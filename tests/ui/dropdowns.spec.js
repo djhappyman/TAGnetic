@@ -169,7 +169,13 @@ test('release artwork actions anchor to their artwork and support keyboard retur
   const card=page.locator('.release-card').first();await expect(card).toBeVisible();await card.locator('.release-head').click();
   const trigger=card.locator('.release-cover');await expect(trigger).toBeVisible();await trigger.focus();await page.keyboard.press('Shift+F10');const menu=card.locator('.tk-save-menu');await expect(menu).toBeVisible();
   const owner=await trigger.boundingBox(),box=await menu.boundingBox();const viewport=page.viewportSize();expect(Math.abs(box.x-Math.max(8,Math.min(owner.x,viewport.width-box.width-8)))).toBeLessThan(2);expect(Math.min(Math.abs(box.y-owner.y-owner.height-4),Math.abs(box.y+box.height-owner.y+4))).toBeLessThan(2);
-  const items=menu.locator('button');await expect(items.first()).toHaveCSS('justify-content','flex-start');await expect(items.first()).toHaveCSS('text-align','start');await expect(items.first()).toHaveCSS('min-height','32px');await expect(items.first()).toBeFocused();await page.keyboard.press('ArrowDown');await expect(items.nth(1)).toBeFocused();await page.keyboard.press('Home');await expect(items.first()).toBeFocused();
+  const items=menu.locator('button');
+  const leadingGap=await items.first().evaluate(button=>{
+    const style=getComputedStyle(button),box=button.getBoundingClientRect(),range=document.createRange();range.selectNodeContents(button);
+    return range.getBoundingClientRect().left-box.left-parseFloat(style.borderLeftWidth)-parseFloat(style.paddingLeft);
+  });
+  expect(Math.abs(leadingGap)).toBeLessThan(1);
+  await expect(items.first()).toHaveCSS('text-align','start');await expect(items.first()).toHaveCSS('min-height','32px');await expect(items.first()).toBeFocused();await page.keyboard.press('ArrowDown');await expect(items.nth(1)).toBeFocused();await page.keyboard.press('Home');await expect(items.first()).toBeFocused();
   await page.keyboard.press('Escape');await expect(menu).toBeHidden();await expect(trigger).toBeFocused();expect(errors).toEqual([]);
 });
 
