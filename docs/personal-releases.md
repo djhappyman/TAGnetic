@@ -2,7 +2,7 @@
 
 This branch builds **Tagnetic**, formerly TagRex Personal. Its version line is
 independent of upstream TagRex. Download packages from
-[this fork’s releases](https://github.com/djhappyman/tagrex/releases).
+[this fork’s releases](https://github.com/djhappyman/TAGnetic/releases).
 
 New hosted builds use numeric `major.minor.patch` versions. Release tags keep
 `personal-v<VERSION>`, for example `personal-v1.4.2`, for compatibility with the

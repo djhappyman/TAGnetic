@@ -7,29 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Fixed
+## [1.4.2] - 2026-11-14
 
-- Ignore macOS AppleDouble companion files when scanning audio on removable drives (upstream #755).
+**Tagnetic Alpha 1** — the first complete Tagnetic alpha for Windows, macOS and Linux.
+
+### Added
+
+- A compact import-field checklist beside search, with Artwork first and choices
+  remembered between imports.
+- Clear artwork indicators for embedded, missing and pending artwork.
+- A complete eight-package release with SHA-256 checksums and source/build details.
 
 ### Changed
 
-- Introduce Tagnetic branding in the interface, app packages, release titles and
-  project links, preserving existing settings and Undo history.
+- Apply source tags in predictable sequential order, pairing selected files with
+  checked source tracks from top to bottom and skipping unchecked source tracks.
+- Sort tracks naturally within each folder while keeping folders in place.
+- Simplify online release cards with clearer typography, grouped metadata and
+  integrated Import controls; remove automatic matching and duration comparisons.
+- Keep artwork actions available by right-clicking collapsed release covers.
+- Show only actual changed rows and columns in Staged, retaining column order and
+  readable tag headings, including abbreviations such as ID, CD and URL.
+- Show tagging and renaming progress in the existing table cells from top to
+  bottom, with scrolling, fast highlight fades and deselection on completion.
+- Introduce Tagnetic branding throughout the interface, icons, packages and
+  project links while retaining existing settings and Undo history.
+- Redesign transformation presets with inline rule editing, grouped controls,
+  field-specific Before/After examples and clear matching options.
+- Manage presets through rename/copy/delete menus, with Undo for deletion and
+  built-in presets kept read-only.
+- Translate preset-editor messages into German, Spanish, French, Italian,
+  Russian and Ukrainian.
 
-- Redesign transformation presets with clearer rule explanations, inline editing,
-  collapsible preset groups and consistent themed controls.
-- Keep field-specific Before/After samples visible while editing rules, with
-  selection-based examples, labelled matching options and inline pattern errors.
-- Manage presets through sidebar rename/copy/delete menus, with Undo for deletion
-  and built-in presets kept read-only.
-- Provide the new preset-editor messages in German, Spanish, French, Italian,
-  Russian and Ukrainian, with catalogue and placeholder checks in the unit suite.
+### Fixed
 
-## [1.4.2] - Unreleased
-
-- Requested builds publish a complete personal prerelease after validation and
-  all platform packages pass, with checksums and source/build provenance.
-- Restrict release publication to the personal fork and reject version reuse.
+- Remove staged changes when edited values are restored to their original values.
+- Update artwork indicators after embedding or removal.
+- Keep popups above other controls and animate source dropdowns.
+- Keep rapid folder reversals smooth even after slow rendering.
+- Respect a later focus move when a new preset rule requests delayed autofocus.
+- Ignore macOS AppleDouble companion files when scanning removable drives.
+- Point release guards, build publication and project links at the renamed
+  `djhappyman/TAGnetic` repository; reject version reuse and other repositories.
 
 ## [1.4.1] - 2026-11-13
 

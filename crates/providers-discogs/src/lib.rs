@@ -28,7 +28,7 @@ const API_BASE: &str = "https://api.discogs.com";
 const USER_AGENT: &str = concat!(
     "Tagnetic/",
     env!("CARGO_PKG_VERSION"),
-    " +https://github.com/djhappyman/tagrex"
+    " +https://github.com/djhappyman/TAGnetic"
 );
 
 #[derive(Clone)]

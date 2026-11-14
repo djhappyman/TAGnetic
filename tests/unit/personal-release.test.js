@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
 import { createHash } from 'node:crypto';
 import { planRelease, verifyBundles, assertAssets } from '../../tools/personal-release.mjs';
-const env = { GITHUB_REPOSITORY: 'djhappyman/tagrex', GITHUB_SHA: 'a'.repeat(40), GITHUB_REF: 'refs/heads/main' };
+const env = { GITHUB_REPOSITORY: 'djhappyman/TAGnetic', GITHUB_SHA: 'a'.repeat(40), GITHUB_REF: 'refs/heads/main' };
 
 test('manual publication requires a personal fork, numeric version and exact version tag', () => {
   assert.equal(planRelease('1.4.1', env).publish, false);

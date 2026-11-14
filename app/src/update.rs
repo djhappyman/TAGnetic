@@ -18,8 +18,8 @@ use tauri::{AppHandle, Url};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 /// Where the releases are, and the page the notice opens.
-const LATEST_API: &str = "https://api.github.com/repos/djhappyman/tagrex/releases/latest";
-pub const RELEASES_PAGE: &str = "https://github.com/djhappyman/tagrex/releases";
+const LATEST_API: &str = "https://api.github.com/repos/djhappyman/TAGnetic/releases/latest";
+pub const RELEASES_PAGE: &str = "https://github.com/djhappyman/TAGnetic/releases";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct UpdateCheckDto {

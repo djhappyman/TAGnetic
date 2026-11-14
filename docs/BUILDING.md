@@ -15,6 +15,14 @@ A push to `main` runs those same reusable CI checks through **Build and release*
 
 Do not create an upstream-style `v*` tag for personal builds. The tag version is checked against the app configuration before packaging.
 
+## First alpha release
+
+Tagnetic Alpha 1 uses numeric package version **1.4.2** and tag
+`personal-v1.4.2`. The GitHub release is marked as a prerelease. Numeric package
+versions keep the Linux RPM, DEB and desktop installers consistent. Publish from
+the merged `main` of `djhappyman/TAGnetic`, after all validation and package jobs
+succeed. Existing releases and the persistent application identifier stay intact.
+
 ## Package targets
 
 - Windows x64/ARM64: NSIS `.exe`.
@@ -40,12 +48,12 @@ GitHub documentation: [workflow triggers](https://docs.github.com/en/actions/ref
 For feature checkpoints, paired upstream contributions and branch retirement,
 see the [contribution workflow](WORKFLOW.md).
 
-Uncheck **publish_release** for an artifact-only manual build. Main pushes remain artifact-only. An upstream repository is rejected by the release planner; all publication targets `djhappyman/tagrex` explicitly.
+Uncheck **publish_release** for an artifact-only manual build. Main pushes remain artifact-only. An upstream repository is rejected by the release planner; all publication targets `djhappyman/TAGnetic` explicitly.
 
 ## Branding and compatibility
 
 New packages and release titles use **Tagnetic**. The repository remains at
-`djhappyman/tagrex`, and the `personal-v<VERSION>` tag scheme is retained so old
+`djhappyman/TAGnetic`, and the `personal-v<VERSION>` tag scheme is retained so old
 release links and automation continue to work. The application identifier
 `com.djhappyman.tagrex.personal`, internal executable/crate names and saved
 preference keys are intentionally retained to keep existing settings and Undo

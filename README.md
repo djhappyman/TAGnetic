@@ -6,7 +6,7 @@
 
 A desktop music library editor built around a familiar table, quick previews and deliberate saving. Edit tags, tidy file names, find metadata and manage artwork, with a clear view of what will change before you Apply.
 
-[Downloads](https://github.com/djhappyman/tagrex/releases) · [User guide](docs/guide/README.md) · [Roadmap](docs/ROADMAP.md) · [Report an issue](https://github.com/djhappyman/tagrex/issues)
+[Downloads](https://github.com/djhappyman/TAGnetic/releases) · [User guide](docs/guide/README.md) · [Roadmap](docs/ROADMAP.md) · [Report an issue](https://github.com/djhappyman/TAGnetic/issues)
 
 Tagnetic is an independent project built on [TagRex](https://github.com/tagrex/tagrex), with its own interface and product direction. Shared improvements continue to be offered upstream.
 
@@ -34,7 +34,7 @@ Performance is an ongoing focus: reducing repeated file reads, directory scans, 
 
 ## Download
 
-Get builds from [this repository’s Releases](https://github.com/djhappyman/tagrex/releases). Earlier packages are named **TagRex Personal**. The original TagRex downloads provide its interface, not Tagnetic’s.
+Get builds from [this repository’s Releases](https://github.com/djhappyman/TAGnetic/releases). Earlier packages are named **TagRex Personal**. The original TagRex downloads provide its interface, not Tagnetic’s.
 
 The release workflow targets:
 
@@ -45,7 +45,7 @@ The release workflow targets:
 | Linux x64 | `.deb`, `.rpm`, AppImage |
 | Linux ARM64 | `.deb`, `.rpm` |
 
-Use the assets actually attached to a release. Development artifacts are available from successful **Build and release** runs in [GitHub Actions](https://github.com/djhappyman/tagrex/actions/workflows/build-release.yml). Packaging checks do not replace hands-on testing in each native webview.
+Use the assets actually attached to a release. Development artifacts are available from successful **Build and release** runs in [GitHub Actions](https://github.com/djhappyman/TAGnetic/actions/workflows/build-release.yml). Packaging checks do not replace hands-on testing in each native webview.
 
 The app keeps its settings and Undo history separate from upstream TagRex. In-app updates are disabled, so it will not offer original-project updates over this fork. Current packages have no paid Windows signing or Apple notarization. See [build and release instructions](docs/BUILDING.md).
 
@@ -81,4 +81,4 @@ Original copyright notices and the [GPL-3.0-only licence](LICENSE) are retained.
 
 Tagnetic is independently maintained and is not an official TagRex release. Shared backend fixes are offered to upstream `main`; eligible interface contributions go to its experimental `next` branch. See the [upstream contribution ledger](docs/UPSTREAM.md).
 
-For Tagnetic issues and suggestions, use [this repository’s issue tracker](https://github.com/djhappyman/tagrex/issues).
+For Tagnetic issues and suggestions, use [this repository’s issue tracker](https://github.com/djhappyman/TAGnetic/issues).
