@@ -130,6 +130,30 @@ test('new-rule autofocus does not steal focus after the user moves to the sample
   await expect(input).toBeFocused(); await expect(input).toHaveValue('My own sample');
 });
 
+test('focus-only navigation cancels new-rule autofocus before its deferred frames run',async({page})=>{
+  await create(page);
+  await page.evaluate(async()=>{
+    const raf=window.requestAnimationFrame,caf=window.cancelAnimationFrame,pending=new Map();let id=1000000;
+    window.requestAnimationFrame=callback=>{pending.set(++id,callback);return id;};
+    window.cancelAnimationFrame=handle=>{if(!pending.delete(handle))caf(handle);};
+    try {
+      document.querySelector('#pe-empty-add').click();await Promise.resolve();
+      document.querySelector('#pe-rule-picker [data-cmd="replace"]').click();await Promise.resolve();
+      // Assistive/programmatic navigation need not emit pointer, key or input events.
+      document.querySelector('#pe-sample-input').focus();
+      for(let turn=0;turn<4;turn++){
+        const batch=[...pending.values()];pending.clear();
+        for(const callback of batch)callback(performance.now());
+        await Promise.resolve();
+      }
+    } finally {
+      window.requestAnimationFrame=raf;window.cancelAnimationFrame=caf;
+      for(const callback of pending.values())raf(callback);
+    }
+  });
+  await expect(page.locator('#pe-sample-input')).toBeFocused();
+});
+
 test('matching options are explicit and change the actual result', async ({ page }) => {
   await create(page); await add(page,'replace');
   const fields=page.locator('.is-expanded .pe-rule-field input');
@@ -260,7 +284,12 @@ test('preset three-dot menu attaches to its button inside a centred desktop dial
   const menu=await page.locator('#pe-preset-menu').boundingBox();
   expect(Math.abs(menu.x+menu.width-owner.x-owner.width)).toBeLessThan(2); expect(Math.abs(menu.y-owner.y-owner.height-4)).toBeLessThan(2);
   expect(menu.width).toBeLessThanOrEqual(160);
-  await expect(page.locator('#pe-preset-menu [data-cmd=rename]')).toHaveCSS('justify-content','flex-start');
+  const leadingGap=await page.locator('#pe-preset-menu [data-cmd=rename]').evaluate(async button=>{
+    await Promise.all(button.closest('[data-controller-popup]').getAnimations({subtree:true}).map(animation=>animation.finished.catch(()=>{})));
+    const style=getComputedStyle(button),box=button.getBoundingClientRect();
+    return button.firstElementChild.getBoundingClientRect().left-box.left-parseFloat(style.borderLeftWidth)-parseFloat(style.paddingLeft);
+  });
+  expect(Math.abs(leadingGap)).toBeLessThan(1);
   await page.screenshot({path:testInfo.outputPath('preset-menu.png'),animations:'disabled',timeout:5000});
 });
 
