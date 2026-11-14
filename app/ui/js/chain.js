@@ -231,11 +231,16 @@ export function presetNote(group) {
 // ---- the rule chain (#34) ----
 //
 // `ids` names the elements this instance owns.
-// Deferred focus belongs to the action that requested it. Later input cancels
-// that request; focus changes made by dialog/control setup do not.
+// Deferred focus belongs to the action that requested it. Later input or a
+// focus-only move cancels it; losing focus when a node is removed does not.
 let interactionRevision = 0;
 for (const type of ["pointerdown", "keydown", "input"]) {
   document.addEventListener(type, () => interactionRevision++, true);
+}
+function focusRequestIsCurrent(revision, previousFocus) {
+  const active = document.activeElement;
+  return interactionRevision === revision &&
+    (active === previousFocus || active === document.body || !active);
 }
 
 function createRuleChain({ ids }) {
@@ -268,10 +273,11 @@ function createRuleChain({ ids }) {
     render();
     if (inline) {
       const revisionAtAdd = interactionRevision;
+      const focusAtAdd = document.activeElement;
       requestAnimationFrame(() => requestAnimationFrame(() => {
         // Enhancement and menu teardown finish before focusing a new field.
         // Never take focus back if the person has already moved elsewhere.
-        if (interactionRevision !== revisionAtAdd) return;
+        if (!focusRequestIsCurrent(revisionAtAdd, focusAtAdd)) return;
         const editor = el(ids.rules).querySelector(`[data-key="${expandedRule}"] .pe-inline-editor`);
         (editor?.querySelector("input[type=text]") || editor?.querySelector("select"))?.focus();
       }));
