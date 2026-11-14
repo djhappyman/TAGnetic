@@ -1861,7 +1861,7 @@ async fn open_releases_page() -> Result<(), ErrorDto> {
 }
 
 /// The mask guide, linked from the foot of the placeholder reference (#557).
-const MASK_GUIDE: &str = "https://github.com/djhappyman/tagrex/blob/main/docs/guide/masks.md";
+const MASK_GUIDE: &str = "https://github.com/djhappyman/TAGnetic/blob/main/docs/guide/masks.md";
 
 /// Open the mask guide in the system browser (#557). Fixed address, like the
 /// releases page: nothing the frontend sends can make this open anything else.

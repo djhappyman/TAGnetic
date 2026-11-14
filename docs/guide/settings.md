@@ -48,7 +48,7 @@ In-app update checks and installation are disabled in Tagnetic. The inherited
 update controls are hidden, and the app does not check for original TagRex
 releases at startup.
 
-Download builds from [Tagnetic’s GitHub releases](https://github.com/djhappyman/tagrex/releases).
+Download builds from [Tagnetic’s GitHub releases](https://github.com/djhappyman/TAGnetic/releases).
 Earlier packages still use the name TagRex Personal. See the
 [release notes and build guidance](../BUILDING.md) for the current process.
 

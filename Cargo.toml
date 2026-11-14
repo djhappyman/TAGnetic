@@ -16,7 +16,7 @@ members = [
 version = "1.4.2"
 edition = "2021"
 license = "GPL-3.0-only"
-repository = "https://github.com/djhappyman/tagrex"
+repository = "https://github.com/djhappyman/TAGnetic"
 # Verified minimum toolchain. Set by Tauri, which requires 1.90 (#512); the tag
 # backend alone would need 1.89 as of its 0.25 release (#201), but no crate here
 # is published, so one number for the whole workspace is the honest one. Check a

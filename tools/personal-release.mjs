@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 
-export const repository = 'djhappyman/tagrex';
+export const repository = 'djhappyman/TAGnetic';
 export function planRelease(version, env) {
   assert.equal(env.GITHUB_REPOSITORY, repository, 'Personal builds run only in the personal fork');
   assert.match(version, /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);

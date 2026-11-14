@@ -48,7 +48,7 @@ agent handoff. Keep private audit/history and generated build output out of PRs.
 
 ## 3. Review and publish
 
-Open a focused PR into `djhappyman/tagrex:main`. Explain the problem, resulting
+Open a focused PR into `djhappyman/TAGnetic:main`. Explain the problem, resulting
 behavior, verification and material risks. A local passing result permits
 publication; merge readiness requires hosted results on the exact pushed head.
 

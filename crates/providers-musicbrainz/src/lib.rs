@@ -39,7 +39,7 @@ const RELEASE_INC: &str = "recordings+artist-credits+labels+genres+isrcs";
 const USER_AGENT: &str = concat!(
     "Tagnetic/",
     env!("CARGO_PKG_VERSION"),
-    " +https://github.com/djhappyman/tagrex"
+    " +https://github.com/djhappyman/TAGnetic"
 );
 
 #[derive(Clone)]

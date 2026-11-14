@@ -36,7 +36,7 @@ const SITE_BASE: &str = "https://www.beatport.com";
 pub(crate) const USER_AGENT: &str = concat!(
     "Tagnetic/",
     env!("CARGO_PKG_VERSION"),
-    " +https://github.com/djhappyman/tagrex"
+    " +https://github.com/djhappyman/TAGnetic"
 );
 
 /// How many tracks to ask for per page. A release never has more, so one request
