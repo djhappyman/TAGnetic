@@ -148,3 +148,15 @@ test('artwork hover and drop feedback remain visible for filled and empty covers
   }
   expect(await page.evaluate(()=>window.tagrex.previewPlan)).toBeNull();
 });
+
+for (const [width,height] of [[600,600],[900,300],[300,900]]) {
+  test(`artwork keeps its actual ${width}x${height} contour rounded and softly shaded`, async ({page}) => {
+    const image=page.locator('.cover-main-image img');
+    await image.evaluate((node,{width,height})=>{node.src='data:image/svg+xml;base64,'+btoa(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="100%" height="100%" fill="#2868ff"/></svg>`);},{width,height});
+    await expect.poll(()=>image.evaluate(node=>node.naturalWidth)).toBe(width);
+    const metrics=await image.evaluate(node=>{const r=node.getBoundingClientRect(),s=getComputedStyle(node),well=node.closest('#cover-well').getBoundingClientRect();return {width:r.width,height:r.height,radius:s.borderRadius,shadow:s.boxShadow,center:r.x+r.width/2,wellCenter:well.x+well.width/2};});
+    expect(metrics.width/metrics.height).toBeCloseTo(width/height,2);
+    expect(metrics.radius).toBe('8px');expect(metrics.shadow).toContain('0, 0, 0');
+    expect(metrics.shadow).not.toBe('none');expect(metrics.center).toBeCloseTo(metrics.wellCenter,0);
+  });
+}

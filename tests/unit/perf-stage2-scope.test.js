@@ -32,7 +32,7 @@ function harness(overrides = {}) {
     tracksBody: { querySelector: () => c.editing },
     el: id => { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); },
     msg: key => key, tn: (_key, count) => `${count} files`,
-    paintRowSelection() {}, spreadsheet: { refresh() {} }, updateStatus() {}, updatePanelCounts() {},
+    paintRowSelection() {}, rowSelectionSet:()=>c.diffByPath && !c.isAutomaticTransformPreview() ? c.applySelection : new Set(c.paths), spreadsheet: { refresh() {} }, updateStatus() {}, updatePanelCounts() {},
     selectionPanelsPending: false, selectionPanelSubject: 'old', contentRevision: 0,
     selectionVersion: () => 1, isAutomaticTransformRefresh: () => c.refreshing,
     cancelSelectionPanels() {}, scheduleSelectionPanels: () => calls.panels++,
@@ -85,7 +85,7 @@ test('live field locks affect automatic scope but manual Apply only validates it
     if (automatic) c.automaticPlan = c.previewPlan;
     c.updateTransformScope(); c.updateDiffBar();
     assert.equal(c.applyBtn.disabled, automatic && !locked);
-    assert.equal(nodes.get('status-transform-scope').textContent, locked ? `${Number(automatic)} modified · 1 selected hidden` : 'Fix invalid values');
+    assert.equal(nodes.get('status-transform-scope').textContent, locked ? '' : 'Fix invalid values');
   }
 });
 
@@ -104,8 +104,8 @@ test('busy, failed, dismissed, blocked, editing and empty Apply states preserve 
   for (const [flag, text, disabled] of [
     ['automaticBusy', 'Previewing…', true], ['liveBusy', 'Previewing…', true],
     ['automaticFailed', 'Preview failed', true], ['automaticBlocked', 'Review current preview first', false],
-    ['dismissed', 'Preview cleared', false], ['editing', '1 modified · 1 selected hidden', true],
-    ['empty', '1 modified · 1 selected hidden', true],
+    ['dismissed', 'Preview cleared', false], ['editing', '', true],
+    ['empty', '', true],
   ]) {
     const { c, nodes } = harness(); c.automaticPlan = c.previewPlan;
     if (flag === 'dismissed') c.automaticKey = c.dismissedKey = 'same';
@@ -168,7 +168,7 @@ test('hidden counts need no filtered selection array, and missing diff/rail rema
   const { c, nodes, calls } = harness();
   c.paths.filter = () => { throw Error('Selection filter allocation'); };
   c.updateTransformScope();
-  assert.equal(nodes.get('status-transform-scope').textContent, '0 modified · 1 selected hidden');
+  assert.equal(nodes.get('status-transform-scope').textContent, '');
   const before = calls.validity; c.diffByPath = null; c.updateDiffBar();
   assert.equal(calls.validity, before);
   const absent = harness({ el: () => null }); absent.c.updateTransformScope();

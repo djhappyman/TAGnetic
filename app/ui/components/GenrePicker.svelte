@@ -84,7 +84,11 @@
     const caret = prefix.length + leading.length + value.length;
     native.setSelectionRange(caret, caret);
   }
-  function inputChanged() { if (open) filter(); else setOpen(true); }
+  function inputChanged(event: Event) {
+    // Explicit tag removal should not open the suggestions it just cleared.
+    if (event instanceof CustomEvent && event.detail?.clearField) { setOpen(false); return; }
+    if (open) filter(); else setOpen(true);
+  }
   function key(event: KeyboardEvent) {
     if (event.isComposing || native.disabled) return;
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {

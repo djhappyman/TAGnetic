@@ -163,17 +163,17 @@
       </div>
     </ControllerDialog>
 
-    <ControllerDialog id="pe-editor" labelledby="pe-editor-title" closeId="pe-editor-close" describedby="pe-editor-purpose">
+    <ControllerDialog id="pe-editor" labelledby="pe-editor-title" closeId="pe-editor-close">
       <div class="modal pe-editor">
         <div class="modal-head">
-          <div class="pe-heading-line"><h2 id="pe-editor-title" data-i18n="presets.title">Transformation presets</h2><span class="pe-save-note" data-i18n="presets.saveNote">Saves automatically · Files change on Apply</span></div>
+          <div class="pe-heading-line"><h2 id="pe-editor-title" data-i18n="presets.title">Transformation presets</h2></div>
           <Button variant="ghost" size="icon-sm" id="pe-editor-close" class="icon" type="button" data-i18n-title="action.done" title="Done" data-i18n-aria-label="action.done" aria-label="Done"><svg class="ico"><use href="#i-close"/></svg></Button>
         </div>
-        <p id="pe-editor-purpose" class="pe-intro" data-i18n="presets.purpose">Create reusable rules to tidy tags and file names.</p>
-        <div class="pe-editor-body">
+        <div id="pe-editor-body" class="pe-editor-body">
           <div class="pe-list-col">
+            <div class="pe-search"><svg class="ico" aria-hidden="true"><use href="#i-search"/></svg><Input id="pe-search" type="search" placeholder="Search transformations…" aria-label="Search transformations" data-i18n-placeholder="presets.searchPlaceholder" data-i18n-aria-label="presets.search" /></div>
             <div id="pe-list" class="pe-list"></div>
-            <div class="pe-list-actions"><Button variant="default" size="sm" id="pe-new" class="btn primary" type="button"><svg class="ico" aria-hidden="true"><use href="#i-plus"/></svg><span data-i18n="presets.newAction">New preset</span></Button></div>
+
             <div id="pe-deleted" class="pe-deleted" hidden role="status"><span id="pe-deleted-label"></span><Button variant="ghost" size="sm" id="pe-undo-delete" type="button" data-i18n="action.undo">Undo</Button></div>
           </div>
           <div id="pe-edit-col" class="pe-edit-col">
@@ -201,6 +201,14 @@
             </section>
           </div>
         </div>
+        <footer class="pe-footer">
+          <span id="pe-save-status" class="pe-save-status" role="status"></span>
+          <div class="pe-footer-actions">
+            <Button id="pe-cancel" variant="outline" size="sm" type="button" data-i18n="action.cancel">Cancel</Button>
+            <Button id="pe-save" variant="outline" size="sm" type="button" data-i18n="action.save">Save</Button>
+            <Button id="pe-save-close" variant="default" size="sm" class="primary" type="button" data-i18n="presets.saveClose">Save &amp; close</Button>
+          </div>
+        </footer>
       </div>
         <ControllerContextMenu id="pe-preset-menu"><ControllerMenuItem cmd="rename"><svg class="ico" aria-hidden="true"><use href="#i-rename"/></svg><span data-i18n="presets.rename">Rename</span></ControllerMenuItem><ControllerMenuItem cmd="copy"><svg class="ico"><use href="#i-copy"/></svg><span data-i18n="presets.duplicate">Copy</span></ControllerMenuItem><ContextMenu.Separator class="ctx-sep" /><ControllerMenuItem cmd="delete" danger><svg class="ico"><use href="#i-trash"/></svg><span data-i18n="action.delete">Delete</span></ControllerMenuItem></ControllerContextMenu>
         <ControllerContextMenu id="pe-rule-picker"><ControllerMenuItem cmd="replace"><span><span data-i18n="rule.replace">Find and replace</span><small data-i18n="presets.kind.replace.hint">Replace or remove text.</small></span></ControllerMenuItem><ControllerMenuItem cmd="case"><span><span data-i18n="rule.case">Change case</span><small data-i18n="presets.kind.case.hint">Change capital letters.</small></span></ControllerMenuItem><ControllerMenuItem cmd="diacritics"><span><span data-i18n="rule.diacritics">Remove accents</span><small data-i18n="presets.kind.diacritics.hint">Turn é into e.</small></span></ControllerMenuItem><ControllerMenuItem cmd="transliterate"><span><span data-i18n="rule.transliterate">Use Latin letters</span><small data-i18n="presets.kind.transliterate.hint">Convert other writing systems.</small></span></ControllerMenuItem><ControllerMenuItem cmd="untransliterate"><span><span data-i18n="rule.untransliterate">Use Cyrillic letters</span><small data-i18n="presets.kind.untransliterate.hint">Convert Latin text to Cyrillic.</small></span></ControllerMenuItem><ControllerMenuItem cmd="key"><span><span data-i18n="rule.key">Musical key format</span><small data-i18n="presets.kind.key.hint">Switch between key notations.</small></span></ControllerMenuItem></ControllerContextMenu>

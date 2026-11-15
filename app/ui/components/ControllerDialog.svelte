@@ -22,6 +22,7 @@
     return { destroy: bridge.destroy };
   }
   function close() {
+    if (root && !root.dispatchEvent(new CustomEvent("controller:before-close", { cancelable: true }))) return;
     if (closeId) document.getElementById(closeId)?.click();
     if (root && !root.hidden) root.hidden = true;
   }

@@ -170,7 +170,8 @@ for (const theme of ['light', 'dark']) {
     await page.evaluate(value => { localStorage.setItem('tagrex.theme', value); document.documentElement.dataset.theme = value; }, theme);
     const typography = ['fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'color'];
     const frame = ['height', 'borderTopWidth', 'borderTopColor', 'backgroundColor', 'borderRadius'];
-    const padding = ['paddingTop', 'paddingBottom', 'paddingLeft', 'paddingRight'];
+    // Trailing tool space varies by field; shared text insets and frame do not.
+    const padding = ['paddingTop', 'paddingBottom', 'paddingLeft'];
     const styles = (selector, properties) => page.locator(selector).evaluate((node, keys) => Object.fromEntries(keys.map(key => [key, getComputedStyle(node)[key]])), properties);
     const ink = await page.evaluate(() => getComputedStyle(document.body).color);
     await expect.poll(async () => (await styles('#online-source-control', typography)).color).toBe(ink);

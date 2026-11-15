@@ -1,4 +1,5 @@
 import { prepareImportPreferences } from './import-preferences.js';
+import { getOnlineOptions } from './online-options.js';
 import { beginLiveImport, finishLiveImport, isLiveImportCurrent, replaceLiveImport, adoptLiveCoverPlan } from "./live-preview.js";
 import { createComponentElement, upgradeComponentMarkup } from "../lib/component-elements.js";
 // The ONLINE sub-tab of TAGGER (#27, #143 split it out of app.js).
@@ -51,28 +52,20 @@ const coverCache = new Map(); // releaseId -> CoverArtDto (full cover, for embed
 const imageCache = new Map(); // releaseId -> { thumb?, cover? }
 const expandedIds = new Set(); // cards currently expanded — survive a re-render
 
-// Paged search (#95/#96): results come in batches of `searchPerPage`; "Load
-// more" pulls the next page and appends. `searchGen` is bumped on every new
+// Paged search: approaching the end of the scrollport appends the next batch. `searchGen` is bumped on every new
 // search and on Stop, so any in-flight page fetch or background count sweep from
 // an older batch bails instead of writing stale cards.
 // Batch size; mirrors the #search-per-page select. A display preference,
 // persisted and defaulting to 5 (#108).
-const PERPAGE_STORAGE_KEY = "tagrex.searchPerPage";
-function searchPerPagePref() {
-  try {
-    const v = parseInt(localStorage.getItem(PERPAGE_STORAGE_KEY), 10);
-    return [5, 10, 15].includes(v) ? v : 5;
-  } catch (e) {
-    return 5;
-  }
-}
-let searchPerPage = searchPerPagePref();
+let searchPerPage = getOnlineOptions().perPage;
 let searchPage = 0; // last page fetched (0 = none yet)
 let searchHasMore = false; // provider likely has another page
 let searchGen = 0; // generation token
 let searchFailed = false;
 let loadingResults = false; // a page fetch is in flight
 let prefetching = false; // the background per-release detail sweep is running
+let pagingPaused = false;
+let searchRequest = null; // paging retains the query that produced the cards
 
 // Whether a search is doing background work the user might want to interrupt
 // (#108) — a page fetch or the per-release prefetch sweep.
@@ -85,16 +78,34 @@ async function discogsSearch() {
 }
 
 async function loadMoreResults() {
-  if (loadingResults || !searchHasMore) return;
+  if (searchBusy() || !searchHasMore || pagingPaused) return;
   return runSearch(false);
 }
 
+function syncClearSearch() {
+  el('discogs-clear').hidden = !el('discogs-query').value && !releaseCandidates.length && !searchBusy();
+}
+function clearSearch() {
+  searchGen++;
+  loadingResults = false; prefetching = false; pagingPaused = true;
+  searchPage = 0; searchHasMore = false; searchFailed = false; searchRequest = null;
+  releaseCandidates = [];
+  releaseCache.clear(); coverCache.clear(); artworkChoices.clear(); artworkRotations.clear();
+  artworkImages.clear(); imageCache.clear(); expandedIds.clear(); artworkMenuRequest++;
+  el('discogs-query').value = '';
+  closeQueryPresets();
+  renderReleaseList(); updateLoadMoreUi();
+  if (onlineScroll) onlineScroll.scrollTop = 0;
+  el('discogs-query').focus();
+}
+
 // Stop the background loading (#96) without discarding what's already shown:
-// bumping the generation makes in-flight workers bail; the "Load more" button
-// stays available so the user can resume.
+// bumping the generation makes in-flight workers bail. Paging remains paused
+// until a new search instead of immediately undoing the user's Stop.
 function stopLoading() {
   if (!searchBusy()) return;
   searchGen++;
+  pagingPaused = true;
   loadingResults = false;
   prefetching = false;
   updateLoadMoreUi();
@@ -117,26 +128,10 @@ async function providerToken(source) {
 }
 
 async function runSearch(reset) {
-  const source = el("online-source").value;
-  const token = await providerToken(source);
-  const query = el("discogs-query").value.trim();
-  // Only Discogs needs a token; MusicBrainz is unauthenticated (#33).
-  if (source === "discogs" && !token) {
-    toast(t("toast.online.needToken"), true);
-    return;
-  }
-  if (source === "beatport" && !token) {
-    toast(t("toast.online.needBeatport"), true);
-    return;
-  }
-  // Remember the token locally so it's prefilled next time — the Discogs one
-  // only: the Beatport token is an OAuth token the backend already stores, and
-  // writing it into the Discogs token file would break the next Discogs search.
-  if (source === "discogs" && token) invoke("save_discogs_token", { token }).catch(() => {});
-
   if (reset) {
-    releaseSource = source;
-    searchPerPage = Number(el("search-per-page").value) || 5;
+    releaseSource = el("online-source").value;
+    searchRequest = { album: el("discogs-query").value.trim(), format: el("search-format").value || null };
+    searchPerPage = getOnlineOptions().perPage;
     searchPage = 0;
     searchHasMore = false;
     releaseCandidates = [];
@@ -148,6 +143,10 @@ async function runSearch(reset) {
     imageCache.clear();
     expandedIds.clear();
     searchGen++;
+    prefetching = false;
+    pagingPaused = false;
+    renderReleaseList();
+    if (onlineScroll) onlineScroll.scrollTop = 0;
   }
   const gen = searchGen;
   const page = searchPage + 1;
@@ -155,10 +154,16 @@ async function runSearch(reset) {
   searchFailed = false;
   updateLoadMoreUi();
   try {
+    const source = releaseSource;
+    const token = await providerToken(source);
+    if (gen !== searchGen) return;
+    if (source === "discogs" && !token) { pagingPaused = true; toast(t("toast.online.needToken"), true); return; }
+    if (source === "beatport" && !token) { pagingPaused = true; toast(t("toast.online.needBeatport"), true); return; }
+    if (source === "discogs" && token) invoke("save_discogs_token", { token }).catch(() => {});
     const hits = await invoke("provider_search", {
       source: releaseSource,
       token,
-      query: { album: query, format: el("search-format").value || null, page, per_page: searchPerPage },
+      query: { ...searchRequest, page, per_page: searchPerPage },
     });
     if (gen !== searchGen) return; // a newer search / Stop superseded this
     searchPage = page;
@@ -166,10 +171,12 @@ async function runSearch(reset) {
     searchHasMore = hits.length >= searchPerPage;
     // Append, skipping ids already shown in case pages overlap.
     const seen = new Set(releaseCandidates.map((c) => c.id));
-    const added = hits.filter((c) => !seen.has(c.id));
+    const added = hits.filter(c => { if (seen.has(c.id)) return false; seen.add(c.id); return true; });
+    // Stop a broken provider repeating the same page forever.
+    if (!added.length) searchHasMore = false;
     releaseCandidates.push(...added);
-    renderReleaseList();
-    prefetchReleaseCounts(added, gen); // count only the newly added page
+    renderReleaseList(reset ? null : added);
+    await prefetchReleaseCounts(added, gen); // keep one page/count sweep in flight
   } catch (e) {
     if (gen !== searchGen) return;
     searchFailed = true;
@@ -182,9 +189,10 @@ async function runSearch(reset) {
   }
 }
 
-// Show/hide the Load more / Stop footer to match the current loading state.
+// A small in-flow loading/retry status replaces the pinned paging footer.
 function updateLoadMoreUi() {
   const busy = searchBusy();
+  syncClearSearch();
   const empty = el("discogs-empty");
   const heading = el("online-empty-heading");
   const state = loadingResults ? "searching" : searchFailed ? "searchError" : searchPage ? "searchNone" : "searchEmpty";
@@ -201,8 +209,11 @@ function updateLoadMoreUi() {
   btn.setAttribute("aria-label", btn.title);
   const wrap = el("release-more");
   if (!wrap) return;
-  wrap.hidden = releaseCandidates.length === 0;
-  el("load-more").hidden = busy || !searchHasMore;
+  wrap.hidden = releaseCandidates.length === 0 || (!loadingResults && !searchFailed);
+  el("release-loading").hidden = !loadingResults;
+  el("load-more").hidden = loadingResults || !searchFailed || !searchHasMore;
+  onlineScroll?.setAttribute('aria-busy', String(loadingResults));
+  scheduleTracklistWindows();
 }
 
 async function loadSavedToken() {
@@ -333,9 +344,10 @@ function updateMediaBadge(c) {
   }
 }
 
-function renderReleaseList() {
+function renderReleaseList(appended = null) {
   const list = releaseList();
-  list.innerHTML = "";
+  if (!appended) list.innerHTML = "";
+  const candidates = appended || releaseCandidates;
   el("release-toolbar").hidden = releaseCandidates.length === 0;
   // The whole phrase, not just the number: "Found 1 entries" was the same
   // disagreement as the card counts (#167).
@@ -349,14 +361,14 @@ function renderReleaseList() {
     el("discogs-empty").textContent = t("online.noReleases");
     return;
   }
-  for (const c of releaseCandidates) {
+  for (const c of candidates) {
     list.insertAdjacentHTML("beforeend", cardMarkup(c));
   }
   // Keep the artwork tile's dedicated native hit surface; normal actions are
   // mounted components before any controller reads or binds their nodes.
   upgradeComponentMarkup(list, { exclude: '.release-cover' });
   // Restore images (from cache) and any expanded tracklists after the re-render.
-  for (const c of releaseCandidates) {
+  for (const c of candidates) {
     applyImage(c);
     const card = cardEl(c.id);
     if (card && expandedIds.has(c.id) && releaseCache.has(c.id)) {
@@ -819,11 +831,16 @@ async function toggleCard(card) {
       <div class="skeleton-line w-60"></div>
       <div class="skeleton-line w-40"></div>
     </div>`;
-  const token = await providerToken(releaseSource);
+  const source = releaseSource;
+  const gen = searchGen;
+  const current = () => gen === searchGen && source === releaseSource && card.isConnected && cardEl(id) === card;
   try {
+    const token = await providerToken(source);
+    if (!current()) return;
     let release = releaseCache.get(id);
     if (!release) {
-      release = await invoke("provider_fetch_release", { source: releaseSource, token, releaseId: id });
+      release = await invoke("provider_fetch_release", { source, token, releaseId: id });
+      if (!current()) return;
       releaseCache.set(id, release);
     }
     updateMediaBadge(releaseCandidates.find(c => c.id === id) || { id, format: release.format });
@@ -832,6 +849,7 @@ async function toggleCard(card) {
     const tkPill = countPillOf(id); if (tkPill) tkPill.textContent = countLabel(id);
     loadFullCover(id, release.cover_image_url, card);
   } catch (e) {
+    if (!current()) return;
     body.innerHTML = "";
     body.dataset.loaded = "";
     expandedIds.delete(id);
@@ -1044,12 +1062,39 @@ function scheduleTracklistWindows() {
       const card = cardEl(id);
       if (card) renderWindow(card);
     }
+    updateScrollFades();
+    updateResultViewport();
   });
 }
 const onlineScroll = document.querySelector(".online-scroll");
+function updateResultViewport() {
+  if (!onlineScroll?.clientHeight) return;
+  const remaining = onlineScroll.scrollHeight - onlineScroll.scrollTop - onlineScroll.clientHeight;
+  if (remaining < 96 && releaseCandidates.length && !searchFailed && !pagingPaused) void loadMoreResults();
+}
 onlineScroll?.addEventListener("scroll", scheduleTracklistWindows, { passive: true });
 // The panel's size changes with the window, and from nothing when its tab opens.
-if (onlineScroll) new ResizeObserver(scheduleTracklistWindows).observe(onlineScroll);
+const inspectorScrollports = [...document.querySelectorAll('.mode-col .online-scroll, .mode-col .editor-scroll, .mode-col .from-name-scroll, .mode-col > .mode-panel:not(#panel-tagger)')];
+function updateScrollFades() {
+  for (const port of inspectorScrollports) {
+    port.classList.toggle('can-scroll-down', port.clientHeight > 0 && port.scrollHeight - port.scrollTop - port.clientHeight > 1);
+    const focus = document.activeElement;
+    const bounds = port.getBoundingClientRect();
+    const target = port.contains(focus) ? focus.getBoundingClientRect() : null;
+    port.toggleAttribute('data-fade-focus', !!target && target.bottom > bounds.bottom - 24 && target.top < bounds.bottom);
+  }
+}
+const inspectorResize = new ResizeObserver(scheduleTracklistWindows);
+for (const port of inspectorScrollports) {
+  if (port !== onlineScroll) port.addEventListener('scroll', scheduleTracklistWindows, { passive:true });
+  port.addEventListener('focusin', scheduleTracklistWindows);
+  port.addEventListener('focusout', scheduleTracklistWindows);
+  inspectorResize.observe(port);
+  for (const child of port.children) inspectorResize.observe(child);
+}
+// Content can grow after cover/preview work without resizing the scrollport.
+const inspectorContent = new MutationObserver(scheduleTracklistWindows);
+for (const port of inspectorScrollports) inspectorContent.observe(port, { childList:true, subtree:true, characterData:true });
 
 // A table that stops matching its layout has changed row height with no scroll
 // to notice it by: a font size set in Settings, a zoom. It is laid out again.
@@ -1420,7 +1465,7 @@ async function importRelease(card) {
     const imported = await requestImportPreview({
       paths,
       selection,
-      vinylSidesToDisc: el("import-vinyl-disc").checked,
+      vinylSidesToDisc: getOnlineOptions().vinylSidesToDisc,
     }, version, subject);
     if (!imported || !isSelectionCurrent(subject) || !isLiveImportCurrent(version)) return;
     // Hand the release's cover to the staging step (#207) so the tags and the
@@ -1448,6 +1493,8 @@ el("discogs-search").addEventListener("click", () => {
   if (searchBusy()) stopLoading();
   else discogsSearch();
 });
+el("discogs-clear").addEventListener("click", clearSearch);
+el("discogs-query").addEventListener("input", syncClearSearch);
 el("discogs-query").addEventListener("keydown", (e) => e.key === "Enter" && discogsSearch());
 el("query-presets").addEventListener("click", (e) => {
   e.stopPropagation();
@@ -1460,14 +1507,8 @@ document.addEventListener("click", (e) => {
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeQueryPresets();
 });
-el("load-more").addEventListener("click", loadMoreResults);
-el("search-per-page").addEventListener("change", (e) => {
-  const v = parseInt(e.target.value, 10);
-  try {
-    localStorage.setItem(PERPAGE_STORAGE_KEY, String(v));
-  } catch (err) {
-    /* localStorage unavailable — preference just won't persist */
-  }
+el("load-more").addEventListener("click", () => { searchFailed = false; void loadMoreResults(); });
+document.addEventListener("tagrex:online-page-size", () => {
   // Re-run from page 1 at the new page size if we already have results.
   if (releaseCandidates.length) discogsSearch();
 });
@@ -1586,4 +1627,4 @@ function retranslateOnline() {
   if (releaseCandidates.length > 0) renderReleaseList();
 }
 
-export { loadSavedToken, refreshReleaseMatches, retranslateOnline, searchBusy, searchPerPage, stopLoading };
+export { loadSavedToken, refreshReleaseMatches, retranslateOnline, searchBusy, stopLoading };

@@ -90,7 +90,7 @@ async function tick(page, name, on = true) {
 }
 async function changed(page, count = 1) {
   await expect.poll(async () => (await plan(page))?.changes.length || 0).toBe(count);
-  await expect(page.locator('#status-transform-scope')).toContainText(`${count} modified`);
+  await expect(page.locator('#status-transform-scope')).toBeHidden();
   await expect(page.locator('#diff-apply')).toBeEnabled();
 }
 
@@ -255,7 +255,8 @@ test('selection preview covers virtual rows while filters keep hidden selections
   await page.locator('#filter-panel-toggle').click();
   await page.locator('#filter').fill('track-000');
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(1);
-  await expect(page.locator('#status-transform-scope')).toContainText('349 selected hidden');
+  await expect(page.locator('#status-transform-scope')).toBeHidden();
+  await expect(page.locator('#staged-count')).toContainText('350');
   expect((await plan(page)).changes).toHaveLength(350);
   expect(await calls(page, 'apply_plan')).toBe(0);
 });
@@ -267,8 +268,26 @@ test('the compact375px layout keeps scope and explicit Apply reachable after sel
   await page.getByRole('tab', { name: 'Files', exact: true }).click();
   await expect(page.locator('#diff-apply')).toBeInViewport({ ratio: 1 });
   await expect(page.locator('#diff-apply')).toHaveAccessibleName('Apply to 1 file');
-  await expect(page.locator('#status-transform-scope')).toHaveText('1 modified');
+  await expect(page.locator('#status-transform-scope')).toBeHidden();
   await page.locator('#diff-apply').focus(); await expect(page.locator('#diff-apply')).toBeFocused();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
   expect(await calls(page, 'apply_plan')).toBe(0);
+});
+
+
+test('clearing mixed titles stages only the selected files and Apply/Undo round-trips them',async({page})=>{
+  const before=await page.evaluate(()=>window.tagrex.tracks.map(track=>({path:track.path,tags:structuredClone(track.tags)})));
+  await page.locator('#tracks-body tr[data-path]').first().click();
+  await page.locator('#tracks-body tr[data-path]').nth(1).click({modifiers:['Shift']});
+  const input=page.locator('#editor-field-title');await expect(input).toHaveClass(/multiple/);await input.focus();
+  await page.locator('#editor-field-title-clear').click();await changed(page,2);
+  const removal=(await plan(page)).changes;
+  expect(removal.map(change=>change.path)).toEqual(before.slice(0,2).map(track=>track.path));
+  for(const change of removal)expect(change.tag_changes).toEqual([{field:'title',old:before.find(track=>track.path===change.path).tags.title,new:null,invalid:false}]);
+  expect(await page.evaluate(()=>window.tagrex.tracks.map(track=>track.tags))).toEqual(before.map(track=>track.tags));
+  expect(await calls(page,'apply_plan')).toBe(0);
+  await page.locator('#diff-apply').click();await expect(page.locator('#staged-edits')).toBeHidden();
+  expect(await page.evaluate(()=>window.tagrex.tracks.map(track=>track.tags.title||''))).toEqual(['','',before[2].tags.title]);
+  await page.locator('#undo').click();
+  await expect.poll(()=>page.evaluate(()=>window.tagrex.tracks.map(track=>track.tags))).toEqual(before.map(track=>track.tags));
 });

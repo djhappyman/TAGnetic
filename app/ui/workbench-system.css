@@ -27,7 +27,6 @@ body .command-toolbar { display:flex; align-items:center; gap:var(--sp-2); min-h
 body .command-toolbar > button { min-height:var(--ctl-h); border-radius:var(--r-compact); padding:6px 9px; gap:6px; color:var(--muted); font-size:var(--text-sm); background:transparent; border-color:transparent; }
 body .command-toolbar > button:hover:not(:disabled) { color:var(--text); background:var(--row-hover); }
 body .command-toolbar > #undo { width:var(--ctl-h); padding:6px; }
-body .command-toolbar > #status-sel { margin-left:auto; color:var(--muted); font-size:var(--text-xs); white-space:nowrap; }
 .toolbar-overflow { position:relative; }
 body .toolbar-panel { background:var(--bg); border:1px solid color-mix(in srgb,var(--border) 70%,transparent); border-radius:var(--r-menu); padding:var(--menu-inset); box-shadow:0 8px 24px rgb(0 0 0 / .24); }
 body .toolbar-panel .tray-action { min-height:32px; border-radius:var(--r-compact); text-align:left; justify-content:flex-start; }
@@ -93,7 +92,6 @@ body .statusbar .footer-feedback > span { padding:2px 0; font-size:var(--text-xs
 body .statusbar .footer-feedback .ab-locked { color:var(--muted); }
 body .statusbar .footer-feedback > [hidden] { display:none; }
 body .statusbar .sb-right:has(#diff-actionbar[hidden]) #ab-locked { display:none; }
-body .statusbar .sb-right:has(#diff-actionbar:not([hidden])) #status-transform-scope[data-detail='false'] { position:absolute; width:1px; height:1px; padding:0; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
 body .statusbar .sb-right:not(:has(#diff-actionbar:not([hidden]),#busy-pill:not([hidden]),#status-transform-scope:not([hidden]))) { display:none; }
 body .statusbar.player-full-width .sb-right { grid-column:2; grid-row:1; padding:3px; }
 body .statusbar.player-full-width .sb-left { grid-row:2; }
@@ -139,7 +137,6 @@ body .statusbar .diff-actionbar .ab-file { max-width:none; flex:1; }
   body .mode-tab .lbl, body.compact-tabs .mode-tab .lbl { display:inline; }
   body button[data-slot='button'].mode-tab { flex:0 0 auto; padding:6px 8px; font-size:var(--text-xs); }
   body .command-toolbar { flex-wrap:wrap; gap:2px; }
-  body .command-toolbar > #status-sel { margin-left:auto; font-size:var(--text-xs); }
   body .workarea { padding-inline:var(--sp-2); }
   body .library-header #root-field { height:36px; }
   body .library-header .path-open { height:34px; }

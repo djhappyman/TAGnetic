@@ -54,6 +54,43 @@ body .dock-module-chrome .dock-module-toggle { min-width:0; height:var(--ctl-hit
 .dock-module-chrome[data-inline='true'] { margin-left:0; height:auto; min-height:var(--ctl-hit); background:transparent; }
 .dock-module-chrome:focus-visible { outline:1px solid var(--accent); outline-offset:-1px; }
 
+/* Transformations is a shared workflow control, distinct from layout chrome.
+   Keep the collapsed allocation equal to its surface so it cannot be clipped. */
+#dock-module-transformations { --dock-collapsed-height:36px; }
+body #dock-module-transformations > .dock-module-chrome {
+  height:var(--dock-collapsed-height);
+  min-height:var(--dock-collapsed-height);
+  margin-inline:var(--sp-3);
+  padding-inline:var(--sp-2);
+  gap:var(--sp-1);
+  border:0;
+  border-radius:var(--r-control);
+  background:var(--bg);
+  box-shadow:none;
+}
+body #dock-module-transformations .transformation-help {
+  width:var(--ctl-hit);
+  min-width:var(--ctl-hit);
+  height:var(--ctl-hit);
+  min-height:var(--ctl-hit);
+  border:0;
+  background:transparent;
+  box-shadow:none;
+}
+body #dock-module-transformations .transformation-help:hover { background:var(--row-hover); color:var(--text); }
+body #dock-module-transformations #presets-edit {
+  height:var(--ctl-h-sm);
+  min-height:var(--ctl-h-sm);
+  padding-inline:var(--sp-2);
+  border:0;
+  border-radius:var(--r-compact);
+  background:transparent;
+}
+body #dock-module-transformations #presets-edit:hover {
+  background:var(--row-hover);
+  color:var(--text);
+}
+
 /* Splitters: the 4px allocation track, a 1px seam and a 1px inset focus edge.
    Documented exceptions (plan §"Shared contracts"): fixed splitters are exempt
    from the 24px hit-box tier — the grid allocates 4px and the keyboard

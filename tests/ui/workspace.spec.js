@@ -254,7 +254,7 @@ test('narrow preset editor provides usable fields and separate rule actions', as
   }
   await page.locator('#pe-open-add').scrollIntoViewIfNeeded();
   await expect(page.locator('#pe-open-add')).toBeInViewport({ ratio: 1 });
-  await page.locator('#pe-editor-close').click();
+  await page.locator('#pe-cancel').click();
   await expect(page.locator('#pe-editor')).toBeHidden();
 });
 

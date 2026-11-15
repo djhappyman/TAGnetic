@@ -10,22 +10,19 @@ import { createComponentElement } from "../lib/component-elements.js";
 //
 // Built-in presets (#137) live in the binary and stay as shipped: they open
 // read-only here, and Duplicate is how one becomes yours to change. Your own
-// presets save as you go — on switching to another preset, on closing, and on
-// quit — so there is no Save button to forget.
+// presets are edited in a local draft and committed only by Save. Switching
+// presets never changes the saved library or another panel’s active rules.
 import { EXTENDED_FIELDS, fieldLabel } from "./fields.js";
-import { placeFloating, placeContextMenu, el, fileName, ico, toast } from "./dom.js";
-import { t, tn } from "./i18n.js";
+import { placeFloating, placeContextMenu, confirmDialog, el, fileName, ico, toast } from "./dom.js";
+import { t } from "./i18n.js";
 import { invoke } from "./invoke.js";
 import {
   createRuleChain,
-  persistActionGroups,
   presetLabel,
-  presetNote,
   renderAllGroupsMenus,
   ruleForGroup,
-  uniquePresetName,
 } from "./chain.js";
-import { actionGroups, builtinGroups, selectedPaths, setActionGroups, tracks } from "./state.js";
+import { actionGroups, builtinGroups, selectedPaths, setActionGroups, savedSettings, setSavedSettings, tracks } from "./state.js";
 
 const chain = createRuleChain({
   ids: {
@@ -39,8 +36,14 @@ const chain = createRuleChain({
 // Which preset is open: its name and whether it is a built-in. Null when there
 // is none to show (no presets at all).
 let current = null;
+let draftGroups = [];
+let originalGroups = [];
+let saving = false;
+let closing = false;
+const renamedGroups = new Map();
 let renaming = null;
 let deletedPreset = null;
+let deletedOrigin = null;
 let deleteTimer;
 let menuReturnFocus = null;
 const collapsedGroups = new Set();
@@ -57,23 +60,66 @@ function notifyPresetsChanged(renamed) {
 }
 
 function findPreset(name, builtin) {
-  return (builtin ? builtinGroups : actionGroups).find((g) => g.name === name) || null;
+  return (builtin ? builtinGroups : draftGroups).find((g) => g.name === name) || null;
 }
 
-// Write what the chain holds back into the open preset, if it is yours and
+// Stage the chain in the dialog’s local preset draft, if it is yours and
 // something changed. The rules carry their own targets (#251), so the group's
 // scope is only the fallback the shape requires.
-function commit() {
+function stageCurrent() {
   if (!current || current.builtin) return;
   const group = findPreset(current.name, false);
   if (!group) return;
   const rules = chain.asGroup().rules;
   const before = JSON.stringify((group.rules || []).map(ruleForGroup));
   if (JSON.stringify(rules) === before) return;
-  setActionGroups(actionGroups.map((g) => (g === group ? { ...g, rules } : g)));
-  persistActionGroups();
-  renderAllGroupsMenus();
-  notifyPresetsChanged();
+  draftGroups = draftGroups.map((g) => (g === group ? { ...g, rules } : g));
+}
+
+function isDirty() {
+  return JSON.stringify(draftGroups) !== JSON.stringify(originalGroups) ||
+    !!(renaming && el("pe-name")?.value.trim() !== renaming);
+}
+function refreshSaveState() {
+  const dirty = isDirty();
+  el("pe-save").disabled = saving || !!renaming || !dirty;
+  el("pe-save-close").disabled = saving || !!renaming;
+  el("pe-cancel").disabled = saving;
+  el("pe-editor-close").disabled = saving;
+  el("pe-save-status").textContent = saving ? t("presets.saving") : dirty ? t("presets.unsaved") : "";
+  el("pe-editor-body").inert = saving;
+}
+function uniqueDraftName(base) {
+  const taken = new Set([...draftGroups, ...builtinGroups].map(group => group.name));
+  let name = base, n = 2;
+  while (taken.has(name)) name = `${base} ${n++}`;
+  return name;
+}
+async function saveLibrary(closeAfter = false) {
+  if (saving) return;
+  if (renaming) { el("pe-name")?.focus(); return; }
+  stageCurrent();
+  if (!isDirty()) { if (closeAfter) await closePresetEditor(true); return; }
+  saving = true; refreshSaveState();
+  const groups = structuredClone(draftGroups);
+  try {
+    await invoke("save_settings", { settings: { ...savedSettings, action_groups: groups } });
+    setSavedSettings({ ...savedSettings, action_groups: groups });
+    setActionGroups(groups);
+    const changes = originalGroups.flatMap(group => {
+      const name = renamedGroups.has(group.name) ? renamedGroups.get(group.name) : group.name;
+      const next = name !== null && groups.some(item => item.name === name) ? name : null;
+      return next !== group.name ? [{ from: group.name, to: next }] : [];
+    });
+    originalGroups = structuredClone(groups);
+    renamedGroups.clear();
+    renderAllGroupsMenus(); notifyPresetsChanged(changes.length ? changes : undefined);
+    saving = false; refreshSaveState();
+    if (closeAfter) await closePresetEditor(true);
+  } catch (error) {
+    saving = false; refreshSaveState();
+    toast(t("presets.saveFailed") + " " + String(error), true);
+  }
 }
 
 // The sidebar owns naming; Escape cancels without touching the saved identity.
@@ -82,37 +128,36 @@ function startRename() {
   renaming = current.name;
   renderList();
   const input = el("pe-name"); input.focus(); input.select();
+  refreshSaveState();
 }
-function finishRename(cancel = false, fromBlur = false) {
+function finishRename(cancel = false) {
   if (!renaming) return;
   const old = renaming;
   const input = el("pe-name");
   const name = input?.value.trim() || "";
-  if (!cancel && (!name || [...actionGroups, ...builtinGroups].some(group => group.name === name && name !== old))) {
+  if (!cancel && (!name || [...draftGroups, ...builtinGroups].some(group => group.name === name && name !== old))) {
     input.setAttribute("aria-invalid", "true");
     toast(name ? t("presets.nameTaken", { name }) : t("presets.nameEmpty"), true);
     input.focus(); return;
   }
   renaming = null;
   if (!cancel && name !== old) {
-    setActionGroups(actionGroups.map(group => group.name === old ? { ...group, name } : group).sort((a,b) => a.name.localeCompare(b.name)));
+    draftGroups = draftGroups.map(group => group.name === old ? { ...group, name } : group).sort((a,b) => a.name.localeCompare(b.name));
+    const original = [...renamedGroups].find(([, value]) => value === old)?.[0] ||
+      (originalGroups.some(group => group.name === old) && !renamedGroups.has(old) ? old : null);
+    if (original) renamedGroups.set(original, name);
     current = { name, builtin: false };
-    persistActionGroups(); renderAllGroupsMenus(); notifyPresetsChanged({ from: old, to: name });
+    refreshSaveState();
   }
-  if (fromBlur) {
-    // Do not remove the row the pointer is about to click. Replace only the
-    // old name field, leaving other sidebar targets and their focus intact.
-    input.closest(".pe-list-item").replaceWith(presetRow(findPreset(current.name, false)));
-  } else {
-    renderList();
-    el("pe-list").querySelector(".pe-list-row.active")?.focus({ preventScroll: true });
-  }
+  renderList();
+  refreshSaveState();
+  el("pe-list").querySelector(".pe-list-row.active")?.focus({ preventScroll: true });
 }
 
 // Open a preset in the editor half, first saving the one being left.
 function select(name, builtin) {
-  if (renaming) { finishRename(); if (renaming) return; }
-  commit();
+  if (renaming) finishRename(true);
+  stageCurrent();
   if (current?.name === name && current.builtin === builtin) return;
   const group = findPreset(name, builtin);
   if (current?.name !== name || current?.builtin !== builtin) { previewField = "title"; sampleSource = "example"; sampleTyped = false; }
@@ -194,8 +239,8 @@ function scheduleSample() {
   renderSampleSource();
   chain.refreshPresentation();
   el("pe-open-add").hidden = !chain.length || !!current?.builtin;
-  const note = el("pe-list").querySelector(".pe-list-row.active .pe-list-note");
-  if (note && !current?.builtin) note.textContent = shortPresetNote(chain.asGroup());
+  stageCurrent();
+  refreshSaveState();
   for (const error of el("pe-rules").querySelectorAll(".pe-rule-error")) error.hidden = true;
   for (const input of el("pe-rules").querySelectorAll("[aria-invalid]")) input.removeAttribute("aria-invalid");
   el("pe-sample-out").setAttribute("aria-busy", "true");
@@ -248,15 +293,6 @@ async function renderSample() {
   out.removeAttribute("aria-busy");
 }
 
-function shortPresetNote(group) {
-  if (group.builtin) {
-    const key = "presets.short." + group.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-    return t(key) === key ? presetNote(group) || tn("unit.rule", group.rules.length) : t(key);
-  }
-  if (!group.rules.length) return t("presets.emptyTitle");
-  return describeRule(group.rules[0], t).title + (group.rules.length > 1 ? " · " + tn("unit.rule", group.rules.length) : "");
-}
-
 let pressedPresetMenu = null;
 
 function presetRow(group) {
@@ -265,9 +301,10 @@ function presetRow(group) {
   const active = current?.name === group.name && current.builtin === !!group.builtin;
   row.classList.toggle("active", active); row.setAttribute("aria-pressed", String(active));
   const name = document.createElement("span"); name.className = "pe-list-name"; name.textContent = presetLabel(group);
-  const note = document.createElement("span"); note.className = "pe-list-note";
-  note.textContent = shortPresetNote(group);
-  row.append(name, note); row.addEventListener("click", () => select(group.name, !!group.builtin));
+  const icon = document.createElement("span"); icon.className = "pe-preset-icon"; icon.setAttribute("aria-hidden", "true");
+  const builtinIcons = { "standard values": "sliders", "discogs cleanup": "db", "normalize english": "rename", "general latin": "doc", "no dash": "eraser", "no underscore": "eraser", "lower case": "rename", "file extension": "doc", "ftp format": "folder" };
+  icon.innerHTML = ico(group.builtin ? builtinIcons[group.name.toLowerCase()] || "lock" : "presets");
+  row.append(icon, name); row.addEventListener("click", () => select(group.name, !!group.builtin));
   const more = createComponentElement("button"); more.type = "button"; more.className = "icon pe-preset-more"; more.innerHTML = ico("more");
   more.setAttribute("aria-label", t("presets.options", { name: presetLabel(group) })); more.setAttribute("aria-haspopup", "menu"); more.setAttribute("aria-controls", "pe-preset-menu");
   const openMenu = event => {
@@ -296,7 +333,9 @@ function presetRow(group) {
   if (renaming === group.name && !group.builtin) {
     const input = createComponentElement("input"); input.type = "text"; input.id = "pe-name"; input.value = group.name; input.setAttribute("aria-label", t("presets.name"));
     input.addEventListener("keydown", event => { if (event.isComposing) return; if (["Enter", "Escape"].includes(event.key)) { event.preventDefault(); event.stopImmediatePropagation(); finishRename(event.key === "Escape"); } });
-    input.addEventListener("blur", () => { if (renaming) finishRename(false, true); }); wrap.append(input);
+    input.addEventListener("input", refreshSaveState);
+    // Losing focus keeps the unconfirmed name editable. Only Enter commits it.
+    wrap.append(input);
   } else wrap.append(row, more);
   return wrap;
 }
@@ -309,10 +348,17 @@ function renderList() {
     const button = createComponentElement("button"); button.type = "button"; button.className = "text-btn pe-group-toggle";
     button.setAttribute("aria-controls", "pe-group-" + id);
     const label = document.createElement("span"); label.textContent = t(labelKey);
-    const caret = document.createElement("span"); caret.innerHTML = ico("caret-down"); caret.className = "pe-group-caret"; caret.setAttribute("aria-hidden", "true"); button.append(label, caret); heading.append(button);
+    button.append(label); heading.append(button);
+    if (id === "personal") {
+      const add = createComponentElement("button"); add.type = "button"; add.id = "pe-new"; add.className = "icon pe-new";
+      add.innerHTML = ico("plus"); add.setAttribute("aria-label", t("presets.newAction")); add.title = t("presets.newAction");
+      add.addEventListener("click", newPreset); heading.append(add);
+    }
     const panel = document.createElement("div"); panel.id = "pe-group-" + id; panel.className = "pe-group-panel";
     const content = document.createElement("div"); content.className = "pe-group-content";
-    if (!groups.length) { const empty = document.createElement("p"); empty.className = "pe-list-empty"; empty.textContent = t("presets.noneYet"); content.append(empty); }
+    const query = el("pe-search").value.trim().toLocaleLowerCase();
+    groups = groups.filter(group => !query || presetLabel(group).toLocaleLowerCase().includes(query));
+    if (!groups.length) { const empty = document.createElement("p"); empty.className = "pe-list-empty"; empty.textContent = t(query ? "presets.noMatches" : "presets.noneYet"); content.append(empty); }
     for (const group of groups) content.append(presetRow(group));
     panel.append(content);
     const setState = () => {
@@ -322,22 +368,21 @@ function renderList() {
     button.addEventListener("click", () => { if (collapsedGroups.has(id)) collapsedGroups.delete(id); else collapsedGroups.add(id); setState(); });
     setState(); section.append(heading, panel); box.append(section);
   }
-  section("personal", "presets.yours", actionGroups);
+  section("personal", "presets.yours", draftGroups);
   if (builtinGroups.length) section("builtin", "chain.builtIn", builtinGroups);
 }
 
 function addPreset(group) {
   collapsedGroups.delete("personal");
-  setActionGroups([...actionGroups, group].sort((a, b) => a.name.localeCompare(b.name)));
-  persistActionGroups();
-  renderAllGroupsMenus();
-  notifyPresetsChanged();
+  el("pe-search").value = "";
+  draftGroups = [...draftGroups, group].sort((a, b) => a.name.localeCompare(b.name));
+  refreshSaveState();
 }
 
 function newPreset() {
-  if (renaming) { finishRename(); if (renaming) return; }
-  commit();
-  const name = uniquePresetName(t("presets.newName"));
+  if (renaming) finishRename(true);
+  stageCurrent();
+  const name = uniqueDraftName(t("presets.newName"));
   addPreset({ name, scope: "tags", rules: [] });
   select(name, false);
   startRename();
@@ -347,11 +392,11 @@ function newPreset() {
 // change it.
 function duplicatePreset() {
   if (!current) return;
-  if (renaming) { finishRename(); if (renaming) return; }
-  commit();
+  if (renaming) finishRename(true);
+  stageCurrent();
   const source = findPreset(current.name, current.builtin);
   if (!source) return;
-  const name = uniquePresetName(t("presets.copyName", { name: presetLabel(source) }));
+  const name = uniqueDraftName(t("presets.copyName", { name: presetLabel(source) }));
   addPreset({
     name,
     scope: source.scope || "tags",
@@ -367,20 +412,25 @@ function duplicatePreset() {
 
 function deletePreset() {
   if (!current || current.builtin) return;
-  commit();
+  stageCurrent();
   const name = current.name;
   deletedPreset = findPreset(name, false);
-  setActionGroups(actionGroups.filter(group => group.name !== name));
-  persistActionGroups(); renderAllGroupsMenus(); notifyPresetsChanged({ from: name, to: null });
+  deletedOrigin = [...renamedGroups].find(([, value]) => value === name)?.[0] ||
+    (originalGroups.some(group => group.name === name) && !renamedGroups.has(name) ? name : null);
+  if (deletedOrigin) renamedGroups.set(deletedOrigin, null);
+  draftGroups = draftGroups.filter(group => group.name !== name);
+  refreshSaveState();
   current = null;
-  const next = actionGroups[0] || builtinGroups[0]; select(next?.name || "", !!next?.builtin);
+  const next = draftGroups[0] || builtinGroups[0]; select(next?.name || "", !!next?.builtin);
   el("pe-deleted-label").textContent = t("presets.deleted", { name }); el("pe-deleted").hidden = false;
   clearTimeout(deleteTimer); deleteTimer = setTimeout(() => { deletedPreset = null; el("pe-deleted").hidden = true; }, 10000);
   el("pe-undo-delete").focus();
 }
 function undoDelete() {
   if (!deletedPreset) return;
-  const restored = { ...deletedPreset, name: uniquePresetName(deletedPreset.name) };
+  const restored = { ...deletedPreset, name: uniqueDraftName(deletedPreset.name) };
+  if (deletedOrigin) renamedGroups.set(deletedOrigin, restored.name);
+  deletedOrigin = null;
   deletedPreset = null; clearTimeout(deleteTimer); el("pe-deleted").hidden = true;
   addPreset(restored); select(restored.name, false);
   el("pe-list").querySelector(".pe-list-row.active")?.focus();
@@ -408,19 +458,33 @@ function editorOpen() {
 // Open the editor, on `name` when given (the preset a row was showing), else on
 // your first preset, else on the first built-in.
 function openPresetEditor(name) {
+  if (editorOpen()) return;
+  draftGroups = structuredClone(actionGroups);
+  originalGroups = structuredClone(actionGroups);
+  renamedGroups.clear();
+  el("pe-search").value = "";
   current = null;
   const target =
-    (name && (findPreset(name, false) || findPreset(name, true))) || actionGroups[0] || builtinGroups[0];
+    (name && (findPreset(name, false) || findPreset(name, true))) || draftGroups[0] || builtinGroups[0];
   el("pe-editor").hidden = false;
   select(target ? target.name : "", target ? !!target.builtin : false);
+  refreshSaveState();
 }
 
-function closePresetEditor() {
-  if (!editorOpen()) return;
-  if (renaming) { finishRename(); if (renaming) finishRename(true); }
+async function closePresetEditor(discard = false) {
+  if (!editorOpen() || saving || closing) return;
+  stageCurrent();
+  if (!discard && isDirty()) {
+    closing = true;
+    const confirmed = await confirmDialog(t("presets.discardPrompt"), t("action.discard"), { detail: t("presets.discardDetail"), danger: true });
+    closing = false;
+    if (!confirmed) return;
+  }
+  if (renaming) finishRename(true);
   closeMenus(false);
-  commit();
   clearTimeout(sampleTimer);
+  clearTimeout(deleteTimer);
+  deletedPreset = null; el("pe-deleted").hidden = true;
   sampleSeq++;
   el("pe-editor").hidden = true;
 }
@@ -440,7 +504,11 @@ for (const source of ["example", "selection"]) el("pe-" + source).addEventListen
   el("pe-sample-input").placeholder = defaultSample();
   scheduleSample();
 });
-el("pe-new").addEventListener("click", newPreset);
+el("pe-save").addEventListener("click", () => saveLibrary());
+el("pe-save-close").addEventListener("click", () => saveLibrary(true));
+el("pe-cancel").addEventListener("click", () => closePresetEditor(true));
+el("pe-search").addEventListener("input", () => { if (renaming) finishRename(true); collapsedGroups.clear(); renderList(); });
+el("pe-editor").addEventListener("controller:before-close", event => { event.preventDefault(); closePresetEditor(); });
 el("pe-copy-to-edit").addEventListener("click", duplicatePreset);
 el("pe-undo-delete").addEventListener("click", undoDelete);
 for (const id of ["pe-open-add", "pe-empty-add"]) el(id).addEventListener("click", openRulePicker);
@@ -455,7 +523,7 @@ el("pe-preset-menu").addEventListener("click", event => {
   else if (item.dataset.cmd === "rename") startRename();
   else if (item.dataset.cmd === "delete") deletePreset();
 });
-el("pe-editor-close").addEventListener("click", closePresetEditor);
+el("pe-editor-close").addEventListener("click", () => closePresetEditor());
 
 el("pe-sample-input").addEventListener("input", () => {
   // Manual input, including an empty string, is previewed exactly as entered.
@@ -479,6 +547,10 @@ el("pe-editor").addEventListener("click", (e) => {
 document.addEventListener(
   "keydown",
   (e) => {
+    if (editorOpen() && el("confirm-modal").hidden && !e.isComposing && (e.ctrlKey || e.metaKey)) {
+      if (e.key.toLowerCase() === "s") { e.preventDefault(); e.stopImmediatePropagation(); saveLibrary(); return; }
+      if (e.key.toLowerCase() === "f") { e.preventDefault(); e.stopImmediatePropagation(); el("pe-search").focus(); return; }
+    }
     if (e.key === "Escape" && editorOpen() && el("confirm-modal").hidden) {
       if (renaming && e.target.id === "pe-name") return;
       if (document.querySelector('.app-select-trigger[aria-expanded="true"]')) return;
@@ -499,7 +571,7 @@ el("pe-list").addEventListener("contextmenu", event => {
 document.addEventListener("pointerdown", () => { pressedPresetMenu = null; }, true);
 window.addEventListener("pointercancel", () => { pressedPresetMenu = null; });
 window.addEventListener("resize", () => closeMenus(false));
-window.addEventListener("beforeunload", commit);
+window.addEventListener("beforeunload", event => { if (editorOpen() && isDirty()) { event.preventDefault(); event.returnValue = ""; } });
 // Structural edits update the count and preview without rebuilding inputs.
 new MutationObserver(() => {
   // Structural edits update the sample; typing never rebuilds an input node.

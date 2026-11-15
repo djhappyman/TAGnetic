@@ -2,6 +2,8 @@
   import * as Popover from '$lib/components/ui/popover/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Checkbox } from '$lib/components/ui/checkbox/index.js';
+  import { getOnlineOptions, setOnlineOptions } from '../js/online-options.js';
+  import { NativeSelect, NativeSelectOption } from '$lib/components/ui/native-select/index.js';
   import { t, tOr } from '../js/i18n.js';
   type Field = { keys: string[]; label: string; code: string };
   const common = new Set(['title','artist','album','albumartist','track','tracktotal','disc','disctotal','year','genre']);
@@ -13,12 +15,15 @@
   let saving = $state(false);
   let error = $state('');
   let more = $state(false);
+  let vinyl = $state(false);
+  let perPage = $state('5');
   const primary = $derived(fields.filter(field => common.has(field.keys[0])));
   const secondary = $derived(fields.filter(field => !common.has(field.keys[0])));
   async function opened(value: boolean) {
     open = value;
     if (!value) return;
     loading = true; error = '';
+    const options = getOnlineOptions(); vinyl = options.vinylSidesToDisc; perPage = String(options.perPage);
     try {
       const { loadImportPreferences } = await import('../js/import-preferences.js');
       const result = await loadImportPreferences(true);
@@ -76,6 +81,10 @@
             <div class="import-field-choice"><Checkbox id={`online-${field.code}`} checked={!field.keys.every(key => denied.includes(key))} disabled={saving} onCheckedChange={value => toggle(field, value === true)} /><label for={`online-${field.code}`}>{tOr(field.code, field.label)}</label></div>
           {/each}{/if}
         {/if}
+      </div>
+      <div class="import-search-options">
+        <div class="import-field-choice"><Checkbox id="import-vinyl-disc" checked={vinyl} onCheckedChange={value => { vinyl = value === true; setOnlineOptions({ vinylSidesToDisc: vinyl }); }} /><label for="import-vinyl-disc" title={t('online.vinylDiscTitle')}>{t('online.vinylDisc')}</label></div>
+        <label class="import-page-size" for="search-per-page"><span>{t('online.perPage')}</span><NativeSelect size="sm" id="search-per-page" value={perPage} onchange={event => { perPage = event.currentTarget.value; setOnlineOptions({ perPage: Number(perPage) }); }}><NativeSelectOption value="5">5</NativeSelectOption><NativeSelectOption value="10">10</NativeSelectOption><NativeSelectOption value="15">15</NativeSelectOption></NativeSelect></label>
       </div>
       <div class="import-fields-footer"><Button variant="ghost" size="sm" disabled={saving} onclick={() => all(true)}>{t('online.importFieldsAll')}</Button><Button variant="ghost" size="sm" disabled={saving} onclick={() => all(false)}>{t('online.importFieldsClear')}</Button></div>
     {/if}

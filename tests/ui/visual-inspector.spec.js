@@ -72,6 +72,53 @@ const style = (page, selector, keys) => page.locator(selector).first().evaluate(
 const number = (value) => Number.parseFloat(value);
 
 for (const theme of ['dark', 'light']) {
+  test(`rounded Transformations header and tabs share the inspector alignment (${theme})`, async ({ page }) => {
+    await page.evaluate(value => { document.documentElement.dataset.theme = value; }, theme);
+    await tab(page, 'online');
+    const header = '#dock-module-transformations > .dock-module-chrome';
+    const toggle = page.locator(`${header} .dock-module-toggle`);
+    // The surface must fit its collapsed allocation, with reachable actions.
+    if (await toggle.getAttribute('aria-expanded') === 'true') await toggle.click();
+    const bounds = await box(page, header);
+    const module = await box(page, '#dock-module-transformations');
+    const field = await box(page, '#query-box');
+    const firstTab = await box(page, '.subtab');
+    const heading = await box(page, '#subtab-online .inspector-heading');
+    expect(bounds.height).toBe(36);
+    expect(bounds.bottom).toBeLessThanOrEqual(module.bottom + 1);
+    expect(bounds.x).toBeCloseTo(field.x, 0);
+    expect(bounds.right).toBeCloseTo(field.right, 0);
+    expect(firstTab.x - bounds.x).toBeCloseTo(8, 0);
+    const tabs = await page.locator('.subtab').evaluateAll(nodes => nodes.map(node => {
+      const rect = node.getBoundingClientRect();
+      return { width: rect.width, right: rect.right, y: rect.y };
+    }));
+    for (const tab of tabs) {
+      expect(tab.width).toBeCloseTo(firstTab.width, 0);
+      expect(tab.y).toBeCloseTo(firstTab.y, 0);
+    }
+    expect(bounds.right - tabs.at(-1).right).toBeCloseTo(8, 0);
+    expect(firstTab.y - bounds.bottom).toBeCloseTo(12, 0);
+    expect(heading.y - firstTab.bottom).toBeCloseTo(24, 0);
+    const headerStyle = await style(page, header, ['borderRadius', 'backgroundColor', 'boxShadow', 'borderTopWidth']);
+    expect(headerStyle.borderRadius).toBe('10px');
+    expect(headerStyle.backgroundColor).toBe((await style(page, '#query-box', ['backgroundColor'])).backgroundColor);
+    expect(headerStyle.boxShadow).toBe('none');
+    expect(headerStyle.borderTopWidth).toBe('0px');
+    const active = await style(page, '.subtab.active', ['borderRadius', 'backgroundColor']);
+    const inactive = await style(page, '.subtab:not(.active)', ['backgroundColor']);
+    expect(active.borderRadius).toBe('8px');
+    expect(active.backgroundColor).not.toBe(inactive.backgroundColor);
+    await toggle.focus(); await page.keyboard.press('Enter');
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.locator('#groups-menu')).toBeVisible();
+    await page.locator('#presets-edit').click();
+    await expect(page.locator('#pe-editor')).toBeVisible();
+    await page.locator('#pe-cancel').click();
+  });
+}
+
+for (const theme of ['dark', 'light']) {
   test(`compact metadata fills its columns and paired rows keep their spacing (${theme})`, async ({ page }, testInfo) => {
     await page.evaluate(value => { document.documentElement.dataset.theme = value; }, theme);
     await tab(page, 'editor');
@@ -152,7 +199,7 @@ test('every mode panel and Tagger tab uses the shared heading, body and help rol
   expect(number((await style(page, '#from-name-probe .probe-source > span:first-child', ['fontSize'])).fontSize)).toBe(12);
   await tab(page, 'online');
   expect(number((await style(page, '.subtab', ['fontSize'])).fontSize)).toBe(13);
-  expect(number((await style(page, '.subtab', ['height'])).height)).toBe(28);
+  expect(number((await style(page, '.subtab', ['height'])).height)).toBe(32);
 });
 
 test('field groups keep one 24px separation and rows one 8px gap without doubled gaps', async ({ page }) => {
@@ -316,7 +363,7 @@ test('dock menus use menu geometry and compact controls keep a 24px hit box', as
     if (!control) continue;
     expect(control.height, `${name} height`).toBeGreaterThanOrEqual(24);
   }
-  expect(geometry.subtab.height).toBe(28);
+  expect(geometry.subtab.height).toBe(32);
   expect(geometry.lock.width).toBeGreaterThanOrEqual(24);
   // Splitters are the documented exception to the 24px hit tier: a 4px
   // allocation track with a 1px seam, and the keyboard separator as the

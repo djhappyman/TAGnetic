@@ -114,6 +114,14 @@ for(const font of ['inter','mono']) {
             -parseFloat(s.borderLeftWidth)-parseFloat(s.borderRightWidth)
             -parseFloat(s.paddingLeft)-parseFloat(s.paddingRight);
         })).toBeGreaterThanOrEqual(24);
+        // Fit the real three-digit text alongside its clear action, rather
+        // than accepting a wide border box with a clipped value viewport.
+        expect(await input.evaluate(node=>{
+          const s=getComputedStyle(node),ctx=document.createElement('canvas').getContext('2d');
+          ctx.font=s.font;
+          const available=node.getBoundingClientRect().width-parseFloat(s.borderLeftWidth)-parseFloat(s.borderRightWidth)-parseFloat(s.paddingLeft)-parseFloat(s.paddingRight);
+          return available>=ctx.measureText(node.value).width;
+        })).toBe(true);
         await expect(input).toHaveValue(i%2?'999':'123');
       }
     }

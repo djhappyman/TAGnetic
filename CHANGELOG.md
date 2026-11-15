@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.3] - 2026-11-15
+
+**Tagnetic Alpha 2** — clearer editing, intentional presets and smoother feedback.
+
+### Added
+
+- Hover/focus clear controls remove individual tags from selected files, including
+  mixed values, while keeping Apply, Discard and field locks authoritative.
+- Files-tab selected/total counts update immediately and count down as files finish
+  applying. Fast renames retain visible top-to-bottom completion feedback.
+- Search clearing removes results and rejects late responses without discarding
+  staged edits. Import options include vinyl-side conversion and page size.
+
+### Changed
+
+- Transformation presets use a searchable sidebar, built-in icons, explicit Save
+  and Save & close actions, and Enter-only rename confirmation.
+- Online results load further pages on scrolling, retain existing cards and offer
+  retry after errors instead of a permanent More button.
+- Inspector headers, tabs, extra-field disclosures, artwork corners and scrolling
+  fades follow the shared visual system; locks sit inside complete field surfaces.
+- Remove redundant status text and give mixed-value placeholders quieter contrast.
+
+### Fixed
+
+- Returning compilation flags or typed values to their original state removes
+  their pending changes; Discard restores the original mixed selection.
+- Preserve preset drafts on failed saves, handle renamed active presets correctly,
+  and keep focused search/rename outlines inside their surfaces.
+- Keep inspector fades when opening help away from the bottom edge, and preserve
+  search/paging state through cancellation, source changes and stale replies.
+
 ## [1.4.2] - 2026-11-14
 
 **Tagnetic Alpha 1** — the first complete Tagnetic alpha for Windows, macOS and Linux.

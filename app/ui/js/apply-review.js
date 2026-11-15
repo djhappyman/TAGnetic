@@ -1,9 +1,16 @@
 // Presentation only: disk/readback and Undo retain ownership of track metadata.
 // Keep rows/cells attached, including the old-value lines that set row height.
-export function createApplyReview(changes, { columns, offset, rowForPath, artworkLabel }) {
+export function createApplyReview(changes, { columns, offset, rowForPath, artworkLabel, onComplete = () => {} }) {
   const states = new Map(changes.map(change => [change.path, { change, tags: false, transfer: false }]));
   const originals = new WeakMap();
   let current = null;
+  function isComplete({ change, tags, transfer }) {
+    const writesTags = change.tag_changes?.length || change.cover_change || change.block_changes?.length;
+    return (!writesTags || tags) && (!change.rename_to || transfer);
+  }
+  function notifyComplete(state) {
+    if (!state.complete && isComplete(state)) { state.complete = true; onComplete(state.change.path); }
+  }
   function remember(node) {
     if (!originals.has(node)) originals.set(node, {
       className: node.className, title: node.getAttribute('title'),
@@ -24,8 +31,7 @@ export function createApplyReview(changes, { columns, offset, rowForPath, artwor
     const state = states.get(row?.dataset.path);
     if (!state) return;
     const { change, tags, transfer } = state;
-    const writesTags = change.tag_changes?.length || change.cover_change || change.block_changes?.length;
-    const complete = (!writesTags || tags) && (!change.rename_to || transfer);
+    const complete = isComplete(state);
     remember(row);
     row.dataset.applyState = complete ? 'complete' : 'pending';
     row.classList.toggle('applying-current', row.dataset.path === current && !complete);
@@ -74,6 +80,7 @@ export function createApplyReview(changes, { columns, offset, rowForPath, artwor
       const previous = current; current = event.path;
       if (previous !== current) paint(rowForPath(previous));
     }
+    if (event.completed === 'tags' || event.completed === 'transfer') notifyComplete(state);
     paint(rowForPath(event.path));
   }
   function restore() {
@@ -95,7 +102,7 @@ export function createApplyReview(changes, { columns, offset, rowForPath, artwor
     }
   }
   function completeAll() {
-    for (const state of states.values()) { state.tags = true; state.transfer = true; paint(rowForPath(state.change.path)); }
+    for (const state of states.values()) { state.tags = true; state.transfer = true; notifyComplete(state); paint(rowForPath(state.change.path)); }
   }
   return { paint, progress, restore, completeAll };
 }
