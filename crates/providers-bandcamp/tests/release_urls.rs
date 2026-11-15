@@ -27,6 +27,8 @@ fn with_pages(pages: Vec<(u16, Option<String>, &'static str)>, run: impl FnOnce(
                     Err(err) => panic!("{err}"),
                 }
             };
+            // Accepted sockets can inherit nonblocking mode on macOS.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
