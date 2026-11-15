@@ -6840,10 +6840,33 @@ const TEXT_LIST_MAX_BYTES: u64 = 1024 * 1024;
 /// than pasted into the panel as garbage.
 pub fn read_text_list(path: &Path) -> Result<String, AppError> {
     let not_text = || AppError::NotATextList(path.display().to_string());
-    if std::fs::metadata(path)?.len() > TEXT_LIST_MAX_BYTES {
+    // Reject special files before opening (notably devices), then verify the
+    // opened handle too: the path may have been replaced after metadata().
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_file() || metadata.len() > TEXT_LIST_MAX_BYTES {
         return Err(not_text());
     }
-    let bytes = std::fs::read(path)?;
+    #[cfg(unix)]
+    let file = {
+        use rustix::fs::{open, Mode, OFlags};
+        // A regular file can be replaced by a FIFO between metadata and open.
+        // NONBLOCK ensures that even this race cannot park the image-read queue.
+        std::fs::File::from(
+            open(
+                path,
+                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(std::io::Error::from)?,
+        )
+    };
+    #[cfg(not(unix))]
+    let file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > TEXT_LIST_MAX_BYTES {
+        return Err(not_text());
+    }
+    let bytes = read_text_list_bytes(file, path)?;
     let utf16 = |rest: &[u8], unit: fn([u8; 2]) -> u16| {
         let units: Vec<u16> = rest
             .as_chunks::<2>()
@@ -6863,6 +6886,19 @@ pub fn read_text_list(path: &Path) -> Result<String, AppError> {
         return Err(not_text());
     }
     Ok(text)
+}
+
+/// Bound the actual consumption as well as the advisory metadata length.
+fn read_text_list_bytes(reader: impl std::io::Read, path: &Path) -> Result<Vec<u8>, AppError> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    reader
+        .take(TEXT_LIST_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > TEXT_LIST_MAX_BYTES {
+        return Err(AppError::NotATextList(path.display().to_string()));
+    }
+    Ok(bytes)
 }
 
 fn non_empty(value: Option<String>) -> Option<String> {
@@ -11184,6 +11220,65 @@ mod tests {
             read_text_list(&big),
             Err(AppError::NotATextList(_))
         ));
+    }
+
+    #[test]
+    fn read_text_list_accepts_the_exact_size_limit() {
+        let dir = TempDir::new("text-list-boundary");
+        let path = dir.0.join("boundary.txt");
+        std::fs::write(&path, vec![b'a'; TEXT_LIST_MAX_BYTES as usize]).unwrap();
+        assert_eq!(
+            read_text_list(&path).unwrap().len() as u64,
+            TEXT_LIST_MAX_BYTES
+        );
+    }
+
+    #[test]
+    fn read_text_list_caps_consumption_even_if_the_reader_never_ends() {
+        use std::io::Read;
+        let mut reader = std::io::repeat(b'a');
+        let mut counted = (&mut reader).take(TEXT_LIST_MAX_BYTES * 2);
+        assert!(matches!(
+            read_text_list_bytes(&mut counted, Path::new("growing.txt")),
+            Err(AppError::NotATextList(_))
+        ));
+        assert_eq!(counted.limit(), TEXT_LIST_MAX_BYTES - 1);
+    }
+
+    #[test]
+    fn read_text_list_rejects_growth_after_the_metadata_snapshot() {
+        let dir = TempDir::new("text-list-growth");
+        let path = dir.0.join("growing.txt");
+        std::fs::write(&path, b"").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        assert_eq!(file.metadata().unwrap().len(), 0);
+        std::fs::write(&path, vec![b'a'; TEXT_LIST_MAX_BYTES as usize + 1]).unwrap();
+        assert!(matches!(
+            read_text_list_bytes(file, &path),
+            Err(AppError::NotATextList(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_text_list_rejects_fifo_directory_and_device_promptly() {
+        use std::time::{Duration, Instant};
+        let dir = TempDir::new("text-list-special");
+        let fifo = dir.0.join("list.fifo");
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .unwrap();
+        let started = Instant::now();
+        for path in [fifo.as_path(), dir.0.as_path(), Path::new("/dev/zero")] {
+            assert!(matches!(
+                read_text_list(path),
+                Err(AppError::NotATextList(_))
+            ));
+        }
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     // A pattern with separators reaches up into the folders, which is where the
