@@ -5168,12 +5168,33 @@ impl App {
     /// Resolve an export target inside the opened library. The name must be a
     /// bare file name — no separators, no `..` — so an export can never be
     /// steered outside the library root.
+    ///
+    /// An export is text, and publishing replaces any file already at the
+    /// target. A name the scanner would list as a track therefore refuses:
+    /// naming a CSV `01 - Track.flac` used to replace that track's audio with
+    /// the export, with no journal entry and no Undo. The extension is checked
+    /// after folding what the filesystem ignores — case on macOS and Windows,
+    /// and the trailing dots and spaces Windows drops — so `Track.FLAC`,
+    /// `Track.flac ` and `Track.flac.` cannot reach the file either. Refusing
+    /// the name is deliberate for a free-text export: it is better to say so
+    /// than to silently write to a different file.
     fn export_target(&self, file_name: &str) -> Result<PathBuf, AppError> {
         let name = file_name.trim();
         if name.is_empty() || name.contains('/') || name.contains('\\') || name.starts_with('.') {
             return Err(AppError::InvalidFileName(file_name.to_string()));
         }
+        if scanner::is_supported_audio(Path::new(Self::export_name_as_written(name))) {
+            return Err(AppError::InvalidFileName(file_name.to_string()));
+        }
         Ok(self.library_root.join(name))
+    }
+
+    /// The name the filesystem would keep: Windows silently drops trailing
+    /// dots and spaces, so `a.flac.` and `a.flac ` both mean the track
+    /// `a.flac`. Checked on every platform so the refusal does not depend on
+    /// which one the export happens to run on.
+    fn export_name_as_written(name: &str) -> &str {
+        name.trim_end_matches(|c: char| c == '.' || c.is_whitespace())
     }
 
     /// Stage and replace one export beneath the library root through the
@@ -5274,6 +5295,12 @@ impl App {
     /// library is harder to undo than one place full of them. Entry paths stay
     /// relative to the root, so the playlists remain portable together with it.
     ///
+    /// Every group's name is resolved before any file is published, and the
+    /// whole set goes through the confined batch publisher in one transaction:
+    /// a group that cannot be named fails the export with nothing written,
+    /// rather than leaving the groups before it behind with only an error
+    /// message to explain the half-export.
+    ///
     /// Returns what was written, in the order the groups were first seen —
     /// which is the order the selection was in.
     pub fn export_playlists(
@@ -5315,28 +5342,41 @@ impl App {
             groups.entry(key).or_default().push(path.clone());
         }
 
-        let mut written = Vec::new();
+        let mut outputs: Vec<(PathBuf, Vec<u8>)> = Vec::with_capacity(order.len());
+        let mut written = Vec::with_capacity(order.len());
         let mut taken: HashSet<String> = HashSet::new();
         for key in order {
             let members = &groups[&key];
             let name = self.playlist_name(&mask, &members[0], &mut taken)?;
             let target = self.export_target(&name)?;
             let entries = self.playlist_entries(&root, members);
-            self.write_output(&target, export::m3u(&entries).as_bytes())?;
+            outputs.push((target.clone(), export::m3u(&entries).into_bytes()));
             written.push(target.to_string_lossy().into_owned());
         }
+        output::write_batch(&self.library_root, &outputs, true)?;
         Ok(written)
     }
 
     /// The file name for one group's playlist: the mask rendered against the
     /// group's first track.
     ///
+    /// The render is a name, not a path: only a playlist extension survives a
+    /// rendered suffix. Any other suffix is part of the stem, so `%album%`
+    /// rendering `Vol. 2` writes `Vol. 2.m3u` instead of a file with no
+    /// extension, and `%filenameext%` rendering a track writes
+    /// `01 - Track.flac.m3u` instead of the track's own name — which the
+    /// publisher would have replaced, destroying the audio.
+    ///
+    /// The stem goes through the same portable sanitiser a rename uses, so an
+    /// album like `AC/DC` or `Live: 1995` names a file every platform can
+    /// create rather than failing at the publisher or inventing a folder.
+    ///
     /// Two groups can render the same name — two albums called *Greatest Hits*,
     /// a mask that names nothing the groups differ in — and the second one
     /// silently overwriting the first would lose an export the user asked for,
-    /// so a repeat is numbered instead. A mask that renders to nothing at all
-    /// (the album tag is empty) falls back to the track's folder, which is the
-    /// one name every group has.
+    /// so a repeat is numbered instead. The comparison folds case, because
+    /// macOS and Windows resolve `Hits.m3u` and `hits.m3u` to one file, while
+    /// the spelling the mask rendered is what gets written.
     fn playlist_name(
         &self,
         mask: &Mask,
@@ -5351,30 +5391,50 @@ impl App {
             }
             Err(_) => String::new(),
         };
-        // The mask carries the extension when it has one — `%album%.m3u` — and
-        // an album that renders to nothing leaves just `.m3u`, which is an
-        // extension with no name rather than a file called that.
         let rendered = rendered.trim();
         let (stem, extension) = match rendered.rsplit_once('.') {
-            Some((stem, extension)) if !extension.is_empty() => (stem.trim(), extension),
+            Some((stem, extension))
+                if !extension.is_empty() && Self::is_playlist_extension(extension) =>
+            {
+                (stem.trim(), extension)
+            }
+            // No playlist extension to keep: the whole render (bar a trailing
+            // dot, which would make `Vol. 2.` rather than `Vol. 2`) is the
+            // stem, and the suffix is ours.
             _ => (rendered.trim_end_matches('.'), "m3u"),
         };
+        let stem = self.safe_name(stem);
         let stem = if stem.is_empty() {
-            first
+            // Nothing renderable — the album tag is empty, or the name folded
+            // to nothing — so the track's folder is the fallback, and finally
+            // a plain word so the export still has a name.
+            let folder = first
                 .parent()
                 .and_then(|parent| parent.file_name())
                 .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "playlist".to_string())
+                .unwrap_or_default();
+            let folder = self.safe_name(&folder);
+            if folder.is_empty() {
+                "playlist".to_string()
+            } else {
+                folder
+            }
         } else {
-            stem.to_string()
+            stem
         };
         let mut name = format!("{stem}.{extension}");
         let mut nth = 2;
-        while !taken.insert(name.clone()) {
+        while !taken.insert(name.to_lowercase()) {
             name = format!("{stem} ({nth}).{extension}");
             nth += 1;
         }
         Ok(name)
+    }
+
+    /// Whether a rendered suffix is one a playlist may keep. Anything else is
+    /// a tag's text, not an extension this exporter is allowed to write.
+    fn is_playlist_extension(extension: &str) -> bool {
+        extension.eq_ignore_ascii_case("m3u") || extension.eq_ignore_ascii_case("m3u8")
     }
 
     /// Export `paths` as a CUE sheet into the library root (#66).
@@ -14620,6 +14680,177 @@ mod tests {
                 "should reject {name:?}"
             );
         }
+    }
+
+    /// Publishing an export replaces whatever file is already at the target,
+    /// so a name that resolves to a track would overwrite its audio with
+    /// text — and no journal entry could bring it back. Every exporter shares
+    /// the same gate, and the check folds what a filesystem ignores: case on
+    /// macOS/Windows, and the trailing dots and spaces Windows drops.
+    #[test]
+    fn an_export_refuses_a_name_that_is_a_track() {
+        let dir = TempDir::new("export-audio-name");
+        let track = dir.tagged_flac("a.flac", "Artist", "Title");
+        let before = std::fs::read(&track).unwrap();
+        let app = open_app(&dir);
+        let paths = std::slice::from_ref(&track);
+        type ExportCall<'a> = (&'a str, Box<dyn Fn(&str) -> Result<String, AppError> + 'a>);
+        let exporters: Vec<ExportCall> = vec![
+            ("csv", Box::new(|name| app.export_csv(paths, name))),
+            (
+                "playlist",
+                Box::new(|name| app.export_playlist(paths, name)),
+            ),
+            ("cue", Box::new(|name| app.export_cue(paths, name))),
+            ("html", Box::new(|name| app.export_html(paths, name))),
+            ("xml", Box::new(|name| app.export_xml(paths, name))),
+            (
+                "report",
+                Box::new(|name| app.export_report(paths, "%artist% - %title%", name)),
+            ),
+        ];
+
+        for name in [
+            "a.flac", "A.FLAC", "a.flac ", "a.flac.", "a.flac\t", " a.flac ",
+        ] {
+            for (kind, export) in &exporters {
+                assert!(
+                    matches!(export(name), Err(AppError::InvalidFileName(_))),
+                    "{kind} should refuse {name:?}"
+                );
+            }
+        }
+        // The audio is byte-for-byte what it was before any attempt.
+        assert_eq!(std::fs::read(&track).unwrap(), before);
+
+        // A suffix after the track name is an ordinary export again.
+        app.export_csv(paths, "a.flac.csv").unwrap();
+        assert_eq!(std::fs::read(&track).unwrap(), before);
+    }
+
+    /// A rendered split name is a name, not a path or an arbitrary file: only
+    /// a playlist extension survives the render. `%album%` over an album
+    /// called `Vol. 2` still has to end in `.m3u`, while a mask that already
+    /// names a playlist keeps the extension it chose.
+    #[test]
+    fn a_split_playlist_name_keeps_only_a_playlist_extension() {
+        let dir = TempDir::new("export-playlist-extension");
+        let track = dir.tagged_flac_at("one/a.flac", "A", "a");
+        let mut tagged = TagEngine::read(&track).unwrap();
+        tagged.tags.insert(TagField::Album, "Vol. 2".to_string());
+        TagEngine::write(&tagged).unwrap();
+        let app = open_app(&dir);
+
+        let written = app
+            .export_playlists(std::slice::from_ref(&track), "album", "%album%")
+            .unwrap();
+        assert!(written[0].ends_with("Vol. 2.m3u"), "{written:?}");
+        let list = std::fs::read_to_string(dir.0.join("Vol. 2.m3u")).unwrap();
+        assert!(list.starts_with("#EXTM3U\n"), "{list}");
+
+        let written = app
+            .export_playlists(std::slice::from_ref(&track), "album", "%album%.M3U8")
+            .unwrap();
+        assert!(written[0].ends_with("Vol. 2.M3U8"), "{written:?}");
+
+        // Running the same export again is a legitimate re-export, not a
+        // refusal: the name is a playlist, so replacing it is intended.
+        app.export_playlists(std::slice::from_ref(&track), "album", "%album%")
+            .unwrap();
+    }
+
+    /// `%filenameext%` renders the first track's own name. Writing that name
+    /// as the playlist used to replace the track; now the audio extension is
+    /// part of the stem and the playlist extension is appended.
+    #[test]
+    fn a_split_playlist_named_after_a_track_keeps_the_audio_file() {
+        let dir = TempDir::new("export-playlist-filenameext");
+        let track = dir.tagged_flac_at("one/a.flac", "A", "a");
+        let before = std::fs::read(&track).unwrap();
+        let app = open_app(&dir);
+
+        let written = app
+            .export_playlists(std::slice::from_ref(&track), "folder", "%filenameext%")
+            .unwrap();
+        assert!(written[0].ends_with("a.flac.m3u"), "{written:?}");
+        assert_eq!(std::fs::read(&track).unwrap(), before);
+    }
+
+    /// `Hits` and `hits` are one file to macOS and Windows, so numbering the
+    /// second group has to see them as one name even though the spelling the
+    /// mask rendered is what gets written.
+    #[test]
+    fn split_playlists_that_differ_only_by_case_are_numbered_apart() {
+        let dir = TempDir::new("export-playlist-case");
+        let a = dir.tagged_flac_at("one/a.flac", "A", "a");
+        let b = dir.tagged_flac_at("two/b.flac", "B", "b");
+        for (path, album) in [(&a, "Hits"), (&b, "hits")] {
+            let mut track = TagEngine::read(path).unwrap();
+            track.tags.insert(TagField::Album, album.to_string());
+            TagEngine::write(&track).unwrap();
+        }
+        let app = open_app(&dir);
+
+        let written = app
+            .export_playlists(&[a, b], "folder", "%album%.m3u")
+            .unwrap();
+        assert!(written[0].ends_with("Hits.m3u"), "{written:?}");
+        assert!(written[1].ends_with("hits (2).m3u"), "{written:?}");
+        for path in &written {
+            assert!(std::path::Path::new(path).exists(), "{path} is missing");
+        }
+    }
+
+    /// A rendered stem goes through the rename sanitiser, so a tag that
+    /// contains a separator or a character Windows forbids names a file every
+    /// platform can create instead of failing at the publisher.
+    #[test]
+    fn a_split_playlist_name_is_made_portable() {
+        let dir = TempDir::new("export-playlist-portable");
+        let a = dir.tagged_flac_at("acdc/a.flac", "A", "a");
+        let b = dir.tagged_flac_at("live/b.flac", "B", "b");
+        for (path, album) in [(&a, "AC/DC"), (&b, "Live: 1995")] {
+            let mut track = TagEngine::read(path).unwrap();
+            track.tags.insert(TagField::Album, album.to_string());
+            TagEngine::write(&track).unwrap();
+        }
+        let app = open_app(&dir);
+
+        let written = app
+            .export_playlists(&[a, b], "album", "%album%.m3u")
+            .unwrap();
+        assert!(written[0].ends_with("AC_DC.m3u"), "{written:?}");
+        assert!(written[1].ends_with("Live - 1995.m3u"), "{written:?}");
+        for path in &written {
+            assert!(std::path::Path::new(path).exists(), "{path} is missing");
+        }
+    }
+
+    /// Every group's name is resolved before anything is published, so a
+    /// later group that cannot be named writes nothing at all — not even the
+    /// groups that came before it.
+    #[test]
+    fn a_split_export_writes_nothing_when_a_later_name_is_refused() {
+        let dir = TempDir::new("export-playlist-preflight");
+        let a = dir.tagged_flac_at("one/a.flac", "A", "a");
+        let b = dir.tagged_flac_at("two/b.flac", "B", "b");
+        for (path, album) in [(&a, "Good"), (&b, ".hidden")] {
+            let mut track = TagEngine::read(path).unwrap();
+            track.tags.insert(TagField::Album, album.to_string());
+            TagEngine::write(&track).unwrap();
+        }
+        let app = open_app(&dir);
+
+        // `.hidden.m3u` is refused for the same reason any hidden export is.
+        let result = app.export_playlists(&[a, b], "album", "%album%.m3u");
+        assert!(
+            matches!(&result, Err(AppError::InvalidFileName(_))),
+            "{result:?}"
+        );
+        assert!(
+            !dir.0.join("Good.m3u").exists(),
+            "the first group must not be published before the second is refused"
+        );
     }
 
     #[test]
