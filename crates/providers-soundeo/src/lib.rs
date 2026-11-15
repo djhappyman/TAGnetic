@@ -95,6 +95,54 @@ impl SoundeoProvider {
             .map_err(|err| ProviderError::Network(err.to_string()))
     }
 
+    fn get_release_page(&self, url: &str) -> Result<(String, String), ProviderError> {
+        let mut url = url.to_string();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..=5 {
+            validate_release_url(&url)?;
+            if !seen.insert(url.clone()) {
+                return Err(ProviderError::Other("release redirect loop".into()));
+            }
+            let mut response = self
+                .agent
+                .get(&url)
+                .header("User-Agent", USER_AGENT)
+                .config()
+                .max_redirects(0)
+                .max_redirects_will_error(false)
+                .build()
+                .call()
+                .map_err(|err| ProviderError::Network(err.to_string()))?;
+            let status = response.status().as_u16();
+            if matches!(status, 301 | 302 | 303 | 307 | 308) {
+                let location = response
+                    .headers()
+                    .get("location")
+                    .and_then(|value| value.to_str().ok())
+                    .ok_or_else(|| {
+                        ProviderError::Other("release redirect missing Location".into())
+                    })?;
+                url = release_redirect(&url, location)?;
+                continue;
+            }
+            if !(200..300).contains(&status) {
+                return Err(status_to_error(
+                    status,
+                    response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|value| value.to_str().ok()),
+                ));
+            }
+            let html = response
+                .body_mut()
+                .read_to_string()
+                .map_err(|err| ProviderError::Network(err.to_string()))?;
+            return Ok((html, url));
+        }
+        Err(ProviderError::Other("too many release redirects".into()))
+    }
+
     /// Download a cover image from Soundeo's CDN (`covers.sndstatic.com`). No
     /// auth. Not on [`MetadataProvider`], like the other providers.
     pub fn fetch_image(&self, url: &str) -> Result<FetchedImage, ProviderError> {
@@ -151,7 +199,7 @@ impl MetadataProvider for SoundeoProvider {
         }
         // A pasted release URL is a direct hit — read that page and present it as
         // the one candidate, so its card shows the real artist/title/cover.
-        if is_soundeo_release_url(text) {
+        if is_soundeo_release_url(text) || text.contains("://") || text.starts_with("//") {
             return match self.fetch_release(&ReleaseId(text.to_string())) {
                 Ok(release) => Ok(vec![release_to_candidate(&release)]),
                 Err(ProviderError::NotFound) => Ok(Vec::new()),
@@ -166,8 +214,9 @@ impl MetadataProvider for SoundeoProvider {
     }
 
     fn fetch_release(&self, id: &ReleaseId) -> Result<Release, ProviderError> {
-        let html = self.get(&id.0)?;
-        parse_release(&html, &id.0)
+        validate_release_url(&id.0)?;
+        let (html, final_url) = self.get_release_page(&id.0)?;
+        parse_release(&html, &final_url)
     }
 }
 
@@ -183,8 +232,93 @@ fn status_to_error(status: u16, retry_after: Option<&str>) -> ProviderError {
 }
 
 fn is_soundeo_release_url(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    lower.starts_with("http") && lower.contains("soundeo.com/release/")
+    validate_release_url(text).is_ok()
+}
+
+/// Accept only Soundeo release pages before making any request.
+fn validate_release_url(text: &str) -> Result<ureq::http::Uri, ProviderError> {
+    let invalid = || {
+        ProviderError::Other(
+            "invalid Soundeo release URL; use a canonical Soundeo release link".into(),
+        )
+    };
+    let uri: ureq::http::Uri = text.parse().map_err(|_| invalid())?;
+    let scheme = uri.scheme_str().ok_or_else(invalid)?;
+    if !matches!(scheme, "http" | "https") {
+        return Err(invalid());
+    }
+    let host = uri.host().ok_or_else(invalid)?.to_ascii_lowercase();
+    let authority = uri.authority().ok_or_else(invalid)?.as_str();
+    let default_port = if scheme == "https" { 443 } else { 80 };
+    if !(matches!(host.as_str(), "soundeo.com" | "www.soundeo.com"))
+        || !(authority.eq_ignore_ascii_case(&host)
+            || authority.eq_ignore_ascii_case(&format!("{host}:{default_port}")))
+    {
+        return Err(invalid());
+    }
+    let valid_path = release_id_from_url(text).is_some()
+        && uri
+            .path()
+            .strip_prefix("/release/")
+            .is_some_and(valid_release_segment);
+    if !valid_path {
+        return Err(invalid());
+    }
+    Ok(uri)
+}
+
+// Titles may contain escaped Unicode or punctuation. Decode only for the path
+// boundary checks; never let an escaped separator or dot segment change routes.
+fn valid_release_segment(segment: &str) -> bool {
+    let mut decoded = Vec::with_capacity(segment.len());
+    let mut bytes = segment.bytes();
+    while let Some(byte) = bytes.next() {
+        let byte = if byte == b'%' {
+            let Some(high) = bytes.next().and_then(|b| (b as char).to_digit(16)) else {
+                return false;
+            };
+            let Some(low) = bytes.next().and_then(|b| (b as char).to_digit(16)) else {
+                return false;
+            };
+            (high * 16 + low) as u8
+        } else {
+            byte
+        };
+        if byte.is_ascii_control() || matches!(byte, b'/' | b'\\') {
+            return false;
+        }
+        decoded.push(byte);
+    }
+    !decoded.is_empty() && decoded != b"." && decoded != b".."
+}
+
+fn release_redirect(current: &str, location: &str) -> Result<String, ProviderError> {
+    let current = validate_release_url(current)?;
+    let next = if location.starts_with('/') && !location.starts_with("//") {
+        format!(
+            "{}://{}{}",
+            current.scheme_str().unwrap_or("https"),
+            current.authority().map(|a| a.as_str()).unwrap_or_default(),
+            location
+        )
+    } else if location.starts_with('?') {
+        format!(
+            "{}://{}{}{}",
+            current.scheme_str().unwrap_or("https"),
+            current.authority().map(|a| a.as_str()).unwrap_or_default(),
+            current.path(),
+            location
+        )
+    } else {
+        location.to_string()
+    };
+    let next_uri = validate_release_url(&next)?;
+    if current.scheme_str() == Some("https") && next_uri.scheme_str() != Some("https") {
+        return Err(ProviderError::Other(
+            "release redirect would downgrade HTTPS".into(),
+        ));
+    }
+    Ok(next)
 }
 
 // One `.trackitem` row's fields: the release it belongs to (href + name), the
@@ -551,6 +685,79 @@ fn unescape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_unrelated_or_ambiguous_release_urls_before_transport() {
+        let provider = SoundeoProvider::new();
+        for url in [
+            "http://127.0.0.1/soundeo.com/release/title-123.html",
+            "http://localhost/release/title-123.html?soundeo.com",
+            "https://soundeo.com.evil.test/release/title-123.html",
+            "https://evilsoundeo.com/release/title-123.html",
+            "https://soundeo.com@127.0.0.1/release/title-123.html",
+            "https://user@soundeo.com/release/title-123.html",
+            "https://soundeo.com:8443/release/title-123.html",
+            "ftp://soundeo.com/release/title-123.html",
+            "https://soundeo.com/wrong/release/title-123.html",
+            "https://soundeo.com/release/title-123.html/extra",
+            "https://soundeo.com/album/%2e%2e/release",
+        ] {
+            assert!(!is_soundeo_release_url(url), "{url}");
+            assert!(
+                matches!(
+                    provider.fetch_release(&ReleaseId(url.into())),
+                    Err(ProviderError::Other(_))
+                ),
+                "{url}"
+            );
+            assert!(
+                matches!(
+                    provider.search(&SearchQuery {
+                        album: Some(url.into()),
+                        ..Default::default()
+                    }),
+                    Err(ProviderError::Other(_))
+                ),
+                "search {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn permits_escaped_titles_but_rejects_path_delimiters_and_traversal() {
+        assert!(is_soundeo_release_url(
+            "https://soundeo.com/release/some.title-%E6%97%A5-123.html"
+        ));
+        for segment in [
+            "%2e%2e",
+            "%2f",
+            "title%2fother",
+            "title%5cother",
+            "%00",
+            "%GG",
+            "%1",
+        ] {
+            assert!(!valid_release_segment(segment), "{segment}");
+        }
+        assert!(valid_release_segment("some.title-%E6%97%A5"));
+    }
+
+    #[test]
+    fn validates_redirect_destinations_and_prevents_downgrades() {
+        let current = "https://soundeo.com/release/title-123.html";
+        assert!(release_redirect(current, "/release/title-123.html?ref=123").is_ok());
+        assert!(release_redirect(current, "?ref=123").is_ok());
+        for next in [
+            "http://soundeo.com/release/title-123.html",
+            "https://127.0.0.1/release/title-123.html",
+            "//127.0.0.1/release/title-123.html",
+            "https://soundeo.com.evil.test/release/title-123.html",
+            "https://soundeo.com/search",
+        ] {
+            assert!(release_redirect(current, next).is_err(), "{next}");
+        }
+        assert!(release_redirect("http://soundeo.com/release/title-123.html", current).is_ok());
+    }
 
     /// A server that answers 429 with a `Retry-After` (with the whitespace HTTP
     /// allows around it) is a rate limit for as long as it asks, end to end.
