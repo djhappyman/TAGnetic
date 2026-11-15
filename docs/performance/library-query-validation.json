@@ -1,0 +1,134 @@
+{
+  "date": "2026-11-15",
+  "branch": "feat/library-query-command-bar",
+  "frontendBase": "213f06c307823977bffd58e3d98ee9202f3c5526",
+  "verificationScope": "Local Linux development checkout; no feature commit, PR or hosted CI run yet.",
+  "checks": {
+    "javascriptUnit": {
+      "command": "npm run test:unit",
+      "passed": 136,
+      "failed": 0
+    },
+    "ui": {
+      "command": "npx playwright test",
+      "passed": 552,
+      "failed": 0,
+      "optInSkipped": 11
+    },
+    "tableScale": {
+      "rows": [
+        20000,
+        50000,
+        100000
+      ],
+      "passed": 3,
+      "maxMountedRows": 50,
+      "fullSelectionIterationsDuringScroll": 0
+    },
+    "rust": {
+      "command": "cargo test --locked -p tagrex-commands --lib",
+      "passed": 286,
+      "failed": 0,
+      "ignored": 2
+    },
+    "additionalAudioFixture": "Explicit local WAV-to-MP3 likely-recording test passed; disposable audio only.",
+    "clippy": "cargo clippy --locked -p tagrex-commands --all-targets -- -D warnings: passed",
+    "shell": "cargo check --locked -p tagrex --features dev-mcp: passed",
+    "frontendBuild": "npm run build: passed",
+    "svelte": "npm run check: 0 errors, 0 warnings",
+    "format": "cargo fmt --all --check and git diff --check: passed",
+    "chipContrast": {
+      "themeVariants": 20,
+      "tonesPerTheme": 7,
+      "minimumRatio": 4.6279
+    },
+    "nativeDuplicateJobs": {
+      "passed": 2,
+      "failed": 0,
+      "scope": "Cancellation, supersession, invalidation and late-publication rejection"
+    },
+    "progressiveDuplicateTable": {
+      "rows": [
+        20000,
+        50000,
+        100000
+      ],
+      "passed": 3,
+      "maxMountedRows": 47,
+      "anchorDeltaPx": 0,
+      "retainedVisibleRows": true
+    },
+    "duplicateReview": {
+      "normalTableUntilExplicitScan": true,
+      "wholeGroupSelection": true,
+      "keyboardEnterAndSpace": true,
+      "selectedGroupGrowth": true,
+      "detailsUseLoadedSavedDtos": true,
+      "copyDetailsPageSize": 20,
+      "resetAndHydration": true,
+      "stagedPreviewPreserved": true,
+      "compactInspectorRevealedAndFocused": true,
+      "errorFeedbackPreserved": true
+    },
+    "visualReview": {
+      "states": [
+        "ready",
+        "selected"
+      ],
+      "themes": [
+        "dark",
+        "light"
+      ],
+      "viewports": [
+        {
+          "width": 1280,
+          "height": 900
+        },
+        {
+          "width": 620,
+          "height": 900
+        }
+      ],
+      "captures": 8,
+      "findingsResolved": [
+        "Recessed result surface",
+        "Track-title/count separation"
+      ],
+      "nativeUiUnchanged": true
+    }
+  },
+  "nativeReadback": {
+    "loadedTracks": 53,
+    "undoBatches": 38,
+    "pendingEdits": 0,
+    "previewChanges": 0,
+    "selection": 1,
+    "sameLibraryPaths": true,
+    "previousUndoRetained": true,
+    "sourceMatchesCheckout": true,
+    "queryFieldHeightPx": 32,
+    "removedHeaderAndFlags": true,
+    "duplicateScanControlsInSearchRail": 0,
+    "scanActionInSidebar": true,
+    "footerScanRemoved": true,
+    "tableMask": "none",
+    "realAudioWrites": false,
+    "readOnlyMode": "search",
+    "currentQueryPreserved": "hixxy"
+  },
+  "performance": {
+    "matching": "library-query-results.json",
+    "actualWebKitIpc": "library-query-webview-results.json",
+    "fieldSuggestions": "library-suggestion-results.json",
+    "virtualTable": "library-query-table-results.json",
+    "methodAndLimits": "library-query.md",
+    "progressiveDuplicates": "library-query-progress-results.json"
+  },
+  "limits": [
+    "Likely duplicate evidence covers a bounded excerpt and requires review; audio scan throughput was not benchmarked.",
+    "Artist delimiter interpretation is conservative; raw credits are preserved.",
+    "Natural-language support recognizes explicit common phrases, not arbitrary language.",
+    "The edge-case checklist also contains future validation targets and design choices.",
+    "At 100k files/50k duplicate groups, the Chromium mock publication burst still produced an 89ms heartbeat gap; this includes fixture JavaScript matching."
+  ]
+}

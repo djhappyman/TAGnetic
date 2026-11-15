@@ -2,11 +2,10 @@
 //
 // The choices that only change how the app looks — the value font, the table
 // and tracklist sizes, the badge face, the theme, the optional checkbox column,
-// the filter-mode flags and the grouping key. They live in localStorage rather
+// and the grouping key. They live in localStorage rather
 // than the backend's settings.json because they are per-machine view state, not
 // library data, and they apply themselves by toggling classes and CSS
 // variables on <body>.
-import { filterRegex, filterCase } from "./state.js";
 import { DEFAULT_ACCENT, PALETTE_DEFAULT, normalizePalette, paletteAccent } from "./palettes.js";
 
 // Data-font preference: file names, tags and tracklists use the selected face.
@@ -65,34 +64,6 @@ function showOldValues() {
 function saveShowOldValues(on) {
   try { localStorage.setItem('tagrex.showOldValues', on ? '1' : '0'); }
   catch { /* View preferences remain optional when storage is unavailable. */ }
-}
-
-// Filter mode prefs (#44): regex on/off and case sensitivity. Pure view choices,
-// persisted like the other display prefs. Read once at startup, then flipped by
-// the toolbar toggles.
-const FILTER_REGEX_STORAGE_KEY = "tagrex.filterRegex";
-const FILTER_CASE_STORAGE_KEY = "tagrex.filterCase";
-function regexModeEnabled() {
-  try {
-    return localStorage.getItem(FILTER_REGEX_STORAGE_KEY) === "1";
-  } catch (e) {
-    return false;
-  }
-}
-function caseSensitiveEnabled() {
-  try {
-    return localStorage.getItem(FILTER_CASE_STORAGE_KEY) === "1";
-  } catch (e) {
-    return false;
-  }
-}
-function saveFilterMode() {
-  try {
-    localStorage.setItem(FILTER_REGEX_STORAGE_KEY, filterRegex ? "1" : "0");
-    localStorage.setItem(FILTER_CASE_STORAGE_KEY, filterCase ? "1" : "0");
-  } catch (e) {
-    /* localStorage unavailable — preference just won't persist */
-  }
 }
 
 // Table font size (#100), 10–20px, applied live to both the monospace and the
@@ -512,9 +483,6 @@ export {
   applyValueFont,
   checkboxColEnabled,
   applyCheckboxCol,
-  regexModeEnabled,
-  caseSensitiveEnabled,
-  saveFilterMode,
   tableFontPx,
   applyTableFont,
   TABLE_FONT_DEFAULT,

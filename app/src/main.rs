@@ -45,6 +45,190 @@ static IMAGE_ADMISSION: std::sync::LazyLock<operation_control::ImageAdmission> =
 static BROWSER_QUEUE: blocking::Queue = blocking::Queue::new();
 static SETTINGS_QUEUE: blocking::Queue = blocking::Queue::new();
 static SESSION_QUEUE: blocking::Queue = blocking::Queue::new();
+static LIBRARY_QUERY_QUEUE: blocking::Queue = blocking::Queue::new();
+static LIBRARY_SUGGEST_QUEUE: blocking::Queue = blocking::Queue::new();
+static QUERY_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SUGGEST_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DUPLICATE_QUEUE: blocking::Queue = blocking::Queue::new();
+static DUPLICATE_JOB_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static DUPLICATE_JOBS: std::sync::LazyLock<
+    Mutex<std::collections::BTreeMap<u64, Arc<DuplicateJob>>>,
+> = std::sync::LazyLock::new(Mutex::default);
+static DUPLICATE_ANALYSIS: std::sync::LazyLock<Mutex<tagrex_commands::duplicates::AnalysisCache>> =
+    std::sync::LazyLock::new(Mutex::default);
+
+struct DuplicateJob {
+    status: Mutex<tagrex_commands::duplicates::DuplicateJobStatus>,
+    cancel: std::sync::atomic::AtomicBool,
+    index: std::sync::Weak<tagrex_commands::query::QueryIndex>,
+}
+
+impl DuplicateJob {
+    // Callers hold DUPLICATE_JOBS before publishing. Start, cancel and worker
+    // publication therefore cannot interleave old and new job generations.
+    fn publish(&self, update: tagrex_commands::duplicates::ScanProgress) {
+        let Some(index) = self.index.upgrade() else {
+            return;
+        };
+        if self.cancel.load(Ordering::Acquire) || !index.is_current() {
+            return;
+        }
+        let Ok(mut status) = self.status.lock() else {
+            return;
+        };
+        if status.status != "running" {
+            return;
+        }
+        status.processed = update.processed;
+        status.total = update.total;
+        status.skipped = update.skipped;
+        status.errors = update.errors;
+        status.phase = update.phase.into();
+        if let Some(groups) = update.groups {
+            status.groups_revision += 1;
+            status.groups_count = groups.len();
+            index.set_duplicate_results(
+                &status.kind,
+                tagrex_commands::query::DuplicateResults {
+                    status: "running".into(),
+                    groups,
+                    groups_revision: status.groups_revision,
+                    skipped: status.skipped,
+                    errors: status.errors,
+                },
+            );
+        }
+    }
+
+    fn clear(&self, terminal: &str, message: Option<String>, publish_scope: bool) {
+        self.cancel.store(true, Ordering::Release);
+        let Ok(mut status) = self.status.lock() else {
+            return;
+        };
+        let snapshot_current = self.index.upgrade().is_some_and(|index| index.is_current());
+        if status.status != "running" && snapshot_current {
+            return;
+        }
+        if status.status == terminal && status.groups_count == 0 {
+            return;
+        }
+        status.status = terminal.into();
+        status.phase = terminal.into();
+        status.groups_revision += 1;
+        status.groups_count = 0;
+        if let Some(message) = message {
+            status.message = Some(message);
+            status.errors += 1;
+        }
+        if publish_scope {
+            if let Some(index) = self.index.upgrade().filter(|index| index.is_current()) {
+                index.set_duplicate_results(
+                    &status.kind,
+                    tagrex_commands::query::DuplicateResults {
+                        status: terminal.into(),
+                        groups_revision: status.groups_revision,
+                        skipped: status.skipped,
+                        errors: status.errors,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+    }
+
+    fn finish(&self, mut results: tagrex_commands::query::DuplicateResults) {
+        let Some(index) = self.index.upgrade() else {
+            self.clear("cancelled", None, false);
+            return;
+        };
+        if self.cancel.load(Ordering::Acquire) || !index.is_current() {
+            self.clear("cancelled", None, false);
+            return;
+        }
+        let Ok(mut status) = self.status.lock() else {
+            return;
+        };
+        if status.status != "running" {
+            return;
+        }
+        status.status = "complete".into();
+        status.phase = "complete".into();
+        status.processed = status.total;
+        status.skipped = results.skipped;
+        status.errors = results.errors;
+        status.groups_revision += 1;
+        status.groups_count = results.groups.len();
+        results.groups_revision = status.groups_revision;
+        index.set_duplicate_results(&status.kind, results);
+    }
+}
+
+fn current_duplicate_job(
+    jobs: &std::collections::BTreeMap<u64, Arc<DuplicateJob>>,
+    id: u64,
+    job: &Arc<DuplicateJob>,
+) -> bool {
+    DUPLICATE_JOB_ID.load(Ordering::Acquire) == id + 1
+        && jobs
+            .get(&id)
+            .is_some_and(|current| Arc::ptr_eq(current, job))
+}
+
+// Synthetic benchmark snapshots are isolated from the real App and journal.
+// These commands do not exist in release builds and never probe fixture paths.
+#[cfg(debug_assertions)]
+static BENCHMARK_INDICES: std::sync::LazyLock<
+    Mutex<std::collections::BTreeMap<u64, Arc<tagrex_commands::query::QueryIndex>>>,
+> = std::sync::LazyLock::new(Mutex::default);
+
+#[cfg(debug_assertions)]
+#[tauri::command]
+async fn library_benchmark_create(tracks: Vec<TrackDto>) -> Result<serde_json::Value, ErrorDto> {
+    if tracks.len() > 100_000 {
+        return Err(shell_error(
+            "Synthetic benchmarks support at most 100,000 rows.",
+        ));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let started=std::time::Instant::now();let index=Arc::new(tagrex_commands::query::QueryIndex::from_tracks(&tracks));let id=index.id;
+        let mut indices=BENCHMARK_INDICES.lock().map_err(shell_error)?;
+        while indices.len()>=2 {if let Some((_,old))=indices.pop_first(){old.invalidate();}}
+        indices.insert(id,index);
+        Ok(serde_json::json!({"benchmarkId":id,"snapshotId":id,"total":tracks.len(),"indexMs":started.elapsed().as_secs_f64()*1000.0}))
+    }).await.map_err(shell_error)?
+}
+
+#[cfg(debug_assertions)]
+#[tauri::command]
+async fn library_benchmark_query(
+    benchmark_id: u64,
+    request: tagrex_commands::query::QueryRequest,
+) -> Result<tagrex_commands::query::QueryResult, ErrorDto> {
+    let index = BENCHMARK_INDICES
+        .lock()
+        .map_err(shell_error)?
+        .get(&benchmark_id)
+        .cloned()
+        .ok_or_else(|| shell_error("Synthetic benchmark no longer exists."))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        index.query(&request, || false).map_err(shell_error)
+    })
+    .await
+    .map_err(shell_error)?
+}
+
+#[cfg(debug_assertions)]
+#[tauri::command]
+fn library_benchmark_dispose(benchmark_id: u64) -> Result<bool, ErrorDto> {
+    let removed = BENCHMARK_INDICES
+        .lock()
+        .map_err(shell_error)?
+        .remove(&benchmark_id);
+    if let Some(index) = &removed {
+        index.invalidate();
+    }
+    Ok(removed.is_some())
+}
 static LIBRARY_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static SETTINGS_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -259,6 +443,207 @@ async fn list_tracks(state: State<'_, AppState>) -> Result<Vec<TrackDto>, ErrorD
     SESSION_QUEUE
         .run(move || with_app(&state, |app| Ok(app.list_tracks())))
         .await
+}
+
+/// Query workers hold an immutable index, not the session/journal mutex.
+#[tauri::command]
+async fn library_query(
+    state: State<'_, AppState>,
+    request: tagrex_commands::query::QueryRequest,
+) -> Result<tagrex_commands::query::QueryResult, ErrorDto> {
+    let revision = QUERY_REVISION.fetch_add(1, Ordering::SeqCst) + 1;
+    let generation = LIBRARY_GENERATION.load(Ordering::SeqCst);
+    let state = state.inner().clone();
+    let source = state.clone();
+    let index = SESSION_QUEUE
+        .run(move || with_app(&source, |app| Ok(app.query_snapshot())))
+        .await?;
+    let snapshot_id = index.id;
+    let result = LIBRARY_QUERY_QUEUE
+        .run(move || {
+            index
+                .query(&request, || {
+                    QUERY_REVISION.load(Ordering::SeqCst) != revision
+                        || LIBRARY_GENERATION.load(Ordering::SeqCst) != generation
+                })
+                .map_err(shell_error)
+        })
+        .await?;
+    let current = SESSION_QUEUE
+        .run(move || {
+            with_app(&state, |app| {
+                Ok(app.query_snapshot_id() == Some(snapshot_id))
+            })
+        })
+        .await?;
+    if !current
+        || QUERY_REVISION.load(Ordering::SeqCst) != revision
+        || LIBRARY_GENERATION.load(Ordering::SeqCst) != generation
+    {
+        return Err(shell_error(
+            "Query superseded by a newer request or library revision.",
+        ));
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+async fn library_suggest(
+    state: State<'_, AppState>,
+    request: tagrex_commands::query::SuggestRequest,
+) -> Result<tagrex_commands::query::SuggestResult, ErrorDto> {
+    let revision = SUGGEST_REVISION.fetch_add(1, Ordering::SeqCst) + 1;
+    let generation = LIBRARY_GENERATION.load(Ordering::SeqCst);
+    let state = state.inner().clone();
+    let source = state.clone();
+    let index = SESSION_QUEUE
+        .run(move || with_app(&source, |app| Ok(app.query_snapshot())))
+        .await?;
+    let snapshot_id = index.id;
+    let result = LIBRARY_SUGGEST_QUEUE
+        .run(move || {
+            index
+                .suggest(&request, || {
+                    SUGGEST_REVISION.load(Ordering::SeqCst) != revision
+                        || LIBRARY_GENERATION.load(Ordering::SeqCst) != generation
+                })
+                .map_err(shell_error)
+        })
+        .await?;
+    let current = SESSION_QUEUE
+        .run(move || {
+            with_app(&state, |app| {
+                Ok(app.query_snapshot_id() == Some(snapshot_id))
+            })
+        })
+        .await?;
+    if !current
+        || SUGGEST_REVISION.load(Ordering::SeqCst) != revision
+        || LIBRARY_GENERATION.load(Ordering::SeqCst) != generation
+    {
+        return Err(shell_error(
+            "Suggestions superseded by a newer request or library revision.",
+        ));
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+async fn library_duplicates_start(
+    state: State<'_, AppState>,
+    kind: String,
+) -> Result<tagrex_commands::duplicates::DuplicateJobStatus, ErrorDto> {
+    if !["exact", "same_audio", "likely"].contains(&kind.as_str()) {
+        return Err(shell_error("Unsupported duplicate criterion."));
+    }
+    let state = state.inner().clone();
+    let index = SESSION_QUEUE
+        .run(move || with_app(&state, |app| Ok(app.query_snapshot())))
+        .await?;
+    let (id, status, job) = {
+        let mut jobs = DUPLICATE_JOBS.lock().map_err(shell_error)?;
+        let id = DUPLICATE_JOB_ID.fetch_add(1, Ordering::SeqCst);
+        for previous in jobs.values() {
+            previous.clear("cancelled", None, true);
+        }
+        let status = tagrex_commands::duplicates::DuplicateJobStatus {
+            job_id: id,
+            snapshot_id: index.id,
+            kind: kind.clone(),
+            status: "running".into(),
+            processed: 0,
+            total: index.rows.len(),
+            skipped: 0,
+            errors: 0,
+            groups_revision: 0,
+            groups_count: 0,
+            phase: "stamping".into(),
+            message: None,
+        };
+        let job = Arc::new(DuplicateJob {
+            status: Mutex::new(status.clone()),
+            cancel: std::sync::atomic::AtomicBool::new(false),
+            index: Arc::downgrade(&index),
+        });
+        jobs.insert(id, job.clone());
+        while jobs.len() > 8 {
+            jobs.pop_first();
+        }
+        index.set_duplicate_results(
+            &kind,
+            tagrex_commands::query::DuplicateResults {
+                status: "running".into(),
+                ..Default::default()
+            },
+        );
+        (id, status, job)
+    };
+    let failed_job = job.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = DUPLICATE_QUEUE
+            .run(move || {
+                let cancelled = || job.cancel.load(Ordering::Acquire) || !index.is_current();
+                let result = tagrex_commands::duplicates::scan_with_updates(
+                    &index,
+                    &kind,
+                    &DUPLICATE_ANALYSIS,
+                    cancelled,
+                    |update| {
+                        if let Ok(jobs) = DUPLICATE_JOBS.lock() {
+                            if current_duplicate_job(&jobs, id, &job) {
+                                job.publish(update);
+                            }
+                        }
+                    },
+                );
+                let jobs = DUPLICATE_JOBS.lock().map_err(shell_error)?;
+                let current = current_duplicate_job(&jobs, id, &job);
+                match result {
+                    Ok(results) if current && !cancelled() => job.finish(results),
+                    Ok(_) | Err(tagrex_commands::query::QueryError::Cancelled) => {
+                        job.clear("cancelled", None, current)
+                    }
+                    Err(error) => job.clear("failed", Some(error.to_string()), current),
+                }
+                Ok(())
+            })
+            .await;
+        if let Err(error) = result {
+            if let Ok(jobs) = DUPLICATE_JOBS.lock() {
+                let current = current_duplicate_job(&jobs, id, &failed_job);
+                failed_job.clear("failed", Some(error.text), current);
+            }
+        }
+    });
+    Ok(status)
+}
+
+#[tauri::command]
+fn library_duplicates_status(
+    job_id: u64,
+) -> Result<tagrex_commands::duplicates::DuplicateJobStatus, ErrorDto> {
+    let jobs = DUPLICATE_JOBS.lock().map_err(shell_error)?;
+    let job = jobs
+        .get(&job_id)
+        .ok_or_else(|| shell_error("Duplicate scan no longer exists."))?;
+    if job.index.upgrade().is_none_or(|index| !index.is_current()) {
+        job.clear("cancelled", None, false);
+    }
+    let status = job.status.lock().map_err(shell_error)?.clone();
+    Ok(status)
+}
+
+#[tauri::command]
+fn library_duplicates_cancel(
+    job_id: u64,
+) -> Result<tagrex_commands::duplicates::DuplicateJobStatus, ErrorDto> {
+    let jobs = DUPLICATE_JOBS.lock().map_err(shell_error)?;
+    let job = jobs
+        .get(&job_id)
+        .ok_or_else(|| shell_error("Duplicate scan no longer exists."))?;
+    job.clear("cancelled", None, current_duplicate_job(&jobs, job_id, job));
+    let status = job.status.lock().map_err(shell_error)?.clone();
+    Ok(status)
 }
 
 #[tauri::command]
@@ -2292,6 +2677,17 @@ fn main() {
             open_library,
             open_drop,
             list_tracks,
+            library_query,
+            library_suggest,
+            library_duplicates_start,
+            library_duplicates_status,
+            library_duplicates_cancel,
+            #[cfg(debug_assertions)]
+            library_benchmark_create,
+            #[cfg(debug_assertions)]
+            library_benchmark_query,
+            #[cfg(debug_assertions)]
+            library_benchmark_dispose,
             read_track,
             read_track_rows,
             trash_files,
@@ -2401,6 +2797,104 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{paths_from_args, provider_page_url, release_url};
+
+    fn duplicate_job_fixture() -> (
+        std::sync::Arc<tagrex_commands::query::QueryIndex>,
+        super::DuplicateJob,
+    ) {
+        let tracks=(0..3).map(|i|serde_json::from_value(serde_json::json!({"path":format!("/virtual/{i}.flac"),"format":"FLAC","tags":{"title":"Track"}})).unwrap()).collect::<Vec<super::TrackDto>>();
+        let index = std::sync::Arc::new(tagrex_commands::query::QueryIndex::from_tracks(&tracks));
+        let job = super::DuplicateJob {
+            status: std::sync::Mutex::new(tagrex_commands::duplicates::DuplicateJobStatus {
+                job_id: 1,
+                snapshot_id: index.id,
+                kind: "exact".into(),
+                status: "running".into(),
+                processed: 0,
+                total: 3,
+                skipped: 0,
+                errors: 0,
+                groups_revision: 0,
+                groups_count: 0,
+                phase: "stamping".into(),
+                message: None,
+            }),
+            cancel: std::sync::atomic::AtomicBool::new(false),
+            index: std::sync::Arc::downgrade(&index),
+        };
+        (index, job)
+    }
+
+    fn duplicate_update() -> tagrex_commands::duplicates::ScanProgress {
+        tagrex_commands::duplicates::ScanProgress {
+            phase: "hashing",
+            processed: 2,
+            total: 3,
+            skipped: 0,
+            errors: 0,
+            groups: Some(vec![tagrex_commands::query::DuplicateQueryGroup {
+                id: "stable".into(),
+                label: "Track".into(),
+                reason: "verified bytes".into(),
+                confidence: "exact".into(),
+                indices: vec![0, 1],
+            }]),
+        }
+    }
+
+    #[test]
+    fn duplicate_job_cancel_clears_partial_groups_and_rejects_late_publication() {
+        let (index, job) = duplicate_job_fixture();
+        job.publish(duplicate_update());
+        assert_eq!(index.duplicate_results("exact").groups_revision, 1);
+        assert_eq!(index.duplicate_results("exact").groups.len(), 1);
+        let status = serde_json::to_value(job.status.lock().unwrap().clone()).unwrap();
+        assert_eq!(status["groupsCount"], 1);
+        assert_eq!(status["groupsRevision"], 1);
+        assert!(status.get("groups").is_none());
+        job.clear("cancelled", None, true);
+        assert!(index.duplicate_results("exact").groups.is_empty());
+        assert_eq!(index.duplicate_results("exact").groups_revision, 2);
+        job.publish(duplicate_update());
+        assert_eq!(index.duplicate_results("exact").groups_revision, 2);
+        assert_eq!(job.status.lock().unwrap().groups_count, 0);
+    }
+
+    #[test]
+    fn duplicate_job_supersession_and_snapshot_invalidation_stop_old_updates() {
+        let (index, job) = duplicate_job_fixture();
+        job.publish(duplicate_update());
+        job.clear("cancelled", None, true);
+        index.set_duplicate_results(
+            "exact",
+            tagrex_commands::query::DuplicateResults {
+                status: "running".into(),
+                groups_revision: 10,
+                ..Default::default()
+            },
+        );
+        job.publish(duplicate_update());
+        assert_eq!(index.duplicate_results("exact").groups_revision, 10);
+        assert!(index.duplicate_results("exact").groups.is_empty());
+        let (index, job) = duplicate_job_fixture();
+        job.publish(duplicate_update());
+        index.invalidate();
+        job.publish(duplicate_update());
+        job.clear("cancelled", None, false);
+        assert!(index.duplicate_results("exact").groups.is_empty());
+        assert_eq!(job.status.lock().unwrap().groups_count, 0);
+        assert_eq!(job.status.lock().unwrap().status, "cancelled");
+        let (index, job) = duplicate_job_fixture();
+        job.publish(duplicate_update());
+        let mut results = index.duplicate_results("exact");
+        results.status = "complete".into();
+        job.finish(results);
+        assert_eq!(job.status.lock().unwrap().status, "complete");
+        index.invalidate();
+        job.clear("cancelled", None, false);
+        assert_eq!(job.status.lock().unwrap().groups_count, 0);
+        assert_eq!(job.status.lock().unwrap().status, "cancelled");
+    }
 
     #[test]
     fn bpm_results_from_a_replaced_library_are_rejected_before_accessing_the_session() {

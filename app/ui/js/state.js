@@ -170,20 +170,11 @@ export function setManualOrder(value) {
   manualOrder = value;
 }
 
-// The filter box (#44). `filterQuery` is the compiled form (re-derived by
-// recompileFilter whenever the text or flags change) so the per-row test stays
-// cheap; `filterError` flags a regex that failed to compile.
+// Query controls keep small validated rule data; matching lives in Rust.
+// An invalid query retains its previous complete result set.
 export let filterText = "";
 export function setFilterText(value) {
   filterText = value;
-}
-export let filterRegex = false;
-export function setFilterRegex(value) {
-  filterRegex = value;
-}
-export let filterCase = false;
-export function setFilterCase(value) {
-  filterCase = value;
 }
 export let filterError = false;
 export function setFilterError(value) {

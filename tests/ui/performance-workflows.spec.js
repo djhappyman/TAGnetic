@@ -144,8 +144,8 @@ test('filtered selection reuses model counts, including files inside collapsed g
     document.getElementById('root').value = '/dropped';
     await window.tagrex.openLibrary();
   });
-  await page.locator('#filter-panel-toggle').click();
   await page.locator('#filter').fill('track-00');
+  await page.locator('#filter').press('Enter');
   await expect(page.locator('#status-sel')).toContainText('100/');
   const reads = await page.evaluate(() => {
     let reads = 0;

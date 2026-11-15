@@ -1,3 +1,4 @@
+import { mockMatches, mockSuggestions } from './query-mock.js';
 // The browser-only fake of the Rust command layer (#143 split it out of app.js).
 //
 // Loaded in every build but reached only when `window.__TAURI__` is absent —
@@ -395,6 +396,37 @@ function mockInvoke(cmd, args) {
     return !s.tracks.some((x) => x.path.startsWith(dir + "/"));
   };
   switch (cmd) {
+    case 'library_query': {
+      const {request}=args;const indices=mockMatches(s.tracks,request.query);
+      let groups=[],duplicateStatus='not_scanned',matched=indices;
+      if(request.query.mode==='duplicates') {
+        const scan=s.queryDuplicateScan;
+        if(scan&&scan.kind===request.query.duplicateKind){
+          duplicateStatus=scan.status;const allowed=new Set(indices);
+          groups=scan.groups.filter(g=>g.indices.some(i=>allowed.has(i)));
+          matched=[...new Set(groups.flatMap(g=>g.indices))];
+        }else matched=[];
+      }
+      return Promise.resolve({requestId:request.requestId,snapshotId:1,total:s.tracks.length,matched:matched.length,indices:matched,paths:s.tracks.map(t=>t.path),elapsedMs:0,cancelled:false,duplicateStatus,groups,groupsRevision:s.queryDuplicateScan?.groupsRevision||0,groupsCount:s.queryDuplicateScan?.groups?.length||0,skipped:0,errors:0});
+    }
+    case 'library_suggest': {
+      const scan=s.queryDuplicateScan,dup=args.request.query.mode==='duplicates';
+      const members=dup?['running','complete'].includes(scan?.status)&&scan.kind===args.request.query.duplicateKind?[...new Set(scan.groups.flatMap(g=>g.indices))].map(i=>s.tracks[i]):[]:s.tracks;
+      return Promise.resolve({requestId:args.request.requestId,snapshotId:1,suggestions:mockSuggestions(members,args.request),truncated:false});
+    }
+    case 'library_duplicates_start': {
+      const byKey=new Map();
+      s.tracks.forEach((track,i)=>{
+        const key=args.kind==='exact'?track.mockHash:args.kind==='same_audio'?track.mockAudioId:track.mockFingerprint;
+        if(!key)return;if(!byKey.has(key))byKey.set(key,[]);byKey.get(key).push(i);
+      });
+      const groups=[...byKey.values()].filter(indices=>indices.length>1).map((indices,i)=>({id:`duplicate-${i}`,label:s.tracks[indices[0]].tags.title||'Duplicate group',reason:'Browser fixture evidence',confidence:args.kind==='exact'?'exact':args.kind==='same_audio'?'audio':'likely',indices}));
+      s.queryDuplicateScan={kind:args.kind,groups,groupsCount:groups.length,groupsRevision:1,phase:'complete',jobId:1,snapshotId:1,status:'complete',processed:s.tracks.length,total:s.tracks.length,skipped:0,errors:0};
+      return Promise.resolve(s.queryDuplicateScan);
+    }
+    case 'library_duplicates_status':return Promise.resolve(s.queryDuplicateScan||{status:'cancelled',groups:[]});
+    case 'library_duplicates_cancel':s.queryDuplicateScan={...s.queryDuplicateScan,status:'cancelled',phase:'cancelled',groups:[],groupsCount:0,groupsRevision:(s.queryDuplicateScan?.groupsRevision||0)+1};return Promise.resolve(s.queryDuplicateScan);
+
     // Field locks (#48). The enforcement lives in the backend's plan gate and
     // has no browser stand-in, so locking here drives the UI — padlocks, inert
     // cells, disabled inputs — and nothing else.

@@ -30,7 +30,6 @@ test('sixteen commands have eight group dividers and selection follows the filte
   await page.keyboard.press('Enter');
   expect(new Set(await selected(page))).toEqual(new Set(await paths(page)));
   await page.locator('#ribbon-clear-selection').click();
-  await page.locator('#filter-panel-toggle').click();
   // Use a real substring from the fixture rather than relying on an artist name.
   await page.locator('#filter').fill('Wish');
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(1);

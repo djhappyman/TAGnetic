@@ -250,7 +250,6 @@ test('selection preview covers virtual rows while filters keep hidden selections
   await page.locator('#tracks-body tr[data-path]').first().focus(); await page.keyboard.press('Control+a');
   await changed(page, 350);
   expect(await page.locator('#tracks-body tr[data-path]').count()).toBeLessThan(350);
-  await page.locator('#filter-panel-toggle').click();
   await page.locator('#filter').fill('track-000');
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(1);
   await expect(page.locator('#status-transform-scope')).toBeHidden();

@@ -78,27 +78,22 @@ test('quiet row fills keep selection distinct and contain no row divider borders
     const style = getComputedStyle(panel);
     const pane = getComputedStyle(panel.parentElement);
     const table = getComputedStyle(document.getElementById('files-view'));
-    const trigger = getComputedStyle(document.getElementById('filter-panel-toggle'));
-    return { fill:style.backgroundColor, pane:pane.backgroundColor, table:table.backgroundColor, border:style.borderTopWidth, trigger:trigger.borderTopWidth };
+    return { fill:style.backgroundColor, pane:pane.backgroundColor, table:table.backgroundColor, border:style.borderTopWidth };
   });
   expect(footer.fill).toBe('rgba(0, 0, 0, 0)');
   expect(footer.pane).toBe(footer.table);
   expect(footer.border).toBe('0px');
-  expect(footer.trigger).toBe('0px');
-  await expect(page.locator('#filter-panel-toggle .filter-panel-icon')).toBeVisible();
-  await expect(page.locator('#filter-panel-toggle .filter-panel-caret')).toBeVisible();
-  await page.locator('#filter-panel-toggle').click();
-  await page.keyboard.press('Tab');
-  for (const id of ['presets-btn', 'filter-add']) {
+  await expect(page.locator('#filter-panel-toggle, .filter-panel-head')).toHaveCount(0);
+  await expect(page.locator('#filter')).toBeVisible();
+  for (const id of ['presets-btn']) {
     const control = page.locator(`#${id}`);
     expect(await control.evaluate(node => getComputedStyle(node).borderTopWidth)).toBe('0px');
     await control.focus();
     expect(await control.evaluate(node => getComputedStyle(node).outlineStyle)).toBe('solid');
   }
-  await page.locator('#filter-regex').click();
-  await page.locator('#filter').fill('[');
+  await page.locator('#filter').fill('x'.repeat(2049));
   await expect(page.locator('#filter')).toHaveAttribute('aria-invalid', 'true');
-  await page.locator('#filter-add').focus();
+  await page.locator('#presets-btn').focus();
   expect(await page.locator('.filter-ctl').evaluate(node => {
     const style = getComputedStyle(node);
     return style.borderTopWidth !== '0px' && style.borderTopColor !== 'rgba(0, 0, 0, 0)';

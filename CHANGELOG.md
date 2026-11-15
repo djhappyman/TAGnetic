@@ -7,10 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Compact command ribbon and responsive workspace.
+Library query command bar, compact command ribbon and responsive workspace.
 
 ### Added
 
+- In-field search chips with delayed, case-insensitive metadata suggestions,
+  coloured chip previews, editable all/any groups, exclusions, numeric ranges,
+  local phrase proposals and reusable presets. Artist chips include collaborators
+  while preserving complete artist credits and punctuation-sensitive names.
+- Rust library queries and facets use versioned saved-metadata snapshots and
+  compact result indices. Tag-only Apply refreshes affected rows incrementally.
+- The command bar switches to read-only duplicate groups: verified byte copies,
+  complete decoded-audio matches or likely recordings using local fingerprints,
+  with progress, cancellation and evidence for review. Verified groups appear
+  during scanning under track names, retaining copy rows, selection and scroll
+  position as results arrive. Scan files sits below the sidebar's ready message;
+  the ordinary file table stays visible until scanning starts. Selecting a result
+  selects every group copy and compares saved tags and copy details in the sidebar.
 - Overlay scrollbars fade in during vertical or horizontal scrolling and fade
   away after idle, without reserving table space. Both remain draggable.
 - Grouped command ribbon with delayed tooltips, file selection and ordering,
@@ -22,6 +35,9 @@ Compact command ribbon and responsive workspace.
 
 ### Changed
 
+- Search stays open with value-only muted chips and one suggested rule per field.
+  Regex and case-sensitive controls are removed; recalled presets search literally
+  and case-insensitively too.
 - Row bands fill the viewport while data columns retain their chosen widths.
   Auto-fit measures full contents, and manual resizing disables automatic fitting.
 - The existing panel control opens a smooth, width-limited sidebar. The folder

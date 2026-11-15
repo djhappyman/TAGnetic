@@ -26,12 +26,14 @@ async function open(page, size) {
   }, size);
 }
 
-test('filter height animation retains loaded album rows and an active raw cell', async ({ page }, info) => {
+test('filter row height changes retain loaded album rows and an active raw cell', async ({ page }, info) => {
   await open(page, 53);
   await page.locator('#tracks-body td[data-field="title"]').first().click();
   await page.keyboard.press('F2');
   const result = await page.evaluate(async () => {
     const body = document.getElementById('tracks-body');
+    const panel = document.getElementById('filter-panel');
+    const padding = panel.style.paddingBlock;
     const rows = [...body.querySelectorAll('tr[data-path]')];
     const cell = body.querySelector('[contenteditable="true"]');
     cell.textContent = 'An uncommitted raw value';
@@ -43,14 +45,14 @@ test('filter height animation retains loaded album rows and an active raw cell',
     const timings = [];
     try {
       for (let iteration = 0; iteration < 4; iteration++) {
-        document.getElementById('filter-panel-toggle').click();
+        panel.style.paddingBlock = iteration % 2 ? '8px' : '12px';
         for (let frame = 0; frame < 15; frame++) {
           const start = performance.now(); await new Promise(requestAnimationFrame); timings.push(performance.now() - start);
         }
       }
       return { created, mutations, retained: rows.every(row => row.isConnected), editing: cell.isConnected && cell.isContentEditable,
         raw: cell.textContent, frames: timings };
-    } finally { observer.disconnect(); document.createElement = create; }
+    } finally { observer.disconnect(); document.createElement = create; panel.style.paddingBlock = padding; }
   });
   await info.attach('filter-resize.json', { body: JSON.stringify(result, null, 2), contentType: 'application/json' });
   if (!baseline) {

@@ -53,7 +53,8 @@ test('every workspace mode and tagging subtab remains usable after mounting', as
     await tab.press('Enter');
     await expect(page.locator(`#panel-${mode}`)).toBeVisible();
     await expect(page.locator('.mode-panel:visible')).toHaveCount(1);
-    await expect(page.locator('#duplicates-view')).toBeVisible({ visible: mode === 'deduplicator' });
+    await expect(page.locator('#duplicates-view')).toBeHidden();
+    if(mode==='deduplicator') await expect(page.locator('#files-view')).toBeVisible();
   }
   for (const subtab of ['editor', 'filename', 'fromtext', 'online']) {
     await page.locator(`.subtab[data-subtab="${subtab}"]`).click();
@@ -68,7 +69,6 @@ test('opening and filtering a library preserves track selection and restores the
   await expect(page.locator('#tracks-body tr.selected')).toHaveCount(1);
   await expect(page.locator('#root')).toBeHidden();
   await expect(page.locator('#root-display')).toContainText('music');
-  await page.locator('#filter-panel-toggle').click();
   await page.locator('#filter').fill('Wish Mountain');
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(1);
   await expect(page.locator('#tracks-body')).toContainText('Wish Mountain');

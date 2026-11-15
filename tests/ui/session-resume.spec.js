@@ -63,7 +63,6 @@ test('successful folder open persists view and resumes without restoring an unap
   const selected = await page.evaluate(() => window.tagrex.selectedPaths());
   await page.locator('.subtab[data-subtab="editor"]').click();
   await page.locator('#fields-body input[data-key="title"]').fill('DO NOT RESTORE THIS DRAFT');
-  await page.locator('#filter-panel-toggle').click();
   await page.locator('#filter').fill('Radio');
   await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('tagrex.session.v1') || '{}').filter)).toBe('Radio');
   await page.reload();

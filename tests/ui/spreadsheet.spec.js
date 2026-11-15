@@ -215,7 +215,6 @@ test('Tab can leave the grid at either edge and filtering resets the rectangle',
   await page.keyboard.press('Shift+ArrowRight');
   await page.keyboard.press('Shift+ArrowDown');
   await expect(page.locator('#tracks-body td.sheet-range')).toHaveCount(4);
-  await page.locator('#filter-panel-toggle').click();
   await page.locator('#filter').fill('Wish Mountain');
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(1);
   await expect(page.locator('#tracks-body td.sheet-range')).toHaveCount(1);
@@ -393,7 +392,6 @@ for (const invalidKind of ['date', 'cover']) {
 }
 
 test('wheel scrolling can unmount the focused row while keyboard navigation remains in the grid', async ({ page }) => {
-  await page.locator('#filter-panel-toggle').click();
   await page.evaluate(async () => {
     await window.tagrex.invoke('open_drop', { paths: Array.from({ length: 350 }, (_, i) => `track-${String(i).padStart(3, '0')}.mp3`) });
     document.getElementById('root').value = '/dropped';
@@ -500,7 +498,7 @@ for (const viewport of [{ width: 375, height: 667 }, { width: 844, height: 390 }
     const actions = {
       tagger: ['presets-edit'], renamer: ['preview'],
       generator: ['ribbon-autonumber', 'vinyl-split'],
-      deduplicator: ['dup-scan'], exporter: ['export-run'],
+      deduplicator: [], exporter: ['export-run'],
     };
     for (const [mode, ids] of Object.entries(actions)) {
       await page.locator(`.mode-tab[data-mode="${mode}"]`).click();

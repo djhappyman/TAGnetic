@@ -1,4 +1,5 @@
 import { normalizeConditions } from './filter-query.js';
+import { normalizeRoot } from './query-model.js';
 // View state only: never persist edits, plans, credentials or artwork payloads.
 export const SESSION_KEY = 'tagrex.session.v1';
 export const RESUME_ATTEMPT_KEY = 'tagrex.session.resume-attempt.v1';
@@ -15,15 +16,15 @@ export function normalizeSession(value) {
   const root = text(value.root, 4096);
   // Persist only concrete folders, never an arbitrary drop label or a URL.
   if (!root || !(/^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(root))) return null;
-  let conditions;
-  try { conditions = normalizeConditions(value.conditions); } catch { return null; }
+  let conditions,queryRoot;
+  try { conditions = normalizeConditions(value.conditions); queryRoot=value.queryRoot?normalizeRoot(value.queryRoot):null; } catch { return null; }
   return {
     version: 1, root,
     conditions, conditionMode: value.conditionMode === "any" ? "any" : "all",
+    ...(queryRoot ? { queryRoot, commandMode: value.commandMode === 'duplicates' ? 'duplicates' : 'search', duplicateKind: ['exact','same_audio','likely'].includes(value.duplicateKind) ? value.duplicateKind : 'exact' } : {}),
     mode: modes.has(value.mode) ? value.mode : 'tagger',
     subtab: tabs.has(value.subtab) ? value.subtab : 'online',
     filter: text(value.filter, 2048),
-    regex: value.regex === true, caseSensitive: value.caseSensitive === true,
     sortKey: text(value.sortKey, 128) || null, sortDir: value.sortDir === -1 ? -1 : 1,
     groupBy: text(value.groupBy, 128),
     collapsed: paths(value.collapsed),
@@ -31,7 +32,6 @@ export function normalizeSession(value) {
     selection: Array.isArray(value.selection) && value.selection.length <= MAX_PATHS ? paths(value.selection) : [],
     selectionOmitted: value.selectionOmitted === true || (Array.isArray(value.selection) && value.selection.length > MAX_PATHS),
     scrollTop: pixel(value.scrollTop), scrollLeft: pixel(value.scrollLeft),
-    filterOpen: value.filterOpen === true,
   };
 }
 

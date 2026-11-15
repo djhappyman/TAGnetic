@@ -35,3 +35,8 @@ tagrex-core = { path = "crates/core" }
 # the cost is one slower first build.
 [profile.dev.package."*"]
 opt-level = 2
+
+# The command layer now owns the reusable query index and offline audio
+# comparison. Keep those hot paths responsive in the development app too.
+[profile.dev.package.tagrex-commands]
+opt-level = 2

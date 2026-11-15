@@ -1,0 +1,95 @@
+{
+  "date": "2026-11-15",
+  "method": "Serial Chromium mock fixture; all files paired into verified duplicate groups. Grow from 40% published groups to 100%, retaining a visible row at scrollTop 100000. One sample per size before/after model allocation cleanup. Includes 180ms native-status simulation polling, 120ms query debounce, fixture JavaScript matching and two animation-frame waits. This is a geometry/stability stress check, not native scanning throughput or a statistically established speedup.",
+  "before": [
+    {
+      "files": 20000,
+      "groups": 10000,
+      "mounted": 47,
+      "retained": true,
+      "anchorDeltaPx": 0,
+      "publishToPaintMs": 301.59999990463257,
+      "maxHeartbeatGapMs": 33.300000071525574
+    },
+    {
+      "files": 50000,
+      "groups": 25000,
+      "mounted": 47,
+      "retained": true,
+      "anchorDeltaPx": 0,
+      "publishToPaintMs": 332.8000000715256,
+      "maxHeartbeatGapMs": 60.5
+    },
+    {
+      "files": 100000,
+      "groups": 50000,
+      "mounted": 47,
+      "retained": true,
+      "anchorDeltaPx": 0,
+      "publishToPaintMs": 381.3000000715256,
+      "maxHeartbeatGapMs": 98.89999997615814
+    }
+  ],
+  "after": [
+    {
+      "files": 20000,
+      "groups": 10000,
+      "mounted": 47,
+      "retained": true,
+      "anchorDeltaPx": 0,
+      "publishToPaintMs": 301.2000000476837,
+      "maxHeartbeatGapMs": 29
+    },
+    {
+      "files": 50000,
+      "groups": 25000,
+      "mounted": 47,
+      "retained": true,
+      "anchorDeltaPx": 0,
+      "publishToPaintMs": 316.09999990463257,
+      "maxHeartbeatGapMs": 48
+    },
+    {
+      "files": 100000,
+      "groups": 50000,
+      "mounted": 47,
+      "retained": true,
+      "anchorDeltaPx": 0,
+      "publishToPaintMs": 356.89999997615814,
+      "maxHeartbeatGapMs": 88.60000002384186
+    }
+  ],
+  "limits": [
+    "The 100k-files/50k-groups burst still produces a main-thread heartbeat gap above 50ms in the JavaScript mock. Native matching is measured separately.",
+    "Real audio hashing/decoding/fingerprinting throughput was not benchmarked."
+  ],
+  "currentDuplicateReviewFlow": [
+    {
+      "files": 20000,
+      "groups": 10000,
+      "mounted": 47,
+      "retained": true,
+      "anchorDeltaPx": 0,
+      "publishToPaintMs": 289,
+      "maxHeartbeatGapMs": 28.800000071525574
+    },
+    {
+      "files": 50000,
+      "groups": 25000,
+      "mounted": 47,
+      "retained": true,
+      "anchorDeltaPx": 0,
+      "publishToPaintMs": 330.8000000715256,
+      "maxHeartbeatGapMs": 50.700000047683716
+    },
+    {
+      "files": 100000,
+      "groups": 50000,
+      "mounted": 47,
+      "retained": true,
+      "anchorDeltaPx": 0,
+      "publishToPaintMs": 360.8000000715256,
+      "maxHeartbeatGapMs": 88.10000002384186
+    }
+  ]
+}

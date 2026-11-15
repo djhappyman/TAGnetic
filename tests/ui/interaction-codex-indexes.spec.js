@@ -49,7 +49,6 @@ for (const count of [20000, 50000, 100000]) test(`select-all ${count} retains ma
   await page.keyboard.press('Control+a');
   const expected = await page.evaluate(() => window.tagrex.tracks.map(track => track.path));
   expect(await page.evaluate(() => window.tagrex.selectedPaths())).toEqual(expected);
-  await page.locator('#filter-panel-toggle').click();
   await page.locator('#filter').fill('track-000000');
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(1);
   expect(await page.evaluate(() => window.tagrex.selectedPaths())).toEqual(expected);

@@ -1,0 +1,32 @@
+<section id="library-query-comparison" data-viz-composition>
+  <div data-viz-container></div>
+  <script type="application/json" data-viz-chart>
+    {
+      "id": "query-round-trip-100k",
+      "title": "100,000 tracks · query latency",
+      "description": "Warm medians in the running development WebKit, 40 samples. Rust includes Tauri IPC. Lower is faster; excludes index setup, debounce, table rendering and audio scanning.",
+      "height": 360,
+      "spec": {
+        "type": "horizontalBar",
+        "y": "Workload",
+        "x": ["Previous JavaScript", "Rust + Tauri IPC"],
+        "xLabel": "Milliseconds",
+        "showValues": true,
+        "showLegend": true,
+        "startAtZero": true
+      },
+      "columns": ["Workload", "Previous JavaScript", "Rust + Tauri IPC"],
+      "rows": [
+        ["Free text", 6, 7],
+        ["Genre + missing artwork", 6, 2],
+        ["Artist equality + artwork", 6, 1],
+        ["Alternative conditions + text", 15, 8]
+      ]
+    }
+  </script>
+</section>
+<script type="module">
+  import {mountChart} from 'https://persistent.oaistatic.com/plugins/visualize/charts/1.2.3/element.js';
+  const root=document.getElementById('library-query-comparison');
+  mountChart(root.querySelector('[data-viz-container]'),JSON.parse(root.querySelector('[data-viz-chart]').textContent));
+</script>

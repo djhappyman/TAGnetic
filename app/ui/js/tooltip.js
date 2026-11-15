@@ -1,5 +1,5 @@
 // Keep native title bubbles suppressed around dense editors and suggestions.
-// The command ribbon opts into our themed tooltip surface for every button,
+// The command ribbon and query mode toggle use our themed tooltip surface,
 // including commands added later, without individual tooltip wrappers.
 import { showControllerTooltip } from '../lib/controller-surfaces.js';
 const descriptions = new WeakMap();
@@ -53,7 +53,7 @@ export function hideTooltip() {
 }
 
 function ribbonButton(target) {
-  return target instanceof Element ? target.closest('.command-ribbon button.ribbon-command') : null;
+  return target instanceof Element ? target.closest('.command-ribbon button.ribbon-command, #query-mode-toggle') : null;
 }
 function revealRibbonHint(button, delay) {
   if (!button || ribbonAnchor === button) return;

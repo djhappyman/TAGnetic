@@ -10,6 +10,11 @@
   import DockModule from './DockModule.svelte';
   import type { WorkspaceLayout } from '$lib/workspace-layout';
   import FilterPanel from './FilterPanel.svelte';
+  import QueryChips from './QueryChips.svelte';
+  import QueryModeToggle from './QueryModeToggle.svelte';
+  import QueryFeedback from './QueryFeedback.svelte';
+  import DuplicateScanControls from './DuplicateScanControls.svelte';
+  import DuplicateHelp from './DuplicateHelp.svelte';
   import InspectorHelp from './InspectorHelp.svelte';
   import ImportFields from './ImportFields.svelte';
   import NativeCheckbox from './controls/NativeCheckbox.svelte';
@@ -353,22 +358,21 @@
 
     <FilterPanel>
       <div class="filter-ctl field is-empty">
-
+        <QueryChips />
         <span id="filter-check" class="field-chip" hidden><span id="filter-check-name"></span><Button variant="ghost" size="icon-sm" id="filter-check-clear" class="icon" type="button" data-i18n-title="health.clear" title="Show all files" data-i18n-aria-label="health.clear" aria-label="Show all files"><svg class="ico"><use href="#i-close"/></svg></Button></span>
-        <Input id="filter" type="search" data-i18n-placeholder="toolbar.filterPlaceholder" placeholder="Filter (try artist:aphex)" spellcheck="false" />
+        <Input id="filter" type="search" placeholder="Start typing…" aria-label="Search files" spellcheck="false" />
         <div class="field-tools">
           <Button variant="ghost" size="icon-sm" id="filter-clear" class="icon field-clear" type="button" data-i18n-title="toolbar.clearFilter" title="Clear the filter" data-i18n-aria-label="toolbar.clearFilter" aria-label="Clear the filter"><svg class="ico"><use href="#i-close"/></svg></Button>
-          <span class="field-sep" aria-hidden="true"></span>
-          <Button variant="ghost" size="sm" id="filter-regex" class="field-flag" type="button" data-i18n-title="toolbar.regex" title="Regular-expression mode" aria-pressed="false">.*</Button>
-          <Button variant="ghost" size="sm" id="filter-case" class="field-flag" type="button" data-i18n-title="toolbar.caseSensitive" title="Case-sensitive" aria-pressed="false">Aa</Button>
         </div>
       </div>
+      <QueryModeToggle />
       <div class="filter-presets">
-          <div class="col-picker">
-            <Button variant="ghost" size="sm" id="presets-btn" class="tray-action" data-i18n-title="toolbar.presetsTitle" title="Save and reuse filter and sort presets" data-i18n-aria-label="toolbar.presets" aria-label="Filter and sort presets"><svg class="ico"><use href="#i-presets"/></svg><span class="tray-label" data-i18n="toolbar.presets">Filter and sort presets</span></Button>
-            <div id="presets-menu" class="col-menu" hidden></div>
-          </div>
+        <div class="col-picker">
+          <Button variant="ghost" size="sm" id="presets-btn" class="tray-action" data-i18n-title="toolbar.presetsTitle" title="Save and reuse filter and sort presets" data-i18n-aria-label="toolbar.presets" aria-label="Filter and sort presets"><svg class="ico"><use href="#i-presets"/></svg><span class="tray-label">Presets</span></Button>
+          <div id="presets-menu" class="col-menu" hidden></div>
         </div>
+      </div>
+      {#if mode !== 'deduplicator'}<QueryFeedback />{/if}
     </FilterPanel>
 
     <div id="duplicates-view" hidden>
@@ -650,25 +654,9 @@
 
     <Tabs.Content value="deduplicator" id="panel-deduplicator" class="mode-panel" hidden>
       <div class="panel-block">
-        <h2 data-i18n="dedup.heading">Find duplicates</h2>
-        <p class="hint muted" style="padding: 0" data-i18n="dedup.hint">
-          Scan the library for likely duplicates using the key you choose.
-        </p>
-        <label class="export-row"
-          ><span data-i18n="dedup.by">By</span>
-          <NativeSelect size="sm" id="dup-criterion" data-i18n-title="dedup.criterion.title" title="Choose how to match duplicate files">
-            <NativeSelectOption value="artist_title" data-i18n="dedup.criterion.artistTitle">Artist + Title</NativeSelectOption>
-            <NativeSelectOption value="album_track" data-i18n="dedup.criterion.albumTrack">Album + Track</NativeSelectOption>
-            <NativeSelectOption value="duration" data-i18n="dedup.criterion.duration">Duration</NativeSelectOption>
-            <NativeSelectOption value="size" data-i18n="dedup.criterion.size">File size</NativeSelectOption>
-            <NativeSelectOption value="hash" data-i18n="dedup.criterion.hash">Identical bytes</NativeSelectOption>
-          </NativeSelect>
-        </label>
-
-        <div class="panel-actions">
-          <p class="ro-note panel-note"><svg class="ico"><use href="#i-lock"/></svg> <span data-i18n="dedup.readonly">Read-only. Nothing is changed.</span></p>
-          <Button variant="default" size="sm" id="dup-scan" class="primary" data-i18n="dedup.scan">Scan</Button>
-        </div>
+        <div class="duplicate-heading"><h2>Find duplicates</h2><DuplicateHelp /></div>
+        {#if mode === 'deduplicator'}<DuplicateScanControls />{/if}
+        <Button id="dup-scan" hidden>Scan</Button>
       </div>
     </Tabs.Content>
 
