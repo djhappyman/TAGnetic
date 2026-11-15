@@ -9,9 +9,13 @@ on:
   workflow_dispatch:
     inputs:
       publish_release:
-        description: Publish a new personal prerelease after all packages pass
+        description: Publish a complete release after all packages pass
         type: boolean
         default: true
+      prerelease:
+        description: Mark as a prerelease instead of a regular Latest release
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -33,5 +37,6 @@ jobs:
     uses: ./.github/workflows/release.yml
     with:
       publish_release: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release || startsWith(github.ref, 'refs/tags/personal-v') }}
+      prerelease: ${{ inputs.prerelease || false }}
     permissions:
       contents: write

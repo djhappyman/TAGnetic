@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync, readFileSync }
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
 import { createHash } from 'node:crypto';
-import { planRelease, verifyBundles, assertAssets } from '../../tools/personal-release.mjs';
+import { planRelease, verifyBundles, assertAssets, publicationArgs } from '../../tools/personal-release.mjs';
 const env = { GITHUB_REPOSITORY: 'djhappyman/TAGnetic', GITHUB_SHA: 'a'.repeat(40), GITHUB_REF: 'refs/heads/main' };
 
 test('manual publication requires a personal fork, numeric version and exact version tag', () => {
@@ -15,6 +15,16 @@ test('manual publication requires a personal fork, numeric version and exact ver
   assert.throws(() => planRelease('1.4.1', { ...env, GITHUB_REF: 'refs/tags/personal-v1.4.2' }));
   assert.throws(() => planRelease('1.4.1-personal.1', env));
 });
+test('normal releases publish as Latest; prereleases require an explicit opt-in', () => {
+  const regular = planRelease('1.4.6', {...env, PUBLISH_RELEASE:'true'});
+  assert.equal(regular.prerelease, false);
+  assert.deepEqual(publicationArgs(regular), ['--draft=false','--prerelease=false','--latest=true']);
+  const preview = planRelease('1.4.6', {...env, PUBLISH_RELEASE:'true', RELEASE_PRERELEASE:'true'});
+  assert.equal(preview.prerelease, true);
+  assert.deepEqual(publicationArgs(preview), ['--draft=false','--prerelease=true','--latest=false']);
+  assert.equal(planRelease('1.4.6', {...env, RELEASE_PRERELEASE:'false'}).prerelease,false);
+});
+
 function fixture(t) {
   const root = mkdtempSync(join(process.env.TMPDIR || tmpdir(), 'personal-release-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));

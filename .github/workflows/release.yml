@@ -9,12 +9,15 @@ name: Release build
 #
 # Called by Build and release after reusable CI validation. Main commits produce
 # artifacts; personal tags
-# also attach a complete successful matrix to a personal pre-release.
+# also attach a complete successful matrix to a personal release.
 
 on:
   workflow_call:
     inputs:
       publish_release:
+        type: boolean
+        default: false
+      prerelease:
         type: boolean
         default: false
 
@@ -39,6 +42,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PUBLISH_RELEASE: ${{ inputs.publish_release }}
+          RELEASE_PRERELEASE: ${{ inputs.prerelease }}
         run: node tools/personal-release.mjs plan
 
   build:
@@ -146,8 +150,9 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-      - name: Verify all packages and publish a complete personal prerelease
+      - name: Verify all packages and publish a complete release
         env:
           GH_TOKEN: ${{ github.token }}
           PUBLISH_RELEASE: "true"
+          RELEASE_PRERELEASE: ${{ inputs.prerelease }}
         run: node tools/personal-release.mjs publish bundles

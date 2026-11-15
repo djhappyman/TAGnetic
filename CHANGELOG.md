@@ -7,7 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.6] - 2026-11-15
+
+**Tagnetic 1.4.6**: safer imports, native matching and ribbon Redo.
+
 ### Added
+
+- Regular GitHub releases become Latest by default; prereleases require an
+  explicit opt-in. Complete installer, checksum and provenance verification
+  remains mandatory before publication.
+- Project README with framed workspace/duplicate screenshots and a plain feature
+  list, download formats and an overview of the staged editing workflow.
 
 - Session-only Redo beside Undo in the command ribbon, with Ctrl/Cmd+Shift+Z,
   translated feedback, progress and guarded replay of tags, artwork and renames.

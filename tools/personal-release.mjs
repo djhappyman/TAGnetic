@@ -12,8 +12,14 @@ export function planRelease(version, env) {
   assert.match(env.GITHUB_SHA, /^[a-f0-9]{40}$/);
   const tag = `personal-v${version}`;
   if (env.GITHUB_REF?.startsWith('refs/tags/')) assert.equal(env.GITHUB_REF, `refs/tags/${tag}`, 'Tag must match app version');
-  return { version, tag, sha: env.GITHUB_SHA, publish: env.PUBLISH_RELEASE === 'true' || env.GITHUB_REF === `refs/tags/${tag}` };
+  return { version, tag, sha: env.GITHUB_SHA, publish: env.PUBLISH_RELEASE === 'true' || env.GITHUB_REF === `refs/tags/${tag}`, prerelease: env.RELEASE_PRERELEASE === 'true' };
 }
+// Publish only after the complete draft has been verified. Normal releases
+// become Latest; explicit preview releases stay out of that destination.
+export function publicationArgs(plan) {
+  return ['--draft=false', `--prerelease=${plan.prerelease}`, `--latest=${!plan.prerelease}`];
+}
+
 export function verifyBundles(root, version) {
   const expected = {
     'tagnetic-linux-x64': ['.deb', '.rpm', '.AppImage'],
@@ -92,14 +98,19 @@ function main() {
   const changelog = readFileSync('CHANGELOG.md', 'utf8');
   const section = changelog.split(`## [${plan.version}]`)[1]?.split(/\n## \[/)[0]?.replace(/^[^\n]*\n/, '').trim();
   const notes = join(root, 'release-notes.md');
-  writeFileSync(notes, `Tagnetic development prerelease.\n\n${section || `Tagnetic ${plan.version}.`}\n\nSource: ${plan.sha}\nBuild: ${process.env.BUILD_RUN_URL || `https://github.com/${repository}/actions/runs/${process.env.GITHUB_RUN_ID}`}\n\nWindows x64/ARM64; universal macOS; Linux x64 DEB/RPM/AppImage and ARM64 DEB/RPM. Packages are not notarized or signed with paid desktop certificates. In-app updates remain disabled.\n`);
+  writeFileSync(notes, `Tagnetic ${plan.prerelease ? 'development prerelease' : 'release'}.\n\n${section || `Tagnetic ${plan.version}.`}\n\nSource: ${plan.sha}\nBuild: ${process.env.BUILD_RUN_URL || `https://github.com/${repository}/actions/runs/${process.env.GITHUB_RUN_ID}`}\n\nWindows x64/ARM64; universal macOS; Linux x64 DEB/RPM/AppImage and ARM64 DEB/RPM. Packages are not notarized or signed with paid desktop certificates. In-app updates remain disabled.\n`);
   let created;
   try {
-    created = JSON.parse(gh(['api', '--method', 'POST', `repos/${repository}/releases`, '-f', `tag_name=${plan.tag}`, '-f', `target_commitish=${plan.sha}`, '-f', `name=Tagnetic ${plan.version}`, '-f', `body=${readFileSync(notes, 'utf8')}`, '-F', 'draft=true', '-F', 'prerelease=true', '-f', 'make_latest=false']));
+    created = JSON.parse(gh(['api', '--method', 'POST', `repos/${repository}/releases`, '-f', `tag_name=${plan.tag}`, '-f', `target_commitish=${plan.sha}`, '-f', `name=Tagnetic ${plan.version}`, '-f', `body=${readFileSync(notes, 'utf8')}`, '-F', 'draft=true', '-F', `prerelease=${plan.prerelease}`, '-f', 'make_latest=false']));
     assert.ok(created?.draft);
     gh(['release', 'upload', plan.tag, '--repo', repository, ...assets]);
     const draft = api(`releases/${created.id}`); assert.equal(draft.id, created.id); assert.ok(draft.draft); assertAssets(draft.assets, assets);
-    gh(['release', 'edit', plan.tag, '--repo', repository, '--draft=false', '--prerelease', '--latest=false']);
+    gh(['release', 'edit', plan.tag, '--repo', repository, ...publicationArgs(plan)]);
+    const published = api(`releases/${created.id}`);
+    assert.equal(published.draft, false);
+    assert.equal(published.prerelease, plan.prerelease);
+    assertAssets(published.assets, assets);
+    if (!plan.prerelease) assert.equal(api('releases/latest')?.id, created.id, 'New regular release must be Latest');
     console.log(gh(['release', 'view', plan.tag, '--repo', repository, '--json', 'url', '--jq', '.url']));
   } catch (error) {
     // Remove only this invocation's unpublished draft; retain its source tag.
