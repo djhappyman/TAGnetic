@@ -64,6 +64,10 @@ pub struct TrackDto {
     /// silently vanishes from the library. `#[serde(default)]` = false.
     #[serde(default)]
     pub unreadable: bool,
+    /// The original tag-read failure for an unreadable placeholder. Successful
+    /// reads have no diagnostic; older serialized rows may omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_error: Option<ErrorDto>,
     /// Playing time in seconds, for the Length column (#172). A technical
     /// property rather than a tag, read from the same probe as the tags, so it
     /// costs nothing extra. `None` when the file couldn't be read.
@@ -116,8 +120,8 @@ impl From<&TagBlock> for TagBlockDto {
 
 impl TrackDto {
     /// A placeholder row for a file whose tags failed to read: path only, format
-    /// guessed from the extension, no tags.
-    fn unreadable(path: &Path) -> Self {
+    /// guessed from the extension, no tags, and the original read failure.
+    fn unreadable(path: &Path, read_error: ErrorDto) -> Self {
         let format = path
             .extension()
             .and_then(|ext| ext.to_str())
@@ -128,6 +132,7 @@ impl TrackDto {
             format,
             tags: std::collections::BTreeMap::new(),
             unreadable: true,
+            read_error: Some(read_error),
             duration_secs: None,
             tag_blocks: Vec::new(),
             compilation_field: None,
@@ -2401,7 +2406,7 @@ impl App {
                 has_cover: read.has_cover,
                 ..TrackDto::from(read.file)
             },
-            Err(_) => TrackDto::unreadable(path),
+            Err(error) => TrackDto::unreadable(path, ErrorDto::from(AppError::TagIo(error))),
         }
     }
 
@@ -7445,6 +7450,7 @@ impl From<tagrex_core::model::TrackFile> for TrackDto {
                 .map(|(field, value)| (field.to_storage_key(), value))
                 .collect(),
             unreadable: false,
+            read_error: None,
             // Both filled by the caller that read the properties too (#172,
             // #47); a conversion from tags alone knows neither the playing time
             // nor which blocks the file carries.
@@ -10665,6 +10671,130 @@ mod tests {
             .find(|t| t.path.ends_with("good.flac"))
             .unwrap();
         assert!(!good.unreadable);
+    }
+
+    #[test]
+    fn read_error_is_backward_compatible_and_round_trips() {
+        // Both kinds of legacy row predate the optional diagnostic.
+        for unreadable in [false, true] {
+            let row: TrackDto = serde_json::from_value(serde_json::json!({
+                "path": "legacy.flac",
+                "format": "FLAC",
+                "tags": {},
+                "unreadable": unreadable
+            }))
+            .unwrap();
+            assert_eq!(row.unreadable, unreadable);
+            assert_eq!(row.read_error, None);
+            assert!(serde_json::to_value(&row)
+                .unwrap()
+                .get("read_error")
+                .is_none());
+        }
+
+        let error = ErrorDto::from(AppError::TagIo(tagrex_core::model::TagIoError::Malformed(
+            "invalid frame".to_string(),
+        )));
+        let row = TrackDto::unreadable(Path::new("broken.flac"), error.clone());
+        let json = serde_json::to_value(&row).unwrap();
+        assert_eq!(json["read_error"], serde_json::to_value(error).unwrap());
+        assert_eq!(serde_json::from_value::<TrackDto>(json).unwrap(), row);
+    }
+
+    #[test]
+    fn read_error_agrees_across_read_apis_without_mutating_media_or_history() {
+        let dir = TempDir::new("read-error-apis");
+        let good = dir.tagged_flac("good.flac", "Artist", "Title");
+        let bad = dir.0.join("bad.flac");
+        std::fs::write(&bad, b"not a real flac file").unwrap();
+        let expected = ErrorDto::from(AppError::TagIo(TagEngine::read(&bad).unwrap_err()));
+        assert_eq!(expected.message.code, "error.tag.backend");
+        assert!(!expected.message.args["detail"].is_empty());
+        assert!(!expected.text.is_empty());
+        let paths = [bad.clone(), good.clone()];
+        let before: Vec<_> = paths
+            .iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect();
+
+        // Both directory libraries and explicit file sets keep failed rows.
+        for file_set in [false, true] {
+            let journal_path = dir.0.join(format!("journal-{file_set}.sqlite"));
+            let app = if file_set {
+                App::open_file_set(dir.0.clone(), paths.to_vec(), &journal_path).unwrap()
+            } else {
+                App::open(dir.0.clone(), &journal_path).unwrap()
+            };
+            let history = serde_json::to_value(app.history().unwrap()).unwrap();
+            let journal_bytes = std::fs::read(&journal_path).unwrap();
+            let rows = app.list_tracks();
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0].path, bad.to_string_lossy());
+            assert_eq!(rows[1].path, good.to_string_lossy());
+            assert_eq!(app.read_track_rows(&paths).unwrap(), rows);
+            for (path, row) in paths.iter().zip(&rows) {
+                assert_eq!(app.read_track(path).unwrap(), *row);
+            }
+
+            let unreadable = &rows[0];
+            assert!(unreadable.unreadable);
+            assert_eq!(unreadable.read_error.as_ref(), Some(&expected));
+            assert_eq!(unreadable.format, "FLAC");
+            assert!(unreadable.tags.is_empty());
+            assert_eq!(unreadable.duration_secs, None);
+            assert!(unreadable.tag_blocks.is_empty());
+            assert_eq!(unreadable.compilation_field, None);
+            assert!(unreadable.has_cover);
+            assert!(!rows[1].unreadable);
+            assert_eq!(rows[1].read_error, None);
+            assert!(serde_json::to_value(&rows[1])
+                .unwrap()
+                .get("read_error")
+                .is_none());
+            assert_eq!(
+                serde_json::to_value(app.history().unwrap()).unwrap(),
+                history
+            );
+            assert_eq!(std::fs::read(&journal_path).unwrap(), journal_bytes);
+            for (path, bytes) in paths.iter().zip(&before) {
+                assert_eq!(std::fs::read(path).unwrap(), *bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn read_error_clears_after_repair_on_each_refresh_api() {
+        let dir = TempDir::new("read-error-repair");
+        for api in ["list", "single", "batch"] {
+            let path = dir.0.join(format!("{api}.flac"));
+            // Keep the length unchanged: a failed read must not be cached.
+            std::fs::write(&path, [b'?'; MINIMAL_FLAC.len()]).unwrap();
+            let app = open_app(&dir);
+            let refresh = || match api {
+                "list" => app
+                    .list_tracks()
+                    .into_iter()
+                    .find(|row| row.path == path.to_string_lossy())
+                    .unwrap(),
+                "single" => app.read_track(&path).unwrap(),
+                "batch" => app
+                    .read_track_rows(std::slice::from_ref(&path))
+                    .unwrap()
+                    .remove(0),
+                _ => unreachable!(),
+            };
+            for _ in 0..2 {
+                let row = refresh();
+                assert!(row.unreadable, "{api}");
+                assert!(row.read_error.is_some(), "{api}");
+            }
+            std::fs::write(&path, MINIMAL_FLAC).unwrap();
+            let row = refresh();
+            assert!(!row.unreadable, "{api}");
+            assert_eq!(row.read_error, None, "{api}");
+            assert_eq!(row.duration_secs, Some(0), "{api}");
+            assert_eq!(std::fs::read(&path).unwrap(), MINIMAL_FLAC);
+        }
     }
 
     /// The file placeholders (#147) reach the rename path with a real file
