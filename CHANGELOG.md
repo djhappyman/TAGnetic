@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Library query command bar, compact command ribbon and responsive workspace.
+## [1.4.5] - 2026-11-15
+
+**Tagnetic Alpha 4** — native library search, duplicate review and a compact workspace.
 
 ### Added
 
@@ -38,6 +40,11 @@ Library query command bar, compact command ribbon and responsive workspace.
 - Search stays open with value-only muted chips and one suggested rule per field.
   Regex and case-sensitive controls are removed; recalled presets search literally
   and case-insensitively too.
+- Duplicates mode clears the previous query and reveals its inspector on compact
+  layouts. Suggestions use only verified scan results, while Scan files always
+  examines all opened files. Selected groups grow as more copies are verified.
+- Duplicate comparison shows shared saved tags, differing fields, full copy paths,
+  formats, durations and artwork status, with bounded pages for large groups.
 - Row bands fill the viewport while data columns retain their chosen widths.
   Auto-fit measures full contents, and manual resizing disables automatic fitting.
 - The existing panel control opens a smooth, width-limited sidebar. The folder
@@ -56,8 +63,10 @@ Library query command bar, compact command ribbon and responsive workspace.
   marked as front covers while other embedded images remain intact.
 - Rotated artwork encodes asynchronously while retaining the browser's image
   format and colour handling.
-- Filter disclosure and sidebar resizing preserve loaded table rows and active
-  cell edits instead of rebuilding the table on each animation frame.
+- Sidebar resizing preserves loaded table rows and active cell edits instead of
+  rebuilding the table on each animation frame.
+- Cancelled scans and stale search replies cannot restore dismissed results or
+  suggestions. Keyboard group selection preserves pending previews and Apply scope.
 - Large cell ranges avoid copying the full selection during scrolling. Variable
   row heights update an indexed layout while large libraries remain virtualized.
 - Fractional row heights keep the scrollbar extent stable as tracks enter view.
