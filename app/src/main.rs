@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 mod beatport_session_control;
 mod blocking;
 mod media_session;
+mod navigation;
 mod operation_control;
 mod settings_store;
 mod update;
@@ -2165,6 +2166,10 @@ fn main() {
     builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        // Which document each window may show. Without this hook a webview
+        // navigates anywhere, and provider-derived links are rendered in the
+        // UI; the policy keeps the app's window on the app's own document.
+        .plugin(navigation::init())
         // Size, position and maximized/fullscreen of the main window (#434).
         // Not DECORATIONS or VISIBLE: the overlay title bar and the first show
         // are the app's to decide. Only "main": the Beatport sign-in window is a
