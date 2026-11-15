@@ -70,9 +70,11 @@ pub struct AppliedBatch {
     /// without touching directories that already existed.
     #[allow(clippy::struct_field_names)]
     pub created_dirs: Vec<PathBuf>,
-    /// Directories this batch emptied and then removed (#153), deepest first.
-    /// Rollback recreates exactly these, before anything moves back, so a file
-    /// has a folder to return to.
+    /// Source parents Undo may need to recreate, deepest first (#153). The
+    /// initial write-ahead record includes verified pruning candidates, before
+    /// any removal can run. Stored batches can retain those candidates even
+    /// when not all were removed; recreating an existing authorized parent is
+    /// harmless and ensures files have folders to return to.
     #[allow(clippy::struct_field_names)]
     pub removed_dirs: Vec<PathBuf>,
     /// The roots this batch was authorized to write inside, canonicalized. Only

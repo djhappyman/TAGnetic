@@ -1172,6 +1172,73 @@ fn interrupted_missing_field_outcomes_refuse_later_edits_in_every_mode() {
 }
 
 #[test]
+fn interrupted_pruning_restores_authorized_source_parents_and_sidecars() {
+    use std::sync::atomic::AtomicBool;
+    for stop_before_transfer in [false, true] {
+        let dir = TempDir::new("prune-recovery");
+        let parent = dir.path().join("artist/album");
+        let scans = parent.join("Scans");
+        std::fs::create_dir_all(&scans).unwrap();
+        let source = parent.join("track.flac");
+        std::fs::write(&source, MINIMAL_FLAC).unwrap();
+        let sidecar = scans.join("cover.jpg");
+        std::fs::write(&sidecar, b"disposable scan").unwrap();
+        let target = dir.path().join("new/track.flac");
+        let sidecar_target = dir.path().join("new/cover.jpg");
+        let plan = ChangePlan {
+            prune_empty_dirs: true,
+            changes: vec![FileChange {
+                path: source.clone(),
+                rename_to: Some(target.clone()),
+                sidecar_renames: vec![(sidecar.clone(), sidecar_target.clone())],
+                ..FileChange::default()
+            }],
+            ..ChangePlan::default()
+        };
+        let batch = if stop_before_transfer {
+            let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Executor::apply_with(
+                    &plan,
+                    &mut journal,
+                    &roots(dir.path()),
+                    &mut |progress| {
+                        if progress.done == 1 {
+                            panic!("stop before first transfer");
+                        }
+                    },
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            }))
+            .is_err());
+            drop(journal);
+            SqliteJournal::open(&dir.db())
+                .unwrap()
+                .batches()
+                .unwrap()
+                .remove(0)
+        } else {
+            let batch = interrupt_before_finish(&dir, &plan);
+            assert!(
+                !parent.exists(),
+                "pruning really ran before simulated termination"
+            );
+            batch
+        };
+        assert!(batch.removed_dirs.contains(&parent));
+        assert!(batch.removed_dirs.contains(&scans));
+        assert!(!batch.removed_dirs.contains(&dir.path().to_path_buf()));
+        let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+        Executor::undo(&mut journal, batch.id, &roots(dir.path())).unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), MINIMAL_FLAC);
+        assert_eq!(std::fs::read(&sidecar).unwrap(), b"disposable scan");
+        assert!(!target.exists() && !sidecar_target.exists());
+        assert!(journal.batches().unwrap().is_empty());
+    }
+}
+
+#[test]
 fn interrupted_field_recovery_at_each_tag_write_boundary() {
     use std::sync::atomic::AtomicBool;
     use tagrex_core::plan::PlanError;
@@ -1235,6 +1302,68 @@ fn interrupted_field_recovery_at_each_tag_write_boundary() {
                 "unreached file was not rewritten"
             );
         }
+        assert!(journal.batches().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn interrupted_move_recovers_after_each_pruned_parent() {
+    use std::sync::atomic::AtomicBool;
+    for pruned in 0..=3 {
+        let dir = TempDir::new("pruning-boundary");
+        let parents = [
+            dir.path().join("artist/album/Scans"),
+            dir.path().join("artist/album"),
+            dir.path().join("artist"),
+        ];
+        std::fs::create_dir_all(&parents[0]).unwrap();
+        let source = parents[1].join("track.flac");
+        let sidecar = parents[0].join("cover.jpg");
+        std::fs::write(&source, MINIMAL_FLAC).unwrap();
+        std::fs::write(&sidecar, b"disposable scan").unwrap();
+        let target = dir.path().join("new/track.flac");
+        let sidecar_target = dir.path().join("new/cover.jpg");
+        let plan = ChangePlan {
+            prune_empty_dirs: true,
+            changes: vec![FileChange {
+                path: source.clone(),
+                rename_to: Some(target.clone()),
+                sidecar_renames: vec![(sidecar.clone(), sidecar_target.clone())],
+                ..FileChange::default()
+            }],
+            ..ChangePlan::default()
+        };
+        let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Executor::apply_with(
+                &plan,
+                &mut journal,
+                &roots(dir.path()),
+                &mut |progress| {
+                    if progress.done == 1 {
+                        panic!("stop after initial record");
+                    }
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        }))
+        .is_err());
+        drop(journal);
+        // Deterministic filesystem states at the three deletion boundaries,
+        // backed by the real production write-ahead record.
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::rename(&source, &target).unwrap();
+        std::fs::rename(&sidecar, &sidecar_target).unwrap();
+        for parent in parents.iter().take(pruned) {
+            std::fs::remove_dir(parent).unwrap();
+        }
+        let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+        let id = journal.batches().unwrap()[0].id;
+        Executor::undo(&mut journal, id, &roots(dir.path())).unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), MINIMAL_FLAC);
+        assert_eq!(std::fs::read(&sidecar).unwrap(), b"disposable scan");
+        assert!(!target.exists() && !sidecar_target.exists());
         assert!(journal.batches().unwrap().is_empty());
     }
 }

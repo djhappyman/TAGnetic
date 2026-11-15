@@ -314,7 +314,14 @@ impl Executor {
             applied_at: now_unix_secs(),
             plan: plan.clone(),
             created_dirs: Vec::new(),
-            removed_dirs: Vec::new(),
+            // Write pruning intent before anything can remove a source parent.
+            // A crash may leave some candidates unpruned; recreating an existing
+            // authorized directory during Undo is harmless.
+            removed_dirs: if plan.prune_empty_dirs {
+                pruning_candidates(plan, &roots, &[])
+            } else {
+                Vec::new()
+            },
             allowed_roots: roots.clone(),
             copy_stamps: Vec::new(),
             applied_values: Vec::new(),
@@ -327,24 +334,25 @@ impl Executor {
         written.revisions.clone_from(&batch.id3v2_revisions);
         let mut steps = Steps::new(total, progress, cancel);
         steps.done = plan.changes.len();
-        let removed_dirs = match Self::write_phase(plan, &roots, &mut written, &mut steps) {
-            Ok(removed_dirs) => removed_dirs,
-            Err(error) => {
-                let error = written.roll_back_after(plan, &[], error);
-                if !matches!(error, PlanError::RollbackIncomplete { .. }) {
-                    let _ = journal.rollback(batch.id);
-                } else {
-                    batch.created_dirs.clone_from(&written.created_dirs);
-                    batch.applied_values = merge_applied_values(
-                        &written.applied_values,
-                        applied_values(plan, &written),
-                    );
-                    batch.copy_stamps = copy_stamps(plan);
-                    let _ = journal.retain_interrupted(batch.id, &batch);
+        let removed_dirs =
+            match Self::write_phase(plan, &roots, &batch.removed_dirs, &mut written, &mut steps) {
+                Ok(removed_dirs) => removed_dirs,
+                Err(error) => {
+                    let error = written.roll_back_after(plan, &[], error);
+                    if !matches!(error, PlanError::RollbackIncomplete { .. }) {
+                        let _ = journal.rollback(batch.id);
+                    } else {
+                        batch.created_dirs.clone_from(&written.created_dirs);
+                        batch.applied_values = merge_applied_values(
+                            &written.applied_values,
+                            applied_values(plan, &written),
+                        );
+                        batch.copy_stamps = copy_stamps(plan);
+                        let _ = journal.retain_interrupted(batch.id, &batch);
+                    }
+                    return Err(error);
                 }
-                return Err(error);
-            }
-        };
+            };
         batch.created_dirs = std::mem::take(&mut written.created_dirs);
         batch.removed_dirs = removed_dirs;
         batch.copy_stamps = copy_stamps(plan);
@@ -375,6 +383,7 @@ impl Executor {
     fn write_phase(
         plan: &ChangePlan,
         roots: &[PathBuf],
+        pruning_intent: &[PathBuf],
         written: &mut Written,
         steps: &mut Steps,
     ) -> Result<Vec<PathBuf>, PlanError> {
@@ -453,7 +462,7 @@ impl Executor {
         // is opt-in per plan, and only ever the directories THIS batch emptied —
         // recorded so undo can put them back.
         Ok(if plan.prune_empty_dirs {
-            prune_emptied_dirs(plan, roots, &written.created_dirs)
+            prune_emptied_dirs(pruning_intent, roots, &written.created_dirs)
         } else {
             Vec::new()
         })
@@ -521,14 +530,6 @@ impl Executor {
             }
         }
 
-        // Put back the folders the batch emptied, before anything moves: a file
-        // has to have a directory to move back into (#153).
-        for dir in &batch.removed_dirs {
-            if resolve_target_within_roots(dir, &roots).is_ok() {
-                std::fs::create_dir_all(dir).map_err(PlanError::Io)?;
-            }
-        }
-
         // Validate before touching disk: the file's current location (rename
         // target if it was renamed, else its path) and the restore
         // destination must both sit within a root.
@@ -577,6 +578,14 @@ impl Executor {
                     .collect();
             }
             UndoMode::Overwrite => {}
+        }
+
+        // Put back the folders the batch emptied, before anything moves: a file
+        // has to have a directory to move back into (#153).
+        for dir in &batch.removed_dirs {
+            if resolve_target_within_roots(dir, &roots).is_ok() {
+                std::fs::create_dir_all(dir).map_err(PlanError::Io)?;
+            }
         }
 
         // Reverse the transfers first, so tag restoration finds each file back
@@ -1209,16 +1218,11 @@ fn untransfer(target: &Path, original: &Path, copy: bool) -> Result<(), PlanErro
     }
 }
 
-/// Remove the directories this batch's moves emptied (#153), deepest first, and
-/// report them so undo can put them back.
-///
-/// Only a directory that is empty *now*, sits inside an allowed root, and is not
-/// one this same batch just created. Walking up from each source folder means a
-/// move that empties `Artist/Album` also clears `Artist` when nothing else is
-/// left in it — which is the point, since an unsorted folder is usually a tree.
-/// Anything that fails to remove is simply left alone: a folder that still holds
-/// something the plan never touched is not this batch's to delete.
-fn prune_emptied_dirs(plan: &ChangePlan, roots: &[PathBuf], created: &[PathBuf]) -> Vec<PathBuf> {
+/// Existing source parents a move may empty, deepest first. Capture these in
+/// the initial journal record so even a crash during pruning leaves Undo the
+/// authorized parents it needs. Roots and directories created by this batch
+/// are excluded; containment is verified while the parents still exist.
+fn pruning_candidates(plan: &ChangePlan, roots: &[PathBuf], created: &[PathBuf]) -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     for change in &plan.changes {
         if change.copy || effective_rename(change).is_none() {
@@ -1237,11 +1241,8 @@ fn prune_emptied_dirs(plan: &ChangePlan, roots: &[PathBuf], created: &[PathBuf])
             let mut dir = source.parent();
             while let Some(current) = dir {
                 let owned = current.to_path_buf();
-                // A root is the boundary, not something to remove.
-                if roots.contains(&owned) {
-                    break;
-                }
-                if ensure_within_roots(current, roots).is_err() {
+                // A root reached through a parent symlink is still a boundary.
+                if !is_prunable_parent(current, roots) {
                     break;
                 }
                 if !candidates.contains(&owned) {
@@ -1254,20 +1255,41 @@ fn prune_emptied_dirs(plan: &ChangePlan, roots: &[PathBuf], created: &[PathBuf])
     // Deepest first, so a parent is only considered once its child is gone.
     candidates.sort_by_key(|dir| std::cmp::Reverse(dir.components().count()));
 
+    candidates.retain(|dir| !created.contains(dir));
+    candidates
+}
+
+/// Prune only durably recorded candidates, never a newly discovered parent.
+/// Recheck containment and emptiness now; a transient pre-write read failure
+/// must leave a directory unpruned rather than create an unrecorded removal.
+fn prune_emptied_dirs(
+    candidates: &[PathBuf],
+    roots: &[PathBuf],
+    created: &[PathBuf],
+) -> Vec<PathBuf> {
     let mut removed = Vec::new();
     for dir in candidates {
-        if created.contains(&dir) {
+        if created.contains(dir) || !is_prunable_parent(dir, roots) {
             continue;
         }
         // A folder the batch emptied of everything the user keeps may still
         // hold the OS's own bookkeeping (#404) — a `.DS_Store` Finder wrote
         // while it was open. That is not content, and it is not carried either,
         // so it goes with the folder instead of keeping it from being tidied.
-        if clear_os_junk(&dir) && std::fs::remove_dir(&dir).is_ok() {
-            removed.push(dir);
+        if clear_os_junk(dir) && std::fs::remove_dir(dir).is_ok() {
+            removed.push(dir.clone());
         }
     }
     removed
+}
+
+/// Only strict descendants of the authorized roots may be pruned. Comparing
+/// canonically protects a root even when the plan used an aliased parent path.
+fn is_prunable_parent(dir: &Path, roots: &[PathBuf]) -> bool {
+    let Ok(canonical) = dir.canonicalize() else {
+        return false;
+    };
+    !roots.contains(&canonical) && roots.iter().any(|root| canonical.starts_with(root))
 }
 
 /// Whether `path` is a file the OS writes into folders for its own bookkeeping
@@ -1736,5 +1758,40 @@ mod tests {
             Err(PlanError::RenameCollision(_))
         ));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pruning_cannot_remove_a_parent_outside_the_recorded_intent() {
+        let dir = temp_dir("bounded-pruning");
+        let album = dir.join("artist/album");
+        let scans = album.join("Scans");
+        std::fs::create_dir_all(&scans).unwrap();
+        let roots = canonical_roots(std::slice::from_ref(&dir)).unwrap();
+        let removed = prune_emptied_dirs(std::slice::from_ref(&scans), &roots, &[]);
+        assert_eq!(removed, vec![scans.clone()]);
+        assert!(!scans.exists());
+        assert!(
+            album.is_dir(),
+            "an eligible but unrecorded parent must remain"
+        );
+        assert!(dir.join("artist").is_dir());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pruning_preserves_a_root_reached_through_a_parent_symlink() {
+        let dir = temp_dir("pruning-root-alias");
+        let real_parent = dir.join("real");
+        let library = real_parent.join("library");
+        std::fs::create_dir_all(&library).unwrap();
+        let alias_parent = dir.join("alias");
+        std::os::unix::fs::symlink(&real_parent, &alias_parent).unwrap();
+        let aliased_root = alias_parent.join("library");
+        let roots = canonical_roots(std::slice::from_ref(&library)).unwrap();
+        let removed = prune_emptied_dirs(std::slice::from_ref(&aliased_root), &roots, &[]);
+        assert!(removed.is_empty());
+        assert!(library.is_dir(), "an allowed root must never be pruned");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
