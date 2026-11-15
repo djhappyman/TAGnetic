@@ -14,6 +14,7 @@ mod beatport_session_control;
 mod blocking;
 mod media_session;
 mod operation_control;
+mod settings_store;
 mod update;
 #[cfg(target_os = "linux")]
 mod webkit_compositor;
@@ -200,7 +201,7 @@ async fn open_library(
             let journal_path = config_dir.join("journal.sqlite");
             let opened = App::open(root, &journal_path).map_err(ErrorDto::from)?;
             // Apply saved settings (proxy / rate-limit / ID3 version) to the new session.
-            opened.apply_settings(&read_settings(&app));
+            opened.apply_settings(&read_settings_quietly(&app));
             let mut session = state.lock().map_err(shell_error)?;
             *session = Some(opened);
             LIBRARY_GENERATION.fetch_add(1, Ordering::SeqCst);
@@ -226,7 +227,7 @@ async fn open_drop(
             let journal_path = config_dir.join("journal.sqlite");
             let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
             let (opened, result) = App::open_drop(paths, &journal_path).map_err(ErrorDto::from)?;
-            opened.apply_settings(&read_settings(&app));
+            opened.apply_settings(&read_settings_quietly(&app));
             let mut session = state.lock().map_err(shell_error)?;
             *session = Some(opened);
             LIBRARY_GENERATION.fetch_add(1, Ordering::SeqCst);
@@ -1574,7 +1575,7 @@ fn write_beatport_session(
 
 /// The proxy every provider request goes through, from settings.
 fn beatport_proxy(app: &tauri::AppHandle) -> Option<String> {
-    let proxy = read_settings(app).proxy.trim().to_string();
+    let proxy = read_settings_quietly(app).proxy.trim().to_string();
     (!proxy.is_empty()).then_some(proxy)
 }
 
@@ -1762,13 +1763,69 @@ fn settings_path(app: &tauri::AppHandle) -> Result<PathBuf, ErrorDto> {
 }
 
 /// Read saved settings, falling back to defaults if the file is missing or
-/// unreadable (so a corrupt file never blocks startup).
+/// unusable (so one bad file never blocks startup).
+///
+/// The three outcomes are not the same, so they are not folded together here:
+/// a missing file is a clean start; a file that does not parse is left in place
+/// and copied aside by the next save ([`settings_store`]); a file that exists
+/// but cannot be *read* is remembered, and saving is refused until a read that
+/// feeds the interface succeeds, because the defaults shown instead must not
+/// replace bytes nobody has seen.
+///
+/// Only this (and the start-up read in `main`'s setup) updates that state. The
+/// backend also reads settings for its own use — a provider's proxy, an opened
+/// library's write preferences — through [`read_settings_quietly`], because a
+/// read that never reached the interface's snapshot must not decide whether
+/// the interface may save.
 fn read_settings(app: &tauri::AppHandle) -> SettingsDto {
-    settings_path(app)
-        .ok()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|json| serde_json::from_str(&json).ok())
-        .unwrap_or_default()
+    read_settings_recording(app, true)
+}
+
+/// Read saved settings for the backend's own use (the proxy a request should
+/// go through, the preferences an opened library takes). Same fallback as
+/// [`read_settings`], but it does not touch the "last read failed" state: this
+/// read did not produce the settings the interface will save.
+fn read_settings_quietly(app: &tauri::AppHandle) -> SettingsDto {
+    read_settings_recording(app, false)
+}
+
+fn read_settings_recording(app: &tauri::AppHandle, record: bool) -> SettingsDto {
+    let Ok(path) = settings_path(app) else {
+        // Without a config directory there is nothing to read, and a save will
+        // fail on the same call rather than overwrite anything.
+        return SettingsDto::default();
+    };
+    match settings_store::read::<SettingsDto>(&path) {
+        Ok(Some(settings)) => {
+            if record {
+                settings_store::note_read_success();
+            }
+            settings
+        }
+        Ok(None) => {
+            if record {
+                settings_store::note_read_success();
+            }
+            SettingsDto::default()
+        }
+        Err(settings_store::ReadError::Malformed(detail)) => {
+            eprintln!(
+                "settings: {} is not valid settings JSON ({detail}); it will be kept aside on the next save",
+                path.display()
+            );
+            if record {
+                settings_store::note_read_success();
+            }
+            SettingsDto::default()
+        }
+        Err(settings_store::ReadError::Unreadable(error)) => {
+            eprintln!("settings: {} could not be read: {error}", path.display());
+            if record {
+                settings_store::note_read_failure(error.to_string());
+            }
+            SettingsDto::default()
+        }
+    }
 }
 
 // Personal-fork releases have their own version line and no update service yet.
@@ -1792,7 +1849,7 @@ async fn check_for_update(
     }
     let handle = app.clone();
     let settings = SETTINGS_QUEUE
-        .run(move || Ok(read_settings(&handle)))
+        .run(move || Ok(read_settings_quietly(&handle)))
         .await?;
     if automatic && !settings.check_updates {
         return Ok(None);
@@ -2054,11 +2111,12 @@ async fn save_settings_at(
 ) -> Result<(), ErrorDto> {
     let (settings, revision) = SETTINGS_QUEUE
         .run(move || {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(ErrorDto::from)?;
-            }
-            let json = serde_json::to_string_pretty(&settings).map_err(ErrorDto::from)?;
-            std::fs::write(path, json).map_err(ErrorDto::from)?;
+            // Durable replace: a truncated or half-written settings.json would
+            // lose every saved chain and preset, so the file is only ever
+            // swapped in whole (see [`settings_store`]). A save is refused
+            // rather than performed over a file that could not be read.
+            settings_store::save(&path, &settings)
+                .map_err(|error| ErrorDto::plain(error.to_string()))?;
             // Apply immediately: the network half always (the hub is always there), the
             // library half only when a library is open — so a change takes effect
             // without reopening either way.
@@ -2293,6 +2351,9 @@ mod tests {
     fn saved_preferences_reach_a_library_that_is_still_opening() {
         use std::sync::{mpsc, Arc, Mutex};
         use std::time::{Duration, Instant, SystemTime};
+        // Saving consults the process-wide read state; hold the same lock the
+        // settings-store tests use so a deliberate failure cannot leak in.
+        let _serial = super::settings_store::serialise_save_tests();
         let root = std::env::temp_dir().join(format!(
             "tagrex-settings-open-{}-{}",
             std::process::id(),
@@ -2345,6 +2406,58 @@ mod tests {
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
         assert_eq!(actual, Some(Duration::from_secs(7 * 60)));
+    }
+
+    /// A startup read that failed leaves the interface on defaults. Saving
+    /// those defaults over a file that may have become readable again would
+    /// discard every saved chain and preset, so the save is refused and the
+    /// file keeps its bytes.
+    #[test]
+    fn settings_are_not_overwritten_after_a_failed_read() {
+        use std::sync::{Arc, Mutex};
+        use std::time::SystemTime;
+        let _serial = super::settings_store::serialise_save_tests();
+        let root = std::env::temp_dir().join(format!(
+            "tagrex-settings-unread-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("settings.json");
+        let before = br#"{"bpm_max_minutes":7}"#;
+        std::fs::write(&path, before).unwrap();
+
+        super::settings_store::note_read_failure("permission denied".to_string());
+        let state: super::AppState = Arc::new(Mutex::new(None));
+        let providers: super::ProviderState = Arc::new(super::ProviderQueues::default());
+        let untouched = super::SettingsDto::default().bpm_max_minutes;
+        let result = tauri::async_runtime::block_on(super::save_settings_at(
+            path.clone(),
+            state,
+            providers.clone(),
+            super::SettingsDto {
+                bpm_max_minutes: 9,
+                ..Default::default()
+            },
+        ));
+        super::settings_store::note_read_success();
+        let error = result.expect_err("the save went ahead after a failed read");
+
+        assert!(
+            error.text.contains("could not be read earlier"),
+            "unexpected message: {}",
+            error.text
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(
+            providers.settings.lock().unwrap().bpm_max_minutes,
+            untouched,
+            "the refused settings were applied anyway"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
