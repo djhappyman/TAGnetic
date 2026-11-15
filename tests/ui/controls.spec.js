@@ -72,7 +72,7 @@ test('select-all tri-state and wrapping checkbox labels stay synchronized with n
   await expect(page.locator('#tracks-body tr.selected')).toHaveCount(3);
   await expect(header).toHaveAttribute('aria-checked', 'true');
   await page.locator('.mode-tab[data-mode="generator"]').click();
-  await page.locator('#gen-job-number').click();
+  await page.locator('#ribbon-autonumber').click();
   const flag = page.locator('#autonum-total-control');
   await flag.locator('xpath=ancestor::label').click();
   await expect(flag).toHaveAttribute('aria-checked', 'true');

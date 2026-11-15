@@ -298,6 +298,8 @@ export const fr = {
   "topbar.recent": "Dossiers ouverts récemment",
   "topbar.pathPlaceholder": "/chemin/vers/la/bibliothèque/musicale",
   "topbar.reread": "Relire le dossier ouvert",
+  "topbar.expandPanel": "Afficher la barre latérale",
+  "topbar.expandPanelTitle": "Afficher la barre latérale et ses commandes de modification.",
   "topbar.collapsePanel": "Replier le panneau du mode",
   "topbar.collapsePanelTitle": "Replier le panneau du mode (plus de place pour le tableau)",
   "topbar.undo": "Annuler le dernier lot appliqué",

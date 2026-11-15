@@ -3,7 +3,7 @@
   import { Button } from '$lib/components/ui/button/index.js';
   import { createWorkspaceLayout, provideWorkspaceLayout, type DockArea, type WorkspaceLayout } from '$lib/workspace-layout';
   import '../docking.css';
-  let { storageKey = 'tagrex.workspace.v1', controller = $bindable<WorkspaceLayout>(), children }: { storageKey?: string; controller?: WorkspaceLayout; children: Snippet } = $props();
+  let { storageKey = 'tagrex.workspace.v1', drawer = false, closed = false, controller = $bindable<WorkspaceLayout>(), children }: { storageKey?: string; drawer?: boolean; closed?: boolean; controller?: WorkspaceLayout; children: Snippet } = $props();
   const layout = untrack(() => controller || createWorkspaceLayout(storageKey));
   provideWorkspaceLayout(layout);
   let view = $state.raw(layout.snapshot());
@@ -13,10 +13,13 @@
   const leftHost = (node: HTMLElement) => layout.host('left', node);
   const rightHost = (node: HTMLElement) => layout.host('right', node);
   const bottomHost = (node: HTMLElement) => layout.host('bottom', node);
-  const has = (area: DockArea) => view.modules.some(module => module.area === area);
-  const areaResizable = (area: 'top' | 'bottom') => view.modules.some(module => module.area === area && !module.collapsed);
+  const visibleModules = $derived(view.modules.filter(module => module.visible));
+  const sidebarDrawer = $derived(drawer && !view.compact && view.modules.every(module => module.id === 'files' ? module.area === 'left' : module.area === 'right'));
+  const occupiedModules = $derived(visibleModules.filter(module => !(drawer && closed && !sidebarDrawer && ['inspector','transformations'].includes(module.id))));
+  const has = (area: DockArea) => occupiedModules.some(module => module.area === area);
+  const areaResizable = (area: 'top' | 'bottom') => occupiedModules.some(module => module.area === area && !module.collapsed);
   const areaSize = (area: 'top' | 'bottom') => {
-    const modules = view.modules.filter(module => module.area === area);
+    const modules = occupiedModules.filter(module => module.area === area);
     if (!modules.length) return '0px';
     return modules.every(module => module.collapsed)
       ? `calc(${modules.length} * var(--dock-collapsed-height, 32px))`
@@ -32,15 +35,27 @@
     queueMicrotask(() => layout.ready());
     return () => { unsubscribe(); media.removeEventListener('change', adapt); cancelResize?.(); };
   });
+  function revealPane(id: string) {
+    if (drawer && closed && id !== 'files') document.dispatchEvent(new CustomEvent('tagrex:reveal-module', {detail:id}));
+    else layout.reveal(id);
+  }
   function tabKey(event: KeyboardEvent, index: number) {
-    const count = view.modules.length;
+    const count = visibleModules.length;
     const next = event.key === 'Home' ? 0 : event.key === 'End' ? count - 1 : event.key === 'ArrowRight' ? (index + 1) % count : event.key === 'ArrowLeft' ? (index + count - 1) % count : -1;
     if (next < 0) return;
     event.preventDefault(); event.stopPropagation();
-    const id = view.modules[next].id;
-    layout.reveal(id);
+    const id = visibleModules[next].id;
+    revealPane(id);
     const tabs = canvas.closest('.dock-frame')?.querySelectorAll<HTMLElement>('.dock-module-tab');
     tabs?.[next]?.focus();
+  }
+  const sidebarMinimum = 400;
+  const sidebarMaximum = 560;
+  function columnPosition(value: number) {
+    if (!sidebarDrawer) return value;
+    const width = canvas.getBoundingClientRect().width;
+    const maximum = Math.min(sidebarMaximum, Math.max(sidebarMinimum, width - 480));
+    return Math.min(100 * (width - sidebarMinimum) / width, Math.max(100 * (width - maximum) / width, value));
   }
   function resize(event: PointerEvent, area: 'left' | 'top' | 'bottom') {
     if (event.button !== 0 || view.compact) return;
@@ -50,7 +65,7 @@
     let frame = 0;
     const flush = () => {
       frame = 0;
-      if (pending !== undefined) { layout.resize(area, pending, false); pending = undefined; }
+      if (pending !== undefined) { layout.resize(area, area === 'left' ? columnPosition(pending) : pending, false); pending = undefined; }
     };
     const move = (next: PointerEvent) => {
       pending = area === 'left' ? (next.clientX - rect.left) / rect.width * 100 : area === 'top' ? next.clientY - rect.top : rect.bottom - next.clientY;
@@ -72,20 +87,21 @@
   }
   function resizeKey(event: KeyboardEvent, area: 'left' | 'top' | 'bottom') {
     const delta = area === 'left' ? 2 : 16;
-    if (event.key === 'Home') layout.resize(area, area === 'left' ? 72 : area === 'top' ? 138 : 190);
+    if (event.key === 'Home') layout.resize(area, area === 'left' ? columnPosition(72) : area === 'top' ? 138 : 190);
     else if (['ArrowLeft', 'ArrowUp', 'ArrowRight', 'ArrowDown'].includes(event.key)) {
       const direction = ['ArrowRight', 'ArrowDown'].includes(event.key) ? 1 : -1;
-      layout.resize(area, view[area] + direction * delta * (area === 'bottom' ? -1 : 1));
+      const next = view[area] + direction * delta * (area === 'bottom' ? -1 : 1);
+      layout.resize(area, area === 'left' ? columnPosition(next) : next);
     }
     else return;
     event.preventDefault(); event.stopPropagation();
   }
 </script>
 
-<div class="dock-frame" data-dock-compact={view.compact}>
+<div class="dock-frame" data-dock-compact={view.compact} data-sidebar-enabled={drawer} data-sidebar-drawer={sidebarDrawer} data-sidebar-closed={closed}>
   <div class="dock-switcher" role="tablist" aria-label="Workspace module">
-    {#each view.modules as module, index (module.id)}
-      <Button variant="ghost" size="sm" class="dock-module-tab" role="tab" aria-selected={view.active === module.id} tabindex={view.active === module.id ? 0 : -1} onkeydown={event => tabKey(event, index)} aria-controls={`dock-module-${module.id}`} onclick={() => layout.reveal(module.id)}>{module.title}</Button>
+    {#each visibleModules as module, index (module.id)}
+      <Button variant="ghost" size="sm" class="dock-module-tab" role="tab" aria-selected={view.active === module.id} tabindex={view.active === module.id ? 0 : -1} onkeydown={event => tabKey(event, index)} aria-controls={`dock-module-${module.id}`} onclick={() => revealPane(module.id)}>{module.title}</Button>
     {/each}
   </div>
   <div class="dock-workspace" {@attach node => { canvas = node; return layout.surface(node); }}
@@ -96,11 +112,11 @@
     <div class="dock-middle">
       <div class="dock-area dock-left" role="region" aria-label="Left dock area" data-dock-host="left" {@attach leftHost}></div>
       <Button variant="ghost" class="dock-splitter dock-column-splitter" role="separator" aria-label="Resize workspace columns" aria-orientation="vertical" aria-valuemin={20} aria-valuemax={82} aria-valuenow={view.left} hidden={!has('left') || !has('right')} onpointerdown={event => resize(event, 'left')} onkeydown={event => resizeKey(event, 'left')} />
-      <div class="dock-area dock-right" role="region" aria-label="Right dock area" data-dock-host="right" {@attach rightHost}></div>
+      <div class="dock-area dock-right" inert={sidebarDrawer && closed} aria-hidden={sidebarDrawer && closed ? true : undefined} role="region" aria-label="Right dock area" data-dock-host="right" {@attach rightHost}></div>
     </div>
     <Button variant="ghost" class="dock-splitter dock-bottom-splitter" role="separator" aria-label="Resize bottom modules" aria-orientation="horizontal" aria-valuemin={70} aria-valuemax={600} aria-valuenow={view.bottom} hidden={!areaResizable('bottom')} onpointerdown={event => resize(event, 'bottom')} onkeydown={event => resizeKey(event, 'bottom')} />
     <div class="dock-area dock-bottom" role="region" aria-label="Bottom dock area" data-dock-host="bottom" {@attach bottomHost}></div>
   </div>
   <div class="dock-parking">{@render children()}</div>
-  <p class="dock-announcement" aria-live="polite">{view.modules.find(module => module.id === view.active)?.title || ''}</p>
+  <p class="dock-announcement" aria-live="polite">{view.modules.find(module => module.id === view.active && module.visible)?.title || ''}</p>
 </div>

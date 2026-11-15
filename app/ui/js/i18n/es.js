@@ -296,6 +296,8 @@ export const es = {
   "topbar.recent": "Carpetas abiertas recientemente",
   "topbar.pathPlaceholder": "/ruta/a/la/biblioteca/musical",
   "topbar.reread": "Volver a leer la carpeta abierta",
+  "topbar.expandPanel": "Mostrar barra lateral",
+  "topbar.expandPanelTitle": "Mostrar la barra lateral y sus controles de edición.",
   "topbar.collapsePanel": "Contraer el panel del modo",
   "topbar.collapsePanelTitle": "Contraer el panel del modo (más espacio para la tabla)",
   "topbar.undo": "Deshacer el último lote aplicado",

@@ -1084,6 +1084,14 @@ pub struct PlanDto {
     pub unrendered: Vec<UnrenderedDto>,
 }
 
+/// An immediate metadata write and a refreshed, otherwise unchanged staged plan.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuickWriteDto {
+    pub batch: BatchDto,
+    pub plan: Option<PlanDto>,
+    pub tracks: Vec<TrackDto>,
+}
+
 /// One required placeholder left empty, and on how many files (#411).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UnrenderedDto {
@@ -1122,6 +1130,13 @@ pub struct TagEditDto {
 }
 
 /// An import artwork candidate and the files whose pending import owns it.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct ArtworkImportSourcesDto {
+    pub assignments: Vec<LiveCoverAssignmentDto>,
+    pub missing: Vec<String>,
+    pub skipped_existing: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LiveCoverAssignmentDto {
     pub cover: CoverArtDto,
@@ -4763,6 +4778,92 @@ impl App {
         })
     }
 
+    /// Resolve one explicitly requested sibling image per selected track.
+    /// This only reads files; callers stage the returned assignments separately.
+    pub fn artwork_import_sources(
+        &self,
+        paths: &[PathBuf],
+        pattern: &str,
+        first_image: bool,
+        replace_existing: bool,
+    ) -> Result<ArtworkImportSourcesDto, AppError> {
+        self.read_track_rows(paths)?; // validate the entire selection first
+        let names = if first_image {
+            Vec::new()
+        } else {
+            self.render_column(pattern, paths)?
+        };
+        let mut result = ArtworkImportSourcesDto::default();
+        let mut first_by_dir: HashMap<PathBuf, Option<PathBuf>> = HashMap::new();
+        let mut by_image: HashMap<PathBuf, usize> = HashMap::new();
+        for (index, path) in paths.iter().enumerate() {
+            if !replace_existing && !TagEngine::read_covers(path)?.is_empty() {
+                result
+                    .skipped_existing
+                    .push(path.to_string_lossy().into_owned());
+                continue;
+            }
+            let dir = path
+                .parent()
+                .ok_or_else(|| AppError::OutsideRoot(path.to_string_lossy().into_owned()))?;
+            let image = if first_image {
+                if !first_by_dir.contains_key(dir) {
+                    let mut candidates = std::fs::read_dir(dir)?
+                        .map(|entry| entry.map(|entry| entry.path()))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    candidates
+                        .retain(|candidate| candidate.is_file() && is_import_image(candidate));
+                    candidates.sort_by_key(|candidate| {
+                        (
+                            candidate
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_lowercase(),
+                            candidate.clone(),
+                        )
+                    });
+                    first_by_dir.insert(dir.to_path_buf(), candidates.into_iter().next());
+                }
+                first_by_dir.get(dir).cloned().flatten()
+            } else {
+                let name = &names[index];
+                if name.is_empty() {
+                    None
+                } else {
+                    if name.contains(['/', '\\']) || name == "." || name == ".." {
+                        return Err(AppError::InvalidFileName(name.clone()));
+                    }
+                    let candidate = dir.join(name);
+                    (candidate.is_file() && is_import_image(&candidate)).then_some(candidate)
+                }
+            };
+            let Some(image) = image else {
+                result.missing.push(path.to_string_lossy().into_owned());
+                continue;
+            };
+            let image = std::fs::canonicalize(image)?;
+            if !image.starts_with(std::fs::canonicalize(dir)?) {
+                return Err(AppError::OutsideRoot(image.to_string_lossy().into_owned()));
+            }
+            let at = if let Some(at) = by_image.get(&image) {
+                *at
+            } else {
+                let at = result.assignments.len();
+                result.assignments.push(LiveCoverAssignmentDto {
+                    cover: read_cover_image(&image)?,
+                    paths: Vec::new(),
+                });
+                by_image.insert(image, at);
+                at
+            };
+            result.assignments[at]
+                .paths
+                .push(path.to_string_lossy().into_owned());
+        }
+        Ok(result)
+    }
+
     /// Find an external cover file (`cover.jpg` / `folder.jpg`, and the `.jpeg` /
     /// `.png` variants) sitting next to the selected tracks (#41) — the inverse
     /// of the sidecar export. Returns the first match across the selection's
@@ -5576,6 +5677,97 @@ impl App {
         let roots = self.allowed_roots();
         let batch = Executor::apply(&change_plan, &mut self.journal, &roots)?;
         Ok(BatchDto::from(&batch))
+    }
+
+    /// Write only this command's metadata, retaining every staged proposal.
+    /// Re-read staged undo snapshots after the write, including overlapping
+    /// fields, artwork and whole blocks. No staged desired value is consumed.
+    pub fn quick_write(
+        &mut self,
+        plan: &PlanDto,
+        staged: Option<&PlanDto>,
+    ) -> Result<QuickWriteDto, AppError> {
+        self.quick_write_with(plan, staged, &mut |_| {}, &AtomicBool::new(false))
+    }
+
+    /// Immediate writes use the same confirmed per-file progress and cancellable
+    /// executor as Apply; rebasing staging happens only after that succeeds.
+    pub fn quick_write_with(
+        &mut self,
+        plan: &PlanDto,
+        staged: Option<&PlanDto>,
+        progress: &mut dyn FnMut(&ApplyProgress),
+        cancel: &AtomicBool,
+    ) -> Result<QuickWriteDto, AppError> {
+        // Ribbon metadata commands keep paths stable. Moves need a separate
+        // path-remapping contract before using this entry point.
+        if plan
+            .changes
+            .iter()
+            .any(|c| c.rename_to.is_some() || !c.sidecar_renames.is_empty())
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Quick Write requires unchanged file paths",
+            )
+            .into());
+        }
+        if let Some(staged) = staged {
+            staged.validate_cover_assets()?;
+        }
+        let paths: Vec<PathBuf> = plan
+            .changes
+            .iter()
+            .map(|c| PathBuf::from(&c.path))
+            .collect();
+        self.read_track_rows(&paths)?;
+        let batch = self.apply_with(plan, progress, cancel)?;
+        let refreshed = (|| -> Result<_, AppError> {
+            let mut staged = staged.cloned();
+            if let Some(staged) = staged.as_mut() {
+                for change in &mut staged.changes {
+                    let path = PathBuf::from(&change.path);
+                    if !paths.contains(&path) {
+                        continue;
+                    }
+                    let track = self.read_cached(&path)?;
+                    for field in &mut change.tag_changes {
+                        field.old = track
+                            .tags
+                            .get(&TagField::from_storage_key(&field.field))
+                            .cloned();
+                    }
+                    if let Some(cover) = &mut change.cover_change {
+                        cover.old = cover_arts_to_dto(&TagEngine::read_covers(&path)?);
+                    }
+                    for block in &mut change.block_changes {
+                        let kind = TagBlockKind::from_storage_key(&block.kind)
+                            .ok_or_else(|| AppError::UnknownTagBlock(block.kind.clone()))?;
+                        block.old = TagEngine::read_block(&path, kind)?
+                            .as_ref()
+                            .map(block_content_to_dto);
+                        block.old_revision = id3v2_revision_key(&path, kind)?;
+                        block.old_bytes_base64 = block_bytes_base64(&path, kind)?;
+                    }
+                }
+            }
+            Ok((staged, self.read_track_rows(&paths)?))
+        })();
+        match refreshed {
+            Ok((plan, tracks)) => Ok(QuickWriteDto {
+                batch,
+                plan,
+                tracks,
+            }),
+            Err(error) => {
+                // A failed readback must not leave an unreported successful
+                // write with a stale staged undo image.
+                if let Err(rollback) = self.undo(batch.id) {
+                    return Err(std::io::Error::other(format!("Quick Write readback failed: {error}; rollback of batch {} failed: {rollback}", batch.id)).into());
+                }
+                Err(error)
+            }
+        }
     }
 
     /// [`App::apply`] that reports progress and can be cancelled (#437). A
@@ -6401,6 +6593,15 @@ fn norm_key(value: &str) -> String {
 /// named `.jpg`/`.jpeg`/`.png`, matched case-insensitively (so it works on
 /// case-sensitive filesystems too) and preferring `cover` over `folder` over
 /// `front`.
+fn is_import_image(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ["jpg", "jpeg", "png", "webp", "gif", "bmp", "avif"]
+                .contains(&extension.to_ascii_lowercase().as_str())
+        })
+}
+
 fn external_cover_in(dir: &Path) -> Option<PathBuf> {
     const PREFERRED: [&str; 3] = ["cover", "folder", "front"];
     const EXTS: [&str; 3] = ["jpg", "jpeg", "png"];
@@ -14528,6 +14729,242 @@ mod tests {
             result.skipped_no_cover,
             vec![without_cover.to_string_lossy()]
         );
+    }
+
+    #[test]
+    fn quick_write_reports_confirmed_steps_and_cancellation_rolls_back() {
+        let dir = TempDir::new("quick-write-progress");
+        let a = dir.tagged_flac("a.flac", "Artist", "Original A");
+        let b = dir.tagged_flac("b.flac", "Artist", "Original B");
+        let mut app = open_app(&dir);
+        let edits: Vec<_> = [&a, &b]
+            .iter()
+            .map(|path| TagEditDto {
+                path: path.to_string_lossy().into_owned(),
+                field: "title".into(),
+                value: Some("Quick".into()),
+            })
+            .collect();
+        let plan = app.preview_tag_edits(&edits).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut completed = Vec::new();
+        let result = app.quick_write_with(
+            &plan,
+            None,
+            &mut |event| {
+                if event.completed == Some(tagrex_core::plan::ApplyStep::Tags) {
+                    completed.push(event.path.clone());
+                    cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            },
+            &cancel,
+        );
+        assert!(matches!(
+            result,
+            Err(AppError::Plan(tagrex_core::plan::PlanError::Cancelled))
+        ));
+        assert_eq!(completed, vec![a.clone()]);
+        assert_eq!(
+            TagEngine::read(&a).unwrap().tags[&TagField::Title],
+            "Original A"
+        );
+        assert_eq!(
+            TagEngine::read(&b).unwrap().tags[&TagField::Title],
+            "Original B"
+        );
+        assert!(app.history().unwrap().is_empty());
+        cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+        completed.clear();
+        app.quick_write_with(
+            &plan,
+            None,
+            &mut |event| {
+                if event.completed == Some(tagrex_core::plan::ApplyStep::Tags) {
+                    completed.push(event.path.clone());
+                }
+            },
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(completed, vec![a, b]);
+    }
+
+    #[test]
+    fn quick_write_retains_staged_values_and_rebases_overlapping_undo() {
+        let dir = TempDir::new("quick-write-staged");
+        let a = dir.tagged_flac("a.flac", "Artist", "Original A");
+        let b = dir.tagged_flac("b.flac", "Other", "Original B");
+        let mut app = open_app(&dir);
+        let edit = |path: &Path, field: &str, value: &str| TagEditDto {
+            path: path.to_string_lossy().into_owned(),
+            field: field.into(),
+            value: Some(value.into()),
+        };
+        let staged = app
+            .preview_tag_edits(&[
+                edit(&a, "title", "Staged A"),
+                edit(&a, "artist", "Staged artist"),
+                edit(&b, "title", "Staged B"),
+            ])
+            .unwrap();
+        let before = std::fs::read(&a).unwrap();
+        let quick = app
+            .preview_tag_edits(&[edit(&a, "title", "Quick title")])
+            .unwrap();
+        assert_eq!(std::fs::read(&a).unwrap(), before, "preview never writes");
+        let result = app.quick_write(&quick, Some(&staged)).unwrap();
+        assert_eq!(result.tracks.len(), 1);
+        assert_eq!(
+            TagEngine::read(&a).unwrap().tags[&TagField::Title],
+            "Quick title"
+        );
+        assert_eq!(
+            TagEngine::read(&a).unwrap().tags[&TagField::Artist],
+            "Artist"
+        );
+        assert_eq!(
+            TagEngine::read(&b).unwrap().tags[&TagField::Title],
+            "Original B"
+        );
+        let rebased = result.plan.unwrap();
+        for (old, new) in staged.changes.iter().zip(&rebased.changes) {
+            assert_eq!(old.path, new.path);
+            for (old, new) in old.tag_changes.iter().zip(&new.tag_changes) {
+                assert_eq!(old.field, new.field);
+                assert_eq!(old.new, new.new);
+            }
+        }
+        assert_eq!(
+            live_field(&rebased, &a, "title").unwrap().old.as_deref(),
+            Some("Quick title")
+        );
+        let applied = app.apply(&rebased).unwrap();
+        assert_eq!(
+            TagEngine::read(&a).unwrap().tags[&TagField::Title],
+            "Staged A"
+        );
+        app.undo(applied.id).unwrap();
+        assert_eq!(
+            TagEngine::read(&a).unwrap().tags[&TagField::Title],
+            "Quick title"
+        );
+        assert_eq!(
+            TagEngine::read(&b).unwrap().tags[&TagField::Title],
+            "Original B"
+        );
+        app.undo(result.batch.id).unwrap();
+        assert_eq!(
+            TagEngine::read(&a).unwrap().tags[&TagField::Title],
+            "Original A"
+        );
+    }
+
+    #[test]
+    fn quick_write_rebases_staged_artwork_and_whole_block_snapshots() {
+        let dir = TempDir::new("quick-write-artwork");
+        let a = dir.tagged_flac("a.flac", "Artist", "Original");
+        let art = |data: u8| CoverArt {
+            mime: "image/jpeg".into(),
+            data: vec![data; 8].into(),
+            ..CoverArt::default()
+        };
+        TagEngine::write_covers(&a, &[art(1)]).unwrap();
+        let mut app = open_app(&dir);
+        let paths = vec![a.clone()];
+        let staged = app.preview_remove_tag_block(&paths, "vorbis").unwrap();
+        let quick = app
+            .preview_tag_edits(&[TagEditDto {
+                path: a.to_string_lossy().into_owned(),
+                field: "title".into(),
+                value: Some("Quick".into()),
+            }])
+            .unwrap();
+        let result = app.quick_write(&quick, Some(&staged)).unwrap();
+        let rebased = result.plan.unwrap();
+        let block = &rebased.changes[0].block_changes[0];
+        assert_eq!(block.old.as_ref().unwrap().tags["title"], "Quick");
+        assert!(block.new.is_none());
+        let batch = app.apply(&rebased).unwrap();
+        app.undo(batch.id).unwrap();
+        assert_eq!(TagEngine::read(&a).unwrap().tags[&TagField::Title], "Quick");
+        assert_eq!(TagEngine::read_covers(&a).unwrap()[0].data, art(1).data);
+        app.undo(result.batch.id).unwrap();
+        assert_eq!(
+            TagEngine::read(&a).unwrap().tags[&TagField::Title],
+            "Original"
+        );
+    }
+
+    #[test]
+    fn quick_write_retains_staged_cover_and_can_undo_each_write_separately() {
+        let dir = TempDir::new("quick-write-cover");
+        let a = dir.tagged_flac("a.flac", "Artist", "Title");
+        let art = |data: u8| CoverArt {
+            mime: "image/jpeg".into(),
+            data: vec![data; 8].into(),
+            ..CoverArt::default()
+        };
+        TagEngine::write_covers(&a, &[art(1)]).unwrap();
+        let mut app = open_app(&dir);
+        let paths = vec![a.clone()];
+        let staged = app
+            .preview_cover_embed(&paths, &cover_art_to_dto(&art(2)))
+            .unwrap();
+        let quick = app
+            .preview_cover_embed(&paths, &cover_art_to_dto(&art(3)))
+            .unwrap();
+        let result = app.quick_write(&quick, Some(&staged)).unwrap();
+        let rebased = result.plan.unwrap();
+        assert_eq!(
+            rebased.to_change_plan().changes[0]
+                .cover_change
+                .as_ref()
+                .unwrap()
+                .new[0]
+                .data,
+            art(2).data
+        );
+        let batch = app.apply(&rebased).unwrap();
+        assert_eq!(TagEngine::read_covers(&a).unwrap()[0].data, art(2).data);
+        app.undo(batch.id).unwrap();
+        assert_eq!(TagEngine::read_covers(&a).unwrap()[0].data, art(3).data);
+        app.undo(result.batch.id).unwrap();
+        assert_eq!(TagEngine::read_covers(&a).unwrap()[0].data, art(1).data);
+    }
+
+    #[test]
+    fn artwork_sources_use_pattern_or_first_image_per_folder_without_writing() {
+        let dir = TempDir::new("artwork-sources");
+        let a = dir.tagged_flac_at("A/one.flac", "A", "One");
+        let b = dir.tagged_flac_at("B/two.flac", "B", "Two");
+        std::fs::write(dir.0.join("A/z.png"), b"a").unwrap();
+        std::fs::write(dir.0.join("A/a.jpg"), b"b").unwrap();
+        std::fs::write(dir.0.join("B/other.jpg"), b"c").unwrap();
+        let before = std::fs::read(&a).unwrap();
+        let app = App::open(&dir.0, &dir.0.join("j.sqlite")).unwrap();
+        let paths = vec![a.clone(), b.clone()];
+        let first = app
+            .artwork_import_sources(&paths, "ignored", true, false)
+            .unwrap();
+        assert_eq!(first.assignments.len(), 2);
+        assert_eq!(first.assignments[0].cover.mime, "image/jpeg");
+        assert_eq!(
+            first.assignments[0].paths,
+            vec![a.to_string_lossy().to_string()]
+        );
+        assert_eq!(
+            first.assignments[1].paths,
+            vec![b.to_string_lossy().to_string()]
+        );
+        let matched = app
+            .artwork_import_sources(&paths, "z.png", false, false)
+            .unwrap();
+        assert_eq!(matched.assignments.len(), 1);
+        assert_eq!(matched.missing, vec![b.to_string_lossy().to_string()]);
+        assert!(app
+            .artwork_import_sources(&paths, "../outside.jpg", false, true)
+            .is_err());
+        assert_eq!(std::fs::read(&a).unwrap(), before);
     }
 
     #[test]

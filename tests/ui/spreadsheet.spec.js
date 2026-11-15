@@ -90,7 +90,7 @@ test('the keyboard splitter resizes the workspace and remembers the layout on re
   await expect.poll(async () => Number(await splitter.getAttribute('aria-valuenow'))).toBe(changed);
   await splitter.focus();
   for (let step=0;step<6;step++) await page.keyboard.press('ArrowRight');
-  await expect.poll(async () => Number(await splitter.getAttribute('aria-valuenow'))).toBe(before);
+  await expect.poll(async () => (await page.locator('.mode-col').boundingBox()).width).toBeCloseTo(originalWidth,0);
 });
 
 test('cell keyboard navigation, live preview, cancellation and row selection remain separate', async ({ page }) => {
@@ -267,6 +267,7 @@ test('manual review applies only highlighted files without row checkboxes', asyn
   await cell(page, 'artist').click();
   await paste(page, 'Artist A\nArtist B');
   await expect(page.locator('#diff-actionbar')).toBeVisible();
+  await page.locator('#staged-tab').click();
   await expect(page.locator('#tracks-body tr[data-path].selected')).toHaveCount(2);
   await page.locator('#tracks-body tr[data-path] td.file').first().click({ modifiers: ['Control'] });
   await expect(page.locator('#tracks-body tr[data-path].selected')).toHaveCount(1);
@@ -497,8 +498,8 @@ for (const viewport of [{ width: 375, height: 667 }, { width: 844, height: 390 }
   test(`every mode keeps its primary actions reachable at ${viewport.width}×${viewport.height}`, async ({ page }) => {
     await page.setViewportSize(viewport);
     const actions = {
-      tagger: [], renamer: ['preview'],
-      generator: ['presets-edit', 'autonum-run', 'vinyl-split'],
+      tagger: ['presets-edit'], renamer: ['preview'],
+      generator: ['ribbon-autonumber', 'vinyl-split'],
       deduplicator: ['dup-scan'], exporter: ['export-run'],
     };
     for (const [mode, ids] of Object.entries(actions)) {
@@ -513,8 +514,8 @@ for (const viewport of [{ width: 375, height: 667 }, { width: 844, height: 390 }
       expect(box.y + box.height).toBeLessThanOrEqual(viewport.height + 1);
       for (const id of ids) {
         if (mode === 'generator') await page.getByRole('tab', { name: 'Inspector', exact: true }).click();
-        if (mode === 'generator' && id !== 'presets-edit') await page.locator(`#gen-job-${id === 'autonum-run' ? 'number' : 'sides'}`).click();
-        if (mode === 'generator' && id === 'presets-edit') await page.getByRole('tab', { name: 'Transformations', exact: true }).click();
+        if (mode === 'generator' && id === 'vinyl-split') await page.locator('#gen-job-sides').click();
+        if (mode === 'tagger' && id === 'presets-edit') await page.getByRole('tab', { name: 'Transformations', exact: true }).click();
         const button = page.locator(`#${id}`);
         await button.scrollIntoViewIfNeeded();
         await expect(button).toBeInViewport({ ratio: 1 });

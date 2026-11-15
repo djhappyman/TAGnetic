@@ -1,0 +1,318 @@
+import { test, expect } from '@playwright/test';
+import { readFile } from 'node:fs/promises';
+import { resolve, sep } from 'node:path';
+const root = resolve('.test-dist');
+test.beforeEach(async ({ page }) => {
+  await page.route('http://tagrex.test/**', async route => {
+    const path = resolve(root, '.' + new URL(route.request().url()).pathname);
+    if (!path.startsWith(root + sep)) return route.abort();
+    try { await route.fulfill({ body: await readFile(path), contentType: path.endsWith('.js') ? 'text/javascript' : path.endsWith('.css') ? 'text/css' : path.endsWith('.woff2') ? 'font/woff2' : 'text/html' }); }
+    catch { await route.fulfill({ status: 404, body: 'Missing fixture' }); }
+  });
+  await page.goto('http://tagrex.test/app/ui/index.html');
+  await expect.poll(() => page.evaluate(() => typeof window.tagrex?.setMode)).toBe('function');
+  await page.evaluate(async () => { document.getElementById('root').value = '/music'; await window.tagrex.openLibrary(); });
+});
+async function picker(page, path) {
+  await page.evaluate(path => { window.__TAURI__ = { dialog: { open: async options => { window.lastFolderOptions = options; return path; } } }; }, path);
+}
+const paths = page => page.evaluate(() => window.tagrex.tracks.map(t => t.path));
+const selected = page => page.evaluate(() => [...window.tagrex.selection]);
+
+test('sixteen commands have eight group dividers and selection follows the filtered model', async ({ page }) => {
+  await expect(page.locator('.command-ribbon button.ribbon-command')).toHaveCount(16);
+  await expect(page.locator('.ribbon-divider')).toHaveCount(8);
+  await expect(page.locator('#more-btn')).toBeHidden();
+  await page.locator('#ribbon-clear-selection').click();
+  await expect.poll(() => selected(page)).toEqual([]);
+  await expect(page.locator('#ribbon-clear-selection')).toBeDisabled();
+  await page.locator('#ribbon-select-all').focus();
+  await page.keyboard.press('Enter');
+  expect(new Set(await selected(page))).toEqual(new Set(await paths(page)));
+  await page.locator('#ribbon-clear-selection').click();
+  await page.locator('#filter-panel-toggle').click();
+  // Use a real substring from the fixture rather than relying on an artist name.
+  await page.locator('#filter').fill('Wish');
+  await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(1);
+  await page.locator('#ribbon-select-all').click();
+  expect(await selected(page)).toHaveLength(1);
+});
+
+test('Open uses a directory chooser; cancelling Open or Add leaves the list intact', async ({ page }) => {
+  const before = await paths(page);
+  await picker(page, null);
+  for (const id of ['ribbon-open-folder', 'ribbon-add-folder']) {
+    await page.locator('#' + id).click();
+    expect(await paths(page)).toEqual(before);
+    expect(await page.evaluate(() => window.lastFolderOptions)).toEqual({ directory: true, multiple: false });
+  }
+  await picker(page, '/replacement');
+  await page.locator('#ribbon-open-folder').click();
+  await expect(page.locator('#root-display')).toContainText('replacement');
+});
+
+test('Add retains existing files, tags and selection while loading another folder', async ({ page }) => {
+  const before = await page.evaluate(() => window.tagrex.tracks.map(t => structuredClone(t)));
+  const selection = await selected(page);
+  await picker(page, '/more-music');
+  await page.locator('#ribbon-add-folder').click();
+  await expect.poll(async () => (await paths(page)).length).toBe(before.length + 2);
+  const after = await page.evaluate(() => window.tagrex.tracks);
+  for (const track of before) expect(after.find(t => t.path === track.path).tags).toEqual(track.tags);
+  expect(await selected(page)).toEqual(selection);
+  await page.locator('#ribbon-add-folder').click();
+  await expect.poll(async () => (await paths(page)).length).toBe(before.length + 2);
+});
+
+test('folder commands protect staged edits; Undo invokes the existing history flow', async ({ page }) => {
+  await page.locator('.subtab[data-subtab="editor"]').click();
+
+  await page.locator('#editor-field-title').fill('Ribbon test');
+  await expect(page.locator('#diff-apply')).toBeEnabled();
+  const before = await paths(page);
+  await picker(page, '/other');
+  for (const id of ['ribbon-open-folder', 'ribbon-add-folder']) {
+    await page.locator('#' + id).click();
+    expect(await paths(page)).toEqual(before);
+    await expect(page.locator('#editor-field-title')).toHaveValue('Ribbon test');
+    expect(await page.evaluate(() => window.lastFolderOptions)).toBeUndefined();
+  }
+  await page.locator('#diff-apply').click();
+  await expect(page.locator('#undo')).toBeEnabled();
+  const history = await page.evaluate(() => window.tagrex.invoke('history', {}));
+  await page.locator('#undo').click();
+  await expect.poll(() => page.evaluate(async () => (await window.tagrex.invoke('history', {})).length)).toBe(history.length - 1);
+});
+
+for (const mode of ['light', 'dark']) test(`ribbon fits a narrow ${mode} window`, async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 720 });
+  await page.evaluate(mode => { document.documentElement.dataset.theme = mode; }, mode);
+  for (const button of await page.locator('.command-ribbon button.ribbon-command').all()) await expect(button).toBeInViewport();
+  const dividers = await page.locator('.ribbon-divider').evaluateAll(nodes => nodes.map(n => ({ width: n.getBoundingClientRect().width, height: n.getBoundingClientRect().height })));
+  expect(dividers).toEqual(Array.from({ length: 8 }, () => ({ width: 1, height: 18 })));
+});
+
+
+test('every ribbon command has a themed hover hint, including disabled commands', async ({ page }) => {
+  for (const id of ['ribbon-open-folder', 'ribbon-add-folder', 'undo', 'ribbon-select-all', 'ribbon-clear-selection', 'ribbon-move-down', 'ribbon-move-up', 'group-btn', 'ribbon-remove-tags', 'ribbon-rename-folder', 'ribbon-format-values', 'ribbon-autonumber', 'ribbon-import-artwork', 'ribbon-export-artwork', 'ribbon-artwork-options', 'ribbon-lyrics']) {
+    const button = page.locator('#' + id);
+    await button.hover();
+    const text = await button.getAttribute('aria-description');
+    expect(text).toBeTruthy();
+    await expect(page.locator('#controller-tooltip-content')).toBeVisible();
+    await expect(page.locator('#controller-tooltip-content')).toContainText(text);
+    await page.mouse.move(500, 350);
+    await expect(page.locator('#controller-tooltip-content')).toBeHidden();
+  }
+  await page.locator('#ribbon-add-folder').focus();
+  await expect(page.locator('#controller-tooltip-content')).toContainText('Add folder');
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#controller-tooltip-content')).toBeHidden();
+});
+
+
+test('move buttons reorder selected files in their group and retain the selection', async ({ page }) => {
+  const original = await paths(page);
+  const picked = await selected(page);
+  await page.locator('#ribbon-move-down').click();
+  await expect.poll(() => paths(page)).toEqual([original[1], original[0], original[2]]);
+  expect(await selected(page)).toEqual(picked);
+  await page.locator('#ribbon-move-up').click();
+  await expect.poll(() => paths(page)).toEqual(original);
+  await expect(page.locator('#ribbon-move-up')).toBeDisabled();
+});
+
+test('grouping menu is usable from a neutral ribbon button', async ({ page }) => {
+  const button = page.locator('#group-btn');
+  const neutral = await button.evaluate(n => getComputedStyle(n).color);
+  await button.click();
+  await expect(page.locator('#group-menu')).toBeVisible();
+  await page.locator('#group-menu [data-group=""]').click();
+  await expect(button).toBeFocused();
+  await expect(page.locator('#group-menu')).toBeHidden();
+  await button.click();
+  await page.locator('#group-menu [data-group="album"]').click();
+  await page.mouse.move(500,350);
+  await button.blur();
+  await expect.poll(() => button.evaluate(n => getComputedStyle(n).color)).toBe(neutral);
+  await expect(page.locator('#ribbon-sort')).toHaveCount(0);
+});
+
+
+test('Autonumber owns the track and disc format choices and stages numbers in file order', async ({ page }) => {
+  await page.locator('#ribbon-select-all').click();
+  await page.locator('#ribbon-autonumber').click();
+  await expect(page.getByRole('dialog', {name:/Autonumber/})).toBeVisible();
+  await expect(page.locator('#autonum-track-format-control')).toBeVisible();
+  await expect(page.locator('#autonum-disc-format-control')).toBeVisible();
+  await expect(page.locator('.command-ribbon > .ribbon-group #autonum-track-format')).toHaveCount(0);
+  await page.locator('#autonum-start').fill('3');
+  await page.locator('#autonum-run').click();
+  await expect(page.locator('#ribbon-number-dialog')).toBeHidden();
+  await expect(page.locator('#diff-apply')).toBeEnabled();
+  const plan = await page.evaluate(() => window.tagrex.previewPlan);
+  expect(plan.changes.map(change => change.tag_changes.find(field => field.field === 'track')?.new)).toEqual(['3','4','5']);
+});
+
+test('artwork importer uses a string or first-image option and stages without writing', async ({ page }) => {
+  await page.locator('#ribbon-select-all').click();
+  await page.locator('#ribbon-import-artwork').click();
+  await expect(page.getByRole('dialog', {name:'Import artwork',exact:true})).toBeVisible();
+  await page.locator('#artwork-import-pattern').fill('%album%.jpg');
+  await page.locator('#artwork-import-first-control').click();
+  await expect(page.locator('#artwork-import-pattern')).toBeDisabled();
+  await page.locator('#artwork-import-first-control').click();
+  await expect(page.locator('#artwork-import-pattern')).toHaveValue('%album%.jpg');
+  await page.locator('#ribbon-import-stage').click();
+  await expect(page.locator('#ribbon-import-dialog')).toBeHidden();
+  await expect(page.locator('#diff-apply')).toBeEnabled();
+  const changed = await page.evaluate(() => window.tagrex.previewPlan.changes.filter(c=>c.cover_change).map(c=>c.path));
+  expect(changed).not.toContain((await paths(page))[0]);
+  expect(changed).toHaveLength(2);
+  await expect(page.locator('#ribbon-lyrics')).toBeDisabled();
+  await expect(page.locator('#ribbon-lyrics')).toHaveAttribute('aria-description',/coming later/);
+});
+
+test('Format values stages field patterns and closes without applying', async ({ page }) => {
+  await page.locator('#ribbon-format-values').click();
+  await page.locator('#ribbon-format-pattern').fill('%artist%');
+  await page.locator('#ribbon-format-stage').click();
+  await expect(page.locator('#ribbon-format-dialog')).toBeHidden();
+  await expect(page.locator('#diff-apply')).toBeEnabled();
+  expect(await page.evaluate(()=>window.tagrex.previewPlan.changes[0].tag_changes.find(c=>c.field==='albumartist').new)).toBe('The X Factor');
+});
+
+for (const mode of ['light','dark']) test(`command dialogs have opaque themed surfaces in ${mode}`, async ({page}) => {
+  await page.locator('#settings-open').click();
+  await page.locator(`#set-theme [data-theme-mode="${mode}"]`).click();
+  await page.locator('#settings-cancel').click();
+  for (const [button,root] of [['ribbon-autonumber','ribbon-number-dialog'],['ribbon-import-artwork','ribbon-import-dialog'],['ribbon-remove-tags','ribbon-remove-dialog'],['ribbon-format-values','ribbon-format-dialog']]) {
+    await page.locator('#'+button).click();
+    const body = page.locator('#'+root+' .modal');
+    await expect(body).toBeVisible();
+    const style = await body.evaluate(n => {const s=getComputedStyle(n);return {background:s.backgroundColor,border:s.borderWidth,radius:s.borderRadius,padding:s.padding};});
+    expect(style.background).not.toBe('rgba(0, 0, 0, 0)');
+    expect(style.border).toBe('1px');
+    expect(style.radius).toBe('22px');
+    expect(style.padding).toBe('24px');
+    await page.keyboard.press('Escape');
+    await expect(body).toBeHidden();
+  }
+});
+
+test('quick Write keeps staged values on the same file and leaves the Apply scope intact', async ({page}) => {
+  await page.locator('.subtab[data-subtab="editor"]').click();
+  await page.locator('#editor-field-albumartist').fill('Staged album artist');
+  await expect(page.locator('#diff-apply')).toBeEnabled();
+  const before = await page.evaluate(() => ({plan:structuredClone(window.tagrex.previewPlan), selected:[...window.tagrex.selection]}));
+  await page.locator('#ribbon-format-values').click();
+  await page.locator('#ribbon-format-pattern').fill('Quick album artist');
+  await page.locator('#ribbon-format-write').click();
+  await expect(page.locator('#ribbon-format-dialog')).toBeHidden();
+  await expect.poll(() => page.evaluate(()=>window.tagrex.tracks[0].tags.albumartist)).toBe('Quick album artist');
+  await expect(page.locator('#undo')).toBeEnabled();
+  const after = await page.evaluate(() => ({plan:window.tagrex.previewPlan, selected:[...window.tagrex.selection], tags:window.tagrex.tracks[0].tags}));
+  expect(after.tags.albumartist).toBe('Quick album artist');
+  expect(after.selected).toEqual([]);
+  expect(after.plan.changes.map(c=>c.path)).toEqual(before.plan.changes.map(c=>c.path));
+  const staged = after.plan.changes[0].tag_changes.find(f=>f.field==='albumartist');
+  expect(staged.new).toBe('Staged album artist');
+  expect(staged.old).toBe('Quick album artist');
+  await expect(page.locator('#diff-apply')).toBeEnabled();
+  await page.locator('#diff-apply').click();
+  await expect.poll(()=>page.evaluate(()=>window.tagrex.tracks[0].tags.albumartist)).toBe('Staged album artist');
+});
+
+test('Cancel discards dialog values and number display preferences without touching staged edits', async ({page}) => {
+  await page.locator('#ribbon-format-values').click();
+  await page.locator('#ribbon-format-stage').click();
+  await expect(page.locator('#diff-apply')).toBeEnabled();
+  const before = await page.evaluate(()=>structuredClone(window.tagrex.previewPlan));
+  await page.locator('#ribbon-format-values').click();
+  await page.locator('#ribbon-format-pattern').fill('Discard me');
+  await page.getByRole('button',{name:'Cancel',exact:true}).click();
+  await page.locator('#ribbon-format-values').click();
+  await expect(page.locator('#ribbon-format-pattern')).toHaveValue('%artist%');
+  await page.keyboard.press('Escape');
+  await page.locator('#ribbon-autonumber').click();
+  await page.locator('#autonum-track-format-control').click();
+  await page.getByRole('option',{name:'001',exact:true}).click();
+  await page.getByRole('button',{name:'Cancel',exact:true}).click();
+  expect(await page.evaluate(()=>localStorage.getItem('tagrex.trackDigits'))).toBeNull();
+  expect(await page.evaluate(()=>window.tagrex.previewPlan)).toEqual(before);
+});
+
+for (const [command,root,write] of [['ribbon-autonumber','ribbon-number-dialog','autonum-write'],['ribbon-import-artwork','ribbon-import-dialog','ribbon-import-write'],['ribbon-remove-tags','ribbon-remove-dialog','ribbon-remove-write']]) test(`${command} has Cancel Stage Write and writes without creating staging`, async ({page}) => {
+  await page.locator('#ribbon-clear-selection').click();
+  const rows = page.locator('#tracks-body tr[data-path]');
+  await rows.nth(1).click();
+  await page.locator('#'+command).click();
+  const dialog = page.locator('#'+root);
+  for (const name of ['Cancel','Stage','Write']) await expect(dialog.getByRole('button',{name,exact:true})).toBeVisible();
+  await page.locator('#'+write).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.locator('#undo')).toBeEnabled();
+  expect(await page.evaluate(()=>window.tagrex.previewPlan?.changes?.length || 0)).toBe(0);
+});
+
+async function holdQuickWrite(page) {
+  await page.evaluate(()=>{
+    const original = Promise.resolve;
+    window.__TAURI__ = {event:{listen:async(_event, callback)=>{window.quickProgress=payload=>callback({payload});return ()=>{};}}};
+    const disk = window.tagrex.tracks.map(track=>structuredClone(track));
+    Promise.resolve = function(value) {
+      if (value?.id && value?.description && 'applied_at' in value) return new Promise((resolve,reject)=>{
+        window.finishQuick=()=>resolve(value);
+        window.failQuick=()=>{window.tagrex.tracks.forEach((track,index)=>Object.assign(track,disk[index]));reject({message:{code:'error.plan.cancelled'}});};
+      });
+      return original.call(this,value);
+    };
+    window.quickRows=[...document.querySelectorAll('#tracks-body tr[data-path]')];
+    window.quickCells=[...document.querySelectorAll('#tracks-body td')];
+  });
+}
+
+test('Write closes immediately, paints confirmed rows sequentially, and deselects completed files', async ({page})=>{
+  await page.locator('#ribbon-select-all').click();
+  const targets = await paths(page);
+  await page.locator('#ribbon-format-values').click();
+  await page.locator('#ribbon-format-pattern').fill('Quick write');
+  await holdQuickWrite(page);
+  await page.locator('#ribbon-format-write').click();
+  await expect(page.locator('#ribbon-format-dialog')).toBeHidden();
+  await expect.poll(()=>page.evaluate(()=>typeof window.finishQuick)).toBe('function');
+  const rows=page.locator('#tracks-body tr[data-path]');
+  for (let index=0;index<targets.length;index++) {
+    await page.evaluate(({path,done})=>window.quickProgress({path,done,total:6}), {path:targets[index],done:3+index});
+    await expect(rows.nth(index)).toHaveClass(/applying-current/);
+    await page.evaluate(({path,done})=>window.quickProgress({path,done,total:6,completed:'tags'}), {path:targets[index],done:4+index});
+    await expect(rows.nth(index)).not.toHaveClass(/selected/);
+    await expect(page.locator('#files-selected-count')).toHaveText(String(targets.length-index-1));
+    expect(await page.evaluate(()=>[...window.quickRows,...window.quickCells].every(n=>n.isConnected))).toBe(true);
+  }
+  await page.evaluate(()=>window.finishQuick());
+  await expect(page.locator('#undo')).toBeEnabled();
+  await expect.poll(()=>selected(page)).toEqual([]);
+  await expect(page.locator('#diff-actionbar')).toBeHidden();
+});
+
+test('cancelled quick Write restores the row animation and keeps pending staged edits', async ({page})=>{
+  await page.locator('#ribbon-select-all').click();
+  await page.locator('#ribbon-format-values').click();
+  await page.locator('#ribbon-format-pattern').fill('Staged value');
+  await page.locator('#ribbon-format-stage').click();
+  await expect(page.locator('#diff-apply')).toBeEnabled();
+  const before=await page.evaluate(()=>structuredClone(window.tagrex.previewPlan));
+  await page.locator('#ribbon-format-values').click();
+  await page.locator('#ribbon-format-pattern').fill('Quick value');
+  await holdQuickWrite(page);
+  await page.locator('#ribbon-format-write').click();
+  await expect.poll(()=>page.evaluate(()=>typeof window.finishQuick)).toBe('function');
+  await page.evaluate(path=>window.quickProgress({path,done:4,total:6,completed:'tags'}),before.changes[0].path);
+  await expect(page.locator('#tracks-body tr[data-path]').first()).not.toHaveClass(/selected/);
+  await page.evaluate(()=>window.failQuick());
+  await expect(page.locator('#mode-col')).not.toHaveAttribute('inert','');
+  await expect(page.locator('#tracks-body tr[data-path]').first()).toHaveClass(/selected/);
+  expect(await page.evaluate(()=>window.tagrex.previewPlan.changes)).toEqual(before.changes);
+  await expect(page.locator('#diff-apply')).toBeEnabled();
+});

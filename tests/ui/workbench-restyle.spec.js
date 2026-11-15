@@ -30,7 +30,7 @@ test('table-owned folder controls retain opening and refreshing while commands o
   expect(Math.abs(location.width - bounds.width)).toBeLessThan(2);
   await page.locator('#lib-refresh').click();
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(3);
-  await page.locator('#preset-library').click();
+  await page.locator('#presets-edit').click();
   await expect(page.locator('#pe-editor')).toBeVisible();
   await expect(page.locator('.pe-list-row')).not.toHaveCount(0);
   await page.keyboard.press('Escape');
@@ -113,8 +113,8 @@ test('icons and all tool actions remain available at narrow widths', async ({ pa
     await tab.focus();
     await expect(tab).toBeFocused();
   }
-  await expect(page.locator('#preset-library')).toBeInViewport();
-  await expect(page.locator('#more-btn')).toBeInViewport();
+  await expect(page.locator('#ribbon-autonumber')).toBeInViewport();
+  await expect(page.locator('#ribbon-remove-tags')).toBeInViewport();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
 });
 

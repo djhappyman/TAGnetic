@@ -44,6 +44,6 @@ body .field > input[data-slot='input'] {
 body .settings-search input[data-slot='input']:not([aria-invalid='true']) {
   height:36px; border-color:transparent; background:var(--bg); padding-inline:12px;
 }
-body .settings-body :is(input[data-slot='input'], button.app-select-trigger):not([aria-invalid='true']) {
+body :is(.settings-body,.ribbon-dialog-fields) :is(input[data-slot='input'], button.app-select-trigger):not([aria-invalid='true']) {
   border-color:transparent; background:var(--panel);
 }

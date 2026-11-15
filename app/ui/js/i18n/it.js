@@ -298,6 +298,8 @@ export const it = {
   "topbar.recent": "Cartelle aperte di recente",
   "topbar.pathPlaceholder": "/percorso/della/libreria/musicale",
   "topbar.reread": "Rileggi la cartella aperta",
+  "topbar.expandPanel": "Mostra barra laterale",
+  "topbar.expandPanelTitle": "Mostra la barra laterale e i suoi controlli di modifica.",
   "topbar.collapsePanel": "Comprimi pannello modalità",
   "topbar.collapsePanelTitle": "Comprimi il pannello modalità (più spazio per la tabella)",
   "topbar.undo": "Annulla l'ultima operazione applicata",

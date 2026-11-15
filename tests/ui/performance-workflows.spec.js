@@ -161,9 +161,9 @@ test('filtered selection reuses model counts, including files inside collapsed g
   // A row click may read the selected DTO for its inspector, but must not
   // enumerate every file's tags again just to recount filter matches.
   expect(await page.evaluate(() => window.perfFilterReads())).toBeLessThan(20);
-  await page.locator('#view-btn').click();
   await page.locator('#group-btn').click();
   await page.locator('#group-menu [data-group="album"]').click();
+  await page.locator('#view-btn').click();
   await page.locator('#toggle-groups').click();
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(0);
   await expect(page.locator('#status-sel')).toContainText('100/');
@@ -178,14 +178,11 @@ test('scroll measures only entering rows after learning a uniform height', async
   });
   await page.evaluate(() => {
     window.perfRowReads = [];
-    const descriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight');
-    Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
-      configurable: true,
-      get() {
+    const measure = Element.prototype.getBoundingClientRect;
+    Element.prototype.getBoundingClientRect = function () {
         if (this.matches?.('#tracks-body tr[data-path]')) window.perfRowReads.push(this.dataset.path);
-        return descriptor.get.call(this);
-      },
-    });
+        return measure.call(this);
+    };
   });
   for (const top of [60, 90, 120, 150]) {
     await page.locator('#files-view').evaluate((element, y) => { element.scrollTop = y; }, top);

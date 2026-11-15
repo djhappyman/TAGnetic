@@ -193,6 +193,7 @@ test('editing a manual tag preview preserves a narrowed Apply scope', async ({pa
   await page.locator('#tracks-body td[data-field="artist"]').first().click();
   await page.evaluate(()=>{const data=new DataTransfer();data.setData('text/plain','New artist\nNew artist\nNew artist');document.activeElement.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:data}));});
   await expect(page.locator('#diff-apply')).toBeEnabled();await expect(page.locator('#ab-count')).toHaveText('3');
+  await page.locator('#staged-tab').click();
   await page.locator('#tracks-body tr[data-path]').first().locator('td.file').click();await expect(page.locator('#ab-count')).toHaveText('1');
   await page.locator('#diff-preview').click();
   const artist=page.locator('#tracks-body td[data-field="artist"]').first();await artist.dblclick();await artist.fill('Scoped artist');await artist.press('Enter');

@@ -67,7 +67,7 @@ test('keyboard mode and source navigation keeps controller state and panels in s
   await expect(page.locator('#subtab-editor')).toBeVisible();
 });
 
-test('generator jobs support roving focus, linked panels and Home/End without losing entered values', async ({ page }) => {
+test('generator jobs support roving focus and numbering opens its shared wizard', async ({ page }) => {
   await mode(page, 'generator').click();
   const transform = page.locator('#gen-job-transform');
   const number = page.locator('#gen-job-number');
@@ -80,7 +80,10 @@ test('generator jobs support roving focus, linked panels and Home/End without lo
   const panel = page.locator(`#${await number.getAttribute('aria-controls')}`);
   await expect(panel).toHaveAttribute('role', 'tabpanel');
   await expect(panel).toBeVisible();
+  await panel.getByRole('button',{name:'Open Autonumber',exact:true}).click();
+  await expect(page.locator('#ribbon-number-dialog')).toBeVisible();
   await page.locator('#autonum-start').fill('17');
+  await page.locator('#ribbon-number-dialog').getByRole('button',{name:'Cancel',exact:true}).click();
   await number.focus();
   await page.keyboard.press('End');
   await expect(sides).toBeFocused();
@@ -90,5 +93,5 @@ test('generator jobs support roving focus, linked panels and Home/End without lo
   await expect(transform).toBeFocused();
   await page.keyboard.press('ArrowRight');
   await expect(number).toBeFocused();
-  await expect(page.locator('#autonum-start')).toHaveValue('17');
+  await expect(panel.getByRole('button',{name:'Open Autonumber',exact:true})).toBeVisible();
 });

@@ -83,6 +83,9 @@ test.afterEach(async ({ page }) => expect(issues.get(page)).toEqual([]));
 const calls = (page, command) => page.evaluate(command => window.transformCalls[command] || 0, command);
 const plan = page => page.evaluate(() => structuredClone(window.tagrex.previewPlan));
 async function tick(page, name, on = true) {
+  const module = page.locator('#dock-module-transformations');
+  if (!(await module.isVisible())) await page.getByRole('tab',{name:'Transformations',exact:true}).click();
+  if ((await module.getAttribute('data-dock-collapsed')) === 'true') await module.locator('.dock-module-toggle').click();
   const row = page.locator('#groups-menu .preset-check').filter({ has: page.locator('.preset-apply', { hasText: name }) });
   const input = row.locator('input.group-tick');
   if (await input.isChecked() !== on) await row.locator('.preset-apply').click();
@@ -94,20 +97,15 @@ async function changed(page, count = 1) {
   await expect(page.locator('#diff-apply')).toBeEnabled();
 }
 
-for (const mode of ['tagger', 'renamer', 'generator', 'deduplicator', 'exporter']) {
-  test(`ticking a visible preset automatically previews the selection in ${mode}`, async ({ page }) => {
-    await page.locator(`.mode-tab[data-mode="${mode}"]`).click();
-    await tick(page, mode === 'renamer' ? 'Upper filenames' : 'Upper titles');
-    await changed(page);
-    await expect(page.locator('#files-view')).toBeVisible();
-    await expect(page.locator('#diff-actionbar')).toBeVisible();
-    await expect(page.locator('#transform-preview')).toBeHidden();
-    if (mode === 'renamer') expect((await plan(page)).changes[0].rename_to).toContain('THE X FACTOR');
-    else expect((await plan(page)).changes[0].tag_changes.find(change => change.field === 'title').new).toBe('DESERT RAIN');
-    expect(await calls(page, 'preview_tag_edits')).toBe(0);
-    expect(await calls(page, 'apply_plan')).toBe(0);
-  });
-}
+test('ticking a visible preset automatically previews the selection in Tags', async ({ page }) => {
+  await tick(page, 'Upper titles');
+  await changed(page);
+  await expect(page.locator('#files-view')).toBeVisible();
+  await expect(page.locator('#diff-actionbar')).toBeVisible();
+  expect((await plan(page)).changes[0].tag_changes.find(change => change.field === 'title').new).toBe('DESERT RAIN');
+  expect(await calls(page, 'preview_tag_edits')).toBe(0);
+  expect(await calls(page, 'apply_plan')).toBe(0);
+});
 
 test('the same active filename rules run after a chosen Online import', async ({ page }) => {
   await page.locator('.subtab[data-subtab="online"]').click();

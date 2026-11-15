@@ -27,7 +27,7 @@ test('auto-numbering stages mapping order after reverse Ctrl selection without m
   await rows.nth(2).locator('td.file').click();
   await rows.nth(0).locator('td.file').click({ modifiers: ['Control'] });
   await page.locator('.mode-tab[data-mode="generator"]').click();
-  await page.locator('#gen-job-number').click();
+  await page.locator('#ribbon-autonumber').click();
   await page.locator('#autonum-start').fill('7');
   await page.locator('#autonum-run').click();
   await expect(page.locator('#diff-apply')).toBeEnabled();

@@ -203,7 +203,7 @@ export function initSpreadsheet(options) {
     if (paint) refresh();
     if (path && giveFocus) options.focusRow(path);
   }
-  function refresh() {
+  function refresh({ scrollOnly = false } = {}) {
     const paths = rows(), keys = columns();
     // The owner replaces the row array when rebuilding its view, even when its
     // path order is unchanged. Compare that order once per replacement; stable
@@ -275,7 +275,7 @@ export function initSpreadsheet(options) {
     const count = r ? r.paths.length * r.keys.length : 0;
     const readonlyReason = r?.keys.map((key) => reasons.get(key)).find(Boolean) || '';
     const editable = !!r && !readonlyReason;
-    if (!r && !reviewing && (!scrollRefresh || changed || !lastSummary)) lastSummary = options.selectionSummary();
+    if (!r && !reviewing && (!(scrollOnly || scrollRefresh) || changed || !lastSummary)) lastSummary = options.selectionSummary();
     const snapshot = {
       label: reviewing ? 'Review the staged changes, then Apply.' : r ? `${options.label(active.key)} · ${count === 1 ? '1 cell' : `${r.paths.length} × ${r.keys.length} cells`}` : lastSummary,
       detail: reviewing ? 'Only highlighted files will be applied.' : readonlyReason || (r ? (count === 1 ? 'F2 edits · Shift + arrows select' : 'Copy, paste, or fill down') : 'Click a cell to start'),

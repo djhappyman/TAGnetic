@@ -17,8 +17,6 @@ test.beforeEach(async ({ page }) => {
   await page.locator('#root').fill('/music');
   await page.locator('#root').press('Enter');
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(3);
-  await page.locator('.mode-tab[data-mode="generator"]').click();
-  await page.locator('#gen-job-transform').click();
   await page.locator('#presets-edit').click();
   await expect(page.locator('#pe-editor')).toBeVisible();
   await page.locator('#pe-editor').evaluate(async e=>{await Promise.all(e.getAnimations({subtree:true}).map(a=>a.finished.catch(()=>{})));});

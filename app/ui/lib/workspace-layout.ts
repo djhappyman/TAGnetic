@@ -2,10 +2,10 @@ import { getContext, setContext } from 'svelte';
 
 export const DOCK_AREAS = ['top', 'left', 'right', 'bottom'] as const;
 export type DockArea = typeof DOCK_AREAS[number];
-export type DockModuleInfo = { id: string; title: string; area: DockArea; index: number; weight: number; collapsed?: boolean };
+export type DockModuleInfo = { id: string; title: string; area: DockArea; index: number; weight: number; collapsed?: boolean; visible: boolean };
 export type DockSnapshot = { modules: DockModuleInfo[]; left: number; top: number; bottom: number; active: string; compact: boolean };
 type Placement = { area: DockArea; index: number; weight: number; collapsed?: boolean };
-type Module = { id: string; title: string; node: HTMLElement; defaults: Placement };
+type Module = { id: string; title: string; node: HTMLElement; defaults: Placement; visible: boolean };
 const CONTEXT = Symbol('tagrex-dock-workspace');
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 const areaValid = (area: unknown): area is DockArea => DOCK_AREAS.includes(area as DockArea);
@@ -59,7 +59,7 @@ export function createWorkspaceLayout(storageKey = 'tagrex.workspace.v1') {
   const ordered = (area: DockArea) => [...modules.values()].filter(module => placements.get(module.id)?.area === area)
     .sort((a, b) => placements.get(a.id)!.index - placements.get(b.id)!.index);
   function snapshot(): DockSnapshot {
-    return { modules: DOCK_AREAS.flatMap(area => ordered(area).map((module, index) => ({ id: module.id, title: module.title, ...placements.get(module.id)!, index }))), left, top, bottom, active, compact };
+    return { modules: DOCK_AREAS.flatMap(area => ordered(area).map((module, index) => ({ id: module.id, title: module.title, ...placements.get(module.id)!, index, visible: module.visible }))), left, top, bottom, active, compact };
   }
   function save() {
     try { localStorage.setItem(storageKey, JSON.stringify({ version: 1, transformSizingRevision: 2, modules: Object.fromEntries(placements), left, top, bottom, active })); } catch { /* Session-only layouts remain usable. */ }
@@ -80,6 +80,8 @@ export function createWorkspaceLayout(storageKey = 'tagrex.workspace.v1') {
           if (atomic && module.node.isConnected) atomic.call(host, module.node, existing);
           else host.insertBefore(module.node, existing);
         }
+        module.node.dataset.dockVisible = String(module.visible);
+        module.node.inert = !module.visible;
         module.node.dataset.dockArea = area;
         module.node.dataset.dockActive = String(module.id === active);
         module.node.dataset.dockCollapsed = String(placements.get(module.id)?.collapsed === true);
@@ -118,18 +120,25 @@ export function createWorkspaceLayout(storageKey = 'tagrex.workspace.v1') {
     register(id: string, title: string, node: HTMLElement, defaultArea: DockArea = 'right', defaultIndex?: number, defaultWeight = 1) {
       if (modules.has(id)) throw new Error(`Duplicate dock module: ${id}`);
       const defaults = { area: defaultArea, index: defaultIndex ?? ordered(defaultArea).length, weight: clamp(defaultWeight, .1, 20), collapsed: false };
-      modules.set(id, { id, title, node, defaults });
+      modules.set(id, { id, title, node, defaults, visible:true });
       if (!placements.has(id)) placements.set(id, { ...defaults });
       paint(false);
       return () => { modules.delete(id); paint(false); };
     },
     move,
+    setVisible(id: string, visible: boolean) {
+      const module = modules.get(id);
+      if (!module || module.visible === visible) return;
+      module.visible = visible;
+      if (!visible && active === id) active = [...modules.values()].find(item => item.visible)?.id || '';
+      paint(false);
+    },
     reorder(id: string, delta: number) {
       const placement = placements.get(id);
       if (placement) move(id, placement.area, Math.max(0, ordered(placement.area).findIndex(module => module.id === id) + delta));
     },
     reveal(id: string) {
-      if (!modules.has(id)) return;
+      if (!modules.get(id)?.visible) return;
       active = id;
       const placement = placements.get(id);
       if (placement) placement.collapsed = false;

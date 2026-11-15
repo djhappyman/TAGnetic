@@ -1,9 +1,12 @@
-// Hover hints are deliberately disabled: even a delayed title bubble can cover
-// the query suggestions or the next control. Keep title text available to
-// assistive technology without asking the browser to draw a floating bubble.
+// Keep native title bubbles suppressed around dense editors and suggestions.
+// The command ribbon opts into our themed tooltip surface for every button,
+// including commands added later, without individual tooltip wrappers.
+import { showControllerTooltip } from '../lib/controller-surfaces.js';
 const descriptions = new WeakMap();
 const labels = new WeakMap();
 let initialized = false;
+let ribbonAnchor = null;
+let ribbonTimer;
 
 function suppressTitle(target) {
   if (!(target instanceof Element) || !target.hasAttribute("title")) return;
@@ -43,8 +46,24 @@ function suppressTitles(root) {
 
 // Retain the controller API used when menus open; it never restores a title.
 export function hideTooltip() {
+  clearTimeout(ribbonTimer);
+  ribbonAnchor = null;
   const tip = document.getElementById("tooltip");
   if (tip) tip.hidden = true;
+}
+
+function ribbonButton(target) {
+  return target instanceof Element ? target.closest('.command-ribbon button.ribbon-command') : null;
+}
+function revealRibbonHint(button, delay) {
+  if (!button || ribbonAnchor === button) return;
+  hideTooltip();
+  ribbonAnchor = button;
+  ribbonTimer = setTimeout(() => {
+    if (ribbonAnchor !== button || !button.isConnected || button.closest('[hidden], [inert]')) return;
+    const text = button.getAttribute('aria-description') || button.getAttribute('aria-label');
+    if (text) showControllerTooltip(button, text, '');
+  }, delay);
 }
 
 export function initTooltips() {
@@ -53,9 +72,21 @@ export function initTooltips() {
   hideTooltip();
   suppressTitles(document.documentElement);
 
+  document.addEventListener('pointerover', event => revealRibbonHint(ribbonButton(event.target), 1000));
+  document.addEventListener('pointerout', event => {
+    const button = ribbonButton(event.target);
+    if (button && !button.contains(event.relatedTarget)) hideTooltip();
+  });
+  document.addEventListener('focusin', event => revealRibbonHint(ribbonButton(event.target), 0));
+  document.addEventListener('focusout', event => { if (ribbonButton(event.target)) hideTooltip(); });
+  document.addEventListener('pointerdown', hideTooltip, true);
+  document.addEventListener('keydown', event => { if (event.key === 'Escape') hideTooltip(); }, true);
+  document.addEventListener('scroll', hideTooltip, true);
+  window.addEventListener('resize', hideTooltip);
+  window.addEventListener('blur', hideTooltip);
+
   // Menus, virtual rows, translations and button states all create or rewrite
-  // titles after startup. Observe only titles and inserted nodes; no hover
-  // timer, pointermove work or change to click/focus behavior is needed.
+  // titles after startup. Keep descriptions current without pointermove work.
   const observer = new MutationObserver((records) => {
     for (const record of records) {
       if (record.type === "attributes") suppressTitle(record.target);

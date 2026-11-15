@@ -428,6 +428,18 @@ function mockInvoke(cmd, args) {
         });
       }
       return Promise.resolve();
+    case "artwork_import_sources": {
+      const result = { assignments: [], missing: [], skipped_existing: [] };
+      const paths = [];
+      for (const path of args.paths || []) {
+        const track = s.tracks.find(track => track.path === path);
+        if (!args.replaceExisting && track?.has_cover) result.skipped_existing.push(path);
+        else if (!args.firstImage && (!args.pattern || args.pattern.includes('missing'))) result.missing.push(path);
+        else paths.push(path);
+      }
+      if (paths.length) result.assignments.push({ paths, cover: {mime:'image/png', data_base64:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC'} });
+      return Promise.resolve(result);
+    }
     case "read_cover_image":
       // Browser-dev stand-in: echo a tiny 1x1 PNG as the "read" cover so the
       // embed flow can be exercised without touching disk (#133).
@@ -470,8 +482,11 @@ function mockInvoke(cmd, args) {
         all.push(mk(`${base}/01 track.mp3`, `Folder ${di + 1}`, "Track 1"));
         all.push(mk(`${base}/02 track.mp3`, `Folder ${di + 1}`, "Track 2"));
       });
-      files.forEach((f) => all.push(mk(`/dropped/${f}`, "Loose", f)));
-      s.tracks = all;
+      // Reopening current paths during a folder addition retains their metadata,
+      // as the real backend's filesystem reader does.
+      const existing = new Map(s.tracks.map(track => [track.path, track]));
+      files.forEach((f) => all.push(existing.get(f) || mk(`/dropped/${f}`, "Loose", f)));
+      s.tracks = [...new Map(all.map(track => [track.path, track])).values()];
       return Promise.resolve({ mode: "files", root: "/dropped", folders: dirs });
     }
     case "open_mask_guide":
@@ -894,6 +909,19 @@ function mockInvoke(cmd, args) {
       }
       return Promise.resolve(plan("Clear tags", { code: "plan.clearTags" }, changes));
     }
+    case "quick_write": return (async () => {
+      // Separate simulated disk writes from the UI model and staged buffers.
+      const batch = await mockInvoke('apply_plan', {plan:args.plan});
+      const affected = new Set(args.plan.changes.map(change => change.path));
+      const staged = args.stagedPlan ? structuredClone(args.stagedPlan) : null;
+      for (const change of staged?.changes || []) {
+        if (!affected.has(change.path)) continue;
+        const track = findTrack(change.path);
+        for (const field of change.tag_changes) field.old = track.tags[field.field] || null;
+        if (change.cover_change) change.cover_change.old = structuredClone(track.coverSet || []);
+      }
+      return {batch, plan:staged, tracks:structuredClone(s.tracks.filter(track => affected.has(track.path)))};
+    })();
     case "apply_plan":
       for (const c of args.plan.changes) {
         const t = findTrack(c.path);

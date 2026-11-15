@@ -202,8 +202,8 @@ test('standard and advanced field disclosures support native Enter and Space act
 test('Sonner retains report nodes and native dismiss listeners across repeated messages', async ({ page }) => {
   await library(page);
   const toast = page.locator('#toast');
-  await expect(toast).toBeVisible();
-  await expect(page.locator('[data-sonner-toast] #toast')).toHaveCount(1);
+  await expect(toast).toBeHidden();
+  await expect(page.locator('[data-sonner-toast] #toast')).toHaveCount(0);
   await page.evaluate(() => {
     const root = document.getElementById('toast');
     root.hidden = true;

@@ -238,8 +238,7 @@ test('narrow preset editor provides usable fields and separate rule actions', as
   await page.setViewportSize({ width: 375, height: 667 });
   await openApp(page);
   await openLibrary(page);
-  await page.locator('.mode-tab[data-mode="generator"]').click();
-  await page.locator('#gen-job-transform').click();
+  await page.locator('.dock-module-tab[aria-controls="dock-module-transformations"]').click();
   await page.locator('#presets-edit').click();
   await expect(page.locator('#pe-editor')).toBeVisible();
   await page.locator('#pe-new').click();

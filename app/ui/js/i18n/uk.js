@@ -299,6 +299,8 @@ export const uk = {
   "topbar.recent": "Нещодавно відкриті папки",
   "topbar.pathPlaceholder": "/шлях/до/музичної/бібліотеки",
   "topbar.reread": "Перечитати відкриту папку",
+  "topbar.expandPanel": "Показати бічну панель",
+  "topbar.expandPanelTitle": "Показати бічну панель та елементи редагування.",
   "topbar.collapsePanel": "Згорнути панель режиму",
   "topbar.collapsePanelTitle": "Згорнути панель режиму (більше місця таблиці)",
   "topbar.undo": "Скасувати останнє застосування",
