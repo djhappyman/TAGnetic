@@ -390,6 +390,35 @@ pub struct CoverArtDto {
     pub description: String,
 }
 
+/// Immutable resizing settings captured before image work leaves the session.
+#[derive(Debug, Clone, Copy)]
+pub struct CoverEmbedOptions {
+    max_px: u32,
+    quality: u8,
+}
+
+/// A source image read and resized outside the session lock, ready to preview.
+#[derive(Debug)]
+pub struct PreparedCoverEmbed {
+    art: CoverArt,
+    notes: Vec<PlanMessage>,
+}
+
+impl CoverEmbedOptions {
+    /// Read an explicitly selected image; it may live outside the audio library.
+    /// Call this on a bounded background image worker, never under the session lock.
+    pub fn read_image(self, image_path: &Path) -> Result<PreparedCoverEmbed, AppError> {
+        let art = read_cover_image_art(image_path)?;
+        let art = tagrex_core::cover::resize_cover(&art, self.max_px, self.quality);
+        let notes = if tagrex_core::cover::is_over_max(&art, self.max_px) {
+            vec![PlanMessage::CoverNotShrunk { images: 1 }]
+        } else {
+            Vec::new()
+        };
+        Ok(PreparedCoverEmbed { art, notes })
+    }
+}
+
 /// A planned change to a file's embedded images (#56). Both sides are the whole
 /// set: `old` is restored on undo, `new` is written; an empty side means no
 /// images at all.
@@ -4755,7 +4784,6 @@ impl App {
         paths: &[PathBuf],
         cover: &CoverArtDto,
     ) -> Result<PlanDto, AppError> {
-        let _encoding_scope = cover_encoding::Scope::new();
         validate_inline_covers(std::slice::from_ref(cover))?;
         // Resize/recompress once, up front (#41), so every file embeds the same
         // trimmed image and the preview shows exactly what will be written.
@@ -4766,6 +4794,37 @@ impl App {
                 self.cover_quality.get(),
             )
         });
+        let notes = self.unshrunk_cover_notes(new_art.iter());
+        self.preview_cover_embed_art(paths, new_art.as_ref(), notes)
+    }
+
+    /// Validate the complete target set before reading or processing an image.
+    pub fn cover_embed_options(&self, paths: &[PathBuf]) -> Result<CoverEmbedOptions, AppError> {
+        self.validate_track_paths(paths)?;
+        Ok(CoverEmbedOptions {
+            max_px: self.cover_max_px.get(),
+            quality: self.cover_quality.get(),
+        })
+    }
+
+    /// Build the ordinary cover plan after background processing. Revalidate
+    /// targets because files or explicit session membership may have changed.
+    pub fn preview_prepared_cover_embed(
+        &self,
+        paths: &[PathBuf],
+        cover: PreparedCoverEmbed,
+    ) -> Result<PlanDto, AppError> {
+        self.validate_track_paths(paths)?;
+        self.preview_cover_embed_art(paths, Some(&cover.art), cover.notes)
+    }
+
+    fn preview_cover_embed_art(
+        &self,
+        paths: &[PathBuf],
+        new_art: Option<&CoverArt>,
+        notes: Vec<PlanMessage>,
+    ) -> Result<PlanDto, AppError> {
+        let _encoding_scope = cover_encoding::Scope::new();
         let mut changes = Vec::new();
         for path in paths {
             let old = TagEngine::read_covers(path)?;
@@ -4773,7 +4832,7 @@ impl App {
             // dropped or fetched image means "this is the cover", never "throw
             // away the back and the disc".
             let mut new = old.clone();
-            match &new_art {
+            match new_art {
                 Some(art) => {
                     let front = art.clone();
                     match new.iter().position(|c| c.kind == CoverKind::Front) {
@@ -4805,7 +4864,7 @@ impl App {
         let notes = if changes.is_empty() {
             Vec::new()
         } else {
-            self.unshrunk_cover_notes(new_art.iter())
+            notes
         };
         Ok(self.plan(PlanMessage::EmbedCover, notes, changes, false))
     }
@@ -6886,20 +6945,30 @@ pub fn bpm_in_range(raw: f64, floor: u32) -> u32 {
     bpm.round().max(0.0) as u32
 }
 
+fn read_cover_image_art(path: &Path) -> Result<CoverArt, AppError> {
+    let mime = mime_for_image_path(path)
+        .ok_or_else(|| AppError::NotAnImage(path.display().to_string()))?;
+    Ok(CoverArt {
+        mime: mime.to_string(),
+        data: std::fs::read(path)?.into(),
+        kind: CoverKind::Front,
+        description: String::new(),
+    })
+}
+
 /// Read an image file into a [`CoverArtDto`] (#133), ready to feed
 /// [`App::preview_cover_embed`]. Used when the user drops an image onto the
 /// cover well: the drag-drop event gives a path, not a browser `File`. The
 /// extension must be a recognized image format, or this errors rather than
 /// embedding arbitrary bytes.
 pub fn read_cover_image(path: &Path) -> Result<CoverArtDto, AppError> {
-    let mime = mime_for_image_path(path)
-        .ok_or_else(|| AppError::NotAnImage(path.display().to_string()))?;
-    let data = std::fs::read(path)?;
+    let art = read_cover_image_art(path)?;
     Ok(CoverArtDto {
         data_ref: None,
-        mime: mime.to_string(),
+        mime: art.mime,
+        kind: art.kind.to_storage_key().to_string(),
         data_base64: base64::engine::general_purpose::STANDARD
-            .encode(&data)
+            .encode(&art.data)
             .into(),
         ..CoverArtDto::default()
     })
@@ -10491,6 +10560,157 @@ mod tests {
         assert_eq!(after.len(), 2, "the back cover was dropped: {after:?}");
         assert_eq!(after[0], image(CoverKind::Front, 9));
         assert_eq!(after[1], image(CoverKind::Back, 2));
+    }
+
+    #[test]
+    fn cover_path_preview_matches_inline_without_writing_and_keeps_other_images() {
+        let dir = TempDir::new("cover-path-equivalence");
+        let source_dir = TempDir::new("cover-path-external-source");
+        let track = dir.tagged_flac("x.flac", "Autechre", "Gantz Graf");
+        let back = CoverArt {
+            mime: "image/png".into(),
+            data: vec![1, 2, 3].into(),
+            kind: CoverKind::Back,
+            description: "Back".into(),
+        };
+        TagEngine::write_covers(&track, std::slice::from_ref(&back)).unwrap();
+        let source = source_dir.0.join("picked.png");
+        let bytes = base64::engine::general_purpose::STANDARD.decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAEElEQVR4nGP4z8AARwzEcQCukw/x0F8jngAAAABJRU5ErkJggg=="
+        ).unwrap();
+        std::fs::write(&source, &bytes).unwrap();
+        let before = std::fs::read(&track).unwrap();
+        let app = open_app(&dir);
+        let paths = std::slice::from_ref(&track);
+        app.cover_max_px.set(2);
+        app.cover_quality.set(73);
+        let options = app.cover_embed_options(paths).unwrap();
+        let prepared = options.read_image(&source).unwrap();
+        assert_eq!(
+            prepared.art.mime, "image/jpeg",
+            "the fixture must exercise resizing"
+        );
+        let plan = app.preview_prepared_cover_embed(paths, prepared).unwrap();
+        assert_eq!(
+            plan,
+            app.preview_cover_embed(paths, &read_cover_image(&source).unwrap())
+                .unwrap()
+        );
+        let covers = plan.to_change_plan().changes[0]
+            .cover_change
+            .clone()
+            .unwrap();
+        assert_eq!(covers.new[1], back);
+        assert_eq!(
+            std::fs::read(&track).unwrap(),
+            before,
+            "preview wrote the audio file"
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), bytes);
+        assert!(app.history().unwrap().is_empty());
+
+        // A source that cannot decode still follows existing embed-as-is semantics.
+        std::fs::write(&source, b"not decodable but supported extension").unwrap();
+        let prepared = options.read_image(&source).unwrap();
+        let inline = app
+            .preview_cover_embed(paths, &read_cover_image(&source).unwrap())
+            .unwrap();
+        assert_eq!(
+            app.preview_prepared_cover_embed(paths, prepared).unwrap(),
+            inline
+        );
+        assert_eq!(std::fs::read(&track).unwrap(), before);
+    }
+
+    #[test]
+    fn cover_path_preview_noop_empty_targets_and_notes_match_inline() {
+        let dir = TempDir::new("cover-path-noop");
+        let track = dir.tagged_flac("x.flac", "Autechre", "Gantz Graf");
+        let source = dir.0.join("same.png");
+        let art = CoverArt {
+            mime: "image/png".into(),
+            data: vec![0x89, 0x50, 1].into(),
+            kind: CoverKind::Front,
+            description: String::new(),
+        };
+        std::fs::write(&source, &art.data).unwrap();
+        TagEngine::write_covers(&track, &[art]).unwrap();
+        let before = std::fs::read(&track).unwrap();
+        let app = open_app(&dir);
+        let paths = std::slice::from_ref(&track);
+        for paths in [paths, &[]] {
+            let prepared = app
+                .cover_embed_options(paths)
+                .unwrap()
+                .read_image(&source)
+                .unwrap();
+            let plan = app.preview_prepared_cover_embed(paths, prepared).unwrap();
+            assert_eq!(
+                plan,
+                app.preview_cover_embed(paths, &read_cover_image(&source).unwrap())
+                    .unwrap()
+            );
+            assert!(plan.changes.is_empty());
+            assert!(plan.notes.is_empty());
+        }
+        // Header dimensions are available, but pixels cannot be decoded.
+        let oversized = [
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 117, 48, 0, 0, 117,
+            48, 8, 2, 0, 0, 0, 233, 69, 111, 237, 0, 0, 0, 0, 73, 68, 65, 84, 53, 175, 6, 30, 0, 0,
+            0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+        ];
+        std::fs::write(&source, oversized).unwrap();
+        app.cover_max_px.set(500);
+        let prepared = app
+            .cover_embed_options(paths)
+            .unwrap()
+            .read_image(&source)
+            .unwrap();
+        let plan = app.preview_prepared_cover_embed(paths, prepared).unwrap();
+        assert_eq!(
+            plan,
+            app.preview_cover_embed(paths, &read_cover_image(&source).unwrap())
+                .unwrap()
+        );
+        assert_eq!(plan.notes[0].code, "plan.coverNotShrunk");
+        assert_eq!(std::fs::read(&track).unwrap(), before);
+    }
+
+    #[test]
+    fn cover_path_preview_rejects_invalid_sources_targets_and_changed_membership() {
+        let dir = TempDir::new("cover-path-validation");
+        let outside = TempDir::new("cover-path-outside");
+        let track = dir.tagged_flac("x.flac", "Autechre", "Gantz Graf");
+        let other = outside.tagged_flac("other.flac", "Autechre", "Gantz Graf");
+        let source = outside.0.join("picked.png");
+        std::fs::write(&source, b"PNG").unwrap();
+        let mut app = open_app(&dir);
+        assert!(matches!(
+            app.cover_embed_options(&[other]),
+            Err(AppError::OutsideRoot(_))
+        ));
+        let paths = std::slice::from_ref(&track);
+        let options = app.cover_embed_options(paths).unwrap();
+        assert!(matches!(
+            options.read_image(&outside.0.join("bad.txt")),
+            Err(AppError::NotAnImage(_))
+        ));
+        assert!(options.read_image(&outside.0.join("missing.png")).is_err());
+        std::fs::create_dir(outside.0.join("directory.png")).unwrap();
+        assert!(options
+            .read_image(&outside.0.join("directory.png"))
+            .is_err());
+        let prepared = options.read_image(&source).unwrap();
+        app.file_filter = Some(Vec::new());
+        assert!(matches!(
+            app.preview_prepared_cover_embed(paths, prepared),
+            Err(AppError::OutsideRoot(_))
+        ));
+        app.file_filter = None;
+        let prepared = options.read_image(&source).unwrap();
+        std::fs::remove_file(&track).unwrap();
+        assert!(app.preview_prepared_cover_embed(paths, prepared).is_err());
+        assert!(app.history().unwrap().is_empty());
     }
 
     // #706: an image the decoder cannot hold goes in at full size, and every
@@ -16275,6 +16495,7 @@ mod tests {
         std::fs::write(&img, [0x89, 0x50, 0x4e, 0x47]).unwrap(); // "\x89PNG" magic
         let dto = read_cover_image(&img).unwrap();
         assert_eq!(dto.mime, "image/png");
+        assert_eq!(dto.kind, "front");
         assert!(!dto.data_base64.is_empty());
         // A .jpeg maps to image/jpeg; a non-image extension is refused.
         let jpg = dir.0.join("art.jpeg");

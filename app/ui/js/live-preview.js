@@ -17,20 +17,28 @@ export function liveInputChanged() {
   revision++;
   document.dispatchEvent(new CustomEvent('tagrex:live-input'));
 }
-export function recordLiveField(paths, field, value, valid = true) {
-  for (const path of paths) {
-    if (!trackAt(path)) continue;
-    const base = imported.get(path)?.get(field) ?? trackAt(path)?.tags?.[field] ?? '';
-    if (value === base && valid) {
-      edits.get(path)?.delete(field);
-      if (!edits.get(path)?.size) edits.delete(path);
-    } else {
-      if (!edits.has(path)) edits.set(path, new Map());
-      edits.get(path).set(field, value);
-    }
-    const key = path + '\0' + field;
-    if (valid) invalid.delete(key); else invalid.add(key);
+function setLiveField(path, field, value, valid) {
+  const track = trackAt(path);
+  if (!track) return;
+  const base = imported.get(path)?.get(field) ?? track.tags?.[field] ?? '';
+  if (value === base && valid) {
+    edits.get(path)?.delete(field);
+    if (!edits.get(path)?.size) edits.delete(path);
+  } else {
+    if (!edits.has(path)) edits.set(path, new Map());
+    edits.get(path).set(field, value);
   }
+  const key = path + '\0' + field;
+  if (valid) invalid.delete(key); else invalid.add(key);
+}
+export function recordLiveField(paths, field, value, valid = true) {
+  for (const path of paths) setLiveField(path, field, value, valid);
+  liveInputChanged();
+}
+// A bulk action publishes only its complete pending state. Each notification
+// can synchronously snapshot and paint every pending input.
+export function recordLiveFields(entries) {
+  for (const { path, field, value, valid = true } of entries) setLiveField(path, field, value, valid);
   liveInputChanged();
 }
 export function hasInvalidLiveFields(locked = []) {

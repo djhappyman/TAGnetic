@@ -13,7 +13,7 @@ import "../cover-art.css";
 // front-cover operation, which preserves other embedded images.
 import { el, toast } from "./dom.js";
 import { t, tn } from "./i18n.js";
-import { invoke } from "./invoke.js";
+import { invoke, TAURI } from "./invoke.js";
 import { hooks } from "./hooks.js";
 import { previewPlan, selectedPaths, captureSelection, isSelectionCurrent, setPreviewPlan, setPreviewSource, trackAt } from "./state.js";
 
@@ -79,9 +79,7 @@ async function chooseCover() {
       filters: [{ name: t("editor.coverArt"), extensions: ["jpg", "jpeg", "png", "webp", "gif", "bmp", "avif"] }],
     });
     if (typeof chosen !== "string" || !isSelectionCurrent(subject)) return;
-    const cover = await invoke("read_cover_image", { path: chosen });
-    if (!isSelectionCurrent(subject)) return;
-    await embedCoverDto(cover, subject);
+    await previewCoverPath(chosen, subject);
   } catch (error) {
     if (isSelectionCurrent(subject)) toast(String(error), true);
   } finally { nativePickActive = false; }
@@ -125,25 +123,60 @@ async function embedCoverFile(file, subject = captureSelection()) {
   await embedCoverDto(await readImageFile(file), subject);
 }
 
-// Embed an image dropped onto the cover well in the packaged app (#133): the
-// drag-drop event gives a path, which the backend reads into a cover DTO.
+// Native picks and drops stay in Rust from source read through plan creation.
+// Older running native builds retain their existing DTO command pair.
+function isMissingCoverPathCommand(error) {
+  const failure = error?.failure ?? error;
+  return typeof failure === "string" && failure === "Command preview_cover_embed_path not found";
+}
+
+async function previewCoverPath(imagePath, subject) {
+  if (!isSelectionCurrent(subject)) return;
+  if (TAURI) {
+    try {
+      const plan = await invoke("preview_cover_embed_path", { paths: subject.paths, imagePath });
+      if (isSelectionCurrent(subject)) adoptCoverEmbedPlan(plan, subject.paths);
+      return;
+    } catch (error) {
+      // Only Tauri's missing-command response permits the compatibility path.
+      // Invalid sources, I/O failures and validation errors must stay visible.
+      if (!isMissingCoverPathCommand(error)) throw error;
+    }
+  }
+  if (!isSelectionCurrent(subject)) return;
+  const cover = await invoke("read_cover_image", { path: imagePath });
+  // Older readers omitted the kind, which their decoder treated as Other.
+  // A picked or dropped source always represents the front cover.
+  if (!cover.kind) cover.kind = "front";
+  if (isSelectionCurrent(subject)) await embedCoverDto(cover, subject);
+}
+
+// A packaged-app drag-drop event supplies a path instead of a browser File.
 async function embedCoverFromPath(path) {
   const subject = captureSelection();
-  if (selectedPaths().length === 0) {
+  if (subject.paths.length === 0) {
     toast(t("toast.cover.selectEmbed"), true);
     return;
   }
   try {
-    const cover = await invoke("read_cover_image", { path });
-    await embedCoverDto(cover, subject);
+    await previewCoverPath(path, subject);
   } catch (e) {
-    toast(String(e), true);
+    if (isSelectionCurrent(subject)) toast(String(e), true);
   }
 }
 
+function adoptCoverEmbedPlan(plan, paths) {
+  adoptLiveCoverPlan(plan, paths);
+  toast(
+    plan.changes.length
+      ? t("toast.cover.preview", { files: tn("unit.file", plan.changes.length) })
+      : t("toast.cover.sameCover")
+  );
+}
+
 // Preview embedding a cover DTO ({ mime, data_base64 }) as the front cover of
-// the current selection — the shared tail of every cover-embed source (picker,
-// HTML5 drop, native drop, and the release card).
+// the current selection — shared by browser files, legacy native reads and
+// the release card. Native path previews adopt the same ordinary cover plan.
 async function embedCoverDto(cover, subject = captureSelection()) {
   if (!isSelectionCurrent(subject)) return;
   const paths = subject.paths;
@@ -154,12 +187,7 @@ async function embedCoverDto(cover, subject = captureSelection()) {
   try {
     const plan = await invoke("preview_cover_embed", { paths, cover });
     if (!isSelectionCurrent(subject)) return;
-    adoptLiveCoverPlan(plan, paths);
-    toast(
-      plan.changes.length
-        ? t("toast.cover.preview", { files: tn("unit.file", plan.changes.length) })
-        : t("toast.cover.sameCover")
-    );
+    adoptCoverEmbedPlan(plan, paths);
   } catch (e) {
     toast(String(e), true);
   }
