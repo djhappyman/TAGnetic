@@ -617,7 +617,10 @@ window.addEventListener('pagehide', pauseAutomaticTransformPreview, { once: true
 // A preset changed in the editor: keep a renamed one ticked, then let every job
 // see the new rules.
 onPresetsChanged((renamed) => {
-  if (renamed) renameActivePreset(renamed.from, renamed.to);
+  if (renamed) {
+    if (Array.isArray(renamed)) renameActivePreset(renamed);
+    else renameActivePreset(renamed.from, renamed.to);
+  }
   renderAllGroupsMenus();
   refreshTransformButton();
   notifyChainChanged();

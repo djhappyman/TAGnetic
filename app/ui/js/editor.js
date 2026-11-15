@@ -103,7 +103,10 @@ function reflectFieldLocks() {
       continue;
     }
     const inputs = [...row.querySelectorAll(".field-input")];
-    for (const input of inputs) input.disabled = !editorPaths.size || isFieldLocked(input.dataset.key);
+    for (const input of inputs) {
+      input.disabled = !editorPaths.size || isFieldLocked(input.dataset.key);
+      reflectFieldClear(input);
+    }
     row.classList.toggle("locked", inputs.length > 0 && inputs.every(input => input.disabled));
     const button = row.querySelector(".fe-lock");
     if (button) reflectLockButton(button);
@@ -596,15 +599,11 @@ function fieldGroup(title, rows, paths, kind) {
   head.type = "button";
   head.setAttribute("aria-expanded", String(!collapsed));
   head.setAttribute("aria-controls", `editor-group-${kind}`);
-  const count = document.createElement("span");
-  count.className = "fe-group-count";
-  count.textContent = String(rows.reduce((total, row) =>
-    total + (row.duo ? row.duo.reduce((fields, entry) => fields + entry.pair.length, 0) : row.inline?.length || 1), 0));
   const caret = document.createElement("span");
   caret.className = "fe-group-caret";
   caret.setAttribute("aria-hidden", "true");
   caret.innerHTML = ico("caret-down");
-  head.append(" ", count, caret);
+  head.append(caret);
   if (collapsible) group.appendChild(head);
 
   const grid = document.createElement("div");
@@ -664,13 +663,23 @@ function compilationRow(paths) {
   input.addEventListener('change', () => {
     if (input.disabled) return;
     input.indeterminate = false;
-    const value = input.checked ? '1' : '0';
-    row.classList.add('dirty');
+    const checked = input.checked;
     label.title = '';
     for (const [field, targets] of byField) {
-      stagedFields.set(field, value);
-      recordLiveField(targets, field, value);
+      const grouped = new Map();
+      for (const path of targets) {
+        const base = importedValue(path, field) ?? trackAt(path)?.tags?.[field] ?? '';
+        // Absent, 0, false and no are all off. Restore the original spelling
+        // (also yes/true for on), rather than staging a new canonical value.
+        const value = /^(1|true|yes)$/i.test(base.trim()) === checked ? base : checked ? '1' : '0';
+        if (!grouped.has(value)) grouped.set(value, []);
+        grouped.get(value).push(path);
+      }
+      for (const [value, paths] of grouped) recordLiveField(paths, field, value);
+      if (targets.some(path => edits.get(path)?.has(field))) stagedFields.set(field, checked ? '1' : '0');
+      else stagedFields.delete(field);
     }
+    row.classList.toggle('dirty', [...byField].some(([field, targets]) => fieldHasChanges(targets, field)));
   });
   row.append(marker, label);
   if (keys.length) row.append(lockButton(keys, tr('editor.compilation'), refreshFieldEditor));
@@ -688,9 +697,59 @@ function restoreDraft(input, row, key) {
   if (!stagedFields.has(key)) return;
   input.value = stagedFields.get(key);
   input.classList.remove("multiple");
+  input.placeholder = "";
+  input.removeAttribute("title");
   row.classList.remove("multiple");
   input.classList.add("dirty");
   row.classList.add("dirty");
+}
+
+// Dirty styling follows the actual proposal, including reverts to saved data.
+function fieldHasChanges(paths, key) {
+  return paths.some(path => currentFieldValue(path, key) !== (trackAt(path)?.tags?.[key] ?? ''));
+}
+function reflectInputDraft(input, row, key, paths) {
+  if (!paths.some(path => edits.get(path)?.has(key))) stagedFields.delete(key);
+  input.classList.toggle('dirty', fieldHasChanges(paths, key));
+  row.classList.toggle('dirty', [...row.querySelectorAll('.field-input')].some(node => node.classList.contains('dirty')));
+}
+
+// Clearing mixed values is an explicit edit, not an untouched empty input.
+// Reuse the input staging/validation path so Apply, Discard and locks agree.
+const fieldClearUpdates = new WeakMap();
+function reflectFieldClear(input) { fieldClearUpdates.get(input)?.(); }
+function fieldClear(input, label, host) {
+  const button = createComponentElement('button');
+  button.type = 'button';
+  button.id = `${input.id}-clear`;
+  button.className = 'fe-clear';
+  button.setAttribute('aria-label', tr('editor.clearField', { field: label }));
+  button.title = tr('editor.clearFieldTitle', { field: label });
+  button.innerHTML = ico('close');
+  const reflect = () => {
+    button.disabled = input.disabled || input.readOnly;
+    button.hidden = button.disabled || (!input.value && !input.classList.contains('multiple'));
+  };
+  fieldClearUpdates.set(input, reflect);
+  input.addEventListener('input', reflect);
+  const clear = () => {
+    if (input.disabled || input.readOnly) return;
+    input.value = '';
+    input.dispatchEvent(new CustomEvent('input', { bubbles: true, detail: { clearField: true } }));
+    input.focus({ preventScroll: true });
+  };
+  button.addEventListener('pointerdown', event => event.preventDefault());
+  button.addEventListener('click', clear);
+  input.addEventListener('keydown', event => {
+    if (!event.isComposing && !event.altKey && !event.ctrlKey && !event.metaKey &&
+        (event.key === 'Backspace' || event.key === 'Delete') &&
+        !input.value && input.classList.contains('multiple') && !input.disabled && !input.readOnly) {
+      event.preventDefault();
+      clear();
+    }
+  });
+  host.append(button);
+  reflect();
 }
 
 function fieldRow(key, label, paths) {
@@ -753,10 +812,13 @@ function fieldRow(key, label, paths) {
     stagedFields.set(key, input.value);
     row.classList.remove("multiple");
     input.classList.remove("multiple");
+    input.placeholder = "";
+    input.removeAttribute("title");
     row.classList.add("dirty");
     input.classList.add("dirty");
     reflect();
     recordLiveField(paths, key, input.value, validateFieldValue(key, input.value, paths).ok);
+    reflectInputDraft(input, row, key, paths);
   });
 
   // A pre-filled value that's already invalid (rare — the backend guards it)
@@ -772,6 +834,7 @@ function fieldRow(key, label, paths) {
     // would offer an unfinished token ahead of its completion (Ho before House).
     () => tracks.map(track => track.tags?.genre ?? ""),
     () => savedSettings?.multi_value_separator ?? "; ");
+  fieldClear(input, label, cell);
   row.append(marker, labelCell, cell, lockButton([key], label, refreshFieldEditor));
   return row;
 }
@@ -826,15 +889,22 @@ function fieldDuoRow(pairs, paths) {
     input.addEventListener("input", () => {
       stagedFields.set(key, input.value);
       input.classList.remove("multiple");
+      input.placeholder = "";
+      input.removeAttribute("title");
       input.classList.add("dirty");
       row.classList.add("dirty");
       reflectRow();
       recordLiveField(paths, key, input.value, validateFieldValue(key, input.value, paths).ok);
+      reflectInputDraft(input, row, key, paths);
     });
     restoreDraft(input, row, key);
     numericEntry(input, key);
     inputs.push(input);
-    return input;
+    const shell = document.createElement("span");
+    shell.className = "fe-number";
+    shell.append(input);
+    fieldClear(input, aria, shell);
+    return shell;
   };
 
   pairs.forEach((p) => {

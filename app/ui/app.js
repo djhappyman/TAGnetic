@@ -1,3 +1,4 @@
+import { createApplyFeedback } from './js/apply-feedback.js';
 import { initStaging, renderStaging } from "./js/staging.js";
 import { connectWorkspaceController, publishWorkspaceMode, publishWorkspaceSubtab } from './lib/workspace-state';
 import { compileQuery, normalizeConditions, conditionLabel, coverState } from "./js/filter-query.js";
@@ -88,7 +89,6 @@ import {
   refreshReleaseMatches,
   retranslateOnline,
   searchBusy,
-  searchPerPage,
   stopLoading,
 } from "./js/online.js";
 import {
@@ -1423,24 +1423,18 @@ function renderTracks({ preparedFilter = null } = {}) {
   publishFilterState();
 }
 
-// Selection count in the status bar ("N/M selected"). Uses the checked-row
-// count directly; total size/duration are deferred (#27 notes → their own issue).
-// The status bar is the single home for the table's counts (#126): the total
-// file count (or `visible/total` when a filter is active, replacing the old
-// `Files (N)` toolbar label) plus the selection count.
-function updateStatus(selected = selectedPaths().length) {
+// Files owns the live counts. The full filtered summary remains available
+// through its tooltip and accessible description, without another toolbar row.
+function updateStatus(selected = selectedPaths().length, publish = true) {
   const total = tracks.length;
-  if (!total) {
-    statusSel.textContent = "";
-    return;
-  }
-  const files =
-    filterText || filterConditions.length || activeHealthLabel()
-      ? `${matchingTrackCount}/${tn("unit.file", total)}`
-      : tn("unit.file", total);
-  // The active check names itself in the filter field's chip (#559).
-  statusSel.textContent = `${files} · ${tn("count.selected", selected)}`;
-  publishFilterState();
+  el('files-total-count').textContent = total.toLocaleString();
+  el('files-selected-count').textContent = selected.toLocaleString();
+  const files = filterText || filterConditions.length || activeHealthLabel()
+    ? `${matchingTrackCount}/${tn("unit.file", total)}` : tn("unit.file", total);
+  const summary = `${files} · ${tn("count.selected", selected)}`;
+  if (statusSel.textContent !== summary) statusSel.textContent = summary;
+  el('files-tab').title = summary;
+  if (publish) publishFilterState();
 }
 
 function resetEdits() {
@@ -2427,10 +2421,13 @@ async function apply() {
   spreadsheet?.refresh();
   const releaseMutationSurfaces = freezeMutationSurfaces({ scrollableFiles: true });
   const sourceTracks = tracks;
+  const remainingSelected = new Set(rowSelectionSet());
   const review = createApplyReview(appliedPlan.changes, {
     columns: tableColumnKeys().slice(), offset: TABLE_DATA_COLUMN_OFFSET,
     rowForPath: renderedRow, artworkLabel: state => msg(`table.artwork.${state}`),
+    onComplete: path => { if (sourceTracks === tracks && remainingSelected.delete(path)) updateStatus(remainingSelected.size, false); },
   });
+  const feedback = createApplyFeedback(review, appliedPlan.changes);
   activeApplyReview = review;
   for (const row of renderedRows.values()) review.paint(row);
   pauseAutomaticTransformPreview();
@@ -2439,9 +2436,11 @@ async function apply() {
       // The initial pass validates every file without writing. Follow rows only
       // once the executor starts the sequential write pass.
       if (!progress.completed && progress.done < appliedPlan.changes.length) return;
-      review.progress(progress);
+      feedback.progress(progress);
     });
     const batch = await invoke("apply_plan", { plan: appliedPlan });
+    el("diff-cancel-apply").disabled = true;
+    await feedback.finish();
     review.completeAll();
     if (sourceTracks !== tracks) return;
     rememberBatchScope(batch, appliedPlan);
@@ -2482,6 +2481,7 @@ async function apply() {
     refreshCustomColumnCells();
     await refreshHistory();
   } catch (e) {
+    feedback.cancel();
     activeApplyReview = null;
     review.restore();
     // A cancel is the user's own doing and left everything as it was: say so
@@ -2490,9 +2490,11 @@ async function apply() {
     if (code === "error.plan.cancelled") toast(msg("toast.applyCancelled"));
     else toast(String(e), true);
   } finally {
+    feedback.cancel();
     activeApplyReview = null;
     endApplyProgress();
     applying = false;
+    updateStatus(rowSelectionSet().size);
     releaseMutationSurfaces();
     spreadsheet?.refresh();
     resumeAutomaticTransformPreview({ dismiss: !hasLiveInputs() });
@@ -3201,6 +3203,7 @@ function paintRowSelection() {
 }
 function syncSelectionUI({ deferPanels = false, refreshGrid = true, refreshPanels = false } = {}) {
   paintRowSelection();
+  updateStatus(rowSelectionSet().size);
   if (diffByPath && !isAutomaticTransformPreview()) {
     updateDiffBar();
     if (refreshGrid) spreadsheet?.refresh();
@@ -3212,7 +3215,6 @@ function syncSelectionUI({ deferPanels = false, refreshGrid = true, refreshPanel
     for (const path of paths) if (viewPathIndex.has(path)) checked++;
     selectAll.checked = checked > 0 && checked === viewPaths.length;
     selectAll.indeterminate = checked > 0 && checked < viewPaths.length;
-    updateStatus(paths.length);
     updatePanelCounts(paths.length);
   }
   if (refreshGrid) spreadsheet?.refresh();
@@ -3247,11 +3249,9 @@ function updateTransformScope() {
   const note = el('status-transform-scope');
   if (!note) return;
   const scope = automaticTransformScope();
-  let hidden = 0;
-  for (const path of selectedPaths()) if (!navPathIndex.has(path)) hidden++;
-  note.hidden = !scope.enabled && !hasLiveInputs() && !scope.busy;
-  note.dataset.detail = String(Boolean(scope.busy || scope.invalid || scope.failed || scope.blocked || hidden));
-  const text = scope.busy ? 'Previewing…' : scope.invalid ? 'Fix invalid values' : scope.failed ? 'Preview failed' : scope.blocked ? 'Review current preview first' : scope.dismissed ? 'Preview cleared' : `${scope.changes} modified${hidden ? ` · ${hidden} selected hidden` : ''}`;
+  const text = scope.busy ? 'Previewing…' : scope.invalid ? 'Fix invalid values' : scope.failed ? 'Preview failed' : scope.blocked ? 'Review current preview first' : scope.dismissed ? 'Preview cleared' : '';
+  note.hidden = (!scope.enabled && !hasLiveInputs() && !scope.busy) || !text;
+  note.dataset.detail = String(Boolean(text));
   if (note.textContent !== text) note.textContent = text;
   note.setAttribute('aria-busy', String(scope.busy));
   if (isAutomaticTransformPreview()) updateDiffBar(scope);
@@ -4021,11 +4021,10 @@ applyCheckboxCol(checkboxColEnabled());
 applyTableFont(tableFontPx());
 applyTracklistFont(tracklistFontPx());
 applyBadgeFont(badgeFont());
-// Reflect saved defaults onto the grouping + search page-size selects (#108).
+// Reflect saved defaults onto the grouping selector.
 // Grouping options are built from the modeled fields (#43), then the saved
 // choice is applied.
 populateGroupMenu();
-el("search-per-page").value = String(searchPerPage);
 // Load saved action groups (#57) from settings.json into the Groups popover.
 // The per-job chains become presets once the saved ones are in (#392).
 initActionGroups().then(() => {

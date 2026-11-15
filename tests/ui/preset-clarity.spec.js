@@ -8,7 +8,7 @@ test.beforeEach(async ({ page }) => {
     const path = resolve(root, '.' + new URL(route.request().url()).pathname);
     if (!path.startsWith(root + sep)) return route.abort();
     try {
-      await route.fulfill({ body: await readFile(path), contentType: path.endsWith('.js') ? 'text/javascript' : path.endsWith('.css') ? 'text/css' : path.endsWith('.woff2') ? 'font/woff2' : 'text/html' });
+      await route.fulfill({ body: path.endsWith('.js') ? (await readFile(path, 'utf8')).replace(/case\s*["'\x60]save_settings["'\x60]:/g, match => match + 'window.presetSaveCalls=(window.presetSaveCalls||0)+1;if(window.failPresetSave)return Promise.reject("Preset save failed");') : await readFile(path), contentType: path.endsWith('.js') ? 'text/javascript' : path.endsWith('.css') ? 'text/css' : path.endsWith('.woff2') ? 'font/woff2' : 'text/html' });
     } catch { await route.fulfill({ status: 404, body: 'Missing fixture' }); }
   });
   await page.goto('http://tagrex.test/app/ui/index.html');
@@ -42,7 +42,8 @@ async function menu(page, cmd) {
 
 test('built-in rules explain themselves, expand inline and remain immutable', async ({ page }) => {
   const before = await page.evaluate(() => JSON.stringify(window.tagrex.tracks));
-  await expect(page.locator('.pe-list-note').first()).not.toBeEmpty();
+  await expect(page.locator('.pe-list-note')).toHaveCount(0);
+  await expect(page.locator('#pe-group-builtin .pe-preset-icon')).toHaveCount(2);
   await expect(page.locator('#pe-rules .is-expanded')).toHaveCount(0);
   await expect(page.locator('#pe-rules .rule-grip, #pe-rules .rule-toggle')).toHaveCount(0);
   await expect(page.locator('#pe-rules-scope')).toHaveText('All tags');
@@ -58,12 +59,12 @@ test('built-in rules explain themselves, expand inline and remain immutable', as
   expect(await page.evaluate(() => JSON.stringify(window.tagrex.tracks))).toBe(before);
 });
 
-test('selecting each built-in retains its short description and its actual rules',async({page})=>{
+test('selecting each built-in retains its compact name, icon and actual rules',async({page})=>{
   const rows=page.locator('#pe-group-builtin .pe-list-row');
   for(let i=0;i<await rows.count();i++){
-    const before=await rows.nth(i).locator('.pe-list-note').textContent();
+    const before=await rows.nth(i).locator('.pe-list-name').textContent();
     await rows.nth(i).click(); await expect(page.locator('#pe-sample-out')).not.toHaveAttribute('aria-busy','true');
-    await expect(page.locator('.pe-list-row.active .pe-list-note')).toHaveText(before);
+    await expect(page.locator('.pe-list-row.active .pe-list-name')).toHaveText(before);
     expect(await page.locator('#pe-rules .rule-card').count()).toBeGreaterThan(0);
     await expect(page.locator('#pe-empty')).toBeHidden();
   }
@@ -83,7 +84,7 @@ test('built-in menu offers Copy only, copy is editable and rename stays in sideb
   await page.locator('.is-expanded').getByRole('checkbox',{name:'Pattern matching',exact:true}).uncheck();
   await page.locator('#pe-sample-input').fill('Moon Moon');
   await expect(page.locator('#pe-sample-out')).toHaveText('Sun Sun');
-  await page.locator('#pe-editor-close').click(); await page.locator('#presets-edit').click();
+  await page.locator('#pe-save-close').click(); await expect(page.locator('#pe-editor')).toBeHidden(); await page.locator('#presets-edit').click();
   await expect(page.locator('.pe-list-row.active .pe-list-name')).toHaveText('My cleanup');
   await page.locator('.pe-list-row').nth(1).click();
   await expect(page.locator('.pe-rule-title').first()).toHaveText('Remove repeated spaces');
@@ -257,13 +258,14 @@ test('renaming to an existing name stays editable and Escape restores the origin
   await page.locator('#pe-name').press('Escape'); await expect(page.locator('.pe-list-row.active .pe-list-name')).toHaveText('Mine');
 });
 
-test('clicking another preset during rename commits without swallowing the click',async({page})=>{
+test('clicking another preset cancels an unconfirmed rename without swallowing the click',async({page})=>{
   await create(page,'First'); await create(page,'Second');
   await page.locator('#pe-list').getByText('First',{exact:true}).click();
   await page.locator('.pe-list-row.active').press('F2'); await page.locator('#pe-name').fill('Renamed');
   await page.locator('#pe-list').getByText('Second',{exact:true}).click();
   await expect(page.locator('.pe-list-row.active .pe-list-name')).toHaveText('Second');
-  await expect(page.locator('#pe-list').getByText('Renamed',{exact:true})).toBeVisible();
+  await expect(page.locator('#pe-list').getByText('First',{exact:true})).toBeVisible();
+  await expect(page.locator('#pe-list').getByText('Renamed',{exact:true})).toHaveCount(0);
 });
 
 test('rule action menus attach to the button and fit inside narrow windows',async({page})=>{
@@ -341,4 +343,104 @@ test('preset right-click stays at the pointer while its three-dot menu follows t
   await page.keyboard.press('Escape');await expect(row).toBeFocused();
   const more=page.locator('.pe-list-item:has(.pe-list-row.active) .pe-preset-more');await more.click();await expect(menu).toBeVisible();const owner=await more.boundingBox();box=await menu.boundingBox();expect(Math.abs(box.x+box.width-owner.x-owner.width)).toBeLessThan(2);expect(Math.abs(box.y-owner.y-owner.height-4)).toBeLessThan(2);
   await page.keyboard.press('Escape');await expect(more).toBeFocused();
+});
+
+
+test('preset changes are local until Save, including selection and search', async ({ page }) => {
+  const saved = () => page.evaluate(async () => (await window.tagrex.invoke('load_settings', {})).action_groups || []);
+  await create(page, 'Draft only'); await add(page, 'case');
+  await page.locator('.pe-case-style').selectOption('upper');
+  await page.locator('#pe-group-builtin .pe-list-row').first().click();
+  await page.locator('#pe-search').fill('Draft');
+  await expect(page.locator('#pe-group-personal .pe-list-row')).toHaveCount(1);
+  expect(await saved()).toEqual([]);
+  expect(await page.evaluate(() => window.presetSaveCalls || 0)).toBe(0);
+  await page.locator('#pe-save').click();
+  await expect(page.locator('#pe-save')).toBeDisabled();
+  await expect(page.locator('#pe-editor')).toBeVisible();
+  expect((await saved())[0].name).toBe('Draft only');
+  expect(await page.evaluate(() => window.presetSaveCalls)).toBe(1);
+  await page.locator('#pe-search').fill('');
+  await page.locator('#pe-group-personal .pe-list-row').click();
+  await page.locator('.pe-rule-open').click();
+  await page.locator('.pe-case-style').selectOption('lower');
+  await page.locator('#pe-cancel').click();
+  await expect(page.locator('#pe-editor')).toBeHidden();
+  await page.locator('#presets-edit').click();
+  await page.locator('.pe-rule-open').click();
+  await expect(page.locator('.pe-case-style')).toHaveValue('upper');
+});
+
+test('failed Save preserves the draft and supports retry without closing', async ({ page }) => {
+  await create(page, 'Retry me');
+  await page.evaluate(() => window.failPresetSave = true);
+  await page.locator('#pe-save-close').click();
+  await expect(page.locator('#toast')).toContainText('Could not save presets');
+  await expect(page.locator('#pe-editor')).toBeVisible();
+  await expect(page.locator('#pe-save')).toBeEnabled();
+  expect(await page.evaluate(async () => (await window.tagrex.invoke('load_settings', {})).action_groups || [])).toEqual([]);
+  await page.evaluate(() => window.failPresetSave = false);
+  await page.locator('#pe-save-close').click();
+  await expect(page.locator('#pe-editor')).toBeHidden();
+  await page.locator('#presets-edit').click();
+  await expect(page.locator('.pe-list-row.active')).toContainText('Retry me');
+});
+
+for (const close of ['button', 'escape', 'overlay']) test(`unsaved ${close} dismissal asks before discarding`, async ({ page }) => {
+  await create(page, 'Keep this draft');
+  if (close === 'button') await page.locator('#pe-editor-close').click();
+  else if (close === 'escape') await page.keyboard.press('Escape');
+  else await page.mouse.click(4, 4);
+  await expect(page.locator('#confirm-modal')).toBeVisible();
+  await page.locator('#confirm-cancel').click();
+  await expect(page.locator('#pe-editor')).toBeVisible();
+  await expect(page.locator('.pe-list-row.active')).toContainText('Keep this draft');
+  await page.locator('#pe-cancel').click();
+  await expect(page.locator('#pe-editor')).toBeHidden();
+  await page.locator('#presets-edit').click();
+  await expect(page.locator('#pe-group-personal .pe-list-row')).toHaveCount(0);
+});
+
+test('search and header actions keep compact groups usable', async ({ page }) => {
+  await expect(page.locator('.pe-group-caret, .pe-list-note, .pe-list-actions')).toHaveCount(0);
+  await expect(page.locator('.pe-sidebar-group > h3 #pe-new')).toBeVisible();
+  await page.locator('#pe-search').fill('does not exist');
+  await expect(page.locator('.pe-list-row')).toHaveCount(0);
+  await expect(page.locator('#pe-list')).toContainText('No matching presets.');
+  await create(page, 'Search clears for new');
+  await expect(page.locator('#pe-search')).toHaveValue('');
+  await expect(page.locator('.pe-list-row.active')).toContainText('Search clears for new');
+});
+
+
+test('keyboard search/save and fixed footer match the Settings surface', async ({ page }) => {
+  await create(page, 'Keyboard saved');
+  await page.keyboard.press('Control+f'); await expect(page.locator('#pe-search')).toBeFocused();
+  await page.keyboard.press('Control+s');
+  await expect(page.locator('#pe-save')).toBeDisabled();
+  expect((await page.evaluate(async () => (await window.tagrex.invoke('load_settings', {})).action_groups))[0].name).toBe('Keyboard saved');
+  const surfaces = await page.evaluate(() => ['.pe-edit-col', '.settings-body'].map(selector => getComputedStyle(document.querySelector(selector)).backgroundColor));
+  expect(surfaces[0]).toBe(surfaces[1]);
+  const inset=await page.locator('.pe-edit-col').boundingBox(), footer=await page.locator('.pe-footer').boundingBox();
+  expect(footer.y-inset.y-inset.height).toBeGreaterThanOrEqual(7);
+  const dialog=await page.locator('.modal.pe-editor').boundingBox(), save=await page.locator('#pe-save-close').boundingBox();
+  expect(dialog.x+dialog.width-save.x-save.width).toBeLessThanOrEqual(18);
+  expect(dialog.y+dialog.height-save.y-save.height).toBeLessThanOrEqual(16);
+});
+
+
+test('renaming survives blur and commits only with Enter', async ({ page }) => {
+  await create(page, 'Original name');
+  await page.locator('#pe-save').click(); await expect(page.locator('#pe-save')).toBeDisabled();
+  await page.locator('.pe-list-row.active').press('F2');
+  const name=page.locator('#pe-name'); await name.fill('Only after Enter');
+  await page.locator('#pe-sample-input').click();
+  await expect(name).toBeVisible(); await expect(name).toHaveValue('Only after Enter');
+  await expect(page.locator('#pe-save')).toBeDisabled();
+  await expect(page.locator('#pe-save-close')).toBeDisabled();
+  await name.focus(); await expect(name).toBeFocused();
+  await name.press('Enter');
+  await expect(name).toHaveCount(0);
+  await expect(page.locator('.pe-list-row.active .pe-list-name')).toHaveText('Only after Enter');
+  await expect(page.locator('#pe-save')).toBeEnabled();
 });

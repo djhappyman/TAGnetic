@@ -228,7 +228,6 @@
       </div>
     </div>
     <Button id="arrange-done" variant="ghost" size="sm" hidden={!arranging} onclick={finishArranging} data-i18n="action.done">Done</Button>
-    <span id="status-sel" class="muted"></span>
   </div>
 </header>
 
@@ -238,7 +237,7 @@
   <DockModule moduleId="files" title="Files" defaultArea="left" headerless={!arranging}>
   <section class="files-col">
     <div class="file-view-tabs" role="tablist" aria-label="File views" data-i18n-aria-label="staging.views">
-      <Button id="files-tab" variant="ghost" size="sm" role="tab" aria-selected="true" aria-controls="files-view" data-i18n="staging.files">Files</Button>
+      <Button id="files-tab" variant="ghost" size="sm" role="tab" aria-selected="true" aria-controls="files-view" aria-labelledby="files-tab-label" aria-describedby="status-sel"><span id="files-tab-label" data-i18n="staging.files">Files</span><span class="files-tab-counts" aria-hidden="true"><span id="files-selected" class="files-tab-selection"><span id="files-selected-count">0</span></span><span class="files-count-divider">/</span><span id="files-total-count">0</span></span><span id="status-sel" class="sr-only"></span></Button>
       <Button id="staged-tab" variant="ghost" size="sm" role="tab" aria-selected="false" aria-controls="files-view" tabindex={-1}><span data-i18n="staging.tab">Staged</span><span id="staged-tab-count" class="staged-tab-count"></span></Button>
     </div>
     <div class="library-header">
@@ -439,6 +438,7 @@
               <ImportFields />
               <Input id="discogs-query" type="text" data-i18n-aria-label="online.queryPlaceholder" aria-label="Artist, album, or catalogue number" data-i18n-placeholder="online.queryPlaceholder" placeholder="artist / album / catalog no." spellcheck="false" />
               <div class="field-tools">
+                <Button variant="ghost" size="icon-sm" id="discogs-clear" class="icon query-clear" type="button" data-i18n-title="online.clearSearch" title="Clear search and results" data-i18n-aria-label="online.clearSearch" aria-label="Clear search and results" hidden><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></Button>
                 <Button variant="ghost" size="icon-sm" id="query-presets" class="icon" type="button" data-i18n-title="online.presets" title="Queries this selection can build" data-i18n-aria-label="online.presets" aria-label="Queries this selection can build" aria-expanded="false"><svg class="ico"><use href="#i-caret-down"/></svg></Button>
                 <Button variant="ghost" size="icon-sm" id="discogs-search" class="icon search-toggle" data-i18n-title="online.search" title="Search" data-i18n-aria-label="online.search" aria-label="Search">
                   <svg class="glyph glyph-search" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.3" fill="none" stroke="currentColor" stroke-width="1.5"/><line x1="10.3" y1="10.3" x2="14" y2="14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
@@ -449,17 +449,6 @@
           </div>
           <div class="release-toolbar" id="release-toolbar" hidden>
             <span class="hint muted" id="release-found" data-i18n="online.foundNone">Found 0 entries</span>
-            <div class="spacer"></div>
-            <label class="hint muted" data-i18n-title="online.vinylDiscTitle" title="On import, map a vinyl side (A1/B2) to the disc number: side A → disc 1, B → disc 2, …">
-              <NativeCheckbox id="import-vinyl-disc" /> <span data-i18n="online.vinylDisc">Vinyl side → disc</span>
-            </label>
-            <label class="hint muted per-page"><span data-i18n="online.show">Show</span>
-              <NativeSelect size="sm" id="search-per-page" data-i18n-title="online.perPage" title="Results per page">
-                <NativeSelectOption value="5" selected>5</NativeSelectOption>
-                <NativeSelectOption value="10">10</NativeSelectOption>
-                <NativeSelectOption value="15">15</NativeSelectOption>
-              </NativeSelect>
-            </label>
           </div>
         </div>
         <div class="online-scroll">
@@ -470,11 +459,12 @@
             <h3 id="online-empty-heading" data-i18n="inspector.searchEmptyHeading">Find the right release</h3>
             <p id="discogs-empty" class="empty" data-i18n="online.empty">Search by artist, album or catalogue number.</p>
           </div>
+          <div id="release-more" class="release-more" hidden>
+            <span id="release-loading" class="muted" role="status" data-i18n="inspector.searchingHeading" hidden>Searching releases…</span>
+            <Button variant="ghost" size="sm" id="load-more" type="button" data-i18n="online.retry" hidden>Retry</Button>
+          </div>
         </div>
 
-        <div id="release-more" class="release-more" hidden>
-          <Button variant="outline" size="sm" id="load-more" type="button" data-i18n="online.loadMore">More</Button>
-        </div>
       </Tabs.Content>
 
       <Tabs.Content value="editor" id="subtab-editor" class="subtab-panel editor" hidden>

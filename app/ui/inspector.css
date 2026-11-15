@@ -42,21 +42,25 @@ body .mode-col {
   container-name: tag-inspector;
 }
 
-/* ---- tabs: one 28px compact rail for the four Tagger modes ---------------- */
+/* ---- tabs: one quiet 32px navigation row for the four Tagger modes -------- */
 body .mode-col .subtabs[data-slot='tabs-list'] {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(max-content, 1fr));
   flex: 0 0 auto;
-  justify-content: flex-start;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   gap: var(--sp-1);
-  padding: var(--sp-2) var(--inspector-inset) var(--sp-1);
+  padding: var(--sp-3) calc(var(--inspector-inset) + var(--sp-2));
   border: 0;
   border-radius: 0;
   background: transparent;
 }
 body .mode-col button[data-slot='button'].subtab {
   flex: 0 1 auto;
-  height: var(--ctl-h-sm);
-  min-height: var(--ctl-h-sm);
-  padding: 0 var(--sp-2);
+  height: var(--ctl-h);
+  min-height: var(--ctl-h);
+  padding: 0 var(--sp-1);
   border: 0;
   border-radius: var(--r-compact);
   background: transparent;
@@ -182,7 +186,7 @@ body .mode-col :is(.hint, .cover-meta, .cover-hint, .panel-note) {
 /* ---- field groups: 24px between groups, 4px inside --------------------- */
 body .mode-col .fe {
   gap: var(--inspector-block);
-  min-width: 360px; /* fixed desktop form; a narrower dock scrolls horizontally */
+  min-width: 400px; /* three-digit pairs plus 24px tools; narrower docks scroll this form */
 }
 body .mode-col .fe-group {
   gap: var(--sp-1);
@@ -210,12 +214,17 @@ body .mode-col button.fe-group-head {
   text-transform: none;
 }
 body .mode-col button.fe-group-head {
+  height: var(--ctl-h);
+  min-height: var(--ctl-h);
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-control);
+  background: var(--bg);
   display: flex;
   align-items: center;
   gap: var(--sp-1);
 }
 body .mode-col button.fe-group-head:hover {
-  background: color-mix(in srgb, var(--text) 3%, transparent);
+  background: var(--row-hover);
   color: var(--text);
 }
 body .mode-col button.fe-group-head .fe-group-caret {
@@ -239,7 +248,8 @@ body .mode-col .fe-group-count {
    input's 10px contour (row radius = control radius, inset 0). The parent
    owns an 8px gap between every row, including compact field groups. */
 body .mode-col .fe-row {
-  grid-template-columns: 3px var(--inspector-label) minmax(0, 1fr) var(--ctl-hit);
+  position: relative;
+  grid-template-columns: 3px var(--inspector-label) minmax(0, 1fr);
   column-gap: var(--sp-1);
   min-height: var(--ctl-h);
   margin: 0;
@@ -249,9 +259,9 @@ body .mode-col .fe-row {
 body .mode-col .fe-row + .fe-row {
   margin-top: 0; /* the grid owns gaps for plain and paired rows alike */
 }
-/* The number row has no label rail: marker, the pair group, the pair's lock. */
+/* The number row has no outer label rail; its shared lock sits inside the last field. */
 body .mode-col .fe-row.duo {
-  grid-template-columns: 3px minmax(0, 1fr) var(--ctl-hit);
+  grid-template-columns: 3px minmax(0, 1fr);
 }
 body .mode-col .fe-marker {
   /* Optical: inset so the state rail never pokes out of the row's corner. */
@@ -295,7 +305,7 @@ body .mode-col .fe .field-input,
 body .mode-col .fe-comment textarea.field-input {
   height: var(--ctl-h);
   min-height: var(--ctl-h);
-  padding: 4px var(--input-inset);
+  padding: 4px calc(2 * var(--ctl-hit) + var(--sp-2)) 4px var(--input-inset);
   border-radius: var(--input-radius);
   font-family: var(--font-value);
   font-size: var(--type-body-size);
@@ -313,7 +323,7 @@ body .mode-col .fe textarea.field-input {
 }
 body .mode-col .fe-row .field-input::placeholder {
   font-style: normal;
-  color: var(--muted);
+  color: var(--field-ghost, var(--muted));
   opacity: 1;
 }
 /* Quiet filled controls: the surface groups them, not another border. */
@@ -379,18 +389,23 @@ body .mode-col .fe-duo .fe-pair {
   min-width: 0;
 }
 body .mode-col .fe-duo .fe-pair .field-input {
-  flex: 1 1 0;
-  width: 0;
+  width: 100%;
   min-width: 0;
-  padding-inline: 6px;
+  padding-inline: 6px calc(var(--ctl-hit) + 2px);
   text-align: start;
+}
+body .mode-col .fe-number {
+  position:relative;
+  display:block;
+  flex:1 1 0;
+  min-width:0;
 }
 body .mode-col .fe-cell.num {
   align-items: flex-start;
 }
 body .mode-col .fe-cell.num > .field-input {
   width: 100%;
-  max-width: 96px;
+  max-width: none;
 }
 body .mode-col .fe-cell.num > .field-input:placeholder-shown {
   text-align: start;
@@ -402,7 +417,7 @@ body .mode-col .fe-inline-fields {
   gap: var(--sp-2) var(--sp-4);
 }
 body .mode-col .fe-inline-fields > .fe-row + .fe-row {
-  grid-template-columns: 3px 32px minmax(0, 1fr) var(--ctl-hit);
+  grid-template-columns: 3px 32px minmax(0, 1fr);
 }
 body .mode-col .fe-inline-fields .fe-cell.num > .field-input {
   max-width: none;
@@ -414,11 +429,12 @@ body .mode-col .fe-year-options {
   align-items: center;
 }
 body .mode-col .fe-year-options > .fe-row { margin: 0; }
-body .mode-col .fe-year-options .fe-cell.num > .field-input { max-width: 128px; }
+body .mode-col .fe-year-options .fe-cell.num > .field-input { max-width: none; }
 body .mode-col .fe-compilation {
-  grid-template-columns: 3px minmax(0, 1fr) var(--ctl-hit);
+  grid-template-columns: 3px minmax(0, 1fr);
 }
 body .mode-col .fe-compilation-label {
+  padding-inline-end: calc(var(--ctl-hit) + var(--sp-1));
   display: flex;
   align-items: center;
   gap: var(--sp-2);
@@ -448,6 +464,10 @@ body .mode-col .fe-add-row .fe-add-value {
 
 /* ---- locks: 24px hit box, quiet until the row is in play --------------- */
 body .mode-col button[data-slot='button'].fe-lock {
+  position: absolute;
+  right: var(--sp-1);
+  top: calc((var(--ctl-h) - var(--ctl-hit)) / 2);
+  z-index: 1;
   width: var(--ctl-hit);
   min-width: var(--ctl-hit);
   height: var(--ctl-hit);
@@ -459,7 +479,7 @@ body .mode-col button[data-slot='button'].fe-lock {
   box-shadow: none;
   color: var(--muted);
   opacity: 0;
-  transition: opacity 180ms ease;
+  transition: opacity 180ms ease, background-color 150ms ease;
 }
 body .mode-col .fe-lock > svg {
   width: 14px;
@@ -1076,7 +1096,7 @@ body .mode-col .exp-fields > :is(.exp-row, .exp-mask.show) ~ :is(.exp-row, .exp-
 }
 
 /* ---- action rails: pinned, one height tier --------------------------- */
-body .mode-col :is(.editor-actions, .from-name-actions, .release-more) {
+body .mode-col :is(.editor-actions, .from-name-actions) {
   flex: 0 0 auto;
   min-height: calc(var(--ctl-h) + var(--sp-2));
   margin: 0;
@@ -1179,8 +1199,59 @@ body .import-field-choice:hover { background: var(--row-hover); }
 body .import-field-choice label { display: flex; flex: 1; flex-direction: column; justify-content: center; min-height: 32px; font-size: var(--type-body-size); cursor: pointer; }
 body .import-field-choice.artwork-choice { padding-block: var(--sp-1); margin-bottom: var(--sp-1); background: var(--panel); }
 body .import-field-choice [data-slot='checkbox'] { flex: none; width: 16px; height: 16px; padding: 0; }
-body .import-fields-more { width: 100%; justify-content: space-between; font-size: var(--type-help-size); color: var(--muted); }
+body button.import-fields-more { width:100%; justify-content:space-between; min-height:32px; padding:0 var(--sp-2); border:0; border-radius:var(--r-menu-item); background:transparent; box-shadow:none; font-size:var(--type-help-size); color:var(--muted); }
+body button.import-fields-more:hover { background:var(--row-hover); color:var(--text); }
 body .import-fields-footer { display: flex; justify-content: space-between; padding-top: var(--sp-1); }
-body .import-fields-footer button { font-size: var(--type-help-size); color: var(--muted); }
+body .import-fields-footer button { min-height:32px; padding-inline:var(--sp-3); border:0; border-radius:var(--r-pill); background:var(--row-hover); box-shadow:none; font-size:var(--type-help-size); color:var(--text); }
+body .import-fields-footer button:hover:not(:disabled) { background:var(--sel-tint); color:var(--accent-ink); }
+body .import-search-options { padding-top:var(--sp-2); }
+body .import-page-size { display:flex; align-items:center; justify-content:space-between; gap:var(--sp-3); min-height:36px; padding-inline:var(--sp-2); font-size:var(--type-help-size); color:var(--muted); }
+body .import-page-size > .app-select { width:76px; flex:none; }
 body .import-fields-error { font-size: var(--type-help-size); color: var(--danger); padding: var(--sp-2); }
 @media(prefers-reduced-motion:reduce) { body .import-fields-popover { animation: none; } }
+
+/* Fade only overflowing, unfocused scrollports. At the end or while using a
+   control, all content is fully opaque; fixed staging/actions stay outside. */
+body .mode-col :is(.online-scroll, .editor-scroll, .from-name-scroll, .mode-panel).can-scroll-down:not([data-fade-focus]) {
+  -webkit-mask-image:linear-gradient(to bottom, #000 calc(100% - 24px), transparent);
+  mask-image:linear-gradient(to bottom, #000 calc(100% - 24px), transparent);
+}
+
+/* Disclosures follow the Transformations surface; counts add no useful action. */
+body .mode-col .fe-group.collapsible { gap:var(--sp-3); }
+/* Locks share the field footprint rather than reserving a separate gutter. */
+body .mode-col .fe-row:has(.genre-picker-host) > .fe-lock { right:34px; }
+body .mode-col .fe-row .genre-combobox .field-input { padding-right:86px; }
+/* The last compact value shares its tool slot: clear while editing it, lock
+   when using the row. Neither action changes field width or shifts its value. */
+body .mode-col .fe-row.duo:has(.fe-duo-unit:last-child .fe-number:last-child:is(:hover,:focus-within)) > .fe-lock:not(:focus-visible) { opacity:0; pointer-events:none; }
+body .mode-col .fe-lock:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; box-shadow:none; }
+/* Reserve the clear action's slot; hover/focus animate without shifting tools. */
+body .mode-col #query-box button.query-clear { width:var(--ctl-hit); min-width:var(--ctl-hit); height:var(--ctl-hit); min-height:var(--ctl-hit); padding:5px; opacity:0; pointer-events:none; transform:scale(.9); transition:opacity 150ms ease, transform 150ms ease; }
+body .mode-col #query-box:hover button.query-clear,
+body .mode-col #query-box button.query-clear:focus-visible { opacity:1; pointer-events:auto; transform:scale(1); }
+@media(hover:none) { body .mode-col #query-box button.query-clear { opacity:1; pointer-events:auto; transform:none; } }
+@media(prefers-reduced-motion:reduce) { body .mode-col #query-box button.query-clear { transition:none; } }
+
+body .mode-col #query-box .field-tools button:focus-visible { outline:none; box-shadow:none; }
+
+/* Explicit per-field removal, quiet until hover/focus. It shares the existing
+   field surface and uses the same 24px hit target as locks and search tools. */
+body .mode-col .fe-cell { position:relative; }
+body .mode-col button[data-slot='button'].fe-clear {
+  position:absolute; top:4px; right:28px; z-index:2;
+  width:var(--ctl-hit); min-width:var(--ctl-hit); height:var(--ctl-hit); min-height:var(--ctl-hit);
+  padding:5px; border:0; border-radius:var(--r-compact); box-shadow:none;
+  background:var(--bg); color:var(--muted); opacity:0; pointer-events:none;
+  transition:opacity 150ms ease, background-color 150ms ease;
+}
+body .mode-col button.fe-clear[hidden] { display:none; }
+body .mode-col .fe-number > button.fe-clear { right:2px; }
+body .mode-col .fe-cell:has(.genre-picker-host) > button.fe-clear { right:60px; }
+body .mode-col :is(.fe-cell,.fe-number):is(:hover,:focus-within) > button.fe-clear,
+body .mode-col button.fe-clear:focus-visible { opacity:1; pointer-events:auto; }
+body .mode-col button.fe-clear:hover { color:var(--text); background:var(--row-hover); }
+body .mode-col button.fe-clear:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+body .mode-col button.fe-clear .ico { width:14px; height:14px; }
+@media(hover:none) { body .mode-col button.fe-clear { opacity:1; pointer-events:auto; } }
+@media(prefers-reduced-motion:reduce) { body .mode-col button.fe-clear { transition:none; } }

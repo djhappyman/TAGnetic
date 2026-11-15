@@ -81,6 +81,9 @@ for(const kind of ['tags','transfer'])test(`${kind} Apply patches values in orde
     await report(page,{path:change.path,done:changes.length+index+1,total:changes.length*2,completed:kind});
     await expect(cell).toContainText(kind==='tags'?'Written artist':change.rename_to.split('/').pop());
     await expect(row).not.toHaveClass(/selected/);await expect(row).toHaveAttribute('aria-disabled','true');
+    await expect(page.locator('#files-selected-count')).toHaveText(String(changes.length-index-1));
+    await report(page,{path:change.path,done:changes.length+index+1,total:changes.length*2,completed:kind});
+    await expect(page.locator('#files-selected-count')).toHaveText(String(changes.length-index-1));
     await expect(row).not.toHaveClass(/applying-current/);
     await stable(page);
     if(index===0&&kind==='tags')for(const theme of ['light','dark']){
@@ -101,6 +104,7 @@ test('a cancelled transaction restores the same cells and preview selection',asy
   await expect(page.locator('#tracks-body td[data-field="artist"]').first()).toContainText('Written artist');
   await expect(page.locator('#tracks-body tr[data-path]').first()).toHaveClass(/selected/);
   await expect(page.locator('#tracks-body tr[data-path]').first()).not.toHaveAttribute('aria-disabled','true');
+  await expect(page.locator('#files-selected-count')).toHaveText('3');
   await stable(page);
 });
 
@@ -119,9 +123,11 @@ test('a combined tag and rename row completes only after both writes, without re
   await expect(row.locator('td').nth(3)).toContainText('Written artist');
   await expect(row.locator('.fname')).toHaveText(first.path.split('/').pop());
   await expect(row).not.toHaveAttribute('aria-disabled','true');
+  await expect(page.locator('#files-selected-count')).toHaveText('3');
   await report(page,{path:first.path,done:5,total:7,completed:'transfer'});
   await expect(row.locator('.fname')).toHaveText(first.rename_to.split('/').pop());
-  await expect(row).toHaveAttribute('aria-disabled','true');await stable(page);await finish(page);
+  await expect(row).toHaveAttribute('aria-disabled','true');
+  await expect(page.locator('#files-selected-count')).toHaveText('2');await stable(page);await finish(page);
 });
 
 test('artwork changes update the existing icon only after its write completes',async({page})=>{
@@ -145,6 +151,7 @@ test('large batches allow manual scrolling and remounted rows retain their compl
   expect(changes).toHaveLength(400);
   await holdApply(page);
   await page.evaluate(changes=>{for(const change of changes.slice(0,350))window.writeProgress({path:change.path,done:401,total:800,completed:'tags'});},changes);
+  await expect(page.locator('#files-selected-count')).toHaveText('50');
   await stable(page);
   const before=await page.locator('#files-view').evaluate(node=>node.scrollTop);
   expect(before).toBe(0);
@@ -165,4 +172,41 @@ test('Apply highlight transitions honour reduced motion',async({page})=>{
   await page.emulateMedia({reducedMotion:'reduce'});
   expect(await cell.evaluate(node=>getComputedStyle(node).transitionDuration)).toBe('0s');
   await finish(page);
+});
+
+test('Files owns immediate counts and grows for large numbers without clipping',async({page})=>{
+  await open(page);
+  await expect(page.locator('.command-toolbar #status-sel')).toHaveCount(0);
+  await expect(page.locator('#files-total-count')).toHaveText('3');
+  await expect(page.locator('#files-selected-count')).toHaveText('3');
+  await page.locator('#tracks-body tr[data-path]').first().click();
+  await expect(page.locator('#files-selected-count')).toHaveText('1');
+  await page.locator('#tracks-body tr[data-path]').first().click({modifiers:['Control']});
+  await expect(page.locator('#files-selected-count')).toHaveText('0');
+  await expect(page.locator('#files-selected')).toBeVisible();
+  await page.locator('#filter-panel-toggle').click();await page.locator('#filter').fill('Radio');
+  await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(1);
+  await expect(page.locator('#files-total-count')).toHaveText('3');
+  await expect(page.locator('#files-tab')).toHaveAccessibleDescription(/1\/3/);
+  await page.evaluate(()=>{document.getElementById('files-total-count').textContent='999,999,999';document.getElementById('files-selected-count').textContent='123,456,789';document.getElementById('files-selected').hidden=false;});
+  const size=await page.locator('#files-tab').evaluate(node=>{const box=node.getBoundingClientRect(),counts=node.querySelector('.files-tab-counts'),content=counts.getBoundingClientRect();return {width:box.width,right:box.right,contentRight:content.right,client:counts.clientWidth,scroll:counts.scrollWidth};});
+  expect(size.width).toBeGreaterThan(116);expect(size.contentRight).toBeLessThanOrEqual(size.right-12);expect(size.scroll).toBeLessThanOrEqual(size.client);
+  await expect(page.getByRole('tab',{name:'Files',exact:true})).toBeVisible();
+});
+
+test('a same-frame rename burst visibly completes top to bottom before the preview closes',async({page})=>{
+  await open(page);await page.locator('.mode-tab[data-mode="renamer"]').click();await page.locator('#mask').fill('Fast %title%');await page.locator('#preview').click();
+  await expect(page.locator('#diff-apply')).toBeEnabled();const changes=await page.evaluate(()=>window.tagrex.previewPlan.changes);await holdApply(page);
+  await page.evaluate(changes=>{
+    window.burstFrames=[];window.recordBurst=true;
+    const sample=()=>{if(!window.recordBurst)return;window.burstFrames.push([...document.querySelectorAll('#tracks-body tr.apply-complete')].map(row=>row.dataset.path));requestAnimationFrame(sample);};
+    requestAnimationFrame(sample);
+    for(const change of changes)window.writeProgress({path:change.path,done:changes.length*2,total:changes.length*2,completed:'transfer'});
+    window.finishWrite();
+  },changes);
+  await expect(page.locator('#diff-actionbar')).toBeHidden();
+  const frames=await page.evaluate(()=>{window.recordBurst=false;window.progressObserver.disconnect();return window.burstFrames;});
+  expect(frames.some(paths=>paths.length>0&&paths.length<changes.length)).toBe(true);
+  for(const paths of frames)expect(paths).toEqual(changes.slice(0,paths.length).map(change=>change.path));
+  expect(await page.evaluate(()=>window.tagrex.selectedPaths())).toEqual([]);
 });

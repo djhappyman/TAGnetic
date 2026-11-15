@@ -84,7 +84,7 @@ no extension rather than giving it one.
 checklist opens it on that preset. Your presets are listed first, the shipped
 ones below them.
 
-- **New preset** starts an empty preset. **Add rule** opens a short chooser
+- The **+** beside **Your presets** starts an empty preset. **Add rule** opens a short chooser
   explaining each rule type. Click a rule to expand its editor directly below
   it; only one editor is open at a time.
 - Right-click a preset, or open its **…** menu, to **Rename**, **Copy** or
@@ -101,7 +101,14 @@ ones below them.
   Rules for unrelated fields are excluded from that field's sample.
 - Shared targets appear once beside **Rules**; mixed targets appear beside
   their individual rules. Pattern errors appear beside the Find field.
-- Preset edits save when you switch presets, close the editor or quit.
+- **Search transformations** filters both preset lists. Group headings collapse
+  and expand their lists without changing your edits.
+- Preset edits stay local until you choose **Save**. You can switch presets and
+  keep editing before saving the whole library. **Save & close** also dismisses
+  the editor. **Cancel** discards changes made since the last Save; X, Escape
+  and backdrop dismissal ask before discarding an unsaved draft.
+- Ctrl/Cmd+S saves the draft. Ctrl/Cmd+F focuses the preset search. Saving presets
+  does not write music tags; file changes still require **Apply**.
   Trying a sample never writes your audio files: review the main change plan
   and use **Apply** to write changes.
 

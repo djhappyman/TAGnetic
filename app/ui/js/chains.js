@@ -122,11 +122,15 @@ function setPresetActive(group, on, context) {
 // job's set.
 function renameActivePreset(from, to) {
   if (!active) return;
-  const key = `user:${from}`;
+  // Apply a saved draft's renames atomically, including swaps and deletions.
+  const changes = Array.isArray(from) ? from : [{ from, to }];
+  const mapping = new Map(changes.map(change => [`user:${change.from}`, change.to]));
   for (const context of Object.keys(active)) {
-    if (!active[context].includes(key)) continue;
-    active[context] = active[context].filter((k) => k !== key);
-    if (to) active[context].push(`user:${to}`);
+    active[context] = active[context].flatMap(key => {
+      if (!mapping.has(key)) return [key];
+      const next = mapping.get(key);
+      return next === null ? [] : [`user:${next}`];
+    });
   }
   persistActive();
 }

@@ -86,17 +86,17 @@ test('a sample starts on a whole line and falls back safely when its subject is 
 
 const onlineSource=functions('online.js',['runSearch','updateLoadMoreUi','searchBusy']);
 function searchSetup(invoke) {
-  const nodes=Object.fromEntries(['online-source','discogs-query','search-per-page','search-format','discogs-empty','online-empty-heading','discogs-search','release-more','load-more'].map(id=>[id,{value:'',hidden:false,dataset:{},classList:{toggle(){}},setAttribute(){}}]));
+  const nodes=Object.fromEntries(['online-source','discogs-query','search-per-page','search-format','discogs-empty','online-empty-heading','discogs-search','release-more','release-loading','load-more'].map(id=>[id,{value:'',hidden:false,dataset:{},classList:{toggle(){}},setAttribute(){}}]));
   nodes['online-source'].value='musicbrainz';
   nodes['search-per-page'].value='5';
   const notices=[];
   const cache=()=>new Map();
   const context=vm.createContext({
     el:id=>nodes[id],invoke,providerToken:async()=>'',t:key=>key,toast:message=>notices.push(message),
-    prefetchReleaseCounts(){},renderReleaseList(){},
+    prefetchReleaseCounts(){},renderReleaseList(){},syncClearSearch(){},getOnlineOptions:()=>({perPage:5}),onlineScroll:{setAttribute(){},scrollTop:0},scheduleTracklistWindows(){},
     releaseCache:cache(),coverCache:cache(),artworkChoices:cache(),artworkRotations:cache(),artworkImages:cache(),imageCache:cache(),expandedIds:cache(),
   });
-  vm.runInContext(`let loadingResults=false,prefetching=false,searchFailed=false,searchPage=0,searchGen=0,releaseSource='',searchPerPage=5,searchHasMore=false,releaseCandidates=[];\n${onlineSource}`,context);
+  vm.runInContext(`let loadingResults=false,prefetching=false,searchFailed=false,searchPage=0,searchGen=0,releaseSource='',searchPerPage=5,searchHasMore=false,releaseCandidates=[],pagingPaused=false,searchRequest=null;\n${onlineSource}`,context);
   return {nodes,context,notices};
 }
 

@@ -114,7 +114,7 @@ body .files-col .file-view-tabs {
 }
 body .files-col .file-view-tabs button[data-slot='button'] {
   position:relative; display:flex; justify-content:flex-start; gap:8px;
-  flex:0 0 auto; width:116px; max-width:calc(50% - 2px); min-width:0;
+  flex:0 0 auto; width:max-content; max-width:none; min-width:116px; white-space:nowrap;
   height:32px; min-height:32px; padding:0 14px;
   border:0; border-radius:10px 10px 0 0; box-shadow:none;
   background:color-mix(in srgb,var(--panel) 88%,black); color:var(--muted); transform:none;
@@ -131,3 +131,10 @@ body .files-col:has(.file-view-tabs) .library-header { margin:0; padding:0 0 var
 body .files-col:has(.file-view-tabs) .library-header #root-field { border-radius:var(--r-control); background:var(--bg); }
 body .files-col .staged-tab-count { margin-left:auto; font-size:var(--type-help-size); color:var(--muted); font-variant-numeric:tabular-nums; }
 :root[data-theme='light'] .files-col .file-view-tabs button[data-slot='button']:not([aria-selected='true']) { background:color-mix(in srgb,var(--panel) 90%,var(--text)); }
+
+/* Compact live file/selection counts; large numbers grow their tab naturally. */
+body .files-col .files-tab-counts { display:inline-flex; align-items:center; gap:2px; margin-left:auto; color:var(--muted); font-size:var(--type-help-size); font-variant-numeric:tabular-nums; }
+body .files-col .files-tab-selection { display:inline-flex; align-items:center; gap:4px; color:var(--accent-ink); }
+body .files-col .files-count-divider { color:var(--muted); }
+body .files-col .file-view-tabs { overflow-x:auto; scrollbar-width:none; }
+body .files-col .file-view-tabs::-webkit-scrollbar { display:none; }
