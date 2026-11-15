@@ -1790,6 +1790,8 @@ fn read_settings_quietly(app: &tauri::AppHandle) -> SettingsDto {
     read_settings_recording(app, false)
 }
 
+static SETTINGS_NOTICE: Mutex<Option<String>> = Mutex::new(None);
+
 fn read_settings_recording(app: &tauri::AppHandle, record: bool) -> SettingsDto {
     let Ok(path) = settings_path(app) else {
         // Without a config directory there is nothing to read, and a save will
@@ -1800,12 +1802,18 @@ fn read_settings_recording(app: &tauri::AppHandle, record: bool) -> SettingsDto 
         Ok(Some(settings)) => {
             if record {
                 settings_store::note_read_success();
+                if let Ok(mut notice) = SETTINGS_NOTICE.lock() {
+                    *notice = None;
+                }
             }
             settings
         }
         Ok(None) => {
             if record {
                 settings_store::note_read_success();
+                if let Ok(mut notice) = SETTINGS_NOTICE.lock() {
+                    *notice = None;
+                }
             }
             SettingsDto::default()
         }
@@ -1816,6 +1824,9 @@ fn read_settings_recording(app: &tauri::AppHandle, record: bool) -> SettingsDto 
             );
             if record {
                 settings_store::note_read_success();
+                if let Ok(mut notice) = SETTINGS_NOTICE.lock() {
+                    *notice = Some(format!("Saved settings could not be parsed. Defaults are shown. The original file at {} will be preserved before replacement when you save.", path.display()));
+                }
             }
             SettingsDto::default()
         }
@@ -1823,6 +1834,9 @@ fn read_settings_recording(app: &tauri::AppHandle, record: bool) -> SettingsDto 
             eprintln!("settings: {} could not be read: {error}", path.display());
             if record {
                 settings_store::note_read_failure(error.to_string());
+                if let Ok(mut notice) = SETTINGS_NOTICE.lock() {
+                    *notice = Some(format!("Saved settings at {} could not be read: {error}. Defaults are shown and saving is blocked until the file can be read. Reopen Settings to retry.", path.display()));
+                }
             }
             SettingsDto::default()
         }
@@ -1970,9 +1984,26 @@ async fn close_button_side() -> Result<&'static str, ErrorDto> {
         .await
 }
 
+#[derive(serde::Serialize)]
+struct LoadedSettings {
+    #[serde(flatten)]
+    settings: SettingsDto,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery_notice: Option<String>,
+}
+
 #[tauri::command]
-async fn load_settings(app: tauri::AppHandle) -> Result<SettingsDto, ErrorDto> {
-    SETTINGS_QUEUE.run(move || Ok(read_settings(&app))).await
+async fn load_settings(app: tauri::AppHandle) -> Result<LoadedSettings, ErrorDto> {
+    SETTINGS_QUEUE
+        .run(move || {
+            let settings = read_settings(&app);
+            let recovery_notice = SETTINGS_NOTICE.lock().map_err(shell_error)?.take();
+            Ok(LoadedSettings {
+                settings,
+                recovery_notice,
+            })
+        })
+        .await
 }
 
 /// The shipped preset library (#137). Read-only and not part of settings: the

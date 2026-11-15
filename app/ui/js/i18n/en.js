@@ -674,6 +674,8 @@ export const en = {
   "chain.keyNote": "Convert key notation. Use on the Key field. Unknown values stay unchanged.",
   "chain.builtIn": "Built-in",
   "player.noTrack": "No track loaded",
+  "player.outputUnavailable": "Audio output unavailable",
+  "player.outputUnavailableHint": "Connect an audio device, then press Play to try again.",
   "toast.player.noSeek": "This file can't be seeked",
   "toast.player.gone": "That track isn't in the open library any more",
   "settings.beatport.waiting": "Waiting for the Beatport window…",

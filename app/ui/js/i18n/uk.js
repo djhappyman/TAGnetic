@@ -551,6 +551,8 @@ export const uk = {
   "chain.keyNote": "Перетворює музичну тональність (краще націлювати на поле «Тональність»). Нерозпізнані значення лишаються як є.",
   "chain.builtIn": "Вбудовані",
   "player.noTrack": "Трек не завантажено",
+  "player.outputUnavailable": "Аудіовихід недоступний",
+  "player.outputUnavailableHint": "Підключіть аудіопристрій і знову запустіть відтворення.",
   "toast.player.noSeek": "За цим файлом не можна перемотувати",
   "toast.player.gone": "Цього трека більше немає у відкритій бібліотеці",
   "settings.beatport.waiting": "Очікування вікна Beatport…",
