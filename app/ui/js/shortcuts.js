@@ -55,6 +55,7 @@ function pressMode(mode) {
 const ACTIONS = [
   { id: "apply", combo: "Mod+Enter", buttons: ["diff-apply"], run: () => press("diff-apply") },
   { id: "discard", combo: "Mod+Backspace", buttons: ["diff-discard"], run: () => press("diff-discard") },
+  { id: "redo", combo: "Mod+Shift+KeyZ", buttons: ["redo"], run: () => press("redo") },
   { id: "undo", combo: "Mod+KeyZ", buttons: ["undo"], run: () => press("undo") },
   {
     id: "clearTags",

@@ -83,3 +83,23 @@ When implementations conflict, document the concrete behavior, the reason it fit
 The personal branch retains its existing pooled-artwork journal implementation. That on-disk format is not submitted as part of the Next refresh: upstream explicitly requires stable-readable inline image records, and those records and the cross-version probe are preserved there. No existing journal is silently converted. Sharing artwork in memory/transport and encoding reuse are separate from the journal format.
 
 The compact personal player no longer uses the waveform analysis API. The upstream refresh retains that shared API and its tests because stable main still uses it; removing the control from one interface does not justify removing another interface's backend capability. These are intentional differences, so interface parity does not mean byte-identical Rust/configuration trees.
+
+## Selected upstream adoption (2026-11-15)
+
+The personal fork adapts upstream main's APE/WavPack write guards (`c106b1c`,
+`741dde3`), concrete read fallback (`23416bc`), filename matching (`abc6388`),
+unmatched-import scope (`25f074f`), manual-order retention (`49ecbb9`), shared
+length offset/order confirmation (`c0f7c85`, `0830f44`) and session Redo
+(`8e17613`). These behaviors already exist upstream; no duplicate native PR is
+needed. Tests retain upstream's disposable malformed-file fixtures.
+
+The integration preserves this fork's captured selection, live staged inputs,
+query snapshots, pooled artwork journal and component ribbon. Those compatibility
+adaptations belong to the personal implementation. The duration evidence runs in
+Rust over cached reads; the frontend confirms an explicit reorder and rechecks
+its captured subject after asynchronous replies. Existing release identity and
+font choices remain intact.
+
+The legacy-JS undefined-name check adapts `e40bfda`; output-test token scoping
+adapts `2947a3d`. Only the missing condensed-font coverage from `fe97686` is
+adopted. The other bundled font families already contain Greek and Vietnamese.

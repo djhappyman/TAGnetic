@@ -1422,4 +1422,18 @@ export const en = {
   "presets.discardPrompt": "Discard unsaved preset changes?",
   "presets.discardDetail": "Your saved presets will stay unchanged.",
   "presets.noMatches": "No matching presets.",
+
+  "topbar.redo": "Redo the last undone batch",
+  "redo.running": "Redoing…",
+  "topbar.redoCount": "Redo the last undone batch ({batches})",
+  "shortcuts.action.redo": "Redo the last undone batch",
+  "app.redid": "Redid last batch",
+
+  "import.orderContradicts": "The file order does not match the track lengths: {files} would get the tags of a track whose length is far from theirs.",
+  "import.orderByLength": "Reorder",
+  "import.asItStands": "Keep",
+  "match.action": "Match",
+  "match.actionHint": "Match selected files to release tracks",
+  "match.none": "No confident matches found. Review the selected files and release.",
+  "match.completed": "Matched {files}. Review the order before importing.",
 };

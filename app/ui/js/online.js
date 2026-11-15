@@ -9,7 +9,7 @@ import { createComponentElement, upgradeComponentMarkup } from "../lib/component
 // browser, the query presets that build a search string from the selection, and
 // the import that merges a release onto the selected files. Everything it
 // stages goes through the ordinary preview/apply/undo path.
-import { confirmDialog, el, escapeHtml, fileName, ico, placeFloating, placeContextMenu, toast } from "./dom.js";
+import { choiceDialog, confirmDialog, el, escapeHtml, fileName, ico, placeFloating, placeContextMenu, toast } from "./dom.js";
 import { t, tn } from "./i18n.js";
 import { chooseArtwork } from "./artworkpicker.js";
 import { invoke } from "./invoke.js";
@@ -1188,7 +1188,7 @@ function renderTracklist(card, release) {
     <div class="tracklist-scroll"><table>
       <thead><tr class="tk-head">
         <th class="tk-lead"><label class="tk-selall" title="${escapeHtml(t("online.selectAllTitle"))}"><input type="checkbox" class="tk-selall-box" aria-label="${escapeHtml(t("online.selectAllAria"))}" /></label></th>
-        <th class="tk-selcount muted" colspan="2"><span class="tk-readout"><span class="tk-count">${escapeHtml(countLabel(card.dataset.id))}</span><span class="tk-tally"></span></span></th>
+        <th class="tk-selcount muted" colspan="2"><span class="tk-readout"><span class="tk-count">${escapeHtml(countLabel(card.dataset.id))}</span><span class="tk-tally"></span></span><button type="button" class="tk-match" title="${escapeHtml(t("match.actionHint"))}" aria-label="${escapeHtml(t("match.actionHint"))}">${escapeHtml(t("match.action"))}</button></th>
       </tr></thead>
       <tbody></tbody></table></div>`;
   upgradeComponentMarkup(card.querySelector('.release-tracklist'));
@@ -1198,6 +1198,7 @@ function renderTracklist(card, release) {
   fixTrackColumnWidth(card);
   tracklistResize.observe(card.querySelector(".release-tracklist table"));
   updateTracklistCount(card);
+  card.querySelector('.tk-match').addEventListener('click', () => matchReleaseFiles(card));
 }
 
 function updateTracklistCount(card) {
@@ -1416,10 +1417,37 @@ async function requestImportPreview(args, version, subject) {
   }
 }
 
+async function matchReleaseFiles(card) {
+  const captured = captureSelection();
+  const paths = hooks.orderPathsForDisplay(captured.paths);
+  if (!paths.length) { toast(t('toast.online.selectImport'), true); return; }
+  const release = releaseCache.get(card.dataset.id);
+  const state = tracklistState.get(card);
+  if (!release || !state) return;
+  const button = card.querySelector('.tk-match');
+  button.disabled = true;
+  try {
+    const matches = await invoke('auto_align', {paths, tracks:release.tracks.map(track => ({...track, artist:track.artist || release.artist}))});
+    if (!isSelectionCurrent(captured) || releaseCache.get(card.dataset.id) !== release) return;
+    const paired = matches.map((match, index) => ({track:match?.track, path:paths[index]}))
+      .filter(pair => Number.isInteger(pair.track) && pair.track >= 0 && pair.track < release.tracks.length)
+      .sort((a,b) => a.track-b.track);
+    if (!paired.length) { toast(t('match.none')); return; }
+    const assigned = new Set(paired.map(pair => pair.path));
+    const order = [...paired.map(pair => pair.path), ...paths.filter(path => !assigned.has(path))];
+    if (!hooks.orderSelectedFiles(paths, order)) return;
+    state.checked.fill(0);
+    for (const pair of paired) state.checked[pair.track] = 1;
+    renderWindow(card, true); updateTracklistCount(card);
+    toast(t('match.completed', {files:tn('unit.file', paired.length)}));
+  } catch (error) { toast(String(error), true); }
+  finally { button.disabled = false; }
+}
+
 async function importRelease(card) {
   const captured = captureSelection();
-  const subject = { ...captured, paths: hooks.orderPathsForDisplay(captured.paths) };
-  const paths = subject.paths;
+  let subject = { ...captured, paths: hooks.orderPathsForDisplay(captured.paths) };
+  let paths = subject.paths;
   if (paths.length === 0) {
     toast(t("toast.online.selectImport"), true);
     return;
@@ -1459,15 +1487,30 @@ async function importRelease(card) {
     // Physical medium → drives the vinyl side view (#106).
     media_type: mediaTagValue(release.format),
   };
+  const chosenTracks = JSON.stringify(selection.tracks);
+  const current = () => isSelectionCurrent(subject) && isLiveImportCurrent(version) && releaseCache.get(card.dataset.id) === release && JSON.stringify(enabledTracksOf(card)) === chosenTracks;
   try {
+    const proposal = await invoke('check_import_order', {paths, tracks:selection.tracks, releaseTracks:release.tracks.map(track => ({...track, artist:track.artist || release.artist}))});
+    if (!current()) return;
+    if (proposal) {
+      const choice = await choiceDialog(t('import.orderContradicts', {files:tn('unit.file',proposal.contradicted)}), {
+        primary:t('import.orderByLength'), secondary:t('import.asItStands'),
+      });
+      if (!current() || !choice) return;
+      if (choice === 'primary') {
+        if (!hooks.orderSelectedFiles(paths, proposal.order)) return;
+        paths = proposal.order;
+        subject = {...captureSelection(), paths};
+      }
+    }
     const preferences = await prepareImportPreferences();
-    if (!isSelectionCurrent(subject) || !isLiveImportCurrent(version)) return;
+    if (!current()) return;
     const imported = await requestImportPreview({
       paths,
       selection,
       vinylSidesToDisc: getOnlineOptions().vinylSidesToDisc,
     }, version, subject);
-    if (!imported || !isSelectionCurrent(subject) || !isLiveImportCurrent(version)) return;
+    if (!imported || !current()) return;
     // Hand the release's cover to the staging step (#207) so the tags and the
     // artwork become ONE plan — one Apply, one undo. Whether any of it is
     // written is the backend's call: the import-cover setting decides, per
@@ -1477,8 +1520,9 @@ async function importRelease(card) {
     // importing straight after expanding would otherwise race it and drop the
     // artwork silently, which is the one failure this feature must not have.
     if (preferences.import_cover !== 'never') await loadFullCover(card.dataset.id, release.cover_image_url, card);
-    if (!isSelectionCurrent(subject) || !isLiveImportCurrent(version)) return;
-    if (!replaceLiveImport(imported, preferences.import_cover !== 'never' ? coverCache.get(card.dataset.id) || null : null, paths, version)) return;
+    if (!current()) return;
+    const coverPaths = selection.tracks.length ? paths.slice(0, selection.tracks.length) : paths;
+    if (!replaceLiveImport(imported, preferences.import_cover !== 'never' ? coverCache.get(card.dataset.id) || null : null, coverPaths, version, paths)) return;
     refreshFieldEditor({force:true});
     await hooks.previewEdits();
   } catch (e) {

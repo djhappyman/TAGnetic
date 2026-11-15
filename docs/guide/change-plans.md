@@ -76,8 +76,8 @@ current library.
 - **It is a stack, not a single step.** Each undo takes the newest remaining
   batch and removes it from the journal, so pressing it repeatedly walks back
   through your session.
-- **There is no redo.** An undone batch is gone from the journal. If you undo one
-  step too far, you have to make the change again.
+- **Redo is available in the open session.** The arrow beside Undo reapplies
+  a fully undone batch. A new saved change clears Redo; see below.
 - **It survives restarts.** The journal is a SQLite database on disk, so closing
   Tagnetic and reopening the same library leaves the history intact.
 - **It is scoped to the library you have open.** The journal is shared across
@@ -115,3 +115,17 @@ Both create new files and modify nothing, which is why they skip the preview.
 They are also not in the undo journal — delete the files if you don't want them.
 
 Everything that modifies an audio file or its name goes through the gate.
+
+## Redo
+
+The arrow beside Undo reapplies the last fully undone batch. Use the button or
+**Ctrl/Cmd+Shift+Z** outside a text field. Text fields retain their own typing
+Undo and Redo.
+
+Redo is available for this open session. A new saved change clears it; restarting
+or opening another library clears it too. A partial Undo that kept newer values
+cannot be replayed exactly, so it clears Redo. Files changed since Undo are
+refused rather than overwritten, and a refused Redo remains available to retry.
+
+Pending editor values stay pending while Redo runs. The app refreshes saved
+metadata and validates their preview again before Apply becomes available.

@@ -9,7 +9,8 @@
     "test:ui": "vite build --config tests/ui/vite.config.js && playwright test",
     "dev": "vite",
     "icons": "node tools/generate-icons.mjs",
-    "desktop:dev": "tauri dev --config app/tauri.dev.conf.json"
+    "desktop:dev": "tauri dev --config app/tauri.dev.conf.json",
+    "lint": "node tools/lint/check.js"
   },
   "dependencies": {
     "@lucide/svelte": "^1.72.0",

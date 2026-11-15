@@ -35,6 +35,7 @@ export const hooks = {
   navigablePaths: () => [],
   // Order captured paths by the full table model, including virtual/collapsed rows.
   orderPathsForDisplay: paths => [...paths],
+  orderSelectedFiles: () => false,
   // Redraw whatever the open panel builds at runtime after a language change
   // (#50). The static markup is repainted by `applyStaticText`; this is for the
   // strings a panel writes itself — hints, counts, swapped labels.

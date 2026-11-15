@@ -33,7 +33,7 @@ test.beforeEach(async({page})=>{
     try{
       let body=await readFile(path);
       if(path.endsWith('.js'))body=Buffer.from(body.toString()
-        .replace(/case([`"'])apply_plan\1:\s*for\((?:let|const)\s+\w+\s+of\s+(\w+)\.plan\.changes\)/g,(match,_quote,args)=>match.replace(':',`:window.liveAppliedPaths=${args}.plan.changes.map(change=>change.path);`))
+        .replace(/case([`"'])apply_plan\1:\s*(?:\{[^]*?)?for\((?:let|const)\s+\w+\s+of\s+(\w+)\.plan\.changes\)/g,(match,_quote,args)=>match.replace(':',`:window.liveAppliedPaths=${args}.plan.changes.map(change=>change.path);`))
         .replace(/case([`"'])(preview_live_edits|preview_import|apply_plan|undo)\1:/g,(match,_quote,command)=>`${match}window.liveCalls['${command}']=(window.liveCalls['${command}']||0)+1;`));
       await route.fulfill({body,contentType:path.endsWith('.js')?'text/javascript':path.endsWith('.css')?'text/css':path.endsWith('.woff2')?'font/woff2':'text/html'});
     }catch(error){if(!String(error).includes('ENOENT'))throw error;await route.fulfill({status:404,body:'Missing fixture'});}

@@ -1,3 +1,4 @@
+import { captureFileOrder, restoreFileOrder } from "./js/file-order.js";
 import { interpretQueryText } from './js/query-language.js';
 import { connectRibbonActions } from './js/ribbon-actions.js';
 import { formatNumber } from './js/number-format.js';
@@ -144,6 +145,7 @@ Object.assign(hooks, {
   revealPath,
   navigablePaths: () => navPaths,
   orderPathsForDisplay,
+  orderSelectedFiles,
   // A language change repaints the static markup itself; the open panel builds
   // some of its own text, so it is asked to draw again (#50). The library
   // indicator is dynamic too (#287) — repaint it so an open folder's name and
@@ -283,6 +285,7 @@ function syncFileView() {
 }
 const applyBtn = el("diff-apply");
 const undoBtn = el("undo");
+const redoBtn = el("redo");
 const selectAll = el("select-all");
 const statusSel = el("status-sel");
 let spreadsheet = null;
@@ -1911,15 +1914,21 @@ function diffCell(change, field, track) {
 }
 
 let latestBatchId = null;
+let redoCount = 0;
+const redoViews = [];
+const batchHandOrders = new Map();
 let historyLoaded = false;
 let historyReadVersion = 0;
 async function refreshHistory() {
   const version = ++historyReadVersion;
   const root = sessionRoot;
   try {
-    const batches = await invoke("history", {});
+    const [batches, count] = await Promise.all([invoke("history", {}), invoke("redo_count", {})]);
     if (version !== historyReadVersion || root !== sessionRoot) return;
     latestBatchId = batches[0]?.id ?? null;
+    redoCount = count;
+    if (redoViews.length > count) redoViews.splice(0, redoViews.length - count);
+    updateRedoControl();
     historyLoaded = true;
     undoBtn.disabled = batches.length === 0;
     // Undo is icon-only now (#115) — reflect the batch count in the tooltip /
@@ -1935,6 +1944,13 @@ async function refreshHistory() {
 }
 
 
+
+function updateRedoControl() {
+  redoBtn.disabled = !redoCount || commandMode === 'duplicates' || applying || undoing || Boolean(diffByPath && !isAutomaticTransformPreview());
+  const label = redoCount ? msg('topbar.redoCount', {batches:tn('unit.batch', redoCount)}) : msg('topbar.redo');
+  redoBtn.title = label;
+  redoBtn.setAttribute('aria-label', label);
+}
 
 // A path as a file manager hands it over (#179). Finder's "Copy as Pathname"
 // wraps anything containing a space in single quotes, a shell copy uses double
@@ -2164,8 +2180,9 @@ async function refreshLibrary() {
     for (const path of goneFromSelection) selection.delete(path);
     for (const path of goneFromEdits) edits.delete(path);
     const before = tracks.length;
+    const order = handOrder();
     setTracks(fresh);
-    sortTracks(); // the sort stays, as everything else does (#526)
+    sortKeepingHandOrder(order); // the sort stays, as everything else does (#526)
     // Nothing left selected but files to select: the same rule the open path
     // follows, so an operation is never aimed at nothing without saying so.
     if (selection.size === 0) {
@@ -2337,6 +2354,7 @@ async function afterOpen(label, version = openVersion, savedView = null) {
   setSortKey(null);
   setSortDir(1);
   setManualOrder(false);
+  redoViews.length = 0; batchHandOrders.clear(); redoCount = 0; updateRedoControl();
   filterConditions = [];
   filterRoot=emptyRoot();nativeMatchPaths=null;duplicateGroups=[];duplicateJobs.invalidate();duplicateScanStarted=false;duplicateScanning=false;duplicateStatus='not_scanned';duplicateFoundCount=0;duplicateMessage='';resetDuplicatePublications();libraryQueryClient.invalidate();nativeMatchRevision=-1;scheduledQueryRevision=-1;
   filterConditionMode = "all";
@@ -2458,6 +2476,8 @@ const automaticRenameBatches = new Map();
 const batchRefreshScopes = new Map();
 function rememberBatchScope(batch, plan) {
   if (batch?.id == null) return;
+  if (manualOrder) batchHandOrders.set(batch.id, handOrder());
+  while (batchHandOrders.size > 128) batchHandOrders.delete(batchHandOrders.keys().next().value);
   const moved = plan.changes.some(change => change.rename_to || change.sidecar_renames?.length);
   batchRefreshScopes.set(batch.id, moved ? null : [...new Set(plan.changes.map(change => change.path))]);
   // Older batches remain undoable through the scanner fallback; this memo is
@@ -2593,9 +2613,10 @@ async function apply() {
     }
     // Cover/tag-only batches read back their exact targets. Moves use the
     // scanner because they can change folder/file-set membership.
+    const order = handOrder(new Map(appliedPlan.changes.filter(change => change.rename_to && !change.copy).map(change => [change.path, change.rename_to])));
     const readback = await refreshBatchTracks(batchRefreshScopes.get(batch.id) ?? null, sourceTracks);
     if (!readback) return;
-    sortTracks(); // changed values can change the active sort order
+    sortKeepingHandOrder(order); // retain explicit alignment across writes
     // Mask columns render from disk, and an apply is exactly when what is on
     // disk changed under unchanged paths (#150).
     const scopedFields = readback === 'scoped' && !appliedPlan.changes.some(change => change.block_changes?.length)
@@ -2665,6 +2686,8 @@ async function undo() {
     if (!historyLoaded) await refreshHistory();
     const batchId = latestBatchId;
     if (batchId === null) return;
+    const redoView = {scope:batchRefreshScopes.get(batchId) ?? null, order:handOrder()};
+    const order = batchHandOrders.get(batchId) ?? handOrder();
     await beginUndoProgress();
     let result;
     try {
@@ -2700,7 +2723,8 @@ async function undo() {
     resetEdits();
     const readback = await refreshBatchTracks(batchRefreshScopes.get(batchId) ?? null, sourceTracks);
     if (!readback) return;
-    sortTracks(); // restore the active view order after reading changed values
+    sortKeepingHandOrder(order);
+    if (!kept.length) redoViews.push(redoView);
     invalidateCustomColumns(readback === "scoped" ? batchRefreshScopes.get(batchId) : null);
     batchRefreshScopes.delete(batchId);
     // exitDiffState() also clears previewPlan/previewSource and repaints.
@@ -2713,11 +2737,47 @@ async function undo() {
     endUndoProgress();
     undoing = false;
     releaseMutationSurfaces();
+    syncRibbonSelection();
     resumeAutomaticTransformPreview({ dismiss: !hasLiveInputs() });
   }
 }
 
 
+
+async function redo() {
+  if (redoBtn.disabled || applying || undoing) return;
+  undoing = true;
+  const releaseMutationSurfaces = freezeMutationSurfaces();
+  const sourceTracks = tracks;
+  const view = redoViews.at(-1);
+  pauseAutomaticTransformPreview();
+  try {
+    await beginUndoProgress('redo.running');
+    const batch = await invoke('redo', {});
+    if (!batch || tracks !== sourceTracks) return;
+    const readback = await refreshBatchTracks(view?.scope ?? null, sourceTracks);
+    if (!readback) return;
+    batchRefreshScopes.set(batch.id, view?.scope ?? null);
+    if (view?.order) batchHandOrders.set(batch.id, handOrder());
+    sortKeepingHandOrder(view?.order ?? handOrder());
+    if (view) redoViews.pop();
+    invalidateCustomColumns(readback === 'scoped' ? view?.scope : null);
+    invalidateAutomaticTransformPreview();
+    if (!hasLiveInputs()) exitDiffState();
+    else renderTracks();
+    refreshCustomColumnCells();
+    toast(msg('app.redid'));
+  } catch (error) {
+    toast(String(error), true);
+  } finally {
+    endUndoProgress();
+    undoing = false;
+    releaseMutationSurfaces();
+    syncRibbonSelection();
+    resumeAutomaticTransformPreview({dismiss:!hasLiveInputs()});
+    await refreshHistory();
+  }
+}
 
 // ---- mode tabs ----
 // The active mode's panel is the only one shown; entering a mode refreshes its
@@ -3103,6 +3163,7 @@ async function addFolderToList(root) {
   finally { ribbonFolderBusy = false; appendTypedFolder = false; }
 }
 function syncRibbonSelection() {
+  updateRedoControl();
   const reviewing = usingReviewSelection();
   const count = reviewing ? applySelection.size : selection.size;
   const total = reviewing ? diffByPath.size : viewPaths.length;
@@ -3319,6 +3380,7 @@ document.addEventListener("click", (e) => {
 
 applyBtn.addEventListener("click", apply);
 undoBtn.addEventListener("click", undo);
+redoBtn.addEventListener("click", redo);
 
 // Same flow from the table toolbar, so clearing doesn't require opening EDITOR.
 el("clear-tags").addEventListener("click", previewClearTags);
@@ -4016,6 +4078,32 @@ function sortTracks() {
   });
   for (let i = 0; i < keyed.length; i++) tracks[i] = keyed[i].track;
   reindexTracks();
+}
+
+function orderSelectedFiles(paths, order) {
+  if (applying || undoing || paths.length !== order.length) return false;
+  const requested = new Set(paths);
+  if (requested.size !== order.length || new Set(order).size !== order.length || order.some(path => !requested.has(path) || !trackAt(path))) return false;
+  const byPath = new Map(tracks.map(track => [track.path, track]));
+  let next = 0;
+  setTracks(tracks.map(track => requested.has(track.path) ? byPath.get(order[next++]) : track));
+  setManualOrder(true);
+  renderTracks();
+  syncSelectionUI();
+  return true;
+}
+
+function handOrder(renamed) {
+  return captureFileOrder(tracks, manualOrder, renamed);
+}
+
+function sortKeepingHandOrder(order) {
+  sortTracks();
+  if (!order) return;
+  const placed = restoreFileOrder(tracks, order);
+  for (let i = 0; i < placed.length; i++) tracks[i] = placed[i];
+  reindexTracks();
+  setManualOrder(true);
 }
 
 // Sort clicks are delegated on the header so dynamically-built columns (#43)
