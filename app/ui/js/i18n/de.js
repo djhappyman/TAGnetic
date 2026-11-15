@@ -546,6 +546,8 @@ export const de = {
   "chain.keyNote": "Wandelt die Tonart um (am besten auf das Feld Tonart beschränkt). Unbekannte Werte bleiben unverändert.",
   "chain.builtIn": "Eingebaut",
   "player.noTrack": "Kein Track geladen",
+  "player.outputUnavailable": "Audioausgabe nicht verfügbar",
+  "player.outputUnavailableHint": "Verbinde ein Audiogerät und starte die Wiedergabe erneut.",
   "toast.player.noSeek": "In dieser Datei kann nicht gesprungen werden",
   "toast.player.gone": "Dieser Track ist nicht mehr in der geöffneten Bibliothek",
   "settings.beatport.waiting": "Warte auf das Beatport-Fenster…",

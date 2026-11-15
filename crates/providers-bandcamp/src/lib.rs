@@ -81,14 +81,46 @@ impl BandcampProvider {
         })
     }
 
-    fn get(&self, url: &str) -> Result<String, ProviderError> {
-        let mut response = self
-            .agent
-            .get(url)
-            .header("User-Agent", USER_AGENT)
-            .call()
-            .map_err(|err| ProviderError::Network(err.to_string()))?;
-        read_ok(&mut response)
+    fn get_release_page(&self, url: &str) -> Result<(String, String), ProviderError> {
+        let mut url = url.to_string();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..=5 {
+            validate_release_url(&url)?;
+            if !seen.insert(url.clone()) {
+                return Err(ProviderError::Other("release redirect loop".into()));
+            }
+            let mut response = self
+                .agent
+                .get(&url)
+                .header("User-Agent", USER_AGENT)
+                .config()
+                .max_redirects(0)
+                .max_redirects_will_error(false)
+                .build()
+                .call()
+                .map_err(|err| ProviderError::Network(err.to_string()))?;
+            let status = response.status().as_u16();
+            if matches!(status, 301 | 302 | 303 | 307 | 308) {
+                let location = response
+                    .headers()
+                    .get("location")
+                    .and_then(|value| value.to_str().ok())
+                    .ok_or_else(|| {
+                        ProviderError::Other("release redirect missing Location".into())
+                    })?;
+                url = release_redirect(&url, location)?;
+                continue;
+            }
+            if !(200..300).contains(&status) {
+                return Err(status_to_error(status, retry_after(&response)));
+            }
+            let html = response
+                .body_mut()
+                .read_to_string()
+                .map_err(|err| ProviderError::Network(err.to_string()))?;
+            return Ok((html, url));
+        }
+        Err(ProviderError::Other("too many release redirects".into()))
     }
 
     fn post_json(&self, url: &str, body: &Value) -> Result<String, ProviderError> {
@@ -158,7 +190,7 @@ impl MetadataProvider for BandcampProvider {
         }
         // A pasted release URL is a direct hit — fetch that page and present it
         // as the one candidate, so its card shows the real artist/title/cover.
-        if is_bandcamp_url(text) {
+        if is_bandcamp_url(text) || text.contains("://") || text.starts_with("//") {
             return match self.fetch_release(&ReleaseId(text.to_string())) {
                 Ok(release) => Ok(vec![release_to_candidate(&release)]),
                 // A URL that doesn't parse as a release is simply no result.
@@ -182,8 +214,9 @@ impl MetadataProvider for BandcampProvider {
     }
 
     fn fetch_release(&self, id: &ReleaseId) -> Result<Release, ProviderError> {
-        let html = self.get(&id.0)?;
-        parse_release(&html, &id.0)
+        validate_release_url(&id.0)?;
+        let (html, final_url) = self.get_release_page(&id.0)?;
+        parse_release(&html, &final_url)
     }
 }
 
@@ -222,10 +255,98 @@ fn status_to_error(status: u16, retry_after_secs: Option<u64>) -> ProviderError 
 /// Whether the text is a Bandcamp release URL (an album or a single track),
 /// rather than a free-text search.
 fn is_bandcamp_url(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    lower.starts_with("http")
-        && lower.contains("bandcamp.com/")
-        && (lower.contains("/album/") || lower.contains("/track/"))
+    validate_release_url(text).is_ok()
+}
+
+/// Accept only provider-owned release pages. Custom Bandcamp domains are not
+/// verifiable from an arbitrary pasted authority; use its canonical Bandcamp URL.
+fn validate_release_url(text: &str) -> Result<ureq::http::Uri, ProviderError> {
+    let invalid = || {
+        ProviderError::Other(
+            "invalid Bandcamp release URL; use a canonical Bandcamp release link".into(),
+        )
+    };
+    let uri: ureq::http::Uri = text.parse().map_err(|_| invalid())?;
+    let scheme = uri.scheme_str().ok_or_else(invalid)?;
+    if !matches!(scheme, "http" | "https") {
+        return Err(invalid());
+    }
+    let host = uri.host().ok_or_else(invalid)?.to_ascii_lowercase();
+    let authority = uri.authority().ok_or_else(invalid)?.as_str();
+    let default_port = if scheme == "https" { 443 } else { 80 };
+    if !(host == "bandcamp.com" || host.ends_with(".bandcamp.com"))
+        || !(authority.eq_ignore_ascii_case(&host)
+            || authority.eq_ignore_ascii_case(&format!("{host}:{default_port}")))
+    {
+        return Err(invalid());
+    }
+    let parts: Vec<_> = uri
+        .path()
+        .strip_suffix('/')
+        .unwrap_or(uri.path())
+        .split('/')
+        .collect();
+    let valid_path = parts.len() == 3
+        && matches!(parts[1], "album" | "track")
+        && valid_release_segment(parts[2]);
+    if !valid_path {
+        return Err(invalid());
+    }
+    Ok(uri)
+}
+
+// Titles may contain escaped Unicode or punctuation. Decode only for the path
+// boundary checks; never let an escaped separator or dot segment change routes.
+fn valid_release_segment(segment: &str) -> bool {
+    let mut decoded = Vec::with_capacity(segment.len());
+    let mut bytes = segment.bytes();
+    while let Some(byte) = bytes.next() {
+        let byte = if byte == b'%' {
+            let Some(high) = bytes.next().and_then(|b| (b as char).to_digit(16)) else {
+                return false;
+            };
+            let Some(low) = bytes.next().and_then(|b| (b as char).to_digit(16)) else {
+                return false;
+            };
+            (high * 16 + low) as u8
+        } else {
+            byte
+        };
+        if byte.is_ascii_control() || matches!(byte, b'/' | b'\\') {
+            return false;
+        }
+        decoded.push(byte);
+    }
+    !decoded.is_empty() && decoded != b"." && decoded != b".."
+}
+
+fn release_redirect(current: &str, location: &str) -> Result<String, ProviderError> {
+    let current = validate_release_url(current)?;
+    let next = if location.starts_with('/') && !location.starts_with("//") {
+        format!(
+            "{}://{}{}",
+            current.scheme_str().unwrap_or("https"),
+            current.authority().map(|a| a.as_str()).unwrap_or_default(),
+            location
+        )
+    } else if location.starts_with('?') {
+        format!(
+            "{}://{}{}{}",
+            current.scheme_str().unwrap_or("https"),
+            current.authority().map(|a| a.as_str()).unwrap_or_default(),
+            current.path(),
+            location
+        )
+    } else {
+        location.to_string()
+    };
+    let next_uri = validate_release_url(&next)?;
+    if current.scheme_str() == Some("https") && next_uri.scheme_str() != Some("https") {
+        return Err(ProviderError::Other(
+            "release redirect would downgrade HTTPS".into(),
+        ));
+    }
+    Ok(next)
 }
 
 /// Parse the autocomplete endpoint's JSON into album candidates. Non-album
@@ -491,6 +612,79 @@ fn str_field(value: &Value, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_unrelated_or_ambiguous_release_urls_before_transport() {
+        let provider = BandcampProvider::new();
+        for url in [
+            "http://127.0.0.1/bandcamp.com/album/title",
+            "http://localhost/album/title?bandcamp.com",
+            "https://bandcamp.com.evil.test/album/title",
+            "https://evilbandcamp.com/album/title",
+            "https://bandcamp.com@127.0.0.1/album/title",
+            "https://user@artist.bandcamp.com/album/title",
+            "https://artist.bandcamp.com:8443/album/title",
+            "ftp://artist.bandcamp.com/album/title",
+            "https://artist.bandcamp.com/wrong/album/title",
+            "https://artist.bandcamp.com/album/title/extra",
+            "https://artist.bandcamp.com/album/%2e%2e/release",
+        ] {
+            assert!(!is_bandcamp_url(url), "{url}");
+            assert!(
+                matches!(
+                    provider.fetch_release(&ReleaseId(url.into())),
+                    Err(ProviderError::Other(_))
+                ),
+                "{url}"
+            );
+            assert!(
+                matches!(
+                    provider.search(&SearchQuery {
+                        album: Some(url.into()),
+                        ..Default::default()
+                    }),
+                    Err(ProviderError::Other(_))
+                ),
+                "search {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn permits_escaped_titles_but_rejects_path_delimiters_and_traversal() {
+        assert!(is_bandcamp_url(
+            "https://artist.bandcamp.com/album/some.title-%E6%97%A5"
+        ));
+        for segment in [
+            "%2e%2e",
+            "%2f",
+            "title%2fother",
+            "title%5cother",
+            "%00",
+            "%GG",
+            "%1",
+        ] {
+            assert!(!valid_release_segment(segment), "{segment}");
+        }
+        assert!(valid_release_segment("some.title-%E6%97%A5"));
+    }
+
+    #[test]
+    fn validates_redirect_destinations_and_prevents_downgrades() {
+        let current = "https://artist.bandcamp.com/album/title";
+        assert!(release_redirect(current, "/album/title?ref=123").is_ok());
+        assert!(release_redirect(current, "?ref=123").is_ok());
+        for next in [
+            "http://artist.bandcamp.com/album/title",
+            "https://127.0.0.1/album/title",
+            "//127.0.0.1/album/title",
+            "https://bandcamp.com.evil.test/album/title",
+            "https://artist.bandcamp.com/search",
+        ] {
+            assert!(release_redirect(current, next).is_err(), "{next}");
+        }
+        assert!(release_redirect("http://artist.bandcamp.com/album/title", current).is_ok());
+    }
 
     /// A server that answers 429 with a `Retry-After` (with the whitespace HTTP
     /// allows around it) is a rate limit for as long as it asks, end to end.

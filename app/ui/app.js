@@ -28,7 +28,7 @@ import { initRowSelection } from "./js/row-selection.js";
 import { initSpreadsheet } from "./js/spreadsheet.js";
 import { createComponentElement } from "./lib/component-elements.js";
 import { refreshExporter, setExportKind } from "./js/exporters.js";
-import { applyStaticText, planText, t as msg, tn, list as joinList } from "./js/i18n.js";
+import { applyStaticText, message as backendMessage, planText, t as msg, tn, list as joinList } from "./js/i18n.js";
 import { hooks } from "./js/hooks.js";
 import { vinylPositionOf } from "./js/vinyl.js";
 import { initLaunchOpen } from "./js/dragdrop.js";
@@ -701,10 +701,11 @@ function buildTrackRow(track, groupKey) {
   // listed only so it never looks like the file vanished (#83).
   if (track.unreadable) {
     tr.classList.add("unreadable");
+    const reason = backendMessage(track.read_error?.message) || track.read_error?.text || msg("app.unreadableNote");
     tr.innerHTML = `
       <td class="sel"></td>
-      <td class="file" title="${escapeHtml(msg("app.unreadablePath", { path: track.path }))}">${escapeHtml(fileName(track.path))}</td>
-      ${tableColumnKeys().length > 1 ? `<td class="unreadable-note" colspan="${tableColumnKeys().length - 1}">${escapeHtml(msg("app.unreadableNote"))}</td>` : ""}`;
+      <td class="file" title="${escapeHtml(`${track.path}: ${reason}`)}">${escapeHtml(fileName(track.path))}</td>
+      ${tableColumnKeys().length > 1 ? `<td class="unreadable-note" colspan="${tableColumnKeys().length - 1}">${escapeHtml(reason)}</td>` : ""}`;
     return decorateTrackArtwork(tr, track);
   }
   // Diff-state (#117): a staged plan renders its change into this same table in

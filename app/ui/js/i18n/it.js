@@ -550,6 +550,8 @@ export const it = {
   "chain.keyNote": "Converte la tonalità musicale (meglio limitarlo al campo Tonalità). I valori non riconosciuti restano invariati.",
   "chain.builtIn": "Integrati",
   "player.noTrack": "Nessuna traccia caricata",
+  "player.outputUnavailable": "Uscita audio non disponibile",
+  "player.outputUnavailableHint": "Collega un dispositivo audio e premi Riproduci per riprovare.",
   "toast.player.noSeek": "Questo file non permette lo spostamento",
   "toast.player.gone": "Quella traccia non è più nella libreria aperta",
   "settings.beatport.waiting": "In attesa della finestra Beatport…",

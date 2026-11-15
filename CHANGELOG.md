@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.4] - 2026-11-15
+
+**Tagnetic Alpha 3** — safer backend operations, recovery and exports.
+
+### Fixed
+
+- Undo refuses uncertain interrupted copies and later text, artwork or whole-block
+  changes. Whole-block batches retain before/after SHA-256 fingerprints, including
+  private metadata the tag model cannot represent; older history remains readable.
+- Apply checks captured block bytes and ID3 revisions before writing. Interrupted
+  moves retain directory-pruning intent for recovery.
+- Apply and BPM cancellation belong to the admitted operation. Image requests wait
+  before using blocking workers; text-list reads are bounded and reject special files.
+- Beatport sign-out invalidates pending authentication work, token refreshes share
+  results, and release lookup retrieves complete bounded tracklists.
+- Provider SOCKS support is explicit; release links and redirects are validated,
+  and Soundeo tracks match exact release identities.
+- Exports reject supported audio filenames. Split-playlist names stay portable,
+  avoid case collisions, and are preflighted together before publishing.
+- Settings use synced replacement files and preserve malformed originals. Failed
+  reads prevent accidental replacement with defaults; recovery notices are visible.
+- Preview playback survives unavailable startup audio and retries on Play. The
+  player explains missing output, and unreadable rows show structured read details.
+- Window navigation is restricted to each window's intended trust boundary.
+
+### Verification notes
+
+- Combined backend/frontend checks and the release platform matrix apply to this
+  release. Whole-file fingerprints deliberately refuse later unrelated byte edits
+  for block-changing batches; evidence-free legacy history keeps its prior rules.
+- MCP collaboration remains a design exercise and is not included in this release.
+
 ## [1.4.3] - 2026-11-15
 
 **Tagnetic Alpha 2** — clearer editing, intentional presets and smoother feedback.

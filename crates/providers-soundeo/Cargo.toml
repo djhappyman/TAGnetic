@@ -11,4 +11,4 @@ publish = false
 [dependencies]
 regex = "1.13.1"
 tagrex-core.workspace = true
-ureq = "3.2.1"
+ureq = { version = "3.2.1", features = ["socks-proxy"] }

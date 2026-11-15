@@ -550,6 +550,8 @@ export const ru = {
   "chain.keyNote": "Преобразует музыкальную тональность (лучше нацеливать на поле «Тональность»). Неопознанные значения остаются как есть.",
   "chain.builtIn": "Встроенные",
   "player.noTrack": "Трек не загружен",
+  "player.outputUnavailable": "Аудиовыход недоступен",
+  "player.outputUnavailableHint": "Подключите аудиоустройство и снова запустите воспроизведение.",
   "toast.player.noSeek": "По этому файлу нельзя перематывать",
   "toast.player.gone": "Этого трека больше нет в открытой библиотеке",
   "settings.beatport.waiting": "Ожидание окна Beatport…",

@@ -290,6 +290,10 @@ async function pollPlayerStatus() {
   if (!st.path) {
     // Backend drained (end of list or stopped): go idle unless already idle.
     if (!playerBar.classList.contains("idle")) playerIdle();
+    const idleKey = st.output_unavailable ? "player.outputUnavailable" : "player.noTrack";
+    plTitle.dataset.i18n = idleKey;
+    plTitle.textContent = t(idleKey);
+    plTitle.title = st.output_unavailable ? t("player.outputUnavailableHint") : "";
     return;
   }
 

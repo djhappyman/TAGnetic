@@ -365,6 +365,7 @@ async function openSettings() {
   // Populate from saved values (the token is already in #discogs-token).
   try {
     const s = await invoke("load_settings", {});
+    if (s.recovery_notice) toast(s.recovery_notice, true);
     el("set-proxy").value = s.proxy || "";
     el("set-rate").value = s.rate_limit_per_min || 0;
     el("set-check-updates").checked = s.check_updates !== false;
@@ -568,7 +569,6 @@ async function saveSettings() {
       bpm_max_minutes: bpmMaxFromForm(),
       portable_names: el("set-portable-names").checked,
     };
-    setSavedSettings(settings);
     // Display prefs are local-only; apply + persist before the backend
     // round-trip. (Table font size already applies live on input; persisted
     // here too.)
@@ -577,6 +577,7 @@ async function saveSettings() {
     applyTableFont(parseInt(el("set-table-font").value, 10));
     await invoke("save_discogs_token", { token });
     await invoke("save_settings", { settings });
+    setSavedSettings(settings);
     if (codePageChanged) await hooks.refreshLibrary();
     setBpmEnabled(settings.bpm_detection);
     updateSettingsDot();

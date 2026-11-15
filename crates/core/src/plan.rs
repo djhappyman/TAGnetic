@@ -8,7 +8,7 @@
 //! of plans. **No module writes tags or renames files directly; all writes go
 //! through [`Executor`].** This is an invariant, not a preference.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -16,7 +16,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 use crate::journal::{
-    AppliedBatch, AppliedValue, BatchId, CopyStamp, FileRevision, JournalError, UndoJournal,
+    AppliedBatch, AppliedValue, BatchId, BlockFingerprint, CopyStamp, FileRevision, JournalError,
+    UndoJournal,
 };
 use crate::model::{
     is_storable_custom_name_at, CoverArt, Id3v2Revision, TagBlockContent, TagBlockKind, TagEngine,
@@ -314,10 +315,18 @@ impl Executor {
             applied_at: now_unix_secs(),
             plan: plan.clone(),
             created_dirs: Vec::new(),
-            removed_dirs: Vec::new(),
+            // Write pruning intent before anything can remove a source parent.
+            // A crash may leave some candidates unpruned; recreating an existing
+            // authorized directory during Undo is harmless.
+            removed_dirs: if plan.prune_empty_dirs {
+                pruning_candidates(plan, &roots, &[])
+            } else {
+                Vec::new()
+            },
             allowed_roots: roots.clone(),
             copy_stamps: Vec::new(),
             applied_values: Vec::new(),
+            block_fingerprints: capture_block_fingerprints(plan)?,
             interrupted: true,
             id3v2_revisions: id3v2_revisions(plan),
         };
@@ -327,7 +336,14 @@ impl Executor {
         written.revisions.clone_from(&batch.id3v2_revisions);
         let mut steps = Steps::new(total, progress, cancel);
         steps.done = plan.changes.len();
-        let removed_dirs = match Self::write_phase(plan, &roots, &mut written, &mut steps) {
+        let removed_dirs = match Self::write_phase(
+            plan,
+            &roots,
+            &batch.removed_dirs,
+            &mut batch.block_fingerprints,
+            &mut written,
+            &mut steps,
+        ) {
             Ok(removed_dirs) => removed_dirs,
             Err(error) => {
                 let error = written.roll_back_after(plan, &[], error);
@@ -335,7 +351,10 @@ impl Executor {
                     let _ = journal.rollback(batch.id);
                 } else {
                     batch.created_dirs.clone_from(&written.created_dirs);
-                    batch.applied_values = applied_values(plan);
+                    batch.applied_values = merge_applied_values(
+                        &written.applied_values,
+                        applied_values(plan, &written),
+                    );
                     batch.copy_stamps = copy_stamps(plan);
                     let _ = journal.retain_interrupted(batch.id, &batch);
                 }
@@ -345,7 +364,8 @@ impl Executor {
         batch.created_dirs = std::mem::take(&mut written.created_dirs);
         batch.removed_dirs = removed_dirs;
         batch.copy_stamps = copy_stamps(plan);
-        batch.applied_values = applied_values(plan);
+        batch.applied_values =
+            merge_applied_values(&written.applied_values, applied_values(plan, &written));
         batch.interrupted = false;
         if let Err(error) = journal.finish(batch.id, &batch) {
             written.created_dirs.clone_from(&batch.created_dirs);
@@ -354,7 +374,8 @@ impl Executor {
                 let _ = journal.rollback(batch.id);
             } else {
                 batch.interrupted = true;
-                batch.applied_values = applied_values(plan);
+                batch.applied_values =
+                    merge_applied_values(&batch.applied_values, applied_values(plan, &written));
                 batch.copy_stamps = copy_stamps(plan);
                 let _ = journal.retain_interrupted(batch.id, &batch);
             }
@@ -370,6 +391,8 @@ impl Executor {
     fn write_phase(
         plan: &ChangePlan,
         roots: &[PathBuf],
+        pruning_intent: &[PathBuf],
+        block_fingerprints: &mut [BlockFingerprint],
         written: &mut Written,
         steps: &mut Steps,
     ) -> Result<Vec<PathBuf>, PlanError> {
@@ -387,6 +410,11 @@ impl Executor {
             apply_cover_change(&change.path, change, Direction::Apply)?;
             written.tag_steps[index] = 3;
             write_blocks(&change.path, change, Direction::Apply)?;
+            // Keep observations before progress can hand control to a caller or
+            // a later step can make this path temporarily unreadable.
+            written
+                .applied_values
+                .extend(applied_values_at(change, &change.path));
             steps.complete(&change.path, ApplyStep::Tags);
         }
         // ...then the moves and copies, creating any folders the targets need.
@@ -442,8 +470,20 @@ impl Executor {
         // A move can leave the folder it emptied behind (#153). Removing those
         // is opt-in per plan, and only ever the directories THIS batch emptied —
         // recorded so undo can put them back.
+        // Observe only after all tag writes and transfers, before pruning can
+        // remove a directory needed by error rollback.
+        for fingerprint in block_fingerprints {
+            let change = plan
+                .changes
+                .iter()
+                .find(|change| change.path == fingerprint.path)
+                .expect("fingerprint belongs to this plan");
+            fingerprint.after = Some(file_fingerprint(
+                effective_rename(change).unwrap_or(&change.path),
+            )?);
+        }
         Ok(if plan.prune_empty_dirs {
-            prune_emptied_dirs(plan, roots, &written.created_dirs)
+            prune_emptied_dirs(pruning_intent, roots, &written.created_dirs)
         } else {
             Vec::new()
         })
@@ -511,14 +551,6 @@ impl Executor {
             }
         }
 
-        // Put back the folders the batch emptied, before anything moves: a file
-        // has to have a directory to move back into (#153).
-        for dir in &batch.removed_dirs {
-            if resolve_target_within_roots(dir, &roots).is_ok() {
-                std::fs::create_dir_all(dir).map_err(PlanError::Io)?;
-            }
-        }
-
         // Validate before touching disk: the file's current location (rename
         // target if it was renamed, else its path) and the restore
         // destination must both sit within a root.
@@ -532,7 +564,7 @@ impl Executor {
                 Some(target) => {
                     ensure_within_roots(target, &roots)?;
                     resolve_target_within_roots(&change.path, &roots)?;
-                    ensure_untransfer_safe(target, &change.path, change.copy, &batch.copy_stamps)?;
+                    ensure_untransfer_safe(target, &change.path, change.copy, &batch)?;
                 }
                 None => ensure_within_roots(&change.path, &roots)?,
             }
@@ -545,11 +577,13 @@ impl Executor {
                 }
                 ensure_within_roots(to, &roots)?;
                 resolve_target_within_roots(from, &roots)?;
-                ensure_untransfer_safe(to, from, change.copy, &batch.copy_stamps)?;
+                ensure_untransfer_safe(to, from, change.copy, &batch)?;
             }
         }
 
         let changed = changed_since_applied(&batch)?;
+        let restored_blocks = ensure_block_undo_safe(&batch)?;
+        ensure_covers_undo_safe(&batch)?;
         match mode {
             UndoMode::Strict => {
                 if let Some((_, first)) = changed.first() {
@@ -567,6 +601,14 @@ impl Executor {
                     .collect();
             }
             UndoMode::Overwrite => {}
+        }
+
+        // Put back the folders the batch emptied, before anything moves: a file
+        // has to have a directory to move back into (#153).
+        for dir in &batch.removed_dirs {
+            if resolve_target_within_roots(dir, &roots).is_ok() {
+                std::fs::create_dir_all(dir).map_err(PlanError::Io)?;
+            }
         }
 
         // Reverse the transfers first, so tag restoration finds each file back
@@ -597,6 +639,10 @@ impl Executor {
                 continue;
             }
             steps.begin(&change.path)?;
+            if restored_blocks.contains(&change.path) {
+                steps.done();
+                continue;
+            }
             // Blocks come back before the field and image values are restored,
             // mirroring apply in reverse. It matters when the block that was
             // stripped is the one the app reads from: put it back first and the
@@ -799,6 +845,8 @@ struct Written {
     created_dirs: Vec<PathBuf>,
     /// The ID3v2 revision of each file before the batch, as journaled (#666).
     revisions: Vec<FileRevision>,
+    /// Observed field outcomes of completed in-place writes, before rollback.
+    applied_values: Vec<AppliedValue>,
 }
 
 impl Written {
@@ -809,6 +857,7 @@ impl Written {
             sidecars: Vec::new(),
             created_dirs: Vec::new(),
             revisions: Vec::new(),
+            applied_values: Vec::new(),
         }
     }
 
@@ -978,16 +1027,21 @@ fn ensure_target_free(from: &Path, to: &Path, copy: bool) -> Result<(), PlanErro
 /// since is not the batch's to replace (the file itself is fine, which is what a
 /// case-only rename looks like). A copy is removed only while the file at its
 /// path is still the copy as the batch left it; a batch recorded before stamps
-/// existed has none, and its copies are removed as before.
+/// existed has none, and its copies are removed as before. An interrupted
+/// batch has no such legacy exemption: no stamp means no proof of ownership.
 fn ensure_untransfer_safe(
     target: &Path,
     original: &Path,
     copy: bool,
-    stamps: &[CopyStamp],
+    batch: &AppliedBatch,
 ) -> Result<(), PlanError> {
     if copy {
-        let Some(stamp) = stamps.iter().find(|stamp| stamp.path == target) else {
-            return Ok(());
+        let Some(stamp) = batch.copy_stamps.iter().find(|stamp| stamp.path == target) else {
+            return if batch.interrupted {
+                Err(PlanError::Stale(target.to_path_buf()))
+            } else {
+                Ok(())
+            };
         };
         if CopyStamp::of(target).as_ref() == Some(stamp) {
             Ok(())
@@ -1037,26 +1091,58 @@ fn restore_revision(path: &Path, revisions: &[FileRevision]) -> Result<(), PlanE
     Ok(())
 }
 
-/// What each changed field of every file `plan` wrote in place reads as, once
-/// the batch is written (#658). A file that cannot be read gets nothing, and is
-/// undone unchecked. A copy is not here: undo removes it, under its stamp.
-fn applied_values(plan: &ChangePlan) -> Vec<AppliedValue> {
-    let mut values = Vec::new();
-    for change in &plan.changes {
-        if change.copy || change.tag_changes.is_empty() {
-            continue;
-        }
-        let path = effective_rename(change).unwrap_or(&change.path);
-        let Ok(current) = TagEngine::read(path) else {
-            continue;
-        };
-        values.extend(change.tag_changes.iter().map(|field_change| AppliedValue {
+/// Observe fields only after a write, using the final plan path as the journal
+/// key even when transfers have not run yet. An unreadable outcome is unknown.
+fn applied_values_at(change: &FileChange, now_at: &Path) -> Vec<AppliedValue> {
+    if change.copy || change.tag_changes.is_empty() {
+        return Vec::new();
+    }
+    let Ok(current) = TagEngine::read(now_at) else {
+        return Vec::new();
+    };
+    let path = effective_rename(change).unwrap_or(&change.path);
+    change
+        .tag_changes
+        .iter()
+        .map(|field_change| AppliedValue {
             path: path.to_path_buf(),
             field: field_change.field.clone(),
             value: current.tags.get(&field_change.field).cloned(),
-        }));
+        })
+        .collect()
+}
+
+/// Current values take precedence (including successful restoration to `old`),
+/// while a temporarily unreadable path must not erase an earlier observation.
+fn merge_applied_values(
+    known: &[AppliedValue],
+    mut current: Vec<AppliedValue>,
+) -> Vec<AppliedValue> {
+    let mut seen: BTreeSet<_> = current
+        .iter()
+        .map(|value| (value.path.clone(), value.field.clone()))
+        .collect();
+    // Prefer the last observation if a plan wrote the same path/field twice.
+    for value in known.iter().rev() {
+        if seen.insert((value.path.clone(), value.field.clone())) {
+            current.push(value.clone());
+        }
     }
-    values
+    current
+}
+
+/// Field outcomes read at their final paths, after writes or rollback. An
+/// unreached entry is not an execution outcome: sampling it could authorize
+/// Undo to overwrite an external edit to a file we never wrote.
+fn applied_values(plan: &ChangePlan, written: &Written) -> Vec<AppliedValue> {
+    plan.changes
+        .iter()
+        .zip(&written.tag_steps)
+        .filter(|(_, steps)| **steps != 0)
+        .flat_map(|(change, _)| {
+            applied_values_at(change, effective_rename(change).unwrap_or(&change.path))
+        })
+        .collect()
 }
 
 /// Every field of `batch` that no longer reads as the batch left it (#658),
@@ -1075,9 +1161,14 @@ fn changed_since_applied(batch: &AppliedBatch) -> Result<Vec<(usize, KeptField)>
             continue;
         }
         let path = effective_rename(change).unwrap_or(&change.path);
-        let Some(values) = recorded.get(path) else {
+        let values = recorded.get(path);
+        if values.is_none() && !batch.interrupted {
+            // Completed legacy records intentionally retain their old behavior.
             continue;
-        };
+        }
+        if change.tag_changes.is_empty() {
+            continue;
+        }
         // Where the file is now: back at its own path when an earlier undo
         // already moved it there.
         let now_at = match effective_rename(change) {
@@ -1085,25 +1176,130 @@ fn changed_since_applied(batch: &AppliedBatch) -> Result<Vec<(usize, KeptField)>
             _ => path,
         };
         let current = TagEngine::read(now_at)?;
-        for applied in values {
-            let now = current.tags.get(&applied.field);
-            let old = change
-                .tag_changes
-                .iter()
-                .find(|field_change| field_change.field == applied.field)
-                .and_then(|field_change| field_change.old.as_ref());
+        for field_change in &change.tag_changes {
+            let now = current.tags.get(&field_change.field);
+            let old = field_change.old.as_ref();
+            let applied = values.and_then(|values| {
+                values
+                    .iter()
+                    .find(|value| value.field == field_change.field)
+            });
+            // The plan's `new` value is intent, not proof that an interrupted
+            // write produced it. Only an already-restored field is safe when
+            // execution evidence is absent, even in an override mode.
+            let Some(applied) = applied else {
+                if batch.interrupted && now != old {
+                    return Err(PlanError::ChangedSinceApplied(now_at.to_path_buf()));
+                }
+                continue;
+            };
             if now != applied.value.as_ref() && now != old {
                 changed.push((
                     index,
                     KeptField {
                         path: now_at.to_path_buf(),
-                        field: applied.field.clone(),
+                        field: field_change.field.clone(),
                     },
                 ));
             }
         }
     }
     Ok(changed)
+}
+
+/// Streaming hashes avoid retaining audio or depending on modeled tag fields.
+fn file_fingerprint(path: &Path) -> Result<Vec<u8>, PlanError> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).map_err(PlanError::Io)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(PlanError::Io)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(digest.finalize().to_vec())
+}
+
+fn capture_block_fingerprints(plan: &ChangePlan) -> Result<Vec<BlockFingerprint>, PlanError> {
+    let mut seen = HashSet::new();
+    plan.changes
+        .iter()
+        .filter(|change| {
+            !change.copy && !change.block_changes.is_empty() && seen.insert(change.path.clone())
+        })
+        .map(|change| {
+            Ok(BlockFingerprint {
+                path: change.path.clone(),
+                before: file_fingerprint(&change.path)?,
+                after: None,
+            })
+        })
+        .collect()
+}
+
+/// Reject any later file-content change before reversing transfers or writing
+/// whole blocks. Already-restored files need no metadata rewrite on retry.
+fn ensure_block_undo_safe(batch: &AppliedBatch) -> Result<HashSet<PathBuf>, PlanError> {
+    let mut restored = HashSet::new();
+    for fingerprint in &batch.block_fingerprints {
+        let Some(change) = batch
+            .plan
+            .changes
+            .iter()
+            .find(|change| change.path == fingerprint.path)
+        else {
+            return Err(PlanError::ChangedSinceApplied(fingerprint.path.clone()));
+        };
+        let current_path = match effective_rename(change) {
+            Some(target) if !is_untransferred(target, &change.path, false) => target,
+            _ => &change.path,
+        };
+        let current = file_fingerprint(current_path)?;
+        if current == fingerprint.before {
+            restored.insert(change.path.clone());
+        } else if fingerprint.after.as_ref() != Some(&current) {
+            return Err(PlanError::ChangedSinceApplied(current_path.to_path_buf()));
+        }
+    }
+    Ok(restored)
+}
+
+/// Cover sets include bytes, ordering, picture types and descriptions. Field
+/// override modes cannot choose which images to keep, so refuse an ambiguous
+/// image restore in every mode before reversing any transfer. Completed plans
+/// provide both possible safe states; interrupted intent alone proves only the
+/// already-restored state.
+fn ensure_covers_undo_safe(batch: &AppliedBatch) -> Result<(), PlanError> {
+    for change in &batch.plan.changes {
+        if change.copy {
+            continue;
+        }
+        // A successful whole-file fingerprint check already includes covers,
+        // including normalized/combined block writes.
+        if batch
+            .block_fingerprints
+            .iter()
+            .any(|fingerprint| fingerprint.path == change.path)
+        {
+            continue;
+        }
+        let Some(covers) = &change.cover_change else {
+            continue;
+        };
+        let now_at = match effective_rename(change) {
+            Some(target) if !is_untransferred(target, &change.path, false) => target,
+            _ => &change.path,
+        };
+        let current = TagEngine::read_covers(now_at)?;
+        if current != covers.old && (batch.interrupted || current != covers.new) {
+            return Err(PlanError::ChangedSinceApplied(now_at.to_path_buf()));
+        }
+    }
+    Ok(())
 }
 
 /// The stamp of every copy `plan` made, read once the batch is written (#604).
@@ -1144,16 +1340,11 @@ fn untransfer(target: &Path, original: &Path, copy: bool) -> Result<(), PlanErro
     }
 }
 
-/// Remove the directories this batch's moves emptied (#153), deepest first, and
-/// report them so undo can put them back.
-///
-/// Only a directory that is empty *now*, sits inside an allowed root, and is not
-/// one this same batch just created. Walking up from each source folder means a
-/// move that empties `Artist/Album` also clears `Artist` when nothing else is
-/// left in it — which is the point, since an unsorted folder is usually a tree.
-/// Anything that fails to remove is simply left alone: a folder that still holds
-/// something the plan never touched is not this batch's to delete.
-fn prune_emptied_dirs(plan: &ChangePlan, roots: &[PathBuf], created: &[PathBuf]) -> Vec<PathBuf> {
+/// Existing source parents a move may empty, deepest first. Capture these in
+/// the initial journal record so even a crash during pruning leaves Undo the
+/// authorized parents it needs. Roots and directories created by this batch
+/// are excluded; containment is verified while the parents still exist.
+fn pruning_candidates(plan: &ChangePlan, roots: &[PathBuf], created: &[PathBuf]) -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     for change in &plan.changes {
         if change.copy || effective_rename(change).is_none() {
@@ -1172,11 +1363,8 @@ fn prune_emptied_dirs(plan: &ChangePlan, roots: &[PathBuf], created: &[PathBuf])
             let mut dir = source.parent();
             while let Some(current) = dir {
                 let owned = current.to_path_buf();
-                // A root is the boundary, not something to remove.
-                if roots.contains(&owned) {
-                    break;
-                }
-                if ensure_within_roots(current, roots).is_err() {
+                // A root reached through a parent symlink is still a boundary.
+                if !is_prunable_parent(current, roots) {
                     break;
                 }
                 if !candidates.contains(&owned) {
@@ -1189,20 +1377,41 @@ fn prune_emptied_dirs(plan: &ChangePlan, roots: &[PathBuf], created: &[PathBuf])
     // Deepest first, so a parent is only considered once its child is gone.
     candidates.sort_by_key(|dir| std::cmp::Reverse(dir.components().count()));
 
+    candidates.retain(|dir| !created.contains(dir));
+    candidates
+}
+
+/// Prune only durably recorded candidates, never a newly discovered parent.
+/// Recheck containment and emptiness now; a transient pre-write read failure
+/// must leave a directory unpruned rather than create an unrecorded removal.
+fn prune_emptied_dirs(
+    candidates: &[PathBuf],
+    roots: &[PathBuf],
+    created: &[PathBuf],
+) -> Vec<PathBuf> {
     let mut removed = Vec::new();
     for dir in candidates {
-        if created.contains(&dir) {
+        if created.contains(dir) || !is_prunable_parent(dir, roots) {
             continue;
         }
         // A folder the batch emptied of everything the user keeps may still
         // hold the OS's own bookkeeping (#404) — a `.DS_Store` Finder wrote
         // while it was open. That is not content, and it is not carried either,
         // so it goes with the folder instead of keeping it from being tidied.
-        if clear_os_junk(&dir) && std::fs::remove_dir(&dir).is_ok() {
-            removed.push(dir);
+        if clear_os_junk(dir) && std::fs::remove_dir(dir).is_ok() {
+            removed.push(dir.clone());
         }
     }
     removed
+}
+
+/// Only strict descendants of the authorized roots may be pruned. Comparing
+/// canonically protects a root even when the plan used an aliased parent path.
+fn is_prunable_parent(dir: &Path, roots: &[PathBuf]) -> bool {
+    let Ok(canonical) = dir.canonicalize() else {
+        return false;
+    };
+    !roots.contains(&canonical) && roots.iter().any(|root| canonical.starts_with(root))
 }
 
 /// Whether `path` is a file the OS writes into folders for its own bookkeeping
@@ -1361,6 +1570,28 @@ fn ensure_not_stale(change: &FileChange) -> Result<(), PlanError> {
         if TagEngine::read_block(&change.path, block_change.kind)? != block_change.old {
             return Err(PlanError::Stale(change.path.clone()));
         }
+        // The modeled content omits private/binary frames and some Vorbis
+        // provenance. Compare the same exact snapshot Undo would restore.
+        if let Some(old_bytes) = &block_change.old_bytes {
+            let current_bytes = match block_change.kind {
+                TagBlockKind::Id3v2 => TagEngine::dump_id3v2(&change.path)?,
+                TagBlockKind::VorbisComments => TagEngine::dump_vorbis(&change.path)?,
+                // Unknown exact snapshot formats must not bypass preflight.
+                _ => None,
+            };
+            if current_bytes.as_ref() != Some(old_bytes) {
+                return Err(PlanError::Stale(change.path.clone()));
+            }
+        }
+        // dump_id3v2 deliberately serializes with normalized write options,
+        // so the captured source revision needs a separate comparison.
+        if block_change.kind == TagBlockKind::Id3v2 {
+            if let Some(old_revision) = block_change.old_revision {
+                if TagEngine::id3v2_revision(&change.path)? != Some(old_revision) {
+                    return Err(PlanError::Stale(change.path.clone()));
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -1471,7 +1702,9 @@ fn apply_cover_change(
         Direction::Apply => &cover_change.new,
         Direction::Undo => &cover_change.old,
     };
-    TagEngine::write_covers(path, target)?;
+    if !matches!(direction, Direction::Undo) || TagEngine::read_covers(path)? != *target {
+        TagEngine::write_covers(path, target)?;
+    }
     Ok(())
 }
 
@@ -1484,6 +1717,16 @@ fn write_tag_changes(
         return Ok(());
     }
     let mut track = TagEngine::read(path)?;
+    // An unreached interrupted entry, or an already-restored retry, needs no
+    // write. Besides avoiding normalization, this preserves untouched bytes.
+    if matches!(direction, Direction::Undo)
+        && change
+            .tag_changes
+            .iter()
+            .all(|field| track.tags.get(&field.field) == field.old.as_ref())
+    {
+        return Ok(());
+    }
     for field_change in &change.tag_changes {
         let value = match direction {
             Direction::Apply => &field_change.new,
@@ -1639,5 +1882,40 @@ mod tests {
             Err(PlanError::RenameCollision(_))
         ));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pruning_cannot_remove_a_parent_outside_the_recorded_intent() {
+        let dir = temp_dir("bounded-pruning");
+        let album = dir.join("artist/album");
+        let scans = album.join("Scans");
+        std::fs::create_dir_all(&scans).unwrap();
+        let roots = canonical_roots(std::slice::from_ref(&dir)).unwrap();
+        let removed = prune_emptied_dirs(std::slice::from_ref(&scans), &roots, &[]);
+        assert_eq!(removed, vec![scans.clone()]);
+        assert!(!scans.exists());
+        assert!(
+            album.is_dir(),
+            "an eligible but unrecorded parent must remain"
+        );
+        assert!(dir.join("artist").is_dir());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pruning_preserves_a_root_reached_through_a_parent_symlink() {
+        let dir = temp_dir("pruning-root-alias");
+        let real_parent = dir.join("real");
+        let library = real_parent.join("library");
+        std::fs::create_dir_all(&library).unwrap();
+        let alias_parent = dir.join("alias");
+        std::os::unix::fs::symlink(&real_parent, &alias_parent).unwrap();
+        let aliased_root = alias_parent.join("library");
+        let roots = canonical_roots(std::slice::from_ref(&library)).unwrap();
+        let removed = prune_emptied_dirs(std::slice::from_ref(&aliased_root), &roots, &[]);
+        assert!(removed.is_empty());
+        assert!(library.is_dir(), "an allowed root must never be pruned");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

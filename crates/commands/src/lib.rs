@@ -64,6 +64,10 @@ pub struct TrackDto {
     /// silently vanishes from the library. `#[serde(default)]` = false.
     #[serde(default)]
     pub unreadable: bool,
+    /// The original tag-read failure for an unreadable placeholder. Successful
+    /// reads have no diagnostic; older serialized rows may omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_error: Option<ErrorDto>,
     /// Playing time in seconds, for the Length column (#172). A technical
     /// property rather than a tag, read from the same probe as the tags, so it
     /// costs nothing extra. `None` when the file couldn't be read.
@@ -116,8 +120,8 @@ impl From<&TagBlock> for TagBlockDto {
 
 impl TrackDto {
     /// A placeholder row for a file whose tags failed to read: path only, format
-    /// guessed from the extension, no tags.
-    fn unreadable(path: &Path) -> Self {
+    /// guessed from the extension, no tags, and the original read failure.
+    fn unreadable(path: &Path, read_error: ErrorDto) -> Self {
         let format = path
             .extension()
             .and_then(|ext| ext.to_str())
@@ -128,6 +132,7 @@ impl TrackDto {
             format,
             tags: std::collections::BTreeMap::new(),
             unreadable: true,
+            read_error: Some(read_error),
             duration_secs: None,
             tag_blocks: Vec::new(),
             compilation_field: None,
@@ -2401,7 +2406,7 @@ impl App {
                 has_cover: read.has_cover,
                 ..TrackDto::from(read.file)
             },
-            Err(_) => TrackDto::unreadable(path),
+            Err(error) => TrackDto::unreadable(path, ErrorDto::from(AppError::TagIo(error))),
         }
     }
 
@@ -5168,12 +5173,33 @@ impl App {
     /// Resolve an export target inside the opened library. The name must be a
     /// bare file name — no separators, no `..` — so an export can never be
     /// steered outside the library root.
+    ///
+    /// An export is text, and publishing replaces any file already at the
+    /// target. A name the scanner would list as a track therefore refuses:
+    /// naming a CSV `01 - Track.flac` used to replace that track's audio with
+    /// the export, with no journal entry and no Undo. The extension is checked
+    /// after folding what the filesystem ignores — case on macOS and Windows,
+    /// and the trailing dots and spaces Windows drops — so `Track.FLAC`,
+    /// `Track.flac ` and `Track.flac.` cannot reach the file either. Refusing
+    /// the name is deliberate for a free-text export: it is better to say so
+    /// than to silently write to a different file.
     fn export_target(&self, file_name: &str) -> Result<PathBuf, AppError> {
         let name = file_name.trim();
         if name.is_empty() || name.contains('/') || name.contains('\\') || name.starts_with('.') {
             return Err(AppError::InvalidFileName(file_name.to_string()));
         }
+        if scanner::is_supported_audio(Path::new(Self::export_name_as_written(name))) {
+            return Err(AppError::InvalidFileName(file_name.to_string()));
+        }
         Ok(self.library_root.join(name))
+    }
+
+    /// The name the filesystem would keep: Windows silently drops trailing
+    /// dots and spaces, so `a.flac.` and `a.flac ` both mean the track
+    /// `a.flac`. Checked on every platform so the refusal does not depend on
+    /// which one the export happens to run on.
+    fn export_name_as_written(name: &str) -> &str {
+        name.trim_end_matches(|c: char| c == '.' || c.is_whitespace())
     }
 
     /// Stage and replace one export beneath the library root through the
@@ -5274,6 +5300,12 @@ impl App {
     /// library is harder to undo than one place full of them. Entry paths stay
     /// relative to the root, so the playlists remain portable together with it.
     ///
+    /// Every group's name is resolved before any file is published, and the
+    /// whole set goes through the confined batch publisher in one transaction:
+    /// a group that cannot be named fails the export with nothing written,
+    /// rather than leaving the groups before it behind with only an error
+    /// message to explain the half-export.
+    ///
     /// Returns what was written, in the order the groups were first seen —
     /// which is the order the selection was in.
     pub fn export_playlists(
@@ -5315,28 +5347,41 @@ impl App {
             groups.entry(key).or_default().push(path.clone());
         }
 
-        let mut written = Vec::new();
+        let mut outputs: Vec<(PathBuf, Vec<u8>)> = Vec::with_capacity(order.len());
+        let mut written = Vec::with_capacity(order.len());
         let mut taken: HashSet<String> = HashSet::new();
         for key in order {
             let members = &groups[&key];
             let name = self.playlist_name(&mask, &members[0], &mut taken)?;
             let target = self.export_target(&name)?;
             let entries = self.playlist_entries(&root, members);
-            self.write_output(&target, export::m3u(&entries).as_bytes())?;
+            outputs.push((target.clone(), export::m3u(&entries).into_bytes()));
             written.push(target.to_string_lossy().into_owned());
         }
+        output::write_batch(&self.library_root, &outputs, true)?;
         Ok(written)
     }
 
     /// The file name for one group's playlist: the mask rendered against the
     /// group's first track.
     ///
+    /// The render is a name, not a path: only a playlist extension survives a
+    /// rendered suffix. Any other suffix is part of the stem, so `%album%`
+    /// rendering `Vol. 2` writes `Vol. 2.m3u` instead of a file with no
+    /// extension, and `%filenameext%` rendering a track writes
+    /// `01 - Track.flac.m3u` instead of the track's own name — which the
+    /// publisher would have replaced, destroying the audio.
+    ///
+    /// The stem goes through the same portable sanitiser a rename uses, so an
+    /// album like `AC/DC` or `Live: 1995` names a file every platform can
+    /// create rather than failing at the publisher or inventing a folder.
+    ///
     /// Two groups can render the same name — two albums called *Greatest Hits*,
     /// a mask that names nothing the groups differ in — and the second one
     /// silently overwriting the first would lose an export the user asked for,
-    /// so a repeat is numbered instead. A mask that renders to nothing at all
-    /// (the album tag is empty) falls back to the track's folder, which is the
-    /// one name every group has.
+    /// so a repeat is numbered instead. The comparison folds case, because
+    /// macOS and Windows resolve `Hits.m3u` and `hits.m3u` to one file, while
+    /// the spelling the mask rendered is what gets written.
     fn playlist_name(
         &self,
         mask: &Mask,
@@ -5351,30 +5396,50 @@ impl App {
             }
             Err(_) => String::new(),
         };
-        // The mask carries the extension when it has one — `%album%.m3u` — and
-        // an album that renders to nothing leaves just `.m3u`, which is an
-        // extension with no name rather than a file called that.
         let rendered = rendered.trim();
         let (stem, extension) = match rendered.rsplit_once('.') {
-            Some((stem, extension)) if !extension.is_empty() => (stem.trim(), extension),
+            Some((stem, extension))
+                if !extension.is_empty() && Self::is_playlist_extension(extension) =>
+            {
+                (stem.trim(), extension)
+            }
+            // No playlist extension to keep: the whole render (bar a trailing
+            // dot, which would make `Vol. 2.` rather than `Vol. 2`) is the
+            // stem, and the suffix is ours.
             _ => (rendered.trim_end_matches('.'), "m3u"),
         };
+        let stem = self.safe_name(stem);
         let stem = if stem.is_empty() {
-            first
+            // Nothing renderable — the album tag is empty, or the name folded
+            // to nothing — so the track's folder is the fallback, and finally
+            // a plain word so the export still has a name.
+            let folder = first
                 .parent()
                 .and_then(|parent| parent.file_name())
                 .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "playlist".to_string())
+                .unwrap_or_default();
+            let folder = self.safe_name(&folder);
+            if folder.is_empty() {
+                "playlist".to_string()
+            } else {
+                folder
+            }
         } else {
-            stem.to_string()
+            stem
         };
         let mut name = format!("{stem}.{extension}");
         let mut nth = 2;
-        while !taken.insert(name.clone()) {
+        while !taken.insert(name.to_lowercase()) {
             name = format!("{stem} ({nth}).{extension}");
             nth += 1;
         }
         Ok(name)
+    }
+
+    /// Whether a rendered suffix is one a playlist may keep. Anything else is
+    /// a tag's text, not an extension this exporter is allowed to write.
+    fn is_playlist_extension(extension: &str) -> bool {
+        extension.eq_ignore_ascii_case("m3u") || extension.eq_ignore_ascii_case("m3u8")
     }
 
     /// Export `paths` as a CUE sheet into the library root (#66).
@@ -6840,10 +6905,33 @@ const TEXT_LIST_MAX_BYTES: u64 = 1024 * 1024;
 /// than pasted into the panel as garbage.
 pub fn read_text_list(path: &Path) -> Result<String, AppError> {
     let not_text = || AppError::NotATextList(path.display().to_string());
-    if std::fs::metadata(path)?.len() > TEXT_LIST_MAX_BYTES {
+    // Reject special files before opening (notably devices), then verify the
+    // opened handle too: the path may have been replaced after metadata().
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_file() || metadata.len() > TEXT_LIST_MAX_BYTES {
         return Err(not_text());
     }
-    let bytes = std::fs::read(path)?;
+    #[cfg(unix)]
+    let file = {
+        use rustix::fs::{open, Mode, OFlags};
+        // A regular file can be replaced by a FIFO between metadata and open.
+        // NONBLOCK ensures that even this race cannot park the image-read queue.
+        std::fs::File::from(
+            open(
+                path,
+                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(std::io::Error::from)?,
+        )
+    };
+    #[cfg(not(unix))]
+    let file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > TEXT_LIST_MAX_BYTES {
+        return Err(not_text());
+    }
+    let bytes = read_text_list_bytes(file, path)?;
     let utf16 = |rest: &[u8], unit: fn([u8; 2]) -> u16| {
         let units: Vec<u16> = rest
             .as_chunks::<2>()
@@ -6863,6 +6951,19 @@ pub fn read_text_list(path: &Path) -> Result<String, AppError> {
         return Err(not_text());
     }
     Ok(text)
+}
+
+/// Bound the actual consumption as well as the advisory metadata length.
+fn read_text_list_bytes(reader: impl std::io::Read, path: &Path) -> Result<Vec<u8>, AppError> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    reader
+        .take(TEXT_LIST_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > TEXT_LIST_MAX_BYTES {
+        return Err(AppError::NotATextList(path.display().to_string()));
+    }
+    Ok(bytes)
 }
 
 fn non_empty(value: Option<String>) -> Option<String> {
@@ -7445,6 +7546,7 @@ impl From<tagrex_core::model::TrackFile> for TrackDto {
                 .map(|(field, value)| (field.to_storage_key(), value))
                 .collect(),
             unreadable: false,
+            read_error: None,
             // Both filled by the caller that read the properties too (#172,
             // #47); a conversion from tags alone knows neither the playing time
             // nor which blocks the file carries.
@@ -7884,6 +7986,7 @@ mod tests {
             allowed_roots: Vec::new(),
             copy_stamps: Vec::new(),
             applied_values: Vec::new(),
+            block_fingerprints: Vec::new(),
             interrupted: false,
             id3v2_revisions: Vec::new(),
         };
@@ -8104,6 +8207,7 @@ mod tests {
             allowed_roots: vec![dir.0.clone()],
             copy_stamps: Vec::new(),
             applied_values: Vec::new(),
+            block_fingerprints: Vec::new(),
             interrupted: true,
             id3v2_revisions: Vec::new(),
         };
@@ -10667,6 +10771,130 @@ mod tests {
         assert!(!good.unreadable);
     }
 
+    #[test]
+    fn read_error_is_backward_compatible_and_round_trips() {
+        // Both kinds of legacy row predate the optional diagnostic.
+        for unreadable in [false, true] {
+            let row: TrackDto = serde_json::from_value(serde_json::json!({
+                "path": "legacy.flac",
+                "format": "FLAC",
+                "tags": {},
+                "unreadable": unreadable
+            }))
+            .unwrap();
+            assert_eq!(row.unreadable, unreadable);
+            assert_eq!(row.read_error, None);
+            assert!(serde_json::to_value(&row)
+                .unwrap()
+                .get("read_error")
+                .is_none());
+        }
+
+        let error = ErrorDto::from(AppError::TagIo(tagrex_core::model::TagIoError::Malformed(
+            "invalid frame".to_string(),
+        )));
+        let row = TrackDto::unreadable(Path::new("broken.flac"), error.clone());
+        let json = serde_json::to_value(&row).unwrap();
+        assert_eq!(json["read_error"], serde_json::to_value(error).unwrap());
+        assert_eq!(serde_json::from_value::<TrackDto>(json).unwrap(), row);
+    }
+
+    #[test]
+    fn read_error_agrees_across_read_apis_without_mutating_media_or_history() {
+        let dir = TempDir::new("read-error-apis");
+        let good = dir.tagged_flac("good.flac", "Artist", "Title");
+        let bad = dir.0.join("bad.flac");
+        std::fs::write(&bad, b"not a real flac file").unwrap();
+        let expected = ErrorDto::from(AppError::TagIo(TagEngine::read(&bad).unwrap_err()));
+        assert_eq!(expected.message.code, "error.tag.backend");
+        assert!(!expected.message.args["detail"].is_empty());
+        assert!(!expected.text.is_empty());
+        let paths = [bad.clone(), good.clone()];
+        let before: Vec<_> = paths
+            .iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect();
+
+        // Both directory libraries and explicit file sets keep failed rows.
+        for file_set in [false, true] {
+            let journal_path = dir.0.join(format!("journal-{file_set}.sqlite"));
+            let app = if file_set {
+                App::open_file_set(dir.0.clone(), paths.to_vec(), &journal_path).unwrap()
+            } else {
+                App::open(dir.0.clone(), &journal_path).unwrap()
+            };
+            let history = serde_json::to_value(app.history().unwrap()).unwrap();
+            let journal_bytes = std::fs::read(&journal_path).unwrap();
+            let rows = app.list_tracks();
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0].path, bad.to_string_lossy());
+            assert_eq!(rows[1].path, good.to_string_lossy());
+            assert_eq!(app.read_track_rows(&paths).unwrap(), rows);
+            for (path, row) in paths.iter().zip(&rows) {
+                assert_eq!(app.read_track(path).unwrap(), *row);
+            }
+
+            let unreadable = &rows[0];
+            assert!(unreadable.unreadable);
+            assert_eq!(unreadable.read_error.as_ref(), Some(&expected));
+            assert_eq!(unreadable.format, "FLAC");
+            assert!(unreadable.tags.is_empty());
+            assert_eq!(unreadable.duration_secs, None);
+            assert!(unreadable.tag_blocks.is_empty());
+            assert_eq!(unreadable.compilation_field, None);
+            assert!(unreadable.has_cover);
+            assert!(!rows[1].unreadable);
+            assert_eq!(rows[1].read_error, None);
+            assert!(serde_json::to_value(&rows[1])
+                .unwrap()
+                .get("read_error")
+                .is_none());
+            assert_eq!(
+                serde_json::to_value(app.history().unwrap()).unwrap(),
+                history
+            );
+            assert_eq!(std::fs::read(&journal_path).unwrap(), journal_bytes);
+            for (path, bytes) in paths.iter().zip(&before) {
+                assert_eq!(std::fs::read(path).unwrap(), *bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn read_error_clears_after_repair_on_each_refresh_api() {
+        let dir = TempDir::new("read-error-repair");
+        for api in ["list", "single", "batch"] {
+            let path = dir.0.join(format!("{api}.flac"));
+            // Keep the length unchanged: a failed read must not be cached.
+            std::fs::write(&path, [b'?'; MINIMAL_FLAC.len()]).unwrap();
+            let app = open_app(&dir);
+            let refresh = || match api {
+                "list" => app
+                    .list_tracks()
+                    .into_iter()
+                    .find(|row| row.path == path.to_string_lossy())
+                    .unwrap(),
+                "single" => app.read_track(&path).unwrap(),
+                "batch" => app
+                    .read_track_rows(std::slice::from_ref(&path))
+                    .unwrap()
+                    .remove(0),
+                _ => unreachable!(),
+            };
+            for _ in 0..2 {
+                let row = refresh();
+                assert!(row.unreadable, "{api}");
+                assert!(row.read_error.is_some(), "{api}");
+            }
+            std::fs::write(&path, MINIMAL_FLAC).unwrap();
+            let row = refresh();
+            assert!(!row.unreadable, "{api}");
+            assert_eq!(row.read_error, None, "{api}");
+            assert_eq!(row.duration_secs, Some(0), "{api}");
+            assert_eq!(std::fs::read(&path).unwrap(), MINIMAL_FLAC);
+        }
+    }
+
     /// The file placeholders (#147) reach the rename path with a real file
     /// behind them: the folder name and the container come from the file rather
     /// than from any tag, and the technical ones resolve off the actual probe.
@@ -11184,6 +11412,67 @@ mod tests {
             read_text_list(&big),
             Err(AppError::NotATextList(_))
         ));
+    }
+
+    #[test]
+    fn read_text_list_accepts_the_exact_size_limit() {
+        let dir = TempDir::new("text-list-boundary");
+        let path = dir.0.join("boundary.txt");
+        std::fs::write(&path, vec![b'a'; TEXT_LIST_MAX_BYTES as usize]).unwrap();
+        assert_eq!(
+            read_text_list(&path).unwrap().len() as u64,
+            TEXT_LIST_MAX_BYTES
+        );
+    }
+
+    #[test]
+    fn read_text_list_caps_consumption_even_if_the_reader_never_ends() {
+        use std::io::Read;
+        let mut reader = std::io::repeat(b'a');
+        let mut counted = (&mut reader).take(TEXT_LIST_MAX_BYTES * 2);
+        assert!(matches!(
+            read_text_list_bytes(&mut counted, Path::new("growing.txt")),
+            Err(AppError::NotATextList(_))
+        ));
+        assert_eq!(counted.limit(), TEXT_LIST_MAX_BYTES - 1);
+    }
+
+    #[test]
+    fn read_text_list_rejects_growth_after_the_metadata_snapshot() {
+        let dir = TempDir::new("text-list-growth");
+        let path = dir.0.join("growing.txt");
+        std::fs::write(&path, b"").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        assert_eq!(file.metadata().unwrap().len(), 0);
+        std::fs::write(&path, vec![b'a'; TEXT_LIST_MAX_BYTES as usize + 1]).unwrap();
+        assert!(matches!(
+            read_text_list_bytes(file, &path),
+            Err(AppError::NotATextList(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_text_list_rejects_fifo_directory_and_device_promptly() {
+        use std::time::{Duration, Instant};
+        let dir = TempDir::new("text-list-special");
+        let fifo = dir.0.join("list.fifo");
+        // rustix's mkfifoat is unavailable on Apple platforms. The POSIX
+        // utility creates the same disposable fixture on Linux and macOS.
+        let status = std::process::Command::new("mkfifo")
+            .args(["-m", "600"])
+            .arg(&fifo)
+            .status()
+            .expect("create the FIFO fixture with mkfifo");
+        assert!(status.success(), "mkfifo fixture creation failed: {status}");
+        let started = Instant::now();
+        for path in [fifo.as_path(), dir.0.as_path(), Path::new("/dev/zero")] {
+            assert!(matches!(
+                read_text_list(path),
+                Err(AppError::NotATextList(_))
+            ));
+        }
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     // A pattern with separators reaches up into the folders, which is where the
@@ -14620,6 +14909,177 @@ mod tests {
                 "should reject {name:?}"
             );
         }
+    }
+
+    /// Publishing an export replaces whatever file is already at the target,
+    /// so a name that resolves to a track would overwrite its audio with
+    /// text — and no journal entry could bring it back. Every exporter shares
+    /// the same gate, and the check folds what a filesystem ignores: case on
+    /// macOS/Windows, and the trailing dots and spaces Windows drops.
+    #[test]
+    fn an_export_refuses_a_name_that_is_a_track() {
+        let dir = TempDir::new("export-audio-name");
+        let track = dir.tagged_flac("a.flac", "Artist", "Title");
+        let before = std::fs::read(&track).unwrap();
+        let app = open_app(&dir);
+        let paths = std::slice::from_ref(&track);
+        type ExportCall<'a> = (&'a str, Box<dyn Fn(&str) -> Result<String, AppError> + 'a>);
+        let exporters: Vec<ExportCall> = vec![
+            ("csv", Box::new(|name| app.export_csv(paths, name))),
+            (
+                "playlist",
+                Box::new(|name| app.export_playlist(paths, name)),
+            ),
+            ("cue", Box::new(|name| app.export_cue(paths, name))),
+            ("html", Box::new(|name| app.export_html(paths, name))),
+            ("xml", Box::new(|name| app.export_xml(paths, name))),
+            (
+                "report",
+                Box::new(|name| app.export_report(paths, "%artist% - %title%", name)),
+            ),
+        ];
+
+        for name in [
+            "a.flac", "A.FLAC", "a.flac ", "a.flac.", "a.flac\t", " a.flac ",
+        ] {
+            for (kind, export) in &exporters {
+                assert!(
+                    matches!(export(name), Err(AppError::InvalidFileName(_))),
+                    "{kind} should refuse {name:?}"
+                );
+            }
+        }
+        // The audio is byte-for-byte what it was before any attempt.
+        assert_eq!(std::fs::read(&track).unwrap(), before);
+
+        // A suffix after the track name is an ordinary export again.
+        app.export_csv(paths, "a.flac.csv").unwrap();
+        assert_eq!(std::fs::read(&track).unwrap(), before);
+    }
+
+    /// A rendered split name is a name, not a path or an arbitrary file: only
+    /// a playlist extension survives the render. `%album%` over an album
+    /// called `Vol. 2` still has to end in `.m3u`, while a mask that already
+    /// names a playlist keeps the extension it chose.
+    #[test]
+    fn a_split_playlist_name_keeps_only_a_playlist_extension() {
+        let dir = TempDir::new("export-playlist-extension");
+        let track = dir.tagged_flac_at("one/a.flac", "A", "a");
+        let mut tagged = TagEngine::read(&track).unwrap();
+        tagged.tags.insert(TagField::Album, "Vol. 2".to_string());
+        TagEngine::write(&tagged).unwrap();
+        let app = open_app(&dir);
+
+        let written = app
+            .export_playlists(std::slice::from_ref(&track), "album", "%album%")
+            .unwrap();
+        assert!(written[0].ends_with("Vol. 2.m3u"), "{written:?}");
+        let list = std::fs::read_to_string(dir.0.join("Vol. 2.m3u")).unwrap();
+        assert!(list.starts_with("#EXTM3U\n"), "{list}");
+
+        let written = app
+            .export_playlists(std::slice::from_ref(&track), "album", "%album%.M3U8")
+            .unwrap();
+        assert!(written[0].ends_with("Vol. 2.M3U8"), "{written:?}");
+
+        // Running the same export again is a legitimate re-export, not a
+        // refusal: the name is a playlist, so replacing it is intended.
+        app.export_playlists(std::slice::from_ref(&track), "album", "%album%")
+            .unwrap();
+    }
+
+    /// `%filenameext%` renders the first track's own name. Writing that name
+    /// as the playlist used to replace the track; now the audio extension is
+    /// part of the stem and the playlist extension is appended.
+    #[test]
+    fn a_split_playlist_named_after_a_track_keeps_the_audio_file() {
+        let dir = TempDir::new("export-playlist-filenameext");
+        let track = dir.tagged_flac_at("one/a.flac", "A", "a");
+        let before = std::fs::read(&track).unwrap();
+        let app = open_app(&dir);
+
+        let written = app
+            .export_playlists(std::slice::from_ref(&track), "folder", "%filenameext%")
+            .unwrap();
+        assert!(written[0].ends_with("a.flac.m3u"), "{written:?}");
+        assert_eq!(std::fs::read(&track).unwrap(), before);
+    }
+
+    /// `Hits` and `hits` are one file to macOS and Windows, so numbering the
+    /// second group has to see them as one name even though the spelling the
+    /// mask rendered is what gets written.
+    #[test]
+    fn split_playlists_that_differ_only_by_case_are_numbered_apart() {
+        let dir = TempDir::new("export-playlist-case");
+        let a = dir.tagged_flac_at("one/a.flac", "A", "a");
+        let b = dir.tagged_flac_at("two/b.flac", "B", "b");
+        for (path, album) in [(&a, "Hits"), (&b, "hits")] {
+            let mut track = TagEngine::read(path).unwrap();
+            track.tags.insert(TagField::Album, album.to_string());
+            TagEngine::write(&track).unwrap();
+        }
+        let app = open_app(&dir);
+
+        let written = app
+            .export_playlists(&[a, b], "folder", "%album%.m3u")
+            .unwrap();
+        assert!(written[0].ends_with("Hits.m3u"), "{written:?}");
+        assert!(written[1].ends_with("hits (2).m3u"), "{written:?}");
+        for path in &written {
+            assert!(std::path::Path::new(path).exists(), "{path} is missing");
+        }
+    }
+
+    /// A rendered stem goes through the rename sanitiser, so a tag that
+    /// contains a separator or a character Windows forbids names a file every
+    /// platform can create instead of failing at the publisher.
+    #[test]
+    fn a_split_playlist_name_is_made_portable() {
+        let dir = TempDir::new("export-playlist-portable");
+        let a = dir.tagged_flac_at("acdc/a.flac", "A", "a");
+        let b = dir.tagged_flac_at("live/b.flac", "B", "b");
+        for (path, album) in [(&a, "AC/DC"), (&b, "Live: 1995")] {
+            let mut track = TagEngine::read(path).unwrap();
+            track.tags.insert(TagField::Album, album.to_string());
+            TagEngine::write(&track).unwrap();
+        }
+        let app = open_app(&dir);
+
+        let written = app
+            .export_playlists(&[a, b], "album", "%album%.m3u")
+            .unwrap();
+        assert!(written[0].ends_with("AC_DC.m3u"), "{written:?}");
+        assert!(written[1].ends_with("Live - 1995.m3u"), "{written:?}");
+        for path in &written {
+            assert!(std::path::Path::new(path).exists(), "{path} is missing");
+        }
+    }
+
+    /// Every group's name is resolved before anything is published, so a
+    /// later group that cannot be named writes nothing at all — not even the
+    /// groups that came before it.
+    #[test]
+    fn a_split_export_writes_nothing_when_a_later_name_is_refused() {
+        let dir = TempDir::new("export-playlist-preflight");
+        let a = dir.tagged_flac_at("one/a.flac", "A", "a");
+        let b = dir.tagged_flac_at("two/b.flac", "B", "b");
+        for (path, album) in [(&a, "Good"), (&b, ".hidden")] {
+            let mut track = TagEngine::read(path).unwrap();
+            track.tags.insert(TagField::Album, album.to_string());
+            TagEngine::write(&track).unwrap();
+        }
+        let app = open_app(&dir);
+
+        // `.hidden.m3u` is refused for the same reason any hidden export is.
+        let result = app.export_playlists(&[a, b], "album", "%album%.m3u");
+        assert!(
+            matches!(&result, Err(AppError::InvalidFileName(_))),
+            "{result:?}"
+        );
+        assert!(
+            !dir.0.join("Good.m3u").exists(),
+            "the first group must not be published before the second is refused"
+        );
     }
 
     #[test]

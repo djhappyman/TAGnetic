@@ -7,11 +7,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
+mod beatport_session_control;
 mod blocking;
 mod media_session;
+mod navigation;
+mod operation_control;
+mod settings_store;
 mod update;
 #[cfg(target_os = "linux")]
 mod webkit_compositor;
@@ -35,6 +39,8 @@ type AppState = Arc<Mutex<Option<App>>>;
 
 static SAMPLE_QUEUE: blocking::Queue = blocking::Queue::new();
 static IMAGE_READ_QUEUE: blocking::Queue = blocking::Queue::new();
+static IMAGE_ADMISSION: std::sync::LazyLock<operation_control::ImageAdmission> =
+    std::sync::LazyLock::new(|| operation_control::ImageAdmission::new(6));
 static BROWSER_QUEUE: blocking::Queue = blocking::Queue::new();
 static SETTINGS_QUEUE: blocking::Queue = blocking::Queue::new();
 static SESSION_QUEUE: blocking::Queue = blocking::Queue::new();
@@ -196,7 +202,7 @@ async fn open_library(
             let journal_path = config_dir.join("journal.sqlite");
             let opened = App::open(root, &journal_path).map_err(ErrorDto::from)?;
             // Apply saved settings (proxy / rate-limit / ID3 version) to the new session.
-            opened.apply_settings(&read_settings(&app));
+            opened.apply_settings(&read_settings_quietly(&app));
             let mut session = state.lock().map_err(shell_error)?;
             *session = Some(opened);
             LIBRARY_GENERATION.fetch_add(1, Ordering::SeqCst);
@@ -222,7 +228,7 @@ async fn open_drop(
             let journal_path = config_dir.join("journal.sqlite");
             let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
             let (opened, result) = App::open_drop(paths, &journal_path).map_err(ErrorDto::from)?;
-            opened.apply_settings(&read_settings(&app));
+            opened.apply_settings(&read_settings_quietly(&app));
             let mut session = state.lock().map_err(shell_error)?;
             *session = Some(opened);
             LIBRARY_GENERATION.fetch_add(1, Ordering::SeqCst);
@@ -1059,7 +1065,7 @@ fn progress_reporter(
 /// [`AppState`]: the apply holds that lock for its whole run, and the request has
 /// to get through while it does.
 #[derive(Default)]
-struct ApplyControl(Arc<AtomicBool>);
+struct ApplyControl(operation_control::OperationControl);
 
 #[derive(serde::Serialize, Clone)]
 struct ApplyProgressDto {
@@ -1079,13 +1085,12 @@ async fn apply_plan(
     plan: PlanDto,
 ) -> Result<BatchDto, ErrorDto> {
     let state = state.inner().clone();
-    let control = control.0.clone();
-    control.store(false, Ordering::SeqCst);
+    let operation = control.0.admit("Apply")?;
     SESSION_QUEUE
         .run(move || {
             let mut report = progress_reporter(app_handle, plan.changes.len());
             with_app_mut(&state, |app| {
-                app.apply_with(&plan, &mut report, &control)
+                app.apply_with(&plan, &mut report, operation.cancelled())
                     .map_err(ErrorDto::from)
             })
         })
@@ -1094,13 +1099,13 @@ async fn apply_plan(
 
 #[tauri::command]
 fn cancel_apply(control: State<ApplyControl>) {
-    control.0.store(true, Ordering::SeqCst);
+    control.0.cancel();
 }
 
 /// Asks a running BPM detection to stop (#536). Shared with the blocking thread
 /// the detection runs on, hence the `Arc`.
 #[derive(Default)]
-struct BpmControl(Arc<AtomicBool>);
+struct BpmControl(operation_control::OperationControl);
 
 /// What a BPM detection found (#536): the plan for the tempos it measured, and
 /// what it could not measure, for the toast.
@@ -1148,11 +1153,12 @@ async fn detect_bpm(
     control: State<'_, BpmControl>,
     paths: Vec<String>,
 ) -> Result<BpmDetectionDto, ErrorDto> {
-    control.0.store(false, Ordering::SeqCst);
-    let cancel = control.0.clone();
+    let operation = control.0.admit("BPM detection")?;
+    let preparation = operation.clone();
     let session = state.inner().clone();
     let (limit, generation) = SESSION_QUEUE
         .run(move || {
+            let _operation = preparation;
             with_app(&session, |app| {
                 Ok((
                     app.bpm_max_length(),
@@ -1161,6 +1167,7 @@ async fn detect_bpm(
             })
         })
         .await?;
+    let measurement = operation.clone();
     let measured = tauri::async_runtime::spawn_blocking(move || {
         let mut detector = tagrex_player::tempo::TempoDetector::new().map_err(shell_error)?;
         let total = paths.len();
@@ -1185,7 +1192,7 @@ async fn detect_bpm(
                 too_long += 1;
                 continue;
             }
-            match detector.detect(&target, &cancel) {
+            match detector.detect(&target, measurement.cancelled()) {
                 Ok(Some(bpm)) => detected.push((target, bpm)),
                 Ok(None) => no_tempo += 1,
                 Err(tagrex_player::tempo::TempoError::Failed(_)) => failed.push(path.clone()),
@@ -1204,7 +1211,10 @@ async fn detect_bpm(
     let (detected, analysed, no_tempo, too_long, failed, cancelled) = measured;
     let session = state.inner().clone();
     let plan = SESSION_QUEUE
-        .run(move || preview_detected_bpm(&session, generation, &detected))
+        .run(move || {
+            let _operation = operation;
+            preview_detected_bpm(&session, generation, &detected)
+        })
         .await?;
     Ok(BpmDetectionDto {
         plan,
@@ -1218,7 +1228,7 @@ async fn detect_bpm(
 
 #[tauri::command]
 fn cancel_detect_bpm(control: State<BpmControl>) {
-    control.0.store(true, Ordering::SeqCst);
+    control.0.cancel();
 }
 
 // `async` for the same reason as `apply_plan` (#448): a synchronous command runs
@@ -1334,11 +1344,11 @@ async fn provider_fetch_image(
             })
         })
         .await?;
-    // Only fetcher preparation uses the source queue/lock. The download is
-    // bounded by the shared image slots and cannot block a release lookup.
-    tauri::async_runtime::spawn_blocking(move || fetch.fetch_cover(&url).map_err(ErrorDto::from))
+    // Admit before spawn_blocking so waiting thumbnails use no blocking worker.
+    // Keep the command crate's synchronous cap for non-IPC consumers too.
+    IMAGE_ADMISSION
+        .run(move || fetch.fetch_cover(&url).map_err(ErrorDto::from))
         .await
-        .map_err(shell_error)?
 }
 
 /// Save a release's images to disk next to the selected tracks (#102). Async:
@@ -1521,6 +1531,9 @@ fn tighten_secret(path: &std::path::Path) {
 // and the client id (so a refresh doesn't have to re-read it). It lives in the
 // OS app-config dir next to the Discogs token — never in the repository.
 
+static BEATPORT_SESSION: std::sync::LazyLock<Arc<beatport_session_control::SessionControl>> =
+    std::sync::LazyLock::new(|| Arc::new(beatport_session_control::SessionControl::default()));
+
 /// The saved sign-in, as it sits on disk.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct BeatportSession {
@@ -1563,7 +1576,7 @@ fn write_beatport_session(
 
 /// The proxy every provider request goes through, from settings.
 fn beatport_proxy(app: &tauri::AppHandle) -> Option<String> {
-    let proxy = read_settings(app).proxy.trim().to_string();
+    let proxy = read_settings_quietly(app).proxy.trim().to_string();
     (!proxy.is_empty()).then_some(proxy)
 }
 
@@ -1572,7 +1585,7 @@ async fn beatport_status(app: tauri::AppHandle) -> Result<BeatportStatusDto, Err
     SETTINGS_QUEUE
         .run(move || {
             Ok({
-                match read_beatport_session(&app) {
+                match BEATPORT_SESSION.read(|| Ok(read_beatport_session(&app)))?.1 {
                     Some(session) => BeatportStatusDto {
                         authorized: true,
                         username: session.username,
@@ -1591,13 +1604,15 @@ async fn beatport_status(app: tauri::AppHandle) -> Result<BeatportStatusDto, Err
 async fn beatport_logout(app: tauri::AppHandle) -> Result<(), ErrorDto> {
     SETTINGS_QUEUE
         .run(move || {
-            let path = beatport_session_path(&app)?;
-            match std::fs::remove_file(path) {
-                Ok(()) => Ok(()),
-                // Signing out of a session that isn't there is a no-op, not a failure.
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(err) => Err(ErrorDto::from(err)),
-            }
+            BEATPORT_SESSION.logout(|| {
+                let path = beatport_session_path(&app)?;
+                match std::fs::remove_file(path) {
+                    Ok(()) => Ok(()),
+                    // Signing out of a session that isn't there is a no-op.
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(err) => Err(ErrorDto::from(err)),
+                }
+            })
         })
         .await
 }
@@ -1613,7 +1628,10 @@ async fn beatport_logout(app: tauri::AppHandle) -> Result<(), ErrorDto> {
 async fn beatport_login(app: tauri::AppHandle) -> Result<String, ErrorDto> {
     use tagrex_providers_beatport::auth;
 
-    let proxy = beatport_proxy(&app);
+    let config = app.clone();
+    let (generation, proxy) = SETTINGS_QUEUE
+        .run(move || BEATPORT_SESSION.read(|| Ok(beatport_proxy(&config))))
+        .await?;
     let agent = auth::agent(proxy.as_deref()).map_err(ErrorDto::from)?;
 
     let scraper = agent.clone();
@@ -1674,14 +1692,16 @@ async fn beatport_login(app: tauri::AppHandle) -> Result<String, ErrorDto> {
     .map_err(ErrorDto::from)?;
 
     let username = beatport_account_name(&proxy, &token.access_token).await;
-    write_beatport_session(
-        &app,
-        &BeatportSession {
-            token,
-            username: username.clone(),
-            client_id,
-        },
-    )?;
+    let session = BeatportSession {
+        token,
+        username: username.clone(),
+        client_id,
+    };
+    SETTINGS_QUEUE
+        .run(move || {
+            BEATPORT_SESSION.publish(generation, || write_beatport_session(&app, &session))
+        })
+        .await?;
     Ok(username)
 }
 
@@ -1692,30 +1712,27 @@ async fn beatport_login(app: tauri::AppHandle) -> Result<String, ErrorDto> {
 async fn beatport_token(app: tauri::AppHandle) -> Result<String, ErrorDto> {
     use tagrex_providers_beatport::auth;
 
-    let mut session =
-        read_beatport_session(&app).ok_or_else(|| shell_error("Not signed in to Beatport"))?;
-    if !session.token.is_expired() {
-        return Ok(session.token.access_token);
-    }
-
-    let proxy = beatport_proxy(&app);
-    let agent = auth::agent(proxy.as_deref()).map_err(ErrorDto::from)?;
-    let client_id = session.client_id.clone();
-    let refresh_token = session.token.refresh_token.clone();
-    let token = tauri::async_runtime::spawn_blocking(move || {
-        auth::refresh(&agent, &client_id, &refresh_token)
-    })
-    .await
-    .map_err(shell_error)?
-    // A refresh token can be revoked from the account page, and then the
-    // only way back is a fresh sign-in — say so rather than reporting a
-    // bare HTTP status.
-    .map_err(|err| ErrorDto::from(AppError::BeatportReauth(err.to_string())))?;
-
-    let access_token = token.access_token.clone();
-    session.token = token;
-    write_beatport_session(&app, &session)?;
-    Ok(access_token)
+    BEATPORT_SESSION
+        .token(move |control, generation| {
+            let (mut session, proxy) = control.read_at(generation, || {
+                let session = read_beatport_session(&app)
+                    .ok_or_else(|| shell_error("Not signed in to Beatport"))?;
+                Ok((session, beatport_proxy(&app)))
+            })?;
+            if !session.token.is_expired() {
+                return Ok(session.token.access_token);
+            }
+            // Only the short snapshot/publication sections hold the persistence
+            // lock. Status, logout and settings can run while HTTP is pending.
+            let agent = auth::agent(proxy.as_deref()).map_err(ErrorDto::from)?;
+            let token = auth::refresh(&agent, &session.client_id, &session.token.refresh_token)
+                .map_err(|err| ErrorDto::from(AppError::BeatportReauth(err.to_string())))?;
+            let access_token = token.access_token.clone();
+            session.token = token;
+            control.publish(generation, || write_beatport_session(&app, &session))?;
+            Ok(access_token)
+        })
+        .await
 }
 
 /// The account name behind a token. A failure here is not worth failing the
@@ -1747,13 +1764,83 @@ fn settings_path(app: &tauri::AppHandle) -> Result<PathBuf, ErrorDto> {
 }
 
 /// Read saved settings, falling back to defaults if the file is missing or
-/// unreadable (so a corrupt file never blocks startup).
+/// unusable (so one bad file never blocks startup).
+///
+/// The three outcomes are not the same, so they are not folded together here:
+/// a missing file is a clean start; a file that does not parse is left in place
+/// and copied aside by the next save ([`settings_store`]); a file that exists
+/// but cannot be *read* is remembered, and saving is refused until a read that
+/// feeds the interface succeeds, because the defaults shown instead must not
+/// replace bytes nobody has seen.
+///
+/// Only this (and the start-up read in `main`'s setup) updates that state. The
+/// backend also reads settings for its own use — a provider's proxy, an opened
+/// library's write preferences — through [`read_settings_quietly`], because a
+/// read that never reached the interface's snapshot must not decide whether
+/// the interface may save.
 fn read_settings(app: &tauri::AppHandle) -> SettingsDto {
-    settings_path(app)
-        .ok()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|json| serde_json::from_str(&json).ok())
-        .unwrap_or_default()
+    read_settings_recording(app, true)
+}
+
+/// Read saved settings for the backend's own use (the proxy a request should
+/// go through, the preferences an opened library takes). Same fallback as
+/// [`read_settings`], but it does not touch the "last read failed" state: this
+/// read did not produce the settings the interface will save.
+fn read_settings_quietly(app: &tauri::AppHandle) -> SettingsDto {
+    read_settings_recording(app, false)
+}
+
+static SETTINGS_NOTICE: Mutex<Option<String>> = Mutex::new(None);
+
+fn read_settings_recording(app: &tauri::AppHandle, record: bool) -> SettingsDto {
+    let Ok(path) = settings_path(app) else {
+        // Without a config directory there is nothing to read, and a save will
+        // fail on the same call rather than overwrite anything.
+        return SettingsDto::default();
+    };
+    match settings_store::read::<SettingsDto>(&path) {
+        Ok(Some(settings)) => {
+            if record {
+                settings_store::note_read_success();
+                if let Ok(mut notice) = SETTINGS_NOTICE.lock() {
+                    *notice = None;
+                }
+            }
+            settings
+        }
+        Ok(None) => {
+            if record {
+                settings_store::note_read_success();
+                if let Ok(mut notice) = SETTINGS_NOTICE.lock() {
+                    *notice = None;
+                }
+            }
+            SettingsDto::default()
+        }
+        Err(settings_store::ReadError::Malformed(detail)) => {
+            eprintln!(
+                "settings: {} is not valid settings JSON ({detail}); it will be kept aside on the next save",
+                path.display()
+            );
+            if record {
+                settings_store::note_read_success();
+                if let Ok(mut notice) = SETTINGS_NOTICE.lock() {
+                    *notice = Some(format!("Saved settings could not be parsed. Defaults are shown. The original file at {} will be preserved before replacement when you save.", path.display()));
+                }
+            }
+            SettingsDto::default()
+        }
+        Err(settings_store::ReadError::Unreadable(error)) => {
+            eprintln!("settings: {} could not be read: {error}", path.display());
+            if record {
+                settings_store::note_read_failure(error.to_string());
+                if let Ok(mut notice) = SETTINGS_NOTICE.lock() {
+                    *notice = Some(format!("Saved settings at {} could not be read: {error}. Defaults are shown and saving is blocked until the file can be read. Reopen Settings to retry.", path.display()));
+                }
+            }
+            SettingsDto::default()
+        }
+    }
 }
 
 // Personal-fork releases have their own version line and no update service yet.
@@ -1777,7 +1864,7 @@ async fn check_for_update(
     }
     let handle = app.clone();
     let settings = SETTINGS_QUEUE
-        .run(move || Ok(read_settings(&handle)))
+        .run(move || Ok(read_settings_quietly(&handle)))
         .await?;
     if automatic && !settings.check_updates {
         return Ok(None);
@@ -1897,9 +1984,26 @@ async fn close_button_side() -> Result<&'static str, ErrorDto> {
         .await
 }
 
+#[derive(serde::Serialize)]
+struct LoadedSettings {
+    #[serde(flatten)]
+    settings: SettingsDto,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery_notice: Option<String>,
+}
+
 #[tauri::command]
-async fn load_settings(app: tauri::AppHandle) -> Result<SettingsDto, ErrorDto> {
-    SETTINGS_QUEUE.run(move || Ok(read_settings(&app))).await
+async fn load_settings(app: tauri::AppHandle) -> Result<LoadedSettings, ErrorDto> {
+    SETTINGS_QUEUE
+        .run(move || {
+            let settings = read_settings(&app);
+            let recovery_notice = SETTINGS_NOTICE.lock().map_err(shell_error)?.take();
+            Ok(LoadedSettings {
+                settings,
+                recovery_notice,
+            })
+        })
+        .await
 }
 
 /// The shipped preset library (#137). Read-only and not part of settings: the
@@ -2039,11 +2143,12 @@ async fn save_settings_at(
 ) -> Result<(), ErrorDto> {
     let (settings, revision) = SETTINGS_QUEUE
         .run(move || {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(ErrorDto::from)?;
-            }
-            let json = serde_json::to_string_pretty(&settings).map_err(ErrorDto::from)?;
-            std::fs::write(path, json).map_err(ErrorDto::from)?;
+            // Durable replace: a truncated or half-written settings.json would
+            // lose every saved chain and preset, so the file is only ever
+            // swapped in whole (see [`settings_store`]). A save is refused
+            // rather than performed over a file that could not be read.
+            settings_store::save(&path, &settings)
+                .map_err(|error| ErrorDto::plain(error.to_string()))?;
             // Apply immediately: the network half always (the hub is always there), the
             // library half only when a library is open — so a change takes effect
             // without reopening either way.
@@ -2092,6 +2197,10 @@ fn main() {
     builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        // Which document each window may show. Without this hook a webview
+        // navigates anywhere, and provider-derived links are rendered in the
+        // UI; the policy keeps the app's window on the app's own document.
+        .plugin(navigation::init())
         // Size, position and maximized/fullscreen of the main window (#434).
         // Not DECORATIONS or VISIBLE: the overlay title bar and the first show
         // are the app's to decide. Only "main": the Beatport sign-in window is a
@@ -2278,6 +2387,9 @@ mod tests {
     fn saved_preferences_reach_a_library_that_is_still_opening() {
         use std::sync::{mpsc, Arc, Mutex};
         use std::time::{Duration, Instant, SystemTime};
+        // Saving consults the process-wide read state; hold the same lock the
+        // settings-store tests use so a deliberate failure cannot leak in.
+        let _serial = super::settings_store::serialise_save_tests();
         let root = std::env::temp_dir().join(format!(
             "tagrex-settings-open-{}-{}",
             std::process::id(),
@@ -2330,6 +2442,58 @@ mod tests {
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
         assert_eq!(actual, Some(Duration::from_secs(7 * 60)));
+    }
+
+    /// A startup read that failed leaves the interface on defaults. Saving
+    /// those defaults over a file that may have become readable again would
+    /// discard every saved chain and preset, so the save is refused and the
+    /// file keeps its bytes.
+    #[test]
+    fn settings_are_not_overwritten_after_a_failed_read() {
+        use std::sync::{Arc, Mutex};
+        use std::time::SystemTime;
+        let _serial = super::settings_store::serialise_save_tests();
+        let root = std::env::temp_dir().join(format!(
+            "tagrex-settings-unread-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("settings.json");
+        let before = br#"{"bpm_max_minutes":7}"#;
+        std::fs::write(&path, before).unwrap();
+
+        super::settings_store::note_read_failure("permission denied".to_string());
+        let state: super::AppState = Arc::new(Mutex::new(None));
+        let providers: super::ProviderState = Arc::new(super::ProviderQueues::default());
+        let untouched = super::SettingsDto::default().bpm_max_minutes;
+        let result = tauri::async_runtime::block_on(super::save_settings_at(
+            path.clone(),
+            state,
+            providers.clone(),
+            super::SettingsDto {
+                bpm_max_minutes: 9,
+                ..Default::default()
+            },
+        ));
+        super::settings_store::note_read_success();
+        let error = result.expect_err("the save went ahead after a failed read");
+
+        assert!(
+            error.text.contains("could not be read earlier"),
+            "unexpected message: {}",
+            error.text
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(
+            providers.settings.lock().unwrap().bpm_max_minutes,
+            untouched,
+            "the refused settings were applied anyway"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

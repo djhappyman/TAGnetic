@@ -2073,3 +2073,195 @@ fn cloned_bulk_plans_share_artwork_and_copy_on_write_is_explicit() {
         7
     );
 }
+
+fn snapshot_block(
+    path: &Path,
+    kind: tagrex_core::model::TagBlockKind,
+) -> tagrex_core::plan::BlockChange {
+    use tagrex_core::model::TagBlockKind;
+    let mut block = tagrex_core::plan::BlockChange::removal(
+        kind,
+        TagEngine::read_block(path, kind).unwrap().unwrap(),
+    );
+    block.old_bytes = match kind {
+        TagBlockKind::Id3v2 => TagEngine::dump_id3v2(path).unwrap(),
+        TagBlockKind::VorbisComments => TagEngine::dump_vorbis(path).unwrap(),
+        _ => None,
+    };
+    if kind == TagBlockKind::Id3v2 {
+        block.old_revision = TagEngine::id3v2_revision(path).unwrap();
+    }
+    block
+}
+
+#[test]
+fn exact_block_preflight_refuses_private_frame_and_revision_only_changes() {
+    use lofty::config::WriteOptions;
+    use lofty::id3::v2::{Frame, Id3v2Tag, PrivateFrame};
+    use lofty::prelude::{Accessor, TagExt};
+    use tagrex_core::model::{Id3v2Revision, TagBlockKind};
+    for revision_only in [false, true] {
+        let dir = TempDir::new("exact-block-stale");
+        let track = id3v23_mp3(&dir, "track.mp3", "Kept");
+        let write_private = |data: Vec<u8>| {
+            let mut tag = Id3v2Tag::new();
+            tag.set_artist("Kept".to_string());
+            tag.insert(Frame::Private(PrivateFrame::new(
+                "DJ cue points".to_string(),
+                data,
+            )));
+            tag.save_to_path(&track, WriteOptions::default().use_id3v23(true))
+                .unwrap();
+        };
+        write_private(vec![1, 2, 3]);
+        let mut block = snapshot_block(&track, TagBlockKind::Id3v2);
+        if revision_only {
+            // Exercise the revision guard independently of byte comparison.
+            block.old_bytes = None;
+        }
+        let old = block.old.clone();
+        let plan = ChangePlan {
+            changes: vec![FileChange {
+                path: track.clone(),
+                block_changes: vec![block],
+                ..FileChange::default()
+            }],
+            ..ChangePlan::default()
+        };
+        if revision_only {
+            TagEngine::set_id3v2_revision(&track, Id3v2Revision::V4).unwrap();
+        } else {
+            write_private(vec![9, 9, 9]);
+        }
+        assert_eq!(
+            TagEngine::read_block(&track, TagBlockKind::Id3v2).unwrap(),
+            old,
+            "modeled content cannot detect this edit"
+        );
+        let before = std::fs::read(&track).unwrap();
+        let mut journal = VecJournal::new();
+        assert!(
+            matches!(Executor::apply(&plan, &mut journal, &roots(dir.path())), Err(PlanError::Stale(path)) if path == track)
+        );
+        assert_eq!(std::fs::read(&track).unwrap(), before);
+        assert!(journal.batches().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn exact_vorbis_preflight_refuses_reordered_comments() {
+    use lofty::config::WriteOptions;
+    use lofty::ogg::tag::VorbisComments;
+    use lofty::prelude::TagExt;
+    use tagrex_core::model::TagBlockKind;
+    let dir = TempDir::new("exact-vorbis-stale");
+    let track = dir.flac("track.flac");
+    let mut tag = VorbisComments::default();
+    tag.set_vendor("Original Encoder".to_string());
+    tag.push("TITLE".to_string(), "Kept".to_string());
+    tag.push("ALBUM".to_string(), "Kept".to_string());
+    tag.save_to_path(&track, WriteOptions::default()).unwrap();
+    let block = snapshot_block(&track, TagBlockKind::VorbisComments);
+    let old = block.old.clone();
+    let plan = ChangePlan {
+        changes: vec![FileChange {
+            path: track.clone(),
+            block_changes: vec![block],
+            ..FileChange::default()
+        }],
+        ..ChangePlan::default()
+    };
+    // The map cannot represent comment ordering. Swap two equal-length
+    // comments on disk without changing either modeled value or audio bytes.
+    let captured = plan.changes[0].block_changes[0].old_bytes.as_ref().unwrap();
+    let mut bytes = std::fs::read(&track).unwrap();
+    let title = bytes
+        .windows(b"TITLE=Kept".len())
+        .position(|window| window == b"TITLE=Kept")
+        .unwrap();
+    let album = bytes
+        .windows(b"ALBUM=Kept".len())
+        .position(|window| window == b"ALBUM=Kept")
+        .unwrap();
+    bytes[title..title + 5].copy_from_slice(b"ALBUM");
+    bytes[album..album + 5].copy_from_slice(b"TITLE");
+    std::fs::write(&track, bytes).unwrap();
+    assert_ne!(
+        TagEngine::dump_vorbis(&track).unwrap().as_ref(),
+        Some(captured)
+    );
+    assert_eq!(
+        TagEngine::read_block(&track, TagBlockKind::VorbisComments).unwrap(),
+        old
+    );
+    let before = std::fs::read(&track).unwrap();
+    let mut journal = VecJournal::new();
+    assert!(
+        matches!(Executor::apply(&plan, &mut journal, &roots(dir.path())), Err(PlanError::Stale(path)) if path == track)
+    );
+    assert_eq!(std::fs::read(&track).unwrap(), before);
+    assert!(journal.batches().unwrap().is_empty());
+}
+
+#[test]
+fn whole_block_undo_refuses_later_private_id3_frames_in_every_mode() {
+    use lofty::config::WriteOptions;
+    use lofty::id3::v2::{Frame, Id3v2Tag, PrivateFrame};
+    use lofty::prelude::{Accessor, TagExt};
+    use tagrex_core::model::{Id3v2Revision, TagBlockKind};
+    use tagrex_core::plan::UndoMode;
+    for mode in [UndoMode::Strict, UndoMode::KeepChanged, UndoMode::Overwrite] {
+        let dir = TempDir::new("private-frame-undo");
+        let path = id3v23_mp3(&dir, "track.mp3", "Before");
+        let write_private = |data: Vec<u8>, v23: bool| {
+            let mut tag = Id3v2Tag::new();
+            tag.set_artist("Before".to_string());
+            tag.insert(Frame::Private(PrivateFrame::new(
+                "DJ cue points".to_string(),
+                data,
+            )));
+            tag.save_to_path(&path, WriteOptions::default().use_id3v23(v23))
+                .unwrap();
+        };
+        write_private(vec![1, 2, 3], true);
+        let mut block = snapshot_block(&path, TagBlockKind::Id3v2);
+        block.new = block.old.clone();
+        block.revision = Some(Id3v2Revision::V4);
+        let plan = ChangePlan {
+            changes: vec![FileChange {
+                path: path.clone(),
+                block_changes: vec![block],
+                ..FileChange::default()
+            }],
+            ..ChangePlan::default()
+        };
+        let mut journal = VecJournal::new();
+        let batch = Executor::apply(&plan, &mut journal, &roots(dir.path())).unwrap();
+        let applied = std::fs::read(&path).unwrap();
+        let modeled = TagEngine::read_block(&path, TagBlockKind::Id3v2).unwrap();
+        write_private(vec![9, 9, 9], false);
+        assert_eq!(
+            TagEngine::read_block(&path, TagBlockKind::Id3v2).unwrap(),
+            modeled
+        );
+        let later = std::fs::read(&path).unwrap();
+        assert!(matches!(
+            Executor::undo_with_mode(
+                &mut journal,
+                batch.id,
+                &roots(dir.path()),
+                mode,
+                &mut |_| {}
+            ),
+            Err(PlanError::ChangedSinceApplied(_))
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), later);
+        assert!(journal.batch(batch.id).unwrap().is_some());
+        std::fs::write(&path, applied).unwrap();
+        Executor::undo(&mut journal, batch.id, &roots(dir.path())).unwrap();
+        assert_eq!(
+            TagEngine::id3v2_revision(&path).unwrap(),
+            Some(Id3v2Revision::V3)
+        );
+    }
+}

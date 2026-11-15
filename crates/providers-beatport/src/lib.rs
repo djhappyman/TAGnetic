@@ -39,9 +39,10 @@ pub(crate) const USER_AGENT: &str = concat!(
     " +https://github.com/djhappyman/TAGnetic"
 );
 
-/// How many tracks to ask for per page. A release never has more, so one request
-/// is enough for all but the most extreme compilations.
+/// How many tracks to request per page; larger releases follow `next`.
 const TRACKS_PER_PAGE: u32 = 100;
+/// Bound requests and memory even if the API keeps supplying new pages.
+const MAX_TRACK_PAGES: usize = 100;
 
 /// The size to ask the image CDN for. Its URLs carry `{w}`/`{h}` placeholders,
 /// so the resolution is ours to choose rather than something to discover.
@@ -84,7 +85,13 @@ impl BeatportProvider {
             request = request.query(*key, *value);
         }
 
+        // Never forward the bearer token through an API redirect. Pagination
+        // destinations are checked separately before reaching this method.
         let mut response = request
+            .config()
+            .max_redirects(0)
+            .max_redirects_will_error(false)
+            .build()
             .call()
             .map_err(|err| ProviderError::Network(err.to_string()))?;
 
@@ -183,17 +190,151 @@ impl MetadataProvider for BeatportProvider {
         parse_search_response(&body)
     }
 
-    /// Two calls: the release itself, then its tracklist, which the release
-    /// object does not carry.
+    /// Fetch the release, then every bounded tracklist page in release order.
+    /// A failed or malformed later page fails the entire fetch.
     fn fetch_release(&self, id: &ReleaseId) -> Result<Release, ProviderError> {
+        if id.0.is_empty() || !id.0.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(ProviderError::Other(
+                "invalid Beatport release identifier".into(),
+            ));
+        }
         let release = self.get(&format!("{API_BASE}/catalog/releases/{}/", id.0), &[])?;
-        let per_page = TRACKS_PER_PAGE.to_string();
-        let tracks = self.get(
-            &format!("{API_BASE}/catalog/releases/{}/tracks/", id.0),
-            &[("per_page", per_page.as_str())],
-        )?;
+        let first = format!(
+            "{API_BASE}/catalog/releases/{}/tracks/?page=1&per_page={TRACKS_PER_PAGE}",
+            id.0
+        );
+        let tracks = collect_track_pages(&first, |url| self.get(url, &[]))?;
         parse_release(&release, &tracks)
     }
+}
+
+fn pagination_error(message: &str) -> ProviderError {
+    ProviderError::Other(format!("invalid Beatport tracklist pagination: {message}"))
+}
+
+/// Resolve only links to this exact tracklist on the HTTPS API origin. Rebuild
+/// the query so equivalent page links cannot bypass the repeated-page guard.
+fn next_track_page(first: &str, next: &str, expected_page: usize) -> Result<String, ProviderError> {
+    let first: ureq::http::Uri = first
+        .parse()
+        .map_err(|_| pagination_error("invalid first URL"))?;
+    if next.contains('#') {
+        return Err(pagination_error("fragment in next URL"));
+    }
+    let absolute = if next.starts_with('/') && !next.starts_with("//") {
+        format!("https://api.beatport.com{next}")
+    } else if next.starts_with('?') {
+        format!("https://api.beatport.com{}{next}", first.path())
+    } else {
+        next.to_string()
+    };
+    let uri: ureq::http::Uri = absolute
+        .parse()
+        .map_err(|_| pagination_error("invalid next URL"))?;
+    if uri.scheme_str() != Some("https")
+        || !uri.authority().is_some_and(|authority| {
+            matches!(
+                authority.as_str().to_ascii_lowercase().as_str(),
+                "api.beatport.com" | "api.beatport.com:443"
+            )
+        })
+        || uri.path() != first.path()
+    {
+        return Err(pagination_error("next URL is outside this API tracklist"));
+    }
+    let mut page = None;
+    let mut per_page = None;
+    for pair in uri.query().unwrap_or_default().split('&') {
+        let (key, value) = pair
+            .split_once('=')
+            .ok_or_else(|| pagination_error("invalid query"))?;
+        let number = value
+            .parse::<usize>()
+            .map_err(|_| pagination_error("invalid page number"))?;
+        match key {
+            "page" if page.is_none() => page = Some(number),
+            "per_page" if per_page.is_none() => per_page = Some(number),
+            _ => return Err(pagination_error("unknown or duplicate query parameter")),
+        }
+    }
+    if page != Some(expected_page) || per_page.is_some_and(|n| n != TRACKS_PER_PAGE as usize) {
+        return Err(pagination_error("nonconsecutive page or changed page size"));
+    }
+    Ok(format!(
+        "https://api.beatport.com{}?page={expected_page}&per_page={TRACKS_PER_PAGE}",
+        first.path()
+    ))
+}
+
+fn collect_track_pages(
+    first: &str,
+    mut get: impl FnMut(&str) -> Result<String, ProviderError>,
+) -> Result<String, ProviderError> {
+    let mut url = next_track_page(first, first, 1)?;
+    let mut seen_pages = std::collections::HashSet::new();
+    let mut seen_tracks = std::collections::HashSet::new();
+    let mut tracks = Vec::new();
+    let mut total = None;
+    for page in 1..=MAX_TRACK_PAGES {
+        if !seen_pages.insert(url.clone()) {
+            return Err(pagination_error("repeated page"));
+        }
+        let body = get(&url)?;
+        let root: Value = serde_json::from_str(&body)
+            .map_err(|err| pagination_error(&format!("page {page}: {err}")))?;
+        let results = root
+            .get("results")
+            .and_then(Value::as_array)
+            .ok_or_else(|| pagination_error("page missing results array"))?;
+        if results.len() > TRACKS_PER_PAGE as usize {
+            return Err(pagination_error("oversized page"));
+        }
+        if let Some(count) = root.get("count") {
+            let count = count
+                .as_u64()
+                .ok_or_else(|| pagination_error("invalid count"))?;
+            if count > (MAX_TRACK_PAGES * TRACKS_PER_PAGE as usize) as u64
+                || total.is_some_and(|n| n != count)
+            {
+                return Err(pagination_error("excessive or changing count"));
+            }
+            total = Some(count);
+        }
+        for track in results {
+            let id = id_of(track);
+            if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(pagination_error("track missing numeric ID"));
+            }
+            if !seen_tracks.insert(id) {
+                return Err(pagination_error("duplicate track ID"));
+            }
+            tracks.push(track.clone());
+        }
+        if total.is_some_and(|n| tracks.len() as u64 > n) {
+            return Err(pagination_error("results exceed count"));
+        }
+        match root.get("next") {
+            None | Some(Value::Null) => {
+                if total.is_some_and(|n| tracks.len() as u64 != n) {
+                    return Err(pagination_error("incomplete tracklist"));
+                }
+                return serde_json::to_string(&tracks)
+                    .map_err(|err| pagination_error(&err.to_string()));
+            }
+            Some(Value::String(next)) if !next.is_empty() && !results.is_empty() => {
+                if page == MAX_TRACK_PAGES {
+                    return Err(pagination_error("page limit exceeded"));
+                }
+                url = next_track_page(first, next, page + 1)?;
+            }
+            _ => {
+                return Err(pagination_error(
+                    "invalid next link or empty intermediate page",
+                ))
+            }
+        }
+    }
+    Err(pagination_error("page limit exceeded"))
 }
 
 /// Clean a query before it goes into the store's single free-text box (#168).
@@ -302,8 +443,7 @@ fn parse_release(release_body: &str, tracks_body: &str) -> Result<Release, Provi
         .get("results")
         .or(Some(&tracks_root))
         .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+        .ok_or_else(|| pagination_error("missing results array"))?;
 
     let mut tracks = Vec::with_capacity(track_values.len());
     let mut genres: Vec<String> = Vec::new();
@@ -536,6 +676,230 @@ mod tests {
             ),
             "{result:?}"
         );
+    }
+
+    #[test]
+    fn api_requests_do_not_follow_redirects_with_the_bearer_token() {
+        use std::io::{Read, Write};
+        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        target.set_nonblocking(true).unwrap();
+        let location = format!("http://{}/elsewhere", target.local_addr().unwrap());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/page", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+                assert!(request.len() < 8192);
+            }
+            write!(stream, "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        let result = BeatportProvider::new("fixture-token").get(&url, &[]);
+        server.join().unwrap();
+        assert!(matches!(result, Err(ProviderError::Other(message)) if message == "HTTP 302"));
+        assert!(
+            matches!(target.accept(), Err(err) if err.kind() == std::io::ErrorKind::WouldBlock)
+        );
+    }
+
+    #[test]
+    fn release_id_cannot_change_the_api_path() {
+        for id in [
+            "",
+            "../search",
+            "123?query=456",
+            "https://example.com/release/123",
+        ] {
+            assert!(matches!(
+                BeatportProvider::new("fixture-token").fetch_release(&ReleaseId(id.into())),
+                Err(ProviderError::Other(_))
+            ));
+        }
+    }
+
+    const FIRST_TRACK_PAGE: &str =
+        "https://api.beatport.com/v4/catalog/releases/4321/tracks/?page=1&per_page=100";
+
+    fn track_page(start: usize, end: usize, count: usize, next: Value) -> String {
+        serde_json::json!({
+            "count": count, "next": next,
+            "results": (start..=end).map(|id| serde_json::json!({"id": id, "name": format!("Track {id}"),
+                "genre": {"name": if id <= 100 { "First genre" } else { "Last genre" }}})).collect::<Vec<_>>()
+        }).to_string()
+    }
+
+    #[test]
+    fn fetches_101_and_200_tracks_in_order_with_continuous_fallback_numbers() {
+        for count in [101, 200] {
+            let mut calls = Vec::new();
+            let tracks = collect_track_pages(FIRST_TRACK_PAGE, |url| {
+                calls.push(url.to_string());
+                Ok(if calls.len() == 1 {
+                    track_page(
+                        1,
+                        100,
+                        count,
+                        Value::String(
+                            "/v4/catalog/releases/4321/tracks/?per_page=100&page=2".into(),
+                        ),
+                    )
+                } else {
+                    track_page(101, count, count, Value::Null)
+                })
+            })
+            .unwrap();
+            assert_eq!(calls.len(), 2);
+            assert_eq!(
+                calls[1],
+                "https://api.beatport.com/v4/catalog/releases/4321/tracks/?page=2&per_page=100"
+            );
+            let release = parse_release(RELEASE_JSON, &tracks).unwrap();
+            assert_eq!(release.tracks.len(), count);
+            for (index, track) in release.tracks.iter().enumerate() {
+                assert_eq!(track.title, format!("Track {}", index + 1));
+                assert_eq!(track.position, (index + 1).to_string());
+            }
+            assert_eq!(release.genres, ["First genre", "Last genre"]);
+        }
+    }
+
+    #[test]
+    fn keeps_explicit_numbers_across_pages() {
+        let mut calls = 0;
+        let tracks = collect_track_pages(FIRST_TRACK_PAGE, |_| {
+            calls += 1;
+            Ok(if calls == 1 {
+                r#"{"count":2,"results":[{"id":1,"number":7}],"next":"?page=2"}"#
+            } else {
+                r#"{"count":2,"results":[{"id":2,"number":8}],"next":null}"#
+            }
+            .into())
+        })
+        .unwrap();
+        let release = parse_release(RELEASE_JSON, &tracks).unwrap();
+        assert_eq!(
+            release
+                .tracks
+                .iter()
+                .map(|t| t.position.as_str())
+                .collect::<Vec<_>>(),
+            ["7", "8"]
+        );
+    }
+
+    #[test]
+    fn later_page_transport_failure_fails_the_whole_fetch() {
+        let mut calls = 0;
+        let result = collect_track_pages(FIRST_TRACK_PAGE, |_| {
+            calls += 1;
+            if calls == 1 {
+                Ok(track_page(1, 100, 101, Value::String("?page=2".into())))
+            } else {
+                Err(ProviderError::Network("second page disconnected".into()))
+            }
+        });
+        assert_eq!(calls, 2);
+        assert!(
+            matches!(result, Err(ProviderError::Network(message)) if message.contains("second page"))
+        );
+    }
+
+    #[test]
+    fn rejects_pagination_outside_the_exact_tracklist_before_requesting_it() {
+        for next in [
+            "https://api.beatport.com.evil.test/v4/catalog/releases/4321/tracks/?page=2",
+            "https://api.beatport.com@127.0.0.1/v4/catalog/releases/4321/tracks/?page=2",
+            "http://api.beatport.com/v4/catalog/releases/4321/tracks/?page=2",
+            "https://api.beatport.com:8443/v4/catalog/releases/4321/tracks/?page=2",
+            "//127.0.0.1/v4/catalog/releases/4321/tracks/?page=2",
+            "/v4/catalog/releases/999/tracks/?page=2",
+            "?page=1",
+            "?page=3",
+            "?page=2&page=3",
+            "?page=two",
+            "?page=2&per_page=200",
+            "?page=2#fragment",
+        ] {
+            let mut calls = 0;
+            let result = collect_track_pages(FIRST_TRACK_PAGE, |_| {
+                calls += 1;
+                Ok(track_page(1, 100, 200, Value::String(next.into())))
+            });
+            assert!(result.is_err(), "{next}");
+            assert_eq!(calls, 1, "must reject before fetching {next}");
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_incomplete_and_repeated_pages() {
+        for body in [
+            r#"{}"#,
+            r#"{"results":{}}"#,
+            r#"{"results":[],"next":17}"#,
+            r#"{"results":[],"count":1,"next":null}"#,
+            r#"{"results":[],"count":"0"}"#,
+            r#"{"results":[],"next":"?page=2"}"#,
+            r#"{"results":[{"name":"no ID"}]}"#,
+            r#"{"results":[{"id":1},{"id":1}]}"#,
+        ] {
+            assert!(
+                collect_track_pages(FIRST_TRACK_PAGE, |_| Ok(body.into())).is_err(),
+                "{body}"
+            );
+        }
+        let mut calls = 0;
+        let repeated = collect_track_pages(FIRST_TRACK_PAGE, |_| {
+            calls += 1;
+            Ok(track_page(
+                1,
+                100,
+                200,
+                if calls == 1 {
+                    Value::String("?page=2".into())
+                } else {
+                    Value::Null
+                },
+            ))
+        });
+        assert!(
+            matches!(repeated, Err(ProviderError::Other(message)) if message.contains("duplicate track"))
+        );
+        assert_eq!(calls, 2);
+        let mut calls = 0;
+        let changing = collect_track_pages(FIRST_TRACK_PAGE, |_| {
+            calls += 1;
+            Ok(if calls == 1 {
+                track_page(1, 1, 2, Value::String("?page=2".into()))
+            } else {
+                track_page(2, 2, 3, Value::Null)
+            })
+        });
+        assert!(changing.is_err());
+    }
+
+    #[test]
+    fn bounds_even_nonrepeating_pagination() {
+        let mut calls = 0;
+        let result = collect_track_pages(FIRST_TRACK_PAGE, |_| {
+            calls += 1;
+            Ok(serde_json::json!({"results":[{"id":calls}], "next":format!("?page={}", calls + 1)}).to_string())
+        });
+        assert_eq!(calls, MAX_TRACK_PAGES);
+        assert!(
+            matches!(result, Err(ProviderError::Other(message)) if message.contains("page limit"))
+        );
+    }
+
+    #[test]
+    fn unexpected_tracklist_schema_is_an_error() {
+        assert!(parse_release(RELEASE_JSON, "{}").is_err());
+        assert!(parse_release(RELEASE_JSON, r#"{"results":null}"#).is_err());
     }
 
     const SEARCH_JSON: &str = r#"{
