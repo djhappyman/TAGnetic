@@ -36,6 +36,8 @@ type AppState = Arc<Mutex<Option<App>>>;
 
 static SAMPLE_QUEUE: blocking::Queue = blocking::Queue::new();
 static IMAGE_READ_QUEUE: blocking::Queue = blocking::Queue::new();
+static IMAGE_ADMISSION: std::sync::LazyLock<operation_control::ImageAdmission> =
+    std::sync::LazyLock::new(|| operation_control::ImageAdmission::new(6));
 static BROWSER_QUEUE: blocking::Queue = blocking::Queue::new();
 static SETTINGS_QUEUE: blocking::Queue = blocking::Queue::new();
 static SESSION_QUEUE: blocking::Queue = blocking::Queue::new();
@@ -1339,11 +1341,11 @@ async fn provider_fetch_image(
             })
         })
         .await?;
-    // Only fetcher preparation uses the source queue/lock. The download is
-    // bounded by the shared image slots and cannot block a release lookup.
-    tauri::async_runtime::spawn_blocking(move || fetch.fetch_cover(&url).map_err(ErrorDto::from))
+    // Admit before spawn_blocking so waiting thumbnails use no blocking worker.
+    // Keep the command crate's synchronous cap for non-IPC consumers too.
+    IMAGE_ADMISSION
+        .run(move || fetch.fetch_cover(&url).map_err(ErrorDto::from))
         .await
-        .map_err(shell_error)?
 }
 
 /// Save a release's images to disk next to the selected tracks (#102). Async:
