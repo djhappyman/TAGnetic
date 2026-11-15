@@ -561,6 +561,7 @@ impl Executor {
         }
 
         let changed = changed_since_applied(&batch)?;
+        ensure_covers_undo_safe(&batch)?;
         match mode {
             UndoMode::Strict => {
                 if let Some((_, first)) = changed.first() {
@@ -1180,6 +1181,31 @@ fn changed_since_applied(batch: &AppliedBatch) -> Result<Vec<(usize, KeptField)>
     Ok(changed)
 }
 
+/// Cover sets include bytes, ordering, picture types and descriptions. Field
+/// override modes cannot choose which images to keep, so refuse an ambiguous
+/// image restore in every mode before reversing any transfer. Completed plans
+/// provide both possible safe states; interrupted intent alone proves only the
+/// already-restored state.
+fn ensure_covers_undo_safe(batch: &AppliedBatch) -> Result<(), PlanError> {
+    for change in &batch.plan.changes {
+        if change.copy {
+            continue;
+        }
+        let Some(covers) = &change.cover_change else {
+            continue;
+        };
+        let now_at = match effective_rename(change) {
+            Some(target) if !is_untransferred(target, &change.path, false) => target,
+            _ => &change.path,
+        };
+        let current = TagEngine::read_covers(now_at)?;
+        if current != covers.old && (batch.interrupted || current != covers.new) {
+            return Err(PlanError::ChangedSinceApplied(now_at.to_path_buf()));
+        }
+    }
+    Ok(())
+}
+
 /// The stamp of every copy `plan` made, read once the batch is written (#604).
 /// A copy whose stamp cannot be read gets none, and is undone unchecked.
 fn copy_stamps(plan: &ChangePlan) -> Vec<CopyStamp> {
@@ -1580,7 +1606,9 @@ fn apply_cover_change(
         Direction::Apply => &cover_change.new,
         Direction::Undo => &cover_change.old,
     };
-    TagEngine::write_covers(path, target)?;
+    if !matches!(direction, Direction::Undo) || TagEngine::read_covers(path)? != *target {
+        TagEngine::write_covers(path, target)?;
+    }
     Ok(())
 }
 

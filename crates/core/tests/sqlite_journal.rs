@@ -1238,6 +1238,100 @@ fn interrupted_pruning_restores_authorized_source_parents_and_sidecars() {
     }
 }
 
+fn recovery_cover(byte: u8, description: &str) -> tagrex_core::model::CoverArt {
+    tagrex_core::model::CoverArt {
+        mime: "image/png".to_string(),
+        data: vec![0x89, 0x50, 0x4e, 0x47, byte].into(),
+        description: description.to_string(),
+        ..tagrex_core::model::CoverArt::default()
+    }
+}
+
+#[test]
+fn later_cover_sets_survive_undo_refusal_and_allow_retry() {
+    use tagrex_core::model::{CoverArt, CoverKind};
+    use tagrex_core::plan::{CoverChange, PlanError, UndoMode};
+    for mode in [UndoMode::Strict, UndoMode::KeepChanged, UndoMode::Overwrite] {
+        for interrupted in [false, true] {
+            for edit in 0..4 {
+                let dir = TempDir::new("cover-conflict");
+                let parent = dir.path().join("old");
+                std::fs::create_dir_all(&parent).unwrap();
+                let track = parent.join("track.flac");
+                std::fs::write(&track, MINIMAL_FLAC).unwrap();
+                let moved = dir.path().join("moved.flac");
+                let old = vec![recovery_cover(1, "Original")];
+                let new = vec![
+                    recovery_cover(2, "Front"),
+                    CoverArt {
+                        kind: CoverKind::Back,
+                        ..recovery_cover(3, "Back")
+                    },
+                ];
+                TagEngine::write_covers(&track, &old).unwrap();
+                let plan = ChangePlan {
+                    prune_empty_dirs: true,
+                    changes: vec![FileChange {
+                        path: track.clone(),
+                        rename_to: Some(moved.clone()),
+                        cover_change: Some(CoverChange {
+                            old: old.clone(),
+                            new: new.clone(),
+                        }),
+                        ..FileChange::default()
+                    }],
+                    ..ChangePlan::default()
+                };
+                let batch = if interrupted {
+                    interrupt_before_finish(&dir, &plan)
+                } else {
+                    Executor::apply(
+                        &plan,
+                        &mut SqliteJournal::open(&dir.db()).unwrap(),
+                        &roots(dir.path()),
+                    )
+                    .unwrap()
+                };
+                let mut later = new.clone();
+                match edit {
+                    0 => later[0] = recovery_cover(9, "Front"),
+                    1 => later[0].description = "Later description".to_string(),
+                    2 => later[0].kind = CoverKind::Back,
+                    _ => later.reverse(),
+                }
+                TagEngine::write_covers(&moved, &later).unwrap();
+                let before = std::fs::read(&moved).unwrap();
+                let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+                assert!(
+                    matches!(Executor::undo_with_mode(&mut journal, batch.id, &roots(dir.path()), mode, &mut |_| {}), Err(PlanError::ChangedSinceApplied(path)) if path == moved)
+                );
+                assert_eq!(std::fs::read(&moved).unwrap(), before);
+                assert_eq!(TagEngine::read_covers(&moved).unwrap(), later);
+                assert!(!track.exists());
+                assert!(
+                    !parent.exists(),
+                    "refusal must not recreate pruned directories"
+                );
+                assert!(journal.batch(batch.id).unwrap().is_some());
+                // A completed batch accepts its applied state; unknown execution
+                // accepts only an explicitly restored state.
+                TagEngine::write_covers(&moved, if interrupted { &old } else { &new }).unwrap();
+                Executor::undo_with_mode(
+                    &mut journal,
+                    batch.id,
+                    &roots(dir.path()),
+                    mode,
+                    &mut |_| {},
+                )
+                .unwrap();
+                assert_eq!(TagEngine::read_covers(&track).unwrap(), old);
+                assert!(!moved.exists());
+                assert!(journal.batches().unwrap().is_empty());
+            }
+        }
+    }
+}
+
 #[test]
 fn interrupted_field_recovery_at_each_tag_write_boundary() {
     use std::sync::atomic::AtomicBool;
