@@ -235,11 +235,14 @@ fn reserve_staging(target: &Path) -> io::Result<(File, PathBuf)> {
             nanos()
         ));
         let candidate = parent.join(name);
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
         {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&candidate) {
             Ok(file) => return Ok((file, candidate)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
@@ -293,11 +296,14 @@ fn preserve_with_stamp(
 ) -> io::Result<PathBuf> {
     for attempt in 0..100 {
         let candidate = aside_path(path, stamp, attempt);
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
         {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&candidate) {
             Ok(mut file) => {
                 let written = (|| {
                     if let Some(metadata) = permissions {
