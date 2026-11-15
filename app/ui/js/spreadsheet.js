@@ -167,14 +167,17 @@ export function initSpreadsheet(options) {
     const index = columns().indexOf(point.key);
     return index < 0 ? null : tr?.cells[index + TABLE_DATA_COLUMN_OFFSET] || null;
   }
-  function range() {
+  function rangeBounds() {
     if (!active || !anchor) return null;
-    const paths = rows(), keys = columns();
+    const keys = columns();
     const a = rowIndex(anchor.path), b = rowIndex(active.path);
     const x = keys.indexOf(anchor.key), y = keys.indexOf(active.key);
     if (Math.min(a, b, x, y) < 0) return null;
-    const top = Math.min(a, b), left = Math.min(x, y);
-    return { top, left, paths: paths.slice(top, Math.max(a, b) + 1), keys: keys.slice(left, Math.max(x, y) + 1) };
+    return { top: Math.min(a, b), bottom: Math.max(a, b), left: Math.min(x, y), right: Math.max(x, y) };
+  }
+  function range() {
+    const bounds = rangeBounds();
+    return bounds && { ...bounds, paths: rows().slice(bounds.top, bounds.bottom + 1), keys: columns().slice(bounds.left, bounds.right + 1) };
   }
   function focus() {
     if (!active || options.isReviewing()) return;
@@ -222,19 +225,22 @@ export function initSpreadsheet(options) {
     attribute(table, 'aria-rowcount', options.rowCount() + 1);
     attribute(table, 'aria-colcount', keys.length + TABLE_DATA_COLUMN_OFFSET);
     attribute(table.tHead?.rows[0], 'aria-rowindex', 1);
-    const r = range();
-    const selected = new Set(r?.paths || []), selectedKeys = new Set(r?.keys || []);
+    // Paint only the mounted window. A range can span the entire library;
+    // slicing it and constructing a Set on each scroll made that O(library).
+    const r = rangeBounds();
     const reviewing = options.isReviewing();
     const reasons = new Map(keys.map((key) => [key, options.readOnly(key)]));
     for (const tr of body.querySelectorAll('tr[data-path]')) {
       if (tr.classList.contains('unreadable')) continue;
       if (active && !reviewing && tr.tabIndex !== -1) tr.tabIndex = -1;
       attribute(tr, 'aria-rowindex', options.rowNumber(tr.dataset.path));
+      const index = r ? rowIndex(tr.dataset.path) : -1;
+      const includedRow = !!r && index >= r.top && index <= r.bottom;
       for (let i = TABLE_DATA_COLUMN_OFFSET; i < tr.cells.length; i++) {
         const cell = tr.cells[i], key = keys[i - TABLE_DATA_COLUMN_OFFSET];
         if (!key) continue;
         const point = { path: tr.dataset.path, key };
-        const included = !reviewing && selected.has(point.path) && selectedKeys.has(key);
+        const included = !reviewing && includedRow && i - TABLE_DATA_COLUMN_OFFSET >= r.left && i - TABLE_DATA_COLUMN_OFFSET <= r.right;
         let painted = paintedCells.get(cell);
         if (!painted) {
           cell.classList.add('sheet-cell');
@@ -258,8 +264,8 @@ export function initSpreadsheet(options) {
         }
         const states = {
           active: !reviewing && !!same(point, active),
-          top: included && point.path === r.paths[0], bottom: included && point.path === r.paths.at(-1),
-          left: included && key === r.keys[0], right: included && key === r.keys.at(-1),
+          top: included && index === r.top, bottom: included && index === r.bottom,
+          left: included && i - TABLE_DATA_COLUMN_OFFSET === r.left, right: included && i - TABLE_DATA_COLUMN_OFFSET === r.right,
         };
         for (const [state, on] of Object.entries(states)) {
           if (painted[state] !== on) {
@@ -272,14 +278,15 @@ export function initSpreadsheet(options) {
       }
     }
     observeSelectionHeader();
-    const count = r ? r.paths.length * r.keys.length : 0;
-    const readonlyReason = r?.keys.map((key) => reasons.get(key)).find(Boolean) || '';
+    const rangeHeight = r ? r.bottom - r.top + 1 : 0, rangeWidth = r ? r.right - r.left + 1 : 0;
+    const count = rangeHeight * rangeWidth;
+    const readonlyReason = r ? keys.slice(r.left, r.right + 1).map((key) => reasons.get(key)).find(Boolean) || '' : '';
     const editable = !!r && !readonlyReason;
     if (!r && !reviewing && (!(scrollOnly || scrollRefresh) || changed || !lastSummary)) lastSummary = options.selectionSummary();
     const snapshot = {
-      label: reviewing ? 'Review the staged changes, then Apply.' : r ? `${options.label(active.key)} · ${count === 1 ? '1 cell' : `${r.paths.length} × ${r.keys.length} cells`}` : lastSummary,
+      label: reviewing ? 'Review the staged changes, then Apply.' : r ? `${options.label(active.key)} · ${count === 1 ? '1 cell' : `${rangeHeight} × ${rangeWidth} cells`}` : lastSummary,
       detail: reviewing ? 'Only highlighted files will be applied.' : readonlyReason || (r ? (count === 1 ? 'F2 edits · Shift + arrows select' : 'Copy, paste, or fill down') : 'Click a cell to start'),
-      active: !!r, editable, canFill: editable && r.paths.length > 1,
+      active: !!r, editable, canFill: editable && rangeHeight > 1,
       busy, reviewing,
     };
     if (!lastToolbar || Object.keys(snapshot).some((key) => lastToolbar[key] !== snapshot[key])) {

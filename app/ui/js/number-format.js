@@ -6,8 +6,12 @@ const widths = { track: saved('track'), disc: saved('disc') };
 export function numberWidth(key) { return widths[key] || 1; }
 export function setNumberWidth(key, value) {
   if (!(key in widths)) return;
-  widths[key] = Math.max(1, Math.min(3, Number(value) || 1));
-  try { localStorage.setItem('tagrex.' + key + 'Digits', String(widths[key])); } catch { /* Optional preference. */ }
+  const width = Math.max(1, Math.min(3, Number(value) || 1));
+  // The ribbon sets both widths after Numbering, usually to the values already
+  // stored. Re-rendering the table for an unchanged preference is pure work.
+  if (width === widths[key]) return;
+  widths[key] = width;
+  try { localStorage.setItem('tagrex.' + key + 'Digits', String(width)); } catch { /* Optional preference. */ }
   document.dispatchEvent(new CustomEvent('tagrex:number-format'));
 }
 export function formatNumber(value, key) {

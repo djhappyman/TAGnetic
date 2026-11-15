@@ -29,6 +29,7 @@ import {
 import { enablePointerReorder } from "./js/reorder.js";
 import { initRowSelection } from "./js/row-selection.js";
 import { initSpreadsheet } from "./js/spreadsheet.js";
+import { RowHeights } from "./js/row-heights.js";
 import { createComponentElement } from "./lib/component-elements.js";
 import { refreshExporter, setExportKind } from "./js/exporters.js";
 import { applyStaticText, message as backendMessage, planText, t as msg, tn, list as joinList } from "./js/i18n.js";
@@ -969,7 +970,7 @@ let itemIndexByPath = new Map(); // path -> index in viewItems (rendered items o
 // estimate stands in. Rows are uniform in practice, but a staged rename is two
 // lines tall, so heights are learned rather than assumed.
 let itemHeights = [];
-let itemTops = []; // prefix sums, itemTops[i] = top of item i (length n + 1)
+const itemOffsets = new RowHeights();
 let rowHeightEstimate = 18;
 let groupHeightEstimate = 22;
 let rowEstimateMeasured = false;
@@ -996,30 +997,12 @@ function itemHeightAt(i) {
 }
 
 function recomputeItemTops() {
-  itemTops = new Array(viewItems.length + 1);
-  let top = 0;
-  for (let i = 0; i < viewItems.length; i++) {
-    itemTops[i] = top;
-    top += itemHeightAt(i);
-  }
-  itemTops[viewItems.length] = top;
+  itemOffsets.reset(viewItems.length, itemHeightAt);
 }
 
 // First item at or after `offset` px, by binary search over the prefix sums.
 function itemIndexAt(offset) {
-  let lo = 0;
-  let hi = viewItems.length - 1;
-  let found = viewItems.length - 1;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    if (itemTops[mid + 1] > offset) {
-      found = mid;
-      hi = mid - 1;
-    } else {
-      lo = mid + 1;
-    }
-  }
-  return Math.max(0, found);
+  return itemOffsets.indexAt(offset);
 }
 
 // The header text for each destination group (#385): the folder below the one
@@ -1187,10 +1170,10 @@ function setSpacerHeights() {
   const top = tracksBody.firstElementChild;
   const bottom = tracksBody.lastElementChild;
   if (top && top.classList.contains("spacer")) {
-    top.firstElementChild.style.height = `${Math.max(0, Math.round(itemTops[renderedFirst] || 0))}px`;
+    top.firstElementChild.style.height = `${Math.max(0, Math.round(itemOffsets.top(renderedFirst)))}px`;
   }
   if (bottom && bottom.classList.contains("spacer")) {
-    const below = itemTops[viewItems.length] - itemTops[Math.min(renderedLast + 1, viewItems.length)];
+    const below = itemOffsets.top(viewItems.length) - itemOffsets.top(Math.min(renderedLast + 1, viewItems.length));
     bottom.firstElementChild.style.height = `${Math.max(0, Math.round(below))}px`;
   }
 }
@@ -1202,7 +1185,9 @@ function setSpacerHeights() {
 function measureRenderedRows() {
   // Only new rows need a layout read. Recording an estimate-equal height must
   // not rebuild the O(library) prefix array on each one-row scroll step.
-  let changed = false;
+  const before = itemOffsets.top(renderedFirst);
+  const changed = [];
+  let baselineChanged = false;
   let index = renderedFirst;
   for (const tr of tracksBody.children) {
     if (tr.classList.contains("spacer")) continue;
@@ -1210,29 +1195,28 @@ function measureRenderedRows() {
     if (itemHeights[itemIndex] != null) continue;
     const item = viewItems[itemIndex];
     if (!item) continue;
-    const estimated = itemHeightAt(itemIndex);
     const height = tr.getBoundingClientRect().height;
     if (!height) continue;
     itemHeights[itemIndex] = height;
-    if (height !== estimated) changed = true;
+    if (height !== itemOffsets.values[itemIndex]) changed.push([itemIndex, height]);
     // Learn the compact baseline once per model/font, then only lower it if a
     // shorter row appears. Tall diff rows remain individual measurements.
     if (item.kind === "group") {
       if (!groupEstimateMeasured || height < groupHeightEstimate) {
-        if (height !== groupHeightEstimate) changed = true;
+        if (height !== groupHeightEstimate) baselineChanged = true;
         groupHeightEstimate = height;
         groupEstimateMeasured = true;
       }
     } else if (!rowEstimateMeasured || height < rowHeightEstimate) {
-      if (height !== rowHeightEstimate) changed = true;
+      if (height !== rowHeightEstimate) baselineChanged = true;
       rowHeightEstimate = height;
       rowEstimateMeasured = true;
     }
   }
-  if (!changed) return;
-  const before = itemTops[renderedFirst];
-  recomputeItemTops();
-  const shift = itemTops[renderedFirst] - before;
+  if (!baselineChanged && !changed.length) return;
+  if (baselineChanged) recomputeItemTops();
+  else for (const [index, height] of changed) itemOffsets.set(index, height);
+  const shift = itemOffsets.top(renderedFirst) - before;
   if (shift) tableWrap.scrollTop += shift;
   setSpacerHeights();
 }
@@ -1273,7 +1257,7 @@ function renderWindow({ force = false, refreshGrid = true, scrollOnly = false } 
   // will clamp the offset when it next lays the table out, so clamp it here
   // first: cutting the window for a position that is about to be corrected
   // leaves the rows built somewhere the eye isn't.
-  const maxTop = Math.max(0, headHeight + itemTops[viewItems.length] - viewportHeight);
+  const maxTop = Math.max(0, headHeight + itemOffsets.top(viewItems.length) - viewportHeight);
   if (tableWrap.scrollTop > maxTop) tableWrap.scrollTop = maxTop;
   const viewportTop = tableWrap.scrollTop;
   const windowed = viewItems.length > MOUNTED_ROW_LIMIT;
@@ -1313,9 +1297,9 @@ function renderWindow({ force = false, refreshGrid = true, scrollOnly = false } 
   renderedLast = last;
   renderedRows = new Map();
   const frag = document.createDocumentFragment();
-  frag.appendChild(spacerRow(itemTops[first] || 0));
+  frag.appendChild(spacerRow(itemOffsets.top(first)));
   for (let i = first; i <= last; i++) frag.appendChild(buildItemRow(i));
-  frag.appendChild(spacerRow(itemTops[viewItems.length] - itemTops[Math.min(last + 1, viewItems.length)]));
+  frag.appendChild(spacerRow(itemOffsets.top(viewItems.length) - itemOffsets.top(Math.min(last + 1, viewItems.length))));
   tracksBody.replaceChildren(frag);
   measureRenderedRows();
   if (refreshGrid) spreadsheet?.refresh({scrollOnly});
@@ -1379,23 +1363,26 @@ tableWrap.addEventListener("scroll", () => {
 // has to re-cut it.
 let tableResizeFrame = 0;
 let tableResizeNeedsMeasure = false;
-function scheduleTableResize() {
-  tableResizeNeedsMeasure = true;
+function scheduleTableResize({ measure = false } = {}) {
+  tableResizeNeedsMeasure ||= measure;
   if (tableResizeFrame) return;
   tableResizeFrame = requestAnimationFrame(() => {
     tableResizeFrame = 0;
     if (document.body.classList.contains("resizing-dock")) {
       // A width-only live resize keeps the existing rows and their components.
       // Height changes recut only the entering/leaving part of the window.
-      renderWindow();
+      renderWindow({scrollOnly:true});
       return;
     }
     if (tableResizeNeedsMeasure) {
       tableResizeNeedsMeasure = false;
       for (let index = renderedFirst; index <= renderedLast; index++) itemHeights[index] = null;
       headHeight = el("tracks").tHead?.offsetHeight || headHeight;
-      renderWindow({ force: true });
+      // A layout change alters geometry, not loaded values. Measure the
+      // existing cells in place, preserving focus, raw edits and row identity.
+      measureRenderedRows();
     }
+    renderWindow({scrollOnly:true});
   });
 }
 let lastTableLayoutWidth = 0;
@@ -1404,12 +1391,14 @@ new ResizeObserver(entries => {
   const {width, height} = entries[0].contentRect;
   tableWrap.style.setProperty('--table-viewport-width', `${width}px`);
   const layoutWidth = el('tracks').getBoundingClientRect().width;
-  const stableTable = tableWrap.closest('.dock-frame')?.dataset.sidebarDrawer === 'true'
-    && layoutWidth === lastTableLayoutWidth && height === lastTableViewportHeight;
+  const widthChanged = layoutWidth !== lastTableLayoutWidth;
+  const heightChanged = height !== lastTableViewportHeight;
   lastTableLayoutWidth = layoutWidth; lastTableViewportHeight = height;
   // A drawer changes the visible scrollport, not cell widths or row heights.
   // Update sticky group bounds without replacing rows on every animation frame.
-  if (!stableTable) scheduleTableResize();
+  // Filter reveal/collapse changes only viewport height. Recut the bounded
+  // window without rebuilding loaded rows on every animation frame.
+  if (widthChanged || heightChanged) scheduleTableResize({measure:widthChanged});
 }).observe(tableWrap);
 document.addEventListener("tagrex:dock-resize-end", () => {
   if (tableResizeNeedsMeasure) scheduleTableResize();
@@ -3642,14 +3631,17 @@ function marqueePaths(top, bottom) {
   const [path, row] = reference;
   const index = itemIndexByPath.get(path);
   if (index === undefined) return [];
-  const origin = row.getBoundingClientRect().top - tableWrap.getBoundingClientRect().top + tableWrap.scrollTop - itemTops[index];
+  const origin = row.getBoundingClientRect().top - tableWrap.getBoundingClientRect().top + tableWrap.scrollTop - itemOffsets.top(index);
   const from = Math.max(0, top - origin);
   const to = bottom - origin;
   if (to < 0) return [];
   const paths = [];
-  for (let i = itemIndexAt(from); i < viewItems.length && itemTops[i] <= to; i++) {
+  const first = itemIndexAt(from);
+  let itemTop = itemOffsets.top(first);
+  for (let i = first; i < viewItems.length && itemTop <= to; i++) {
     const item = viewItems[i];
-    if (item.kind === "track" && !item.track.unreadable && itemTops[i + 1] >= from) paths.push(item.track.path);
+    itemTop += itemHeightAt(i);
+    if (item.kind === "track" && !item.track.unreadable && itemTop >= from) paths.push(item.track.path);
   }
   return paths;
 }
@@ -3748,7 +3740,7 @@ function scrollPathIntoView(path) {
   const index = itemIndexByPath.get(path);
   if (index === undefined) return;
   const headHeight = el("tracks").querySelector("thead")?.offsetHeight || 0;
-  const top = itemTops[index];
+  const top = itemOffsets.top(index);
   const bottom = top + itemHeightAt(index);
   const viewTop = tableWrap.scrollTop + headHeight;
   const viewBottom = tableWrap.scrollTop + tableWrap.clientHeight;

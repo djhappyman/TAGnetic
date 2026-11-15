@@ -103,7 +103,9 @@
       const width = Math.max(0, innerWidth - reserve);
       footer.style.setProperty('--player-offset', `${left}px`);
       footer.style.setProperty('--player-width', `${width}px`);
-      footer.classList.remove('player-full-width', 'narrow-actions');
+      if (footer.classList.contains('player-full-width') || footer.classList.contains('narrow-actions')) {
+        footer.classList.remove('player-full-width', 'narrow-actions');
+      }
       footer.classList.toggle('stacked-actions', stacked);
     };
     const schedule = () => { if (!pending) pending = requestAnimationFrame(sync); };
