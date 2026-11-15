@@ -7,11 +7,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
+mod beatport_session_control;
 mod blocking;
 mod media_session;
+mod operation_control;
 mod update;
 #[cfg(target_os = "linux")]
 mod webkit_compositor;
@@ -35,6 +37,8 @@ type AppState = Arc<Mutex<Option<App>>>;
 
 static SAMPLE_QUEUE: blocking::Queue = blocking::Queue::new();
 static IMAGE_READ_QUEUE: blocking::Queue = blocking::Queue::new();
+static IMAGE_ADMISSION: std::sync::LazyLock<operation_control::ImageAdmission> =
+    std::sync::LazyLock::new(|| operation_control::ImageAdmission::new(6));
 static BROWSER_QUEUE: blocking::Queue = blocking::Queue::new();
 static SETTINGS_QUEUE: blocking::Queue = blocking::Queue::new();
 static SESSION_QUEUE: blocking::Queue = blocking::Queue::new();
@@ -1059,7 +1063,7 @@ fn progress_reporter(
 /// [`AppState`]: the apply holds that lock for its whole run, and the request has
 /// to get through while it does.
 #[derive(Default)]
-struct ApplyControl(Arc<AtomicBool>);
+struct ApplyControl(operation_control::OperationControl);
 
 #[derive(serde::Serialize, Clone)]
 struct ApplyProgressDto {
@@ -1079,13 +1083,12 @@ async fn apply_plan(
     plan: PlanDto,
 ) -> Result<BatchDto, ErrorDto> {
     let state = state.inner().clone();
-    let control = control.0.clone();
-    control.store(false, Ordering::SeqCst);
+    let operation = control.0.admit("Apply")?;
     SESSION_QUEUE
         .run(move || {
             let mut report = progress_reporter(app_handle, plan.changes.len());
             with_app_mut(&state, |app| {
-                app.apply_with(&plan, &mut report, &control)
+                app.apply_with(&plan, &mut report, operation.cancelled())
                     .map_err(ErrorDto::from)
             })
         })
@@ -1094,13 +1097,13 @@ async fn apply_plan(
 
 #[tauri::command]
 fn cancel_apply(control: State<ApplyControl>) {
-    control.0.store(true, Ordering::SeqCst);
+    control.0.cancel();
 }
 
 /// Asks a running BPM detection to stop (#536). Shared with the blocking thread
 /// the detection runs on, hence the `Arc`.
 #[derive(Default)]
-struct BpmControl(Arc<AtomicBool>);
+struct BpmControl(operation_control::OperationControl);
 
 /// What a BPM detection found (#536): the plan for the tempos it measured, and
 /// what it could not measure, for the toast.
@@ -1148,11 +1151,12 @@ async fn detect_bpm(
     control: State<'_, BpmControl>,
     paths: Vec<String>,
 ) -> Result<BpmDetectionDto, ErrorDto> {
-    control.0.store(false, Ordering::SeqCst);
-    let cancel = control.0.clone();
+    let operation = control.0.admit("BPM detection")?;
+    let preparation = operation.clone();
     let session = state.inner().clone();
     let (limit, generation) = SESSION_QUEUE
         .run(move || {
+            let _operation = preparation;
             with_app(&session, |app| {
                 Ok((
                     app.bpm_max_length(),
@@ -1161,6 +1165,7 @@ async fn detect_bpm(
             })
         })
         .await?;
+    let measurement = operation.clone();
     let measured = tauri::async_runtime::spawn_blocking(move || {
         let mut detector = tagrex_player::tempo::TempoDetector::new().map_err(shell_error)?;
         let total = paths.len();
@@ -1185,7 +1190,7 @@ async fn detect_bpm(
                 too_long += 1;
                 continue;
             }
-            match detector.detect(&target, &cancel) {
+            match detector.detect(&target, measurement.cancelled()) {
                 Ok(Some(bpm)) => detected.push((target, bpm)),
                 Ok(None) => no_tempo += 1,
                 Err(tagrex_player::tempo::TempoError::Failed(_)) => failed.push(path.clone()),
@@ -1204,7 +1209,10 @@ async fn detect_bpm(
     let (detected, analysed, no_tempo, too_long, failed, cancelled) = measured;
     let session = state.inner().clone();
     let plan = SESSION_QUEUE
-        .run(move || preview_detected_bpm(&session, generation, &detected))
+        .run(move || {
+            let _operation = operation;
+            preview_detected_bpm(&session, generation, &detected)
+        })
         .await?;
     Ok(BpmDetectionDto {
         plan,
@@ -1218,7 +1226,7 @@ async fn detect_bpm(
 
 #[tauri::command]
 fn cancel_detect_bpm(control: State<BpmControl>) {
-    control.0.store(true, Ordering::SeqCst);
+    control.0.cancel();
 }
 
 // `async` for the same reason as `apply_plan` (#448): a synchronous command runs
@@ -1334,11 +1342,11 @@ async fn provider_fetch_image(
             })
         })
         .await?;
-    // Only fetcher preparation uses the source queue/lock. The download is
-    // bounded by the shared image slots and cannot block a release lookup.
-    tauri::async_runtime::spawn_blocking(move || fetch.fetch_cover(&url).map_err(ErrorDto::from))
+    // Admit before spawn_blocking so waiting thumbnails use no blocking worker.
+    // Keep the command crate's synchronous cap for non-IPC consumers too.
+    IMAGE_ADMISSION
+        .run(move || fetch.fetch_cover(&url).map_err(ErrorDto::from))
         .await
-        .map_err(shell_error)?
 }
 
 /// Save a release's images to disk next to the selected tracks (#102). Async:
@@ -1521,6 +1529,9 @@ fn tighten_secret(path: &std::path::Path) {
 // and the client id (so a refresh doesn't have to re-read it). It lives in the
 // OS app-config dir next to the Discogs token — never in the repository.
 
+static BEATPORT_SESSION: std::sync::LazyLock<Arc<beatport_session_control::SessionControl>> =
+    std::sync::LazyLock::new(|| Arc::new(beatport_session_control::SessionControl::default()));
+
 /// The saved sign-in, as it sits on disk.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct BeatportSession {
@@ -1572,7 +1583,7 @@ async fn beatport_status(app: tauri::AppHandle) -> Result<BeatportStatusDto, Err
     SETTINGS_QUEUE
         .run(move || {
             Ok({
-                match read_beatport_session(&app) {
+                match BEATPORT_SESSION.read(|| Ok(read_beatport_session(&app)))?.1 {
                     Some(session) => BeatportStatusDto {
                         authorized: true,
                         username: session.username,
@@ -1591,13 +1602,15 @@ async fn beatport_status(app: tauri::AppHandle) -> Result<BeatportStatusDto, Err
 async fn beatport_logout(app: tauri::AppHandle) -> Result<(), ErrorDto> {
     SETTINGS_QUEUE
         .run(move || {
-            let path = beatport_session_path(&app)?;
-            match std::fs::remove_file(path) {
-                Ok(()) => Ok(()),
-                // Signing out of a session that isn't there is a no-op, not a failure.
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(err) => Err(ErrorDto::from(err)),
-            }
+            BEATPORT_SESSION.logout(|| {
+                let path = beatport_session_path(&app)?;
+                match std::fs::remove_file(path) {
+                    Ok(()) => Ok(()),
+                    // Signing out of a session that isn't there is a no-op.
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(err) => Err(ErrorDto::from(err)),
+                }
+            })
         })
         .await
 }
@@ -1613,7 +1626,10 @@ async fn beatport_logout(app: tauri::AppHandle) -> Result<(), ErrorDto> {
 async fn beatport_login(app: tauri::AppHandle) -> Result<String, ErrorDto> {
     use tagrex_providers_beatport::auth;
 
-    let proxy = beatport_proxy(&app);
+    let config = app.clone();
+    let (generation, proxy) = SETTINGS_QUEUE
+        .run(move || BEATPORT_SESSION.read(|| Ok(beatport_proxy(&config))))
+        .await?;
     let agent = auth::agent(proxy.as_deref()).map_err(ErrorDto::from)?;
 
     let scraper = agent.clone();
@@ -1674,14 +1690,16 @@ async fn beatport_login(app: tauri::AppHandle) -> Result<String, ErrorDto> {
     .map_err(ErrorDto::from)?;
 
     let username = beatport_account_name(&proxy, &token.access_token).await;
-    write_beatport_session(
-        &app,
-        &BeatportSession {
-            token,
-            username: username.clone(),
-            client_id,
-        },
-    )?;
+    let session = BeatportSession {
+        token,
+        username: username.clone(),
+        client_id,
+    };
+    SETTINGS_QUEUE
+        .run(move || {
+            BEATPORT_SESSION.publish(generation, || write_beatport_session(&app, &session))
+        })
+        .await?;
     Ok(username)
 }
 
@@ -1692,30 +1710,27 @@ async fn beatport_login(app: tauri::AppHandle) -> Result<String, ErrorDto> {
 async fn beatport_token(app: tauri::AppHandle) -> Result<String, ErrorDto> {
     use tagrex_providers_beatport::auth;
 
-    let mut session =
-        read_beatport_session(&app).ok_or_else(|| shell_error("Not signed in to Beatport"))?;
-    if !session.token.is_expired() {
-        return Ok(session.token.access_token);
-    }
-
-    let proxy = beatport_proxy(&app);
-    let agent = auth::agent(proxy.as_deref()).map_err(ErrorDto::from)?;
-    let client_id = session.client_id.clone();
-    let refresh_token = session.token.refresh_token.clone();
-    let token = tauri::async_runtime::spawn_blocking(move || {
-        auth::refresh(&agent, &client_id, &refresh_token)
-    })
-    .await
-    .map_err(shell_error)?
-    // A refresh token can be revoked from the account page, and then the
-    // only way back is a fresh sign-in — say so rather than reporting a
-    // bare HTTP status.
-    .map_err(|err| ErrorDto::from(AppError::BeatportReauth(err.to_string())))?;
-
-    let access_token = token.access_token.clone();
-    session.token = token;
-    write_beatport_session(&app, &session)?;
-    Ok(access_token)
+    BEATPORT_SESSION
+        .token(move |control, generation| {
+            let (mut session, proxy) = control.read_at(generation, || {
+                let session = read_beatport_session(&app)
+                    .ok_or_else(|| shell_error("Not signed in to Beatport"))?;
+                Ok((session, beatport_proxy(&app)))
+            })?;
+            if !session.token.is_expired() {
+                return Ok(session.token.access_token);
+            }
+            // Only the short snapshot/publication sections hold the persistence
+            // lock. Status, logout and settings can run while HTTP is pending.
+            let agent = auth::agent(proxy.as_deref()).map_err(ErrorDto::from)?;
+            let token = auth::refresh(&agent, &session.client_id, &session.token.refresh_token)
+                .map_err(|err| ErrorDto::from(AppError::BeatportReauth(err.to_string())))?;
+            let access_token = token.access_token.clone();
+            session.token = token;
+            control.publish(generation, || write_beatport_session(&app, &session))?;
+            Ok(access_token)
+        })
+        .await
 }
 
 /// The account name behind a token. A failure here is not worth failing the
