@@ -1366,6 +1366,28 @@ fn ensure_not_stale(change: &FileChange) -> Result<(), PlanError> {
         if TagEngine::read_block(&change.path, block_change.kind)? != block_change.old {
             return Err(PlanError::Stale(change.path.clone()));
         }
+        // The modeled content omits private/binary frames and some Vorbis
+        // provenance. Compare the same exact snapshot Undo would restore.
+        if let Some(old_bytes) = &block_change.old_bytes {
+            let current_bytes = match block_change.kind {
+                TagBlockKind::Id3v2 => TagEngine::dump_id3v2(&change.path)?,
+                TagBlockKind::VorbisComments => TagEngine::dump_vorbis(&change.path)?,
+                // Unknown exact snapshot formats must not bypass preflight.
+                _ => None,
+            };
+            if current_bytes.as_ref() != Some(old_bytes) {
+                return Err(PlanError::Stale(change.path.clone()));
+            }
+        }
+        // dump_id3v2 deliberately serializes with normalized write options,
+        // so the captured source revision needs a separate comparison.
+        if block_change.kind == TagBlockKind::Id3v2 {
+            if let Some(old_revision) = block_change.old_revision {
+                if TagEngine::id3v2_revision(&change.path)? != Some(old_revision) {
+                    return Err(PlanError::Stale(change.path.clone()));
+                }
+            }
+        }
     }
     Ok(())
 }
