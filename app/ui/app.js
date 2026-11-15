@@ -693,6 +693,10 @@ function decorateTrackArtwork(row, track) {
   cell.setAttribute('aria-readonly', 'true');
   cell.append(indicator);
   file.before(cell);
+  const fill = document.createElement('td');
+  fill.className = 'table-fill';
+  fill.setAttribute('aria-hidden', 'true');
+  row.append(fill);
   return row;
 }
 
@@ -900,14 +904,14 @@ function buildGroupHeader(key, count) {
           dest.extras.map((to) => (to.startsWith(dest.dir) ? to.slice(dest.dir.length + 1) : to)).join("\n"),
         )}">+ ${escapeHtml(tn("unit.folderFile", dest.extras.length))}</span>`
       : "";
-    tr.innerHTML = `<td class="group-cell" colspan="${TABLE_DATA_COLUMN_OFFSET + tableColumnKeys().length}"><span class="group-heading-content">
+    tr.innerHTML = `<td class="group-cell" colspan="${tableColumnKeys().length + 2}"><span class="group-heading-content">
       <span class="group-caret">${ico("caret-down")}</span>
       ${label}
       <span class="group-count muted">· ${escapeHtml(tn("unit.file", count))}${extras}</span>
     </span></td>`;
     return tr;
   }
-  tr.innerHTML = `<td class="group-cell" colspan="${TABLE_DATA_COLUMN_OFFSET + tableColumnKeys().length}"><span class="group-heading-content">
+  tr.innerHTML = `<td class="group-cell" colspan="${tableColumnKeys().length + 2}"><span class="group-heading-content">
       <span class="group-caret">${ico("caret-down")}</span>
       <span class="group-label">${escapeHtml(groupLabel(key))}</span>
       <span class="group-count muted">· ${tn("unit.file", count)}</span>
@@ -1153,6 +1157,8 @@ function buildViewModel(preparedFilter = null) {
   recomputeItemTops();
 }
 
+// Spans include artwork and trailing fill. The selection band stays in the
+// DOM for the grid controller but is hidden, so it must not add a phantom column.
 // A spacer stands in for the rows outside the window, so the table is as tall as
 // the whole list and the scrollbar means what it says.
 function spacerRow(height) {
@@ -1160,7 +1166,7 @@ function spacerRow(height) {
   tr.className = "spacer";
   tr.setAttribute("aria-hidden", "true");
   const td = document.createElement("td");
-  td.colSpan = TABLE_DATA_COLUMN_OFFSET + tableColumnKeys().length;
+  td.colSpan = tableColumnKeys().length + 2;
   td.style.height = `${Math.max(0, Math.round(height))}px`;
   tr.appendChild(td);
   return tr;
@@ -1387,19 +1393,27 @@ function scheduleTableResize({ measure = false } = {}) {
 }
 let lastTableLayoutWidth = 0;
 let lastTableViewportHeight = 0;
-new ResizeObserver(entries => {
-  const {width, height} = entries[0].contentRect;
-  tableWrap.style.setProperty('--table-viewport-width', `${width}px`);
-  const layoutWidth = el('tracks').getBoundingClientRect().width;
+const tableGeometryObserver = new ResizeObserver(entries => {
+  const viewport = entries.find(entry => entry.target === tableWrap)?.contentRect;
+  if (viewport) {
+    const value = `${viewport.width}px`;
+    if (tableWrap.style.getPropertyValue('--table-viewport-width') !== value) tableWrap.style.setProperty('--table-viewport-width', value);
+  }
+  // Only data widths affect row heights. The trailing fill can animate with
+  // the pane without remeasuring every loaded row on every drawer frame.
+  const layoutWidth = tableColumnKeys().reduce((total, key) => total + columnWidth(key), 0);
   const widthChanged = layoutWidth !== lastTableLayoutWidth;
-  const heightChanged = height !== lastTableViewportHeight;
-  lastTableLayoutWidth = layoutWidth; lastTableViewportHeight = height;
+  const heightChanged = viewport && viewport.height !== lastTableViewportHeight;
+  lastTableLayoutWidth = layoutWidth;
+  if (viewport) lastTableViewportHeight = viewport.height;
   // A drawer changes the visible scrollport, not cell widths or row heights.
   // Update sticky group bounds without replacing rows on every animation frame.
   // Filter reveal/collapse changes only viewport height. Recut the bounded
   // window without rebuilding loaded rows on every animation frame.
   if (widthChanged || heightChanged) scheduleTableResize({measure:widthChanged});
-}).observe(tableWrap);
+});
+tableGeometryObserver.observe(tableWrap);
+tableGeometryObserver.observe(el('tracks'));
 document.addEventListener("tagrex:dock-resize-end", () => {
   if (tableResizeNeedsMeasure) scheduleTableResize();
 });

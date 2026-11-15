@@ -202,9 +202,9 @@ body .dock-frame[data-sidebar-drawer='true'] #dock-module-files > .dock-module-b
   width:calc(100% - var(--sidebar-space));
   transition:width 240ms var(--workbench-ease);
 }
-/* The scrollport follows the shell, while the actual table keeps its column
-   geometry. Its scrollbar therefore reaches the final column at either width. */
-body .dock-frame[data-sidebar-drawer='true'] #tracks { width:100cqw; min-width:100cqw; }
+/* Data columns retain their chosen widths. Only trailing fill follows the
+   scrollport, so the final data column stays reachable at either pane width. */
+body .dock-frame[data-sidebar-drawer='true'] #tracks:not(.measuring) { width:100%; min-width:100%; }
 body .dock-frame[data-sidebar-drawer='true'] button.dock-column-splitter,
 body .dock-frame[data-sidebar-drawer='true'] button.dock-column-splitter:is(:hover,:active,:focus-visible) { background:transparent; box-shadow:none; }
 body .dock-frame[data-sidebar-drawer='true'] button.dock-column-splitter::after { background:transparent; }

@@ -11,6 +11,8 @@ Compact command ribbon and responsive workspace.
 
 ### Added
 
+- Overlay scrollbars fade in during vertical or horizontal scrolling and fade
+  away after idle, without reserving table space. Both remain draggable.
 - Grouped command ribbon with delayed tooltips, file selection and ordering,
   Autonumber, value formatting, tag removal and artwork import/export controls.
 - Compact command dialogs offer Cancel, Stage and immediate Write. Write keeps
@@ -20,6 +22,8 @@ Compact command ribbon and responsive workspace.
 
 ### Changed
 
+- Row bands fill the viewport while data columns retain their chosen widths.
+  Auto-fit measures full contents, and manual resizing disables automatic fitting.
 - The existing panel control opens a smooth, width-limited sidebar. The folder
   bar, filter and player adapt while table columns retain their geometry.
 - Transformations appear only in Tags. Playlist commands remain part of Export,

@@ -42,7 +42,7 @@ import {
 // persisting and header-grip resizing stopped working (#155).
 const COLUMNS_STORAGE_KEY = "tagrex.columns";
 const COLUMN_WIDTHS_STORAGE_KEY = "tagrex.colWidths";
-const COLUMN_MIN_WIDTH = 48;
+const COLUMN_MIN_WIDTH = 20;
 
 // ---- configurable columns (#43) ----
 // "file" plus every modeled tag field, the pool the user picks columns from.
@@ -429,7 +429,6 @@ async function commitColumnEditor() {
 // measurement per cell, and it needs no second copy of what each cell renders —
 // nested markup, badges and the two-line file cell are all accounted for because
 // the browser is laying them out for real.
-const COLUMN_MAX_FIT_WIDTH = 480;
 const AUTOFIT_STORAGE_KEY = "tagrex.autofitColumns";
 
 // Natural width per key, in one pass. Reads happen after the class is on and
@@ -460,14 +459,13 @@ function measureColumns(keys) {
 // Fit `keys` and persist the result — a fitted width is an ordinary width, no
 // different from a dragged one, so it is stored, restored and resizable after.
 //
-// Clamped at both ends: never narrower than a draggable column, and never so
-// wide that one pathological value (a 300-character comment) pushes the table
-// into horizontal scrolling on its own.
+// Fit the actual contents, without an arbitrary upper limit. Manual resizing
+// can then make any individual column smaller or larger.
 function fitColumns(keys) {
   const natural = measureColumns(keys);
   if (!natural.size) return;
   for (const [key, width] of natural) {
-    const clamped = Math.min(Math.max(width, COLUMN_MIN_WIDTH), COLUMN_MAX_FIT_WIDTH);
+    const clamped = Math.max(width, COLUMN_MIN_WIDTH);
     columnWidths[key] = Math.round(clamped);
   }
   saveColumnWidths();
@@ -541,7 +539,7 @@ function renderTableHead() {
   renderedColumns = tableColumnKeys().join("\0");
   const table = el("tracks");
   const row = table.querySelector("thead tr");
-  row.querySelectorAll("th.sortable").forEach((th) => th.remove());
+  row.querySelectorAll("th.sortable, th.table-fill").forEach((th) => th.remove());
   row.querySelector('th.sel')?.setAttribute('aria-colindex', '1');
   table.style.setProperty('--artwork-column-width', `${ARTWORK_COLUMN_WIDTH}px`);
   const artwork = document.createElement('th');
@@ -618,6 +616,10 @@ function renderTableHead() {
     }
     row.appendChild(th);
   }
+  const fill = document.createElement('th');
+  fill.className = 'table-fill';
+  fill.setAttribute('aria-hidden', 'true');
+  row.append(fill);
   hooks.updateSortIndicators();
 }
 
@@ -913,6 +915,7 @@ export {
   refreshCustomColumnCells,
   refreshCustomColumnPath,
   autofitEnabled,
+  setAutofit,
   fitAllColumns,
   fitColumn,
   maybeAutofit,

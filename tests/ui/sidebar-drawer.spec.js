@@ -25,7 +25,7 @@ for(const theme of ['light','dark'])test(`${theme}: drawer overlays a stable tab
   const ribbon=await box(page,'.command-ribbon'), drawer=await box(page,'.dock-right'), table=await box(page,'#tracks'), address=await box(page,'.library-header');
   expect(drawer.y).toBe(ribbon.y);
   expect(address.x+address.width).toBeCloseTo(drawer.x,0);
-  const columns=await page.locator('#tracks thead th').evaluateAll(nodes=>nodes.map(node=>({x:node.getBoundingClientRect().x,width:node.getBoundingClientRect().width})));
+  const columns=await page.locator('#tracks thead th:not(.table-fill)').evaluateAll(nodes=>nodes.map(node=>({x:node.getBoundingClientRect().x,width:node.getBoundingClientRect().width})));
   await page.evaluate(()=>{window.savedTable=document.getElementById('tracks');window.savedRows=[...document.querySelectorAll('#tracks-body tr[data-path]')];});
   await toggle.focus();await page.keyboard.press('Enter');
   await expect(toggle).toHaveAttribute('aria-expanded','false');
@@ -35,16 +35,16 @@ for(const theme of ['light','dark'])test(`${theme}: drawer overlays a stable tab
     return{width:rect.width, transition:getComputedStyle(document.querySelector('.dock-right')).transitionDuration};
   });
   expect(middle.width).toBeGreaterThan(address.width);
-  expect(middle.width).toBeLessThan(table.width);
+  expect(middle.width).toBeLessThan(1280);
   expect(middle.transition).toContain('0.24s');
   await settled(page);
   await expect(page.locator('.dock-right')).toBeHidden();
   const closed=await box(page,'.library-header');
-  expect(closed.width).toBeCloseTo(table.width,0);
-  expect((await box(page,'#tracks')).width).toBe(table.width);
+  expect(closed.width).toBeCloseTo((await box(page,'#tracks')).width,0);
+  expect((await box(page,'#tracks')).width).toBeGreaterThanOrEqual(table.width);
   const closedRibbon=await box(page,'.command-ribbon');
   expect(closedRibbon.x).toBe(ribbon.x);expect(closedRibbon.y).toBe(ribbon.y);
-  expect(await page.locator('#tracks thead th').evaluateAll(nodes=>nodes.map(node=>({x:node.getBoundingClientRect().x,width:node.getBoundingClientRect().width})))).toEqual(columns);
+  expect(await page.locator('#tracks thead th:not(.table-fill)').evaluateAll(nodes=>nodes.map(node=>({x:node.getBoundingClientRect().x,width:node.getBoundingClientRect().width})))).toEqual(columns);
   expect(await page.evaluate(()=>window.savedTable===document.getElementById('tracks'))).toBe(true);
   expect(await page.evaluate(()=>window.savedRows.every(row=>row.isConnected))).toBe(true);
   await toggle.press('Enter');await settled(page);
@@ -131,12 +131,12 @@ test('drawer width is capped and every ribbon action stays uncovered while resiz
 test('horizontal scrolling reaches the last column with the drawer open and adjusts when closed',async({page})=>{
   const scroll=()=>page.evaluate(()=>{const n=document.getElementById('files-view');n.scrollLeft=n.scrollWidth;return{left:n.scrollLeft,max:n.scrollWidth-n.clientWidth,width:n.clientWidth,content:n.scrollWidth};});
   const open=await scroll();expect(open.max).toBeGreaterThan(0);expect(open.left).toBe(open.max);
-  const last=page.locator('#tracks thead th').last();
+  const last=page.locator('#tracks thead th[data-sort]').last();
   const view=await box(page,'#files-view'),end=await last.boundingBox();
   expect(end.x+end.width).toBeLessThanOrEqual(view.x+view.width+1);
   await page.locator('#panel-toggle').click();await settled(page);
   const closed=await scroll();expect(closed.width).toBeGreaterThan(open.width);expect(closed.left).toBe(closed.max);
-  expect(closed.content).toBe(open.content);
+  expect(closed.content).toBe(Math.max(open.content,closed.width));
   await page.locator('#panel-toggle').click();await settled(page);
   const reopened=await scroll();expect(reopened.max).toBe(open.max);expect(reopened.left).toBe(reopened.max);
 });

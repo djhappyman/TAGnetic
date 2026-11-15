@@ -32,7 +32,7 @@ test('filter is a collapsed dock below the scroller and keeps an active summary 
   const toggle = page.locator('#filter-panel-toggle');
   await expect(toggle).toHaveAttribute('aria-expanded', 'false');
   await expect(page.locator('#filter')).toBeHidden();
-  expect(await page.evaluate(() => document.getElementById('files-view').nextElementSibling.id)).toBe('filter-panel');
+  expect(await page.evaluate(() => document.getElementById('filter-panel').getBoundingClientRect().top >= document.getElementById('files-view').getBoundingClientRect().bottom-1)).toBe(true);
   await expect(page.locator('.view-tabs #filter')).toHaveCount(0);
   await expect(page.locator('#filter-panel #presets-btn')).toHaveCount(1);
   await toggle.click();

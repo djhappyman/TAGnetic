@@ -71,7 +71,7 @@ test('artwork has a dedicated column before File without entering editable range
   await expect(row.locator('td.file .track-artwork')).toHaveCount(0);
   await expect(page.locator('.track-reorder-grip')).toHaveCount(0);
   expect(await row.locator(':scope > td').count()).toBe(await headers.count());
-  await expect(page.locator('#tracks')).toHaveAttribute('aria-colcount', String(await headers.count()));
+  await expect(page.locator('#tracks')).toHaveAttribute('aria-colcount', String(await headers.count()-1));
   await expect(row.locator('td.file')).toHaveAttribute('aria-colindex', '3');
   const artist = row.locator('td[data-field="artist"]');
   await expect(artist).toHaveAttribute('aria-colindex', '4');
@@ -110,8 +110,8 @@ test('artwork has a dedicated column before File without entering editable range
 
 test('group, unreadable and virtual spacer rows span the complete structural grid', async ({ page }) => {
   await page.evaluate(() => { window.tagrex.tracks[1].unreadable = true; window.tagrex.renderTracks(); });
-  const count = await page.locator('#tracks thead tr > th').count();
-  expect(await page.locator('#tracks-body tr.unreadable > td').evaluateAll(cells => cells.reduce((sum, cell) => sum + cell.colSpan, 0))).toBe(count);
+  const count = await page.locator('#tracks thead tr > th:not(.sel)').count();
+  expect(await page.locator('#tracks-body tr.unreadable > td:not(.sel)').evaluateAll(cells => cells.reduce((sum, cell) => sum + cell.colSpan, 0))).toBe(count);
   await page.evaluate(async () => {
     await window.tagrex.invoke('open_drop', { paths: ['Pack'] });
     document.getElementById('root').value = '/dropped/Pack';
