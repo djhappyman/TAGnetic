@@ -965,6 +965,7 @@ async function applyFieldEditor() {
 }
 
 export {
+  previewRemoveTagBlock,
   currentFieldValue,
   hasEditorDraft,
   resetFieldEditor,

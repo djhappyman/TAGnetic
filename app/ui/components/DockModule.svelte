@@ -3,9 +3,10 @@
   import { Button } from '$lib/components/ui/button/index.js';
   import * as Context from '$lib/components/ui/context-menu/index.js';
   import { useWorkspaceLayout, DOCK_AREAS, type DockArea } from '$lib/workspace-layout';
-  let { moduleId, title, defaultArea = 'right', defaultIndex, defaultWeight = 1, chromeTarget, headerless = false, collapsible = false, headerHelp, headerActions, children }: { moduleId: string; title: string; defaultArea?: DockArea; defaultIndex?: number; defaultWeight?: number; chromeTarget?: string; headerless?: boolean; collapsible?: boolean; headerHelp?: Snippet; headerActions?: Snippet; children: Snippet } = $props();
+  let { moduleId, title, defaultArea = 'right', defaultIndex, defaultWeight = 1, chromeTarget, headerless = false, collapsible = false, visible = true, headerHelp, headerActions, children }: { moduleId: string; title: string; defaultArea?: DockArea; defaultIndex?: number; defaultWeight?: number; chromeTarget?: string; headerless?: boolean; collapsible?: boolean; visible?: boolean; headerHelp?: Snippet; headerActions?: Snippet; children: Snippet } = $props();
   const layout = useWorkspaceLayout();
   if (!layout) throw new Error('DockModule must be inside DockWorkspace');
+  function syncVisibility() { layout.setVisible(moduleId, visible); }
   let position = $state(untrack(() => ({ area: defaultArea, index: 0, total: 1, weight: 1, collapsed: false, nextCollapsed: false })));
   let contextOpen = $state(false);
   let root: HTMLElement;
@@ -49,7 +50,7 @@
     const unsubscribe = layout.subscribe(next => {
       const module = next.modules.find(module => module.id === moduleId);
       if (module) {
-        const siblings = next.modules.filter(other => other.area === module.area);
+        const siblings = next.modules.filter(other => other.area === module.area && other.visible);
         const index = siblings.findIndex(other => other.id === moduleId);
         position = { ...module, collapsed: module.collapsed === true, total: siblings.length, nextCollapsed: siblings[index + 1]?.collapsed === true };
       }
@@ -128,7 +129,7 @@
   }
 </script>
 
-<section id={`dock-module-${moduleId}`} class="dock-module" data-dock-module={moduleId} data-collapsible={collapsible} aria-label={title} {@attach attach}>
+<section id={`dock-module-${moduleId}`} class="dock-module" data-dock-module={moduleId} data-collapsible={collapsible} aria-label={title} {@attach attach} {@attach syncVisibility}>
   <Context.Root bind:open={contextOpen}>
     <Context.Trigger class="dock-module-chrome" hidden={headerless} role={collapsible ? 'presentation' : 'button'} tabindex={collapsible ? undefined : 0} aria-label={collapsible ? undefined : `${title} module layout`} title={collapsible ? undefined : 'Right-click to move this module'} onkeydown={keyboardMenu} onclick={headerClick}>
       {#if collapsible}

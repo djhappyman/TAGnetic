@@ -9,7 +9,8 @@ export function functionSource(text, name) {
 }
 export function loadFunction(file, name, root = process.cwd()) {
   if (process.env.TAGREX_INTERACTION_BASELINE) return JSON.parse(readFileSync(process.env.TAGREX_INTERACTION_BASELINE, 'utf8'))[name];
-  return functionSource(readFileSync(resolve(root, file), 'utf8'), name);
+  const text = readFileSync(resolve(root, file), 'utf8');
+  return (name === 'numberTracks' ? functionSource(text, 'numberingEdits') + '\n' : '') + functionSource(text, name);
 }
 export function coverHarness(source, paths, pending, plan, current = true) {
   const calls = { adopt: [], toast: [], invoke: [] };
@@ -39,7 +40,7 @@ export function numberHarness(source, tracks, paths, options = {}) {
     trackAt: path => { calls.indexReads++; return index.get(path); },
     el: id => values[id], edits, groupBy: 'folder', groupKeyOf: track => track.group,
     isVinylSide: value => !!value?.trim() && !/^\d+$/.test(value.trim()),
-    hooks: { renderTracks: () => calls.render++, previewEdits: async () => calls.preview++ },
+    hooks: { orderPathsForDisplay:paths => paths, renderTracks: () => calls.render++, previewEdits: async () => calls.preview++ },
     toast: (...args) => calls.toast.push(args), t: key => key, tn: (_, n) => n,
   });
   vm.runInContext(source, context);

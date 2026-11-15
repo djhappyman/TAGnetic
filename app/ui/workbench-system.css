@@ -100,15 +100,6 @@ body .arranging-workspace .dock-module:not([data-collapsible='true']) > .dock-mo
 body .statusbar { display:grid; grid-template-columns:var(--player-offset,12px) minmax(0,var(--player-width,calc(100% - 24px))) minmax(0,1fr); border:0; min-height:44px; padding:var(--sp-1) 0 var(--sp-2); background:var(--panel); gap:0; }
 body .statusbar .sb-left { grid-column:2; min-width:0; padding-inline:3px; }
 body .statusbar .sb-right { position:relative; grid-column:3; min-width:0; max-width:none; padding-inline:9px 12px; flex-direction:column; align-items:stretch; justify-content:center; min-height:var(--ctl-h); gap:var(--sp-1); container-type:inline-size; }
-/* A compact action rail may extend upward into the inspector, never resize
-   the table/player grid when a draft becomes actionable. */
-body .statusbar.narrow-actions .diff-actionbar { position:absolute; inset:auto var(--sp-3) 0 var(--sp-2); width:auto; }
-/* A scan can coexist with a staged draft: leave its Stop rail below the edit
-   controls instead of painting the absolute actionbar over it. */
-body .statusbar.narrow-actions .sb-right:has(#busy-pill:not([hidden])) .diff-actionbar { bottom:calc(100% + var(--sp-2)); }
-body:has(.statusbar.narrow-actions #busy-pill:not([hidden])):has(.statusbar.narrow-actions #diff-actionbar:not([hidden])) .mode-col { padding-bottom:calc(var(--sp-7) * 2); }
-
-body .statusbar.narrow-actions:has(#diff-actionbar:not([hidden])) .footer-feedback { bottom:calc(100% + var(--sp-7)); }
 /* Scope and lock feedback must not resize the table during a live cell edit. */
 body .statusbar .footer-feedback { position:absolute; left:9px; right:12px; bottom:calc(100% + 3px); display:flex; flex-direction:column; background:var(--panel); }
 body .statusbar .footer-feedback > span { padding:2px 0; font-size:var(--text-xs); }
@@ -116,8 +107,10 @@ body .statusbar .footer-feedback .ab-locked { color:var(--muted); }
 body .statusbar .footer-feedback > [hidden] { display:none; }
 body .statusbar .sb-right:has(#diff-actionbar[hidden]) #ab-locked { display:none; }
 body .statusbar .sb-right:not(:has(#diff-actionbar:not([hidden]),#busy-pill:not([hidden]),#status-transform-scope:not([hidden]))) { display:none; }
-body .statusbar.player-full-width .sb-right { grid-column:2; grid-row:1; padding:3px; }
-body .statusbar.player-full-width .sb-left { grid-row:2; }
+body .statusbar .sb-right { grid-row:1; }
+body .statusbar .diff-actionbar { justify-content:end; }
+body .statusbar.stacked-actions .sb-right { grid-column:2; grid-row:1; padding:3px; }
+body .statusbar.stacked-actions .sb-left { grid-row:2; }
 body #player { gap:var(--sp-3); }
 body #player .pl-transport { gap:1px; }
 body #player .pl-transport button { width:var(--ctl-h-sm); height:var(--ctl-h-sm); border-radius:var(--r-compact); }
@@ -179,3 +172,74 @@ body #tracks .track-artwork.artwork-changing { position: relative; color: var(--
 body #tracks .track-artwork.artwork-changing::after { content: ''; position: absolute; top: -2px; right: -2px; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 1px var(--bg); }
 body.staged-view #tracks tbody tr.selected td:not(.dirty):not(.error):not(.sheet-range) { background: var(--bg); }
 body.staged-view #tracks tbody tr.selected:hover td:not(.dirty):not(.error):not(.sheet-range) { background: var(--row-hover); }
+
+/* First command-ribbon group: familiar hit targets, quiet shared chrome. */
+body .command-ribbon { gap:10px; flex-wrap:nowrap; min-height:32px; }
+body .command-ribbon .ribbon-group { display:flex; align-items:center; gap:2px; }
+body .command-ribbon button.ribbon-command[data-slot='button'] { width:32px; height:32px; min-height:32px; padding:7px; border:0; border-radius:var(--r-compact); color:var(--muted); background:transparent; transition:background-color 140ms ease,color 140ms ease; }
+body .command-ribbon button.ribbon-command:hover:not(:disabled) { color:var(--text); background:var(--row-hover); }
+body .command-ribbon button.ribbon-command:focus-visible { outline:2px solid var(--accent-ink); outline-offset:2px; }
+body .command-ribbon button.ribbon-command:disabled { opacity:.35; pointer-events:auto; }
+body .command-ribbon .ribbon-command .ico { width:17px; height:17px; flex:none; }
+body .command-ribbon .ribbon-divider { display:block; flex:none; width:1px; height:18px; background:var(--workbench-seam); }
+@media (prefers-reduced-motion:reduce) { body .command-ribbon button.ribbon-command[data-slot='button'] { transition:none; } }
+
+body .command-ribbon button.ribbon-menu-trigger { width:42px; gap:3px; }
+body .command-ribbon #group-btn.active { color:var(--muted); background:transparent; }
+body .command-ribbon #group-btn:is(:hover,[aria-expanded='true']) { color:var(--text); background:var(--row-hover); }
+body .command-ribbon .ribbon-chevron { flex:none; }
+@media (max-width:650px) { body .command-ribbon { gap:5px; flex-wrap:wrap; row-gap:6px; } }
+
+/* Focused command dialogs: shell, recessed form, shared footer. */
+:is(#ribbon-number-dialog,#ribbon-import-dialog,#ribbon-remove-dialog,#ribbon-format-dialog) .controller-dialog-content { width:min(520px,calc(100vw - 24px)); max-width:none; }
+.ribbon-tool-body.modal { --controller-modal-width:520px; position:relative; display:flex; flex-direction:column; gap:var(--sp-4); padding:var(--sp-5); max-height:calc(100dvh - 48px); overflow:auto; color:var(--text); background:var(--panel); box-sizing:border-box; }
+.ribbon-tool-header { display:flex; align-items:flex-start; justify-content:space-between; gap:var(--sp-3); }
+.ribbon-tool-header > div { min-width:0; }
+.ribbon-tool-header > button { flex:none; margin:-4px -4px 0 0; }
+.ribbon-tool-body h2 { margin:0; font-size:var(--type-dialog-size,18px); line-height:1.35; font-weight:var(--fw-strong); color:var(--text); }
+.ribbon-selection-count { font-size:var(--text-sm); color:var(--muted); font-weight:var(--fw-normal,400); white-space:nowrap; }
+.ribbon-tool-description { margin:var(--sp-1) 0 0; color:var(--muted); font-size:var(--text-sm); line-height:1.5; }
+.ribbon-dialog-fields { display:flex; flex-direction:column; gap:var(--sp-3); padding:var(--sp-4); border-radius:var(--r-inset); background:var(--bg); }
+.ribbon-form-grid,.ribbon-options-grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:var(--sp-3); }
+.ribbon-field { display:flex; flex-direction:column; min-width:0; gap:var(--sp-1); color:var(--label); font-size:var(--text-sm); font-weight:var(--fw-medium); }
+.ribbon-option { display:flex; align-items:flex-start; gap:var(--sp-2); min-width:0; color:var(--label); cursor:pointer; }
+.ribbon-option > .compat-native { margin-top:2px; }
+.ribbon-option > span { display:flex; flex-direction:column; gap:2px; min-width:0; }
+.ribbon-option strong { font-size:var(--text-sm); line-height:1.4; font-weight:var(--fw-medium); color:var(--label); }
+.ribbon-option small,.ribbon-field-help { margin:0; color:var(--muted); font-size:var(--text-xs); line-height:1.5; }
+.ribbon-option-wide { grid-column:1/-1; }
+.ribbon-tool-footer { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:var(--sp-2); }
+.ribbon-tool-footer > span { color:var(--muted); font-size:var(--text-xs); }
+.ribbon-tool-footer > div { display:flex; align-items:center; gap:var(--sp-2); margin-inline-start:auto; }
+.ribbon-tool-error { margin:0; color:var(--error); font-size:var(--text-sm); overflow-wrap:anywhere; }
+.ribbon-artwork-settings-icon { position:relative; display:flex; }
+.ribbon-artwork-sliders { position:absolute; right:-3px; bottom:-2px; background:var(--panel); }
+body .command-ribbon { flex-wrap:wrap; row-gap:6px; }
+@media (max-width:440px) { .ribbon-options-grid { grid-template-columns:minmax(0,1fr); } .ribbon-tool-body.modal { padding:var(--sp-4); } }
+
+/* One global navigation row; the fixed ribbon shares the drawer's top edge. */
+body .ribbon-strip { flex:none; min-width:0; container-type:inline-size; container-name:ribbon; padding-inline:4px; margin-block-end:var(--sp-2); box-sizing:border-box; }
+body .ribbon-strip .command-ribbon { width:100%; }
+
+/* Comfortable controls use the available strip, with only a modest expansion
+   after folding the sidebar. Compression is continuous rather than two jumps. */
+body .ribbon-strip .command-ribbon {
+  --ribbon-hit:clamp(28px,calc(100cqw / 20),32px);
+  --ribbon-glyph:clamp(17px,calc(100cqw / 36),19px);
+  max-width:760px; justify-content:space-between; gap:clamp(3px,calc(100cqw / 24 - 20px),8px);
+}
+body .ribbon-strip .command-ribbon button.ribbon-command[data-slot='button'] { width:var(--ribbon-hit); padding:5px; }
+body .ribbon-strip .command-ribbon button.ribbon-menu-trigger[data-slot='button'] { width:calc(var(--ribbon-hit) + 8px); }
+body .ribbon-strip .command-ribbon .ribbon-command .ico { width:var(--ribbon-glyph); height:var(--ribbon-glyph); }
+@container ribbon (max-width:600px) { body .command-ribbon .ribbon-group { gap:0; } }
+@container ribbon (max-width:480px) { body .ribbon-strip .command-ribbon { justify-content:flex-start; } }
+
+/* Header cells stay above edited data cells on both scroll axes. Pinned file,
+   artwork and selection headers retain their higher, existing layers. */
+body #tracks thead th { z-index:7; }
+body #files-view::-webkit-scrollbar-corner,
+body #files-view::-webkit-resizer { background:transparent; }
+body #files-view::-webkit-scrollbar-button { display:none; width:0; height:0; }
+
+/* Preview-state feedback uses field validation and the existing toast system. */
+body #status-transform-scope { display:none!important; }

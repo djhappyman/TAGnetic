@@ -90,11 +90,6 @@
       paint();
     };
     document.addEventListener('tagrex:filter-state', stateChanged);
-    const column = root.closest<HTMLElement>('.files-col');
-    const size = new ResizeObserver(() => {
-      column?.style.setProperty('--filter-dock-height', `${root.getBoundingClientRect().height}px`);
-    });
-    size.observe(root);
     const observer = new MutationObserver(paint);
     observer.observe(root, { attributes: true, attributeFilter: ['class', 'hidden', 'aria-pressed'], childList: true, characterData: true, subtree: true });
     root.addEventListener('input', paint);
@@ -104,8 +99,6 @@
     paint();
     return () => {
       observer.disconnect();
-      size.disconnect();
-      column?.style.removeProperty('--filter-dock-height');
       document.removeEventListener('tagrex:filter-state', stateChanged);
       root.removeEventListener('input', paint);
       root.removeEventListener('click', clicked, true);

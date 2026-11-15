@@ -292,11 +292,10 @@ function isVinylSide(value) {
 // buffer, then preview — so it flows through the usual apply/undo path. Options:
 // start value, optional TrackTotal + disc, per-group restart when a grouping is
 // active, and preserving existing vinyl-side positions.
-async function numberTracks() {
-  const paths = selectedPaths(); // mapping order; reads `selection`, survives re-render
+function numberingEdits() {
+  const paths = hooks.orderPathsForDisplay(selectedPaths()); // same order as the file table
   if (paths.length === 0) {
-    toast(t("generator.selectToNumber"), true);
-    return;
+    throw new Error(t("generator.selectToNumber"));
   }
   const start = Math.max(0, Math.floor(Number(el("autonum-start").value) || 1));
   const writeTotal = el("autonum-total").checked;
@@ -304,8 +303,7 @@ async function numberTracks() {
   const keepSides = el("autonum-keep-sides").checked;
   const discRaw = el("autonum-disc").value.trim();
   if (discRaw && !/^\d+$/.test(discRaw)) {
-    toast(t("generator.discWhole"), true);
-    return;
+    throw new Error(t("generator.discWhole"));
   }
   const disc = discRaw ? String(Number(discRaw)) : "";
 
@@ -329,8 +327,7 @@ async function numberTracks() {
     assigned.push({ path, number: n, gkey });
   }
   if (assigned.length === 0) {
-    toast(t("generator.nothingToNumber"));
-    return;
+    return [];
   }
 
   // TrackTotal (unpadded): per group when restarting, else the whole run.
@@ -342,21 +339,25 @@ async function numberTracks() {
   // The track-number tag is stored as a plain integer on every format (lofty
   // normalizes it), so zero-padding can't persist here — pad file names instead
   // via the RENAMER (%track:2%). We write the plain number.
-  for (const a of assigned) {
-    if (!edits.has(a.path)) edits.set(a.path, new Map());
-    const fields = edits.get(a.path);
-    fields.set("track", String(a.number));
-    if (writeTotal) fields.set("tracktotal", String(perGroup ? groupTotals.get(a.gkey) : assigned.length));
-    if (disc) fields.set("disc", disc);
+  return assigned.flatMap(a => [
+    {path:a.path, field:'track', value:String(a.number)},
+    ...(writeTotal ? [{path:a.path, field:'tracktotal', value:String(perGroup ? groupTotals.get(a.gkey) : assigned.length)}] : []),
+    ...(disc ? [{path:a.path, field:'disc', value:disc}] : []),
+  ]);
+}
+
+async function numberTracks() {
+  let values;
+  try { values = numberingEdits(); } catch (error) { toast(error.message, true); return false; }
+  if (!values.length) { toast(t("generator.nothingToNumber")); return false; }
+  for (const {path, field, value} of values) {
+    if (!edits.has(path)) edits.set(path, new Map());
+    edits.get(path).set(field, value);
   }
   hooks.renderTracks();
   await hooks.previewEdits();
-  toast(
-    t("toast.numbered", { tracks: tn("unit.track", assigned.length) }) +
-      (perGroup ? t("toast.numbered.perGroup") : "")
-  );
+  return true;
 }
-
 
 // Decompose vinyl-side track values in the selection into a plain track number
 // plus a disc number, staged into the pending-edits buffer. For files already
@@ -638,7 +639,6 @@ el("transform-modal").addEventListener("click", (e) => {
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && transformModalOpen()) closeTransformModal();
 });
-el("autonum-run").addEventListener("click", numberTracks);
 el("vinyl-split").addEventListener("click", splitVinylSides);
 // Rule reorder is wired per-card by the chain component via enablePointerReorder
 // (grip drag), with ↑/↓ as the fallback — no container-level HTML5 DnD (#88).
@@ -657,6 +657,7 @@ export {
   syncTransformPlacement,
   refreshTransformButton,
   numberTracks,
+  numberingEdits,
   previewTransform,
   refreshGenerator,
   splitVinylSides,

@@ -84,7 +84,7 @@ test('Escape from a marquee restores the previous Shift-range anchor as well as 
 });
 
 for(const width of [375,900,1800])test(`column chooser stays compact and inside a ${width}px window`,async({page})=>{
-  await page.setViewportSize({width,height:800});const header=page.locator('th[data-sort="file"]');await header.click({button:'right'});const menu=page.locator('#columns-menu');await expect(menu).toBeVisible();const box=await menu.boundingBox();expect(box.width).toBeLessThanOrEqual(280);expect(box.x).toBeGreaterThanOrEqual(0);expect(box.x+box.width).toBeLessThanOrEqual(width+1);expect(box.y+box.height).toBeLessThanOrEqual(793);expect(box.height).toBeGreaterThan(500);await page.keyboard.press('Escape');
+  await page.setViewportSize({width,height:800});const header=page.locator('th[data-sort="file"]');await header.click({button:'right'});const menu=page.locator('#columns-menu');await expect(menu).toBeVisible();const box=await menu.boundingBox();expect(box.width).toBeLessThanOrEqual(280);expect(box.x).toBeGreaterThanOrEqual(0);expect(box.x+box.width).toBeLessThanOrEqual(width+1);expect(box.y+box.height).toBeLessThanOrEqual(793);expect(box.height).toBeGreaterThanOrEqual(Math.min(500,793-box.y)-1);await page.keyboard.press('Escape');
 });
 test('group selection cannot send F2 to a previously focused cell in another group',async({page})=>{
   await pack(page,2);await rows(page).last().locator('td[data-field="artist"]').click();const group=page.locator('tr.group-head').first();await group.locator('.group-label').click({button:'right'});await group.focus();await page.keyboard.press('F2');await expect(page.locator('[contenteditable="true"]')).toHaveCount(0);expect(await page.evaluate(()=>[...window.tagrex.selection].every(path=>path.startsWith('/dropped/A/')))).toBe(true);
@@ -130,7 +130,7 @@ async function manualPlan(page,count=1201) {
   await expect(page.locator('#diff-apply')).toBeEnabled();
 }
 test('manual-review group selection keeps the whole group when a Shift range extends it',async({page})=>{
-  await manualPlan(page,6);const groups=page.locator('tr.group-head');
+  await manualPlan(page,6);await page.locator('#staged-tab').click();const groups=page.locator('tr.group-head');
   await groups.nth(1).locator('.group-label').click({button:'right'});await expect(page.locator('tr[data-path].selected')).toHaveCount(3);
   await rows(page).first().locator('td.file').click({modifiers:['Shift']});await expect(page.locator('tr[data-path].selected')).toHaveCount(6);
 });
@@ -140,7 +140,7 @@ test('switching Staged comparison recalibrates the entire virtual scroll extent'
   await page.locator('#files-tab').click();expect(await page.locator('#files-view').evaluate(node=>node.scrollHeight)).toBeLessThan(after*.75);
 });
 test('a plain empty-space click preserves the highlighted manual Apply scope',async({page})=>{
-  await manualPlan(page,6);const box=await page.locator('#files-view').boundingBox();await page.mouse.click(box.x+60,box.y+box.height-30);
+  await manualPlan(page,6);await page.locator('#staged-tab').click();const box=await page.locator('#files-view').boundingBox();await page.mouse.click(box.x+60,box.y+box.height-30);
   await expect(page.locator('tr[data-path].selected')).toHaveCount(6);await expect(page.locator('#diff-apply')).toBeEnabled();
   const last=await rows(page).last().locator('td.file').boundingBox();await page.mouse.move(box.x+60,box.y+box.height-30);await page.mouse.down();await page.mouse.move(last.x+60,last.y+last.height/2,{steps:5});await page.mouse.up();
   await expect(page.locator('tr[data-path].selected')).toHaveCount(1);await expect(page.locator('#diff-apply')).toBeEnabled();

@@ -294,6 +294,8 @@ export const de = {
   "topbar.recent": "Zuletzt geöffnete Ordner",
   "topbar.pathPlaceholder": "/pfad/zur/musikbibliothek",
   "topbar.reread": "Geöffneten Ordner neu einlesen",
+  "topbar.expandPanel": "Seitenleiste anzeigen",
+  "topbar.expandPanelTitle": "Seitenleiste und Bearbeitungsfunktionen anzeigen.",
   "topbar.collapsePanel": "Modusbereich einklappen",
   "topbar.collapsePanelTitle": "Modusbereich einklappen (mehr Platz für die Tabelle)",
   "topbar.undo": "Zuletzt angewendeten Stapel rückgängig machen",

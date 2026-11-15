@@ -298,6 +298,8 @@ export const ru = {
   "topbar.recent": "Недавно открытые папки",
   "topbar.pathPlaceholder": "/путь/к/музыкальной/библиотеке",
   "topbar.reread": "Перечитать открытую папку",
+  "topbar.expandPanel": "Показать боковую панель",
+  "topbar.expandPanelTitle": "Показать боковую панель и элементы редактирования.",
   "topbar.collapsePanel": "Свернуть панель режима",
   "topbar.collapsePanelTitle": "Свернуть панель режима (больше места таблице)",
   "topbar.undo": "Отменить последнее применение",

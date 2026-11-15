@@ -59,6 +59,23 @@ body .topbar-main .view-tabs .dock-module-chrome { margin-left:2px; }
 @media(max-width:900px) { body .topbar-main > .view-tabs { margin-left:2px; } body .topbar-main .toolbar-trigger > span { display:none; } }
 
 body #files-view { scroll-behavior:auto; overscroll-behavior-x:contain; }
+/* Keep chosen data widths exact; the final, non-data column absorbs spare room. */
+body #tracks :is(th,td).table-fill { width:auto; min-width:0; padding:0; pointer-events:auto; }
+body #tracks.measuring :is(th,td).table-fill { display:none; }
+/* Overlay bars take no space from cells; wheel/trackpad scrolling stays native. */
+body #files-view::-webkit-scrollbar { width:0; height:0; }
+body .files-col { position:relative; }
+.table-scrollbar { position:absolute; z-index:12; opacity:0; transition:opacity 200ms ease-out; touch-action:none; cursor:default; }
+.table-scrollbar.is-vertical { inset-inline-end:0; width:12px; }
+.table-scrollbar.is-horizontal { height:12px; }
+.table-scrollbar[hidden] { display:none; }
+.table-scrollbar.is-active { opacity:1; transition-duration:80ms; }
+.table-scrollbar-thumb { position:absolute; border-radius:6px; background:var(--border); }
+.is-vertical > .table-scrollbar-thumb { inset-block-start:0; inset-inline-end:3px; width:6px; }
+.is-horizontal > .table-scrollbar-thumb { inset-inline-start:0; inset-block-end:3px; height:6px; }
+.table-scrollbar:is(:hover,:focus-visible) .table-scrollbar-thumb { background:var(--muted); }
+.table-scrollbar:focus-visible { outline:1px solid var(--accent); outline-offset:-1px; }
+@media(prefers-reduced-motion:reduce) { .table-scrollbar { transition:none; } }
 body #tracks .group-count { color:var(--muted); font-weight:400; }
 /* Highlight is the sole selection affordance, including review/apply scope. */
 body #tracks thead th.sel, body #tracks tbody td.sel,

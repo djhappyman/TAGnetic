@@ -1,9 +1,12 @@
+import { connectRibbonActions } from './js/ribbon-actions.js';
+import { formatNumber } from './js/number-format.js';
+import { movableDirections, shiftSelectedOrder } from './js/row-order.js';
 import { createApplyFeedback } from './js/apply-feedback.js';
 import { initStaging, renderStaging } from "./js/staging.js";
 import { connectWorkspaceController, publishWorkspaceMode, publishWorkspaceSubtab } from './lib/workspace-state';
 import { compileQuery, normalizeConditions, conditionLabel, coverState } from "./js/filter-query.js";
 import { createGroupMotion } from "./js/group-motion.js";
-import { clearLiveInputs, hasLiveInputs, liveInputChanged, recordLiveField, hasInvalidLiveFields, hasInvalidPreview, removeAppliedLiveInputs, undoLiveImport } from "./js/live-preview.js";
+import { clearLiveInputs, hasLiveInputs, liveInputChanged, recordLiveField, hasInvalidLiveFields, hasInvalidPreview, removeAppliedLiveInputs, undoLiveImport, adoptLiveCoverPlan } from "./js/live-preview.js";
 "use strict";
 
 import { TAURI, invoke } from "./js/invoke.js";
@@ -26,6 +29,7 @@ import {
 import { enablePointerReorder } from "./js/reorder.js";
 import { initRowSelection } from "./js/row-selection.js";
 import { initSpreadsheet } from "./js/spreadsheet.js";
+import { RowHeights } from "./js/row-heights.js";
 import { createComponentElement } from "./lib/component-elements.js";
 import { refreshExporter, setExportKind } from "./js/exporters.js";
 import { applyStaticText, message as backendMessage, planText, t as msg, tn, list as joinList } from "./js/i18n.js";
@@ -92,7 +96,7 @@ import {
   stopLoading,
 } from "./js/online.js";
 import {
-  refreshGenerator, syncTransformPlacement, adoptTagOnlyPreview, isAutomaticTransformPreview, isAutomaticTransformRefresh,
+  numberTracks, numberingEdits, refreshGenerator, syncTransformPlacement, adoptTagOnlyPreview, isAutomaticTransformPreview, isAutomaticTransformRefresh,
   automaticTransformScope, scheduleAutomaticTransformPreview,
   dismissAutomaticTransformPreview, pauseAutomaticTransformPreview,
   resumeAutomaticTransformPreview, invalidateAutomaticTransformPreview,
@@ -114,6 +118,7 @@ import {
 } from "./js/suggest.js";
 import {
   currentFieldValue,
+  previewRemoveTagBlock,
   refreshFieldEditor,
   refreshTagFormats,
   resetFieldEditor,
@@ -161,7 +166,7 @@ Object.assign(hooks, {
   },
 });
 import { openSettings, cancelSettings, updateSettingsDot } from "./js/settings.js";
-import { renderSettingsNav } from "./js/settingsui.js";
+import { selectSettingsGroup, renderSettingsNav } from "./js/settingsui.js";
 import {
   valueFont,
   applyValueFont,
@@ -186,7 +191,7 @@ import {
   isPlayingPath,
 } from "./js/player.js";
 import {
-  selectionVersion,
+  selectionVersion, captureSelection, isSelectionCurrent,
   tracks, setTracks, reindexTracks, invalidateTrackContent, contentRevision,
   previewPlan, setPreviewPlan,
   previewSource, setPreviewSource,
@@ -397,7 +402,7 @@ function fieldValue(track, key) {
   const derived = virtualCellText(track, key, edits.get(track.path));
   if (derived !== null) return derived;
   if (customColumnOf(key)) return customColumnValue(key, track.path);
-  return track.tags[key] || "";
+  return formatNumber(track.tags[key] || "", key);
 }
 
 // Compile one immutable query per edit; retain the previous predicate on error.
@@ -688,6 +693,10 @@ function decorateTrackArtwork(row, track) {
   cell.setAttribute('aria-readonly', 'true');
   cell.append(indicator);
   file.before(cell);
+  const fill = document.createElement('td');
+  fill.className = 'table-fill';
+  fill.setAttribute('aria-hidden', 'true');
+  row.append(fill);
   return row;
 }
 
@@ -760,7 +769,7 @@ function buildTrackRow(track, groupKey) {
     td.dataset.path = track.path;
     td.dataset.field = field;
     td.dataset.original = original;
-    td.textContent = value;
+    td.textContent = formatNumber(value, field);
     if (edited && value !== original) td.classList.add("dirty");
     tr.appendChild(td);
   }
@@ -775,7 +784,7 @@ function fillDiffRow(tr, track) {
   const change = diffByPath.get(track.path);
   const pending = edits.get(track.path);
   const automatic = editablePreview();
-  if ((isAutomaticTransformPreview() ? selection : applySelection).has(track.path)) tr.classList.add('selected');
+  if (rowSelectionSet().has(track.path)) tr.classList.add('selected');
   if (!change) {
     // Untouched row: current values, no apply tick, no editing/selection.
     tr.classList.add("untouched");
@@ -895,14 +904,14 @@ function buildGroupHeader(key, count) {
           dest.extras.map((to) => (to.startsWith(dest.dir) ? to.slice(dest.dir.length + 1) : to)).join("\n"),
         )}">+ ${escapeHtml(tn("unit.folderFile", dest.extras.length))}</span>`
       : "";
-    tr.innerHTML = `<td class="group-cell" colspan="${TABLE_DATA_COLUMN_OFFSET + tableColumnKeys().length}"><span class="group-heading-content">
+    tr.innerHTML = `<td class="group-cell" colspan="${tableColumnKeys().length + 2}"><span class="group-heading-content">
       <span class="group-caret">${ico("caret-down")}</span>
       ${label}
       <span class="group-count muted">· ${escapeHtml(tn("unit.file", count))}${extras}</span>
     </span></td>`;
     return tr;
   }
-  tr.innerHTML = `<td class="group-cell" colspan="${TABLE_DATA_COLUMN_OFFSET + tableColumnKeys().length}"><span class="group-heading-content">
+  tr.innerHTML = `<td class="group-cell" colspan="${tableColumnKeys().length + 2}"><span class="group-heading-content">
       <span class="group-caret">${ico("caret-down")}</span>
       <span class="group-label">${escapeHtml(groupLabel(key))}</span>
       <span class="group-count muted">· ${tn("unit.file", count)}</span>
@@ -965,7 +974,7 @@ let itemIndexByPath = new Map(); // path -> index in viewItems (rendered items o
 // estimate stands in. Rows are uniform in practice, but a staged rename is two
 // lines tall, so heights are learned rather than assumed.
 let itemHeights = [];
-let itemTops = []; // prefix sums, itemTops[i] = top of item i (length n + 1)
+const itemOffsets = new RowHeights();
 let rowHeightEstimate = 18;
 let groupHeightEstimate = 22;
 let rowEstimateMeasured = false;
@@ -981,6 +990,9 @@ let renderedLast = -1;
 // Rows built above and below the viewport, so a small scroll shows real rows
 // rather than a gap waiting to be filled.
 const OVERSCAN_ROWS = 10;
+// Album-sized sets stay mounted: scrolling them requires no DOM work. Large
+// collections retain the bounded window instead of allocating a whole library.
+const MOUNTED_ROW_LIMIT = 200;
 
 function itemHeightAt(i) {
   const measured = itemHeights[i];
@@ -989,30 +1001,12 @@ function itemHeightAt(i) {
 }
 
 function recomputeItemTops() {
-  itemTops = new Array(viewItems.length + 1);
-  let top = 0;
-  for (let i = 0; i < viewItems.length; i++) {
-    itemTops[i] = top;
-    top += itemHeightAt(i);
-  }
-  itemTops[viewItems.length] = top;
+  itemOffsets.reset(viewItems.length, itemHeightAt);
 }
 
 // First item at or after `offset` px, by binary search over the prefix sums.
 function itemIndexAt(offset) {
-  let lo = 0;
-  let hi = viewItems.length - 1;
-  let found = viewItems.length - 1;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    if (itemTops[mid + 1] > offset) {
-      found = mid;
-      hi = mid - 1;
-    } else {
-      lo = mid + 1;
-    }
-  }
-  return Math.max(0, found);
+  return itemOffsets.indexAt(offset);
 }
 
 // The header text for each destination group (#385): the folder below the one
@@ -1163,6 +1157,8 @@ function buildViewModel(preparedFilter = null) {
   recomputeItemTops();
 }
 
+// Spans include artwork and trailing fill. The selection band stays in the
+// DOM for the grid controller but is hidden, so it must not add a phantom column.
 // A spacer stands in for the rows outside the window, so the table is as tall as
 // the whole list and the scrollbar means what it says.
 function spacerRow(height) {
@@ -1170,7 +1166,7 @@ function spacerRow(height) {
   tr.className = "spacer";
   tr.setAttribute("aria-hidden", "true");
   const td = document.createElement("td");
-  td.colSpan = TABLE_DATA_COLUMN_OFFSET + tableColumnKeys().length;
+  td.colSpan = tableColumnKeys().length + 2;
   td.style.height = `${Math.max(0, Math.round(height))}px`;
   tr.appendChild(td);
   return tr;
@@ -1180,10 +1176,10 @@ function setSpacerHeights() {
   const top = tracksBody.firstElementChild;
   const bottom = tracksBody.lastElementChild;
   if (top && top.classList.contains("spacer")) {
-    top.firstElementChild.style.height = `${Math.max(0, Math.round(itemTops[renderedFirst] || 0))}px`;
+    top.firstElementChild.style.height = `${Math.max(0, Math.round(itemOffsets.top(renderedFirst)))}px`;
   }
   if (bottom && bottom.classList.contains("spacer")) {
-    const below = itemTops[viewItems.length] - itemTops[Math.min(renderedLast + 1, viewItems.length)];
+    const below = itemOffsets.top(viewItems.length) - itemOffsets.top(Math.min(renderedLast + 1, viewItems.length));
     bottom.firstElementChild.style.height = `${Math.max(0, Math.round(below))}px`;
   }
 }
@@ -1195,7 +1191,9 @@ function setSpacerHeights() {
 function measureRenderedRows() {
   // Only new rows need a layout read. Recording an estimate-equal height must
   // not rebuild the O(library) prefix array on each one-row scroll step.
-  let changed = false;
+  const before = itemOffsets.top(renderedFirst);
+  const changed = [];
+  let baselineChanged = false;
   let index = renderedFirst;
   for (const tr of tracksBody.children) {
     if (tr.classList.contains("spacer")) continue;
@@ -1203,29 +1201,28 @@ function measureRenderedRows() {
     if (itemHeights[itemIndex] != null) continue;
     const item = viewItems[itemIndex];
     if (!item) continue;
-    const estimated = itemHeightAt(itemIndex);
-    const height = tr.offsetHeight;
+    const height = tr.getBoundingClientRect().height;
     if (!height) continue;
     itemHeights[itemIndex] = height;
-    if (height !== estimated) changed = true;
+    if (height !== itemOffsets.values[itemIndex]) changed.push([itemIndex, height]);
     // Learn the compact baseline once per model/font, then only lower it if a
     // shorter row appears. Tall diff rows remain individual measurements.
     if (item.kind === "group") {
       if (!groupEstimateMeasured || height < groupHeightEstimate) {
-        if (height !== groupHeightEstimate) changed = true;
+        if (height !== groupHeightEstimate) baselineChanged = true;
         groupHeightEstimate = height;
         groupEstimateMeasured = true;
       }
     } else if (!rowEstimateMeasured || height < rowHeightEstimate) {
-      if (height !== rowHeightEstimate) changed = true;
+      if (height !== rowHeightEstimate) baselineChanged = true;
       rowHeightEstimate = height;
       rowEstimateMeasured = true;
     }
   }
-  if (!changed) return;
-  const before = itemTops[renderedFirst];
-  recomputeItemTops();
-  const shift = itemTops[renderedFirst] - before;
+  if (!baselineChanged && !changed.length) return;
+  if (baselineChanged) recomputeItemTops();
+  else for (const [index, height] of changed) itemOffsets.set(index, height);
+  const shift = itemOffsets.top(renderedFirst) - before;
   if (shift) tableWrap.scrollTop += shift;
   setSpacerHeights();
 }
@@ -1257,7 +1254,7 @@ function dropRow(tr) {
 // every scroll event: it is bounded by the window, not by the library — and a
 // scroll that moves the window by a row or two only builds those rows, because
 // an overlapping window is trimmed and extended rather than rebuilt.
-function renderWindow({ force = false, refreshGrid = true } = {}) {
+function renderWindow({ force = false, refreshGrid = true, scrollOnly = false } = {}) {
   // Before the table is shown for the first time it has no height yet; a nominal
   // one keeps the first render from being a single row.
   const viewportHeight = tableWrap.clientHeight || 600;
@@ -1266,11 +1263,12 @@ function renderWindow({ force = false, refreshGrid = true } = {}) {
   // will clamp the offset when it next lays the table out, so clamp it here
   // first: cutting the window for a position that is about to be corrected
   // leaves the rows built somewhere the eye isn't.
-  const maxTop = Math.max(0, headHeight + itemTops[viewItems.length] - viewportHeight);
+  const maxTop = Math.max(0, headHeight + itemOffsets.top(viewItems.length) - viewportHeight);
   if (tableWrap.scrollTop > maxTop) tableWrap.scrollTop = maxTop;
   const viewportTop = tableWrap.scrollTop;
-  const first = Math.max(0, itemIndexAt(viewportTop) - OVERSCAN_ROWS);
-  const last = Math.min(viewItems.length - 1, itemIndexAt(viewportTop + viewportHeight) + OVERSCAN_ROWS);
+  const windowed = viewItems.length > MOUNTED_ROW_LIMIT;
+  const first = windowed ? Math.max(0, itemIndexAt(viewportTop) - OVERSCAN_ROWS) : 0;
+  const last = windowed ? Math.min(viewItems.length - 1, itemIndexAt(viewportTop + viewportHeight) + OVERSCAN_ROWS) : viewItems.length - 1;
   if (!force && first === renderedFirst && last === renderedLast) return;
   if (force) spreadsheet?.beforePaint();
   const rowCount = renderedLast - renderedFirst + 1;
@@ -1298,19 +1296,19 @@ function renderWindow({ force = false, refreshGrid = true } = {}) {
     }
     setSpacerHeights();
     measureRenderedRows();
-    if (refreshGrid) spreadsheet?.refresh();
+    if (refreshGrid) spreadsheet?.refresh({scrollOnly});
     return;
   }
   renderedFirst = first;
   renderedLast = last;
   renderedRows = new Map();
   const frag = document.createDocumentFragment();
-  frag.appendChild(spacerRow(itemTops[first] || 0));
+  frag.appendChild(spacerRow(itemOffsets.top(first)));
   for (let i = first; i <= last; i++) frag.appendChild(buildItemRow(i));
-  frag.appendChild(spacerRow(itemTops[viewItems.length] - itemTops[Math.min(last + 1, viewItems.length)]));
+  frag.appendChild(spacerRow(itemOffsets.top(viewItems.length) - itemOffsets.top(Math.min(last + 1, viewItems.length))));
   tracksBody.replaceChildren(frag);
   measureRenderedRows();
-  if (refreshGrid) spreadsheet?.refresh();
+  if (refreshGrid) spreadsheet?.refresh({scrollOnly});
 }
 
 // The row for a path, when it is on screen. Off-window paths have no row — that
@@ -1357,39 +1355,65 @@ function mountMeasureRows(keys) {
 }
 
 let lastVerticalScroll = tableWrap.scrollTop;
+let scrollPaintFrame = 0;
 tableWrap.addEventListener("scroll", () => {
   if (tableWrap.scrollTop === lastVerticalScroll) return;
   lastVerticalScroll = tableWrap.scrollTop;
-  renderWindow();
+  if (!scrollPaintFrame) scrollPaintFrame = requestAnimationFrame(() => {
+    scrollPaintFrame = 0;
+    renderWindow({scrollOnly:true});
+  });
 }, {passive:true});
 // The window is a function of the viewport, so anything that resizes it — the
 // OS window, the mode-panel splitter, showing the table for the first time —
 // has to re-cut it.
 let tableResizeFrame = 0;
 let tableResizeNeedsMeasure = false;
-function scheduleTableResize() {
-  tableResizeNeedsMeasure = true;
+function scheduleTableResize({ measure = false } = {}) {
+  tableResizeNeedsMeasure ||= measure;
   if (tableResizeFrame) return;
   tableResizeFrame = requestAnimationFrame(() => {
     tableResizeFrame = 0;
     if (document.body.classList.contains("resizing-dock")) {
       // A width-only live resize keeps the existing rows and their components.
       // Height changes recut only the entering/leaving part of the window.
-      renderWindow();
+      renderWindow({scrollOnly:true});
       return;
     }
     if (tableResizeNeedsMeasure) {
       tableResizeNeedsMeasure = false;
       for (let index = renderedFirst; index <= renderedLast; index++) itemHeights[index] = null;
       headHeight = el("tracks").tHead?.offsetHeight || headHeight;
-      renderWindow({ force: true });
+      // A layout change alters geometry, not loaded values. Measure the
+      // existing cells in place, preserving focus, raw edits and row identity.
+      measureRenderedRows();
     }
+    renderWindow({scrollOnly:true});
   });
 }
-new ResizeObserver(entries => {
-  tableWrap.style.setProperty('--table-viewport-width', `${entries[0].contentRect.width}px`);
-  scheduleTableResize();
-}).observe(tableWrap);
+let lastTableLayoutWidth = 0;
+let lastTableViewportHeight = 0;
+const tableGeometryObserver = new ResizeObserver(entries => {
+  const viewport = entries.find(entry => entry.target === tableWrap)?.contentRect;
+  if (viewport) {
+    const value = `${viewport.width}px`;
+    if (tableWrap.style.getPropertyValue('--table-viewport-width') !== value) tableWrap.style.setProperty('--table-viewport-width', value);
+  }
+  // Only data widths affect row heights. The trailing fill can animate with
+  // the pane without remeasuring every loaded row on every drawer frame.
+  const layoutWidth = tableColumnKeys().reduce((total, key) => total + columnWidth(key), 0);
+  const widthChanged = layoutWidth !== lastTableLayoutWidth;
+  const heightChanged = viewport && viewport.height !== lastTableViewportHeight;
+  lastTableLayoutWidth = layoutWidth;
+  if (viewport) lastTableViewportHeight = viewport.height;
+  // A drawer changes the visible scrollport, not cell widths or row heights.
+  // Update sticky group bounds without replacing rows on every animation frame.
+  // Filter reveal/collapse changes only viewport height. Recut the bounded
+  // window without rebuilding loaded rows on every animation frame.
+  if (widthChanged || heightChanged) scheduleTableResize({measure:widthChanged});
+});
+tableGeometryObserver.observe(tableWrap);
+tableGeometryObserver.observe(el('tracks'));
 document.addEventListener("tagrex:dock-resize-end", () => {
   if (tableResizeNeedsMeasure) scheduleTableResize();
 });
@@ -1413,7 +1437,7 @@ function renderTracks({ preparedFilter = null } = {}) {
   // While diffing the sel column is the apply scope, not the selection, so the
   // selection UI must not repaint the checkboxes — refresh the action bar instead.
   if (diffByPath) updateDiffBar();
-  if (!diffByPath || isAutomaticTransformPreview()) syncSelectionUI({ refreshGrid: false, refreshPanels:true });
+  if (!usingReviewSelection()) syncSelectionUI({ refreshGrid: false, refreshPanels:true });
   refreshRoving();
   spreadsheet?.refresh();
   // Sticky autofit (#151): re-fit only when what the cells show has actually
@@ -1522,6 +1546,7 @@ function showView(which) {
 
 // ---- duplicate finder (#40): a read-only library scan, grouped ----
 function discardPreview() {
+  if (applying || undoing) return;
   resetEdits();
   dismissAutomaticTransformPreview();
   exitDiffState();
@@ -1728,6 +1753,7 @@ function syncPanelCellMin() {
 // some narrows what a single Apply writes (#81).
 function updateDiffBar(scope) {
   if (!diffByPath) return;
+  syncRibbonSelection();
   scope ??= automaticTransformScope();
   const staged = diffByPath.size;
   const n = applySelection.size;
@@ -2282,7 +2308,7 @@ async function afterOpen(label, version = openVersion, savedView = null) {
 // Open a drag-and-drop of `paths` (#127). The backend resolves a lone folder to
 // a library and anything else to a file-set; `dropFolders` (the dropped dirs)
 // drives the table's drop-origin grouping, and is null for library mode.
-async function openDrop(paths) {
+async function openDrop(paths, options = {}) {
   if (!paths || !paths.length) return;
   invalidateBpm();
   flushSessionView();
@@ -2296,7 +2322,7 @@ async function openDrop(paths) {
     rootInput.value = result.root;
     // A dropped FOLDER is a library and worth remembering (#180); a drop of
     // loose files is rooted at their common ancestor, which nobody chose.
-    await afterOpen(result.root, version);
+    await afterOpen(result.root, version, options.restore || null);
     if (version !== openVersion) return;
     clearResumeAttempt(sessionStorage());
     if (result.mode !== "files") {
@@ -2642,8 +2668,6 @@ function setMode(name) {
     showView("files");
     if (diffByPath) el("diff-actionbar").hidden = false;
   }
-  // Uncollapse when a tab is clicked, so switching modes always reveals the panel.
-  document.body.classList.remove("panel-collapsed");
   (MODE_REFRESH[name] || (() => {}))();
 }
 
@@ -2656,11 +2680,6 @@ function refreshTagger() {
 }
 
 
-
-// Collapse/expand the mode panel to give the table the full width.
-el("panel-toggle").addEventListener("click", () => {
-  document.body.classList.toggle("panel-collapsed");
-});
 
 // Drop the mode-tab labels to icon-only when the labelled tabs no longer fit the
 // top bar (#116, #280). Measured with labels shown (compact removed first), so the
@@ -2941,10 +2960,230 @@ for (const [id,staged] of [['files-tab',false],['staged-tab',true]]) {
   });
 }
 
+// The ribbon reuses the table selection and native folder-open paths. A folder
+// addition builds a file set from the current files plus the chosen directory;
+// the backend resolves/deduplicates these paths without writing media.
+let ribbonFolderBusy = false;
+let appendTypedFolder = false;
+function folderCommandBlocked() {
+  if (applying || undoing || ribbonFolderBusy) return true;
+  if (edits.size || pendingImportCover || hasLiveInputs() || previewPlan?.changes?.length) {
+    toast("Apply or clear staged edits before opening or adding a folder.", true);
+    return true;
+  }
+  return false;
+}
+async function addFolderToList(root) {
+  if (folderCommandBlocked()) return;
+  const savedView = sessionSnapshot();
+  const existingPaths = tracks.map(track => track.path);
+  const paths = [...new Set([...existingPaths, cleanPastedPath(root)])];
+  if (!paths.at(-1)) return;
+  ribbonFolderBusy = true;
+  try { await openDrop(paths, { restore: savedView }); }
+  finally { ribbonFolderBusy = false; appendTypedFolder = false; }
+}
+function syncRibbonSelection() {
+  const reviewing = usingReviewSelection();
+  const count = reviewing ? applySelection.size : selection.size;
+  const total = reviewing ? diffByPath.size : viewPaths.length;
+  el('ribbon-select-all').disabled = applying || undoing || filterPending || !total;
+  el('ribbon-clear-selection').disabled = applying || undoing || filterPending || !count;
+  const moves = movableDirections(ribbonOrderGroups(), selection);
+  const blocked = applying || undoing || filterPending || Boolean(diffByPath && !isAutomaticTransformPreview());
+  el('ribbon-move-up').disabled = blocked || !moves.up;
+  el('ribbon-move-down').disabled = blocked || !moves.down;
+  el('group-btn').disabled = applying || undoing;
+  const blocks = new Map();
+  for (const path of selectedPaths()) for (const block of trackAt(path)?.tag_blocks || []) blocks.set(block.kind, {kind:block.kind, label:block.label});
+  document.dispatchEvent(new CustomEvent('tagrex:ribbon-state', {detail:{count:selectedPaths().length, busy:applying || undoing, blocks:[...blocks.values()]}}));
+}
+function ribbonOrderGroups() {
+  return groupBy ? [...groupPaths.values()] : [viewPaths];
+}
+function moveRibbonSelection(direction) {
+  if (applying || undoing || filterPending || (diffByPath && !isAutomaticTransformPreview())) return;
+  const next = shiftSelectedOrder(tracks, ribbonOrderGroups(), selection, direction);
+  if (!next) return;
+  for (let i = 0; i < next.length; i++) tracks[i] = next[i];
+  reindexTracks();
+  setManualOrder(true);
+  renderTracks();
+  const moved = navPaths.find(path => selection.has(path));
+  if (moved) scrollPathIntoView(moved);
+}
+el('ribbon-move-up').addEventListener('click', () => moveRibbonSelection(-1));
+el('ribbon-move-down').addEventListener('click', () => moveRibbonSelection(1));
+
+el('ribbon-open-folder').addEventListener('click', () => {
+  if (!folderCommandBlocked()) { appendTypedFolder = false; browseForFolder(); }
+});
+el('ribbon-add-folder').addEventListener('click', () => {
+  if (!folderCommandBlocked()) browseForFolder({ append: true });
+});
+el('ribbon-select-all').addEventListener('click', () => {
+  if (applying || undoing) return;
+  selectAllRows();
+});
+el('ribbon-clear-selection').addEventListener('click', () => {
+  if (applying || undoing) return;
+  if (usingReviewSelection()) setApplySelection(new Set());
+  else selection.clear();
+  syncSelectionUI();
+});
+
+// Immediate command writes have their own transaction and never consume live
+// inputs or the global Apply scope. The native result refreshes only the staged
+// old snapshots; its desired values and included rows stay exactly as chosen.
+async function writeQuickPlan(plan) {
+  if (!plan.changes.length) { toast('No changes to write.'); return; }
+  if (hasInvalidPreview(plan)) throw new Error('Correct invalid values before writing.');
+  applying = true;
+  pauseAutomaticTransformPreview();
+  const staged = previewPlan;
+  const source = previewSource;
+  const included = new Set(applySelection);
+  const sourceTracks = tracks;
+  const remainingSelected = new Set(selection);
+  const barWasHidden = el('diff-actionbar').hidden;
+  const release = freezeMutationSurfaces({scrollableFiles:true});
+  const review = createApplyReview(plan.changes, {
+    columns:tableColumnKeys().slice(), offset:TABLE_DATA_COLUMN_OFFSET,
+    rowForPath:renderedRow, artworkLabel:state => msg(`table.artwork.${state}`),
+    onComplete:path => { if (sourceTracks === tracks && remainingSelected.delete(path)) updateStatus(remainingSelected.size, false); },
+  });
+  const feedback = createApplyFeedback(review, plan.changes);
+  activeApplyReview = review;
+  for (const row of renderedRows.values()) review.paint(row);
+  el('diff-actionbar').hidden = false;
+  el('diff-actionbar').classList.add('applying');
+  syncRibbonSelection();
+  try {
+    await beginApplyProgress(progress => {
+      if (!progress.completed && progress.done < plan.changes.length) return;
+      feedback.progress(progress);
+    });
+    const result = await invoke('quick_write', {plan, stagedPlan:staged});
+    el('diff-cancel-apply').disabled = true;
+    await feedback.finish();
+    review.completeAll();
+    activeApplyReview = null;
+    rememberBatchScope(result.batch, plan);
+    for (const change of plan.changes) selection.delete(change.path);
+    spreadsheet?.clearRange({refresh:false});
+    const updated = new Map(result.tracks.map(track => [track.path, track]));
+    setTracks(tracks.map(track => updated.get(track.path) || track));
+    invalidateCustomColumns([...updated.keys()]);
+    setPreviewPlan(result.plan); setPreviewSource(source);
+    if (result.plan) {
+      renderPreview(result.plan);
+      setApplySelection(included); syncSelectionUI();
+    } else renderTracks();
+    refreshCustomColumnCells();
+    refreshFieldEditor();
+    await refreshHistory();
+    toast(`Wrote changes to ${plan.changes.length} ${plan.changes.length === 1 ? 'file' : 'files'}. Staged edits kept.`);
+  } catch (error) {
+    feedback.cancel(); activeApplyReview = null; review.restore();
+    if (error?.failure?.message?.code === 'error.plan.cancelled') toast(msg('toast.applyCancelled'));
+    else throw error;
+  } finally {
+    feedback.cancel(); activeApplyReview = null; endApplyProgress();
+    el('diff-actionbar').hidden = barWasHidden && !previewPlan?.changes.length;
+    applying = false; release();
+    updateStatus(rowSelectionSet().size);
+    syncRibbonSelection(); spreadsheet?.refresh();
+    resumeAutomaticTransformPreview({dismiss:!hasLiveInputs()});
+  }
+}
+
+document.addEventListener('tagrex:number-format', () => renderTracks());
+connectRibbonActions(async (action, options) => {
+  if (applying || undoing) throw new Error('Wait for the current operation to finish.');
+  if (action === 'artwork-settings') {
+    await openSettings();
+    const groups = [...document.querySelectorAll('.settings-group')];
+    const at = groups.findIndex(group => group.contains(el('set-cover-max')));
+    if (at >= 0) selectSettingsGroup(at);
+    el('set-cover-max').scrollIntoView({block:'center'}); el('set-cover-max').focus();
+    return;
+  }
+  const subject = captureSelection();
+  const paths = subject.paths;
+  if (!paths.length) throw new Error('Select files first.');
+  if (action === 'rename') {
+    setMode('renamer');
+    document.dispatchEvent(new CustomEvent('tagrex:reveal-module', {detail:'inspector'}));
+    el('mask').focus();
+    toast('Use a folder pattern such as %album%/%filename% to preserve filenames.');
+  } else if (action === 'export-artwork') {
+    await exportCover();
+  } else if (action === 'number') {
+    if (options.mode === 'write') {
+      const edits = numberingEdits();
+      const plan = await invoke('preview_tag_edits', {edits, paths, cover:null});
+      if (!isSelectionCurrent(subject)) throw new Error('The selection changed. Try again.');
+      await writeQuickPlan(plan);
+    } else if (await numberTracks() === false) return;
+    return {dialog:'ribbon-number-dialog'};
+  } else if (action === 'remove-tags') {
+    if (options.mode === 'write') {
+      const plan = await invoke(options.kind === 'text' ? 'preview_clear_tags' : 'preview_remove_tag_block', {paths, kind:options.kind});
+      if (!isSelectionCurrent(subject)) throw new Error('The selection changed. Try again.');
+      if (plan.changes.some(change => change.block_changes?.some(block => !block.exact))) {
+        el('ribbon-remove-dialog').hidden = true;
+        const ok = await confirmDialog('Remove the selected tag blocks now? Undo can restore text and artwork, but some private data in these blocks cannot be restored.', 'Write', {danger:true});
+        if (!ok) return {dialog:'ribbon-remove-dialog'};
+        if (!isSelectionCurrent(subject)) throw new Error('The selection changed. Try again.');
+      }
+      await writeQuickPlan(plan);
+    } else if (options.kind === 'text') await previewClearTags();
+    else {
+      const label = trackAt(paths[0])?.tag_blocks?.find(block => block.kind === options.kind)?.label || options.kind;
+      // Close the chooser before the existing detailed block-removal confirmation.
+      el('ribbon-remove-dialog').hidden = true;
+      await previewRemoveTagBlock(options.kind, label);
+    }
+    return {dialog:'ribbon-remove-dialog'};
+  } else if (action === 'format-values') {
+    const values = await invoke('render_column', {pattern:options.pattern, paths});
+    if (!isSelectionCurrent(subject)) throw new Error('The selection changed. Try again.');
+    if (options.mode === 'write') {
+      const edits = paths.map((path,index) => ({path, field:options.field, value:values[index] || ''}));
+      const plan = await invoke('preview_tag_edits', {edits, paths, cover:null});
+      if (!isSelectionCurrent(subject)) throw new Error('The selection changed. Try again.');
+      await writeQuickPlan(plan);
+    } else {
+      paths.forEach((path,index) => recordLiveField([path], options.field, values[index] || ''));
+      await hooks.previewEdits();
+    }
+    return {dialog:'ribbon-format-dialog'};
+  } else if (action === 'import-artwork') {
+    const result = await invoke('artwork_import_sources', {paths, pattern:options.pattern, firstImage:options.firstImage, replaceExisting:options.replaceArtwork});
+    if (!isSelectionCurrent(subject)) throw new Error('The selection changed. Try again.');
+    const plans = [];
+    for (const assignment of result.assignments) {
+      plans.push(await invoke('preview_cover_embed', {paths:assignment.paths, cover:assignment.cover}));
+      if (!isSelectionCurrent(subject)) throw new Error('The selection changed. Try again.');
+    }
+    if (plans.length) {
+      const plan = {...plans[0], changes:plans.flatMap(plan => plan.changes)};
+      if (options.mode === 'write') await writeQuickPlan(plan);
+      else adoptLiveCoverPlan(plan, result.assignments.flatMap(assignment => assignment.paths));
+    }
+    report('Artwork import prepared', [
+      {text:`${result.assignments.reduce((sum,item) => sum + item.paths.length,0)} files matched`},
+      result.missing.length && {text:`${result.missing.length} files had no matching image`, problem:true},
+      result.skipped_existing.length && {text:`${result.skipped_existing.length} files kept their existing artwork`},
+    ]);
+    return {dialog:'ribbon-import-dialog'};
+  }
+});
+
 // ---- wire up ----
 // One button, two roles (#177): what it does is what its label says.
 el("lib-action").addEventListener("click", () =>
-  libraryIsDirty() ? openLibrary() : browseForFolder()
+  libraryIsDirty() ? (appendTypedFolder ? addFolderToList(rootInput.value) : openLibrary()) : browseForFolder()
 );
 el("lib-refresh").addEventListener("click", refreshLibrary);
 el("root-display").addEventListener("click", editRootPath);
@@ -3062,7 +3301,7 @@ window.addEventListener(
 // physical key, so a Cyrillic layout no longer breaks it.
 function selectAllRows() {
   // While diffing, the sel column is the apply scope (#117), so select all of it.
-  if (diffByPath && !isAutomaticTransformPreview()) {
+  if (usingReviewSelection()) {
     setApplySelection(new Set(diffByPath.keys()));
     syncSelectionUI();
     return;
@@ -3074,7 +3313,8 @@ function selectAllRows() {
 // Open a native folder chooser (Tauri dialog plugin). The scanner recurses into
 // subfolders, so picking a folder loads everything under it. Outside Tauri
 // (browser dev) there's no native dialog — fall back to focusing the path field.
-async function browseForFolder() {
+async function browseForFolder({ append = false } = {}) {
+  appendTypedFolder = append;
   const dialog = window.__TAURI__ && window.__TAURI__.dialog;
   if (!dialog) {
     // Browser development has no native chooser: open the field instead, which
@@ -3087,7 +3327,8 @@ async function browseForFolder() {
     const picked = await dialog.open({ directory: true, multiple: false });
     if (!picked) return; // user cancelled
     rootInput.value = picked;
-    await openLibrary();
+    if (append) await addFolderToList(picked);
+    else await openLibrary();
   } catch (e) {
     toast(String(e), true);
   }
@@ -3095,9 +3336,10 @@ async function browseForFolder() {
 
 rootInput.addEventListener("input", updateLibAction);
 rootInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") openLibrary();
+  if (e.key === "Enter") appendTypedFolder ? addFolderToList(rootInput.value) : openLibrary();
   // Escape abandons the edit: back to what is open, and out of the field.
   if (e.key === "Escape") {
+    appendTypedFolder = false;
     rootInput.value = openedRoot;
     leaveRootEdit();
   }
@@ -3113,7 +3355,7 @@ el("root-recent").hidden = recentRoots().length === 0;
 selectAll.addEventListener("change", () => {
   const on = selectAll.checked;
   // While diffing the header box toggles the whole apply scope, not selection.
-  if (diffByPath && !isAutomaticTransformPreview()) {
+  if (usingReviewSelection()) {
     setApplySelection(new Set(on ? diffByPath.keys() : []));
     syncSelectionUI();
     return;
@@ -3157,8 +3399,12 @@ function anchorSelection(path) {
   selBase.delete(path);
 }
 
+function usingReviewSelection() {
+  return Boolean(diffByPath && !isAutomaticTransformPreview() && (stagedView || !editablePreview()));
+}
+
 function rowSelectionSet() {
-  return diffByPath && !isAutomaticTransformPreview() ? applySelection : selection;
+  return usingReviewSelection() ? applySelection : selection;
 }
 
 let selectionPanelFrame = 0;
@@ -3206,9 +3452,10 @@ function paintRowSelection() {
   }
 }
 function syncSelectionUI({ deferPanels = false, refreshGrid = true, refreshPanels = false } = {}) {
+  syncRibbonSelection();
   paintRowSelection();
   updateStatus(rowSelectionSet().size);
-  if (diffByPath && !isAutomaticTransformPreview()) {
+  if (usingReviewSelection()) {
     updateDiffBar();
     if (refreshGrid) spreadsheet?.refresh();
     return;
@@ -3253,8 +3500,9 @@ function updateTransformScope() {
   const note = el('status-transform-scope');
   if (!note) return;
   const scope = automaticTransformScope();
-  const text = scope.busy ? 'Previewing…' : scope.invalid ? 'Fix invalid values' : scope.failed ? 'Preview failed' : scope.blocked ? 'Review current preview first' : scope.dismissed ? 'Preview cleared' : '';
-  note.hidden = (!scope.enabled && !hasLiveInputs() && !scope.busy) || !text;
+  const text = scope.busy ? 'Previewing…' : scope.invalid ? 'Fix invalid values' : scope.failed ? 'Preview failed' : scope.blocked ? 'Review current preview first' : '';
+  // Preview state controls validation, never a second notification strip.
+  note.hidden = true;
   note.dataset.detail = String(Boolean(text));
   if (note.textContent !== text) note.textContent = text;
   note.setAttribute('aria-busy', String(scope.busy));
@@ -3275,7 +3523,7 @@ function updatePanelCounts(count = selectedPaths().length) {
 }
 
 function selectRow(tr, e, { deferPanels = false } = {}) {
-  if (diffByPath && !isAutomaticTransformPreview()) { selectReviewRow(tr, e); return; }
+  if (usingReviewSelection()) { selectReviewRow(tr, e); return; }
   if (tr.classList.contains("unreadable")) return; // inert — can't be selected
   const path = tr.dataset.path;
   if (e.shiftKey && selAnchor) {
@@ -3321,7 +3569,7 @@ function selectReviewRow(tr, event) {
 // A plain group right-click replaces; Ctrl/Cmd-click toggles the complete
 // filtered group, including collapsed/offscreen members, and preserves others.
 function selectGroup(key, mode = 'replace') {
-  const manual = diffByPath && !isAutomaticTransformPreview();
+  const manual = usingReviewSelection();
   const paths = (groupPaths.get(key) || []).filter(path => !manual || diffByPath.has(path));
   if (!paths.length) return;
   const target = rowSelectionSet();
@@ -3377,7 +3625,7 @@ tracksBody.addEventListener("click", (e) => {
 // a real row, group header, checkbox or the column header are left to their own
 // handlers, and a modified click keeps the selection for range/add.
 el("files-view").addEventListener("click", (e) => {
-  if (diffByPath && !isAutomaticTransformPreview()) return;
+  if (usingReviewSelection()) return;
   if (e.metaKey || e.ctrlKey || e.shiftKey) return;
   if (e.target.closest("thead") || e.target.closest("td.sel")) return;
   const tr = e.target.closest("tr");
@@ -3397,26 +3645,29 @@ function marqueePaths(top, bottom) {
   const [path, row] = reference;
   const index = itemIndexByPath.get(path);
   if (index === undefined) return [];
-  const origin = row.getBoundingClientRect().top - tableWrap.getBoundingClientRect().top + tableWrap.scrollTop - itemTops[index];
+  const origin = row.getBoundingClientRect().top - tableWrap.getBoundingClientRect().top + tableWrap.scrollTop - itemOffsets.top(index);
   const from = Math.max(0, top - origin);
   const to = bottom - origin;
   if (to < 0) return [];
   const paths = [];
-  for (let i = itemIndexAt(from); i < viewItems.length && itemTops[i] <= to; i++) {
+  const first = itemIndexAt(from);
+  let itemTop = itemOffsets.top(first);
+  for (let i = first; i < viewItems.length && itemTop <= to; i++) {
     const item = viewItems[i];
-    if (item.kind === "track" && !item.track.unreadable && itemTops[i + 1] >= from) paths.push(item.track.path);
+    itemTop += itemHeightAt(i);
+    if (item.kind === "track" && !item.track.unreadable && itemTop >= from) paths.push(item.track.path);
   }
   return paths;
 }
 initRowSelection({
   wrap: tableWrap, getSelection: rowSelectionSet,
   enabled: () => !applying && !undoing,
-  pathsInRange: (top,bottom) => marqueePaths(top,bottom).filter(path => !diffByPath || isAutomaticTransformPreview() || diffByPath.has(path)),
+  pathsInRange: (top,bottom) => marqueePaths(top,bottom).filter(path => !usingReviewSelection() || diffByPath.has(path)),
   onPress: (event) => {
     const before = {selAnchor,selBase,reviewAnchor,reviewBase,activeRowPath};
     const row = event.target.closest('tr[data-path]');
     if (row) selectRow(row, event, {deferPanels:true});
-    else if (!diffByPath || isAutomaticTransformPreview()) { rowSelectionSet().clear(); syncSelectionUI({deferPanels:true,refreshGrid:false}); }
+    else if (!usingReviewSelection()) { rowSelectionSet().clear(); syncSelectionUI({deferPanels:true,refreshGrid:false}); }
     return before;
   },
   onScroll: () => renderWindow(),
@@ -3428,7 +3679,7 @@ initRowSelection({
       setActiveRowByPath(beforePress.activeRowPath, false);
     }
     if (!cancelled && paths.length) {
-      if (diffByPath && !isAutomaticTransformPreview()) { reviewAnchor = startPath || paths[0]; reviewBase = new Set(applySelection); reviewBase.delete(reviewAnchor); }
+      if (usingReviewSelection()) { reviewAnchor = startPath || paths[0]; reviewBase = new Set(applySelection); reviewBase.delete(reviewAnchor); }
       else anchorSelection(startPath || paths[0]);
       setActiveRowByPath(focusPath, false);
       renderedRow(focusPath)?.focus({ preventScroll: true });
@@ -3503,7 +3754,7 @@ function scrollPathIntoView(path) {
   const index = itemIndexByPath.get(path);
   if (index === undefined) return;
   const headHeight = el("tracks").querySelector("thead")?.offsetHeight || 0;
-  const top = itemTops[index];
+  const top = itemOffsets.top(index);
   const bottom = top + itemHeightAt(index);
   const viewTop = tableWrap.scrollTop + headHeight;
   const viewBottom = tableWrap.scrollTop + tableWrap.clientHeight;
@@ -3557,7 +3808,7 @@ tracksBody.addEventListener("keydown", (e) => {
     e.preventDefault(); // Space would otherwise scroll
     const path = tr.dataset.path;
     // While diffing, Space toggles the focused staged row's apply tick.
-    if (diffByPath && !isAutomaticTransformPreview()) {
+    if (usingReviewSelection()) {
       if (!diffByPath.has(path)) return; // untouched rows aren't tickable
       if (applySelection.has(path)) applySelection.delete(path);
       else applySelection.add(path);
@@ -3680,12 +3931,15 @@ el("group-btn").addEventListener("click", (e) => {
   e.stopPropagation();
   const menu = el("group-menu");
   menu.hidden = !menu.hidden;
+  el('group-btn').setAttribute('aria-expanded', String(!menu.hidden));
+  if (!menu.hidden) placeFloating(menu, el('group-btn'));
 });
 el("group-menu").addEventListener("click", (e) => {
   const opt = e.target.closest(".group-opt");
   if (!opt) return;
   el("group-menu").hidden = true;
   setGroupBy(opt.dataset.group);
+  el("group-btn").focus();
 });
 document.addEventListener("click", (e) => {
   const menu = el("group-menu");

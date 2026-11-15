@@ -27,8 +27,9 @@ use tagrex_commands::{
     ActionGroupDto, AlignMatchDto, App, AppError, BatchDto, BlockTargetsDto, CandidateDto,
     CoverArtDto, CoverExportDto, CoverSummaryDto, DropResultDto, DuplicateGroupDto, ErrorDto,
     ImportFieldDto, ImportSelectionDto, ImportTrackDto, LiveCoverAssignmentDto, NameProbeDto,
-    NameProbesDto, PlaceholderDto, PlanDto, ProviderHub, ReleaseDto, SaveImagesDto, SearchQueryDto,
-    SettingsDto, TagEditDto, TextLinesDto, TextProbeDto, TrackDto, TransformRuleDto, UndoReportDto,
+    NameProbesDto, PlaceholderDto, PlanDto, ProviderHub, QuickWriteDto, ReleaseDto, SaveImagesDto,
+    SearchQueryDto, SettingsDto, TagEditDto, TextLinesDto, TextProbeDto, TrackDto,
+    TransformRuleDto, UndoReportDto,
 };
 use tagrex_core::plan::UndoMode;
 use tagrex_player::{Player, PlayerStatus};
@@ -747,6 +748,26 @@ async fn read_external_cover(
 /// [`preview_cover_embed`]. Stateless — the source image isn't confined to the
 /// library, matching the file picker (the user chose it explicitly).
 #[tauri::command]
+async fn artwork_import_sources(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    pattern: String,
+    first_image: bool,
+    replace_existing: bool,
+) -> Result<tagrex_commands::ArtworkImportSourcesDto, ErrorDto> {
+    let state = state.inner().clone();
+    SESSION_QUEUE
+        .run(move || {
+            with_app(&state, |app| {
+                let paths = paths.into_iter().map(PathBuf::from).collect::<Vec<_>>();
+                app.artwork_import_sources(&paths, &pattern, first_image, replace_existing)
+                    .map_err(ErrorDto::from)
+            })
+        })
+        .await
+}
+
+#[tauri::command]
 async fn read_cover_image(path: String) -> Result<CoverArtDto, ErrorDto> {
     IMAGE_READ_QUEUE
         .run(move || {
@@ -1092,6 +1113,32 @@ async fn apply_plan(
             with_app_mut(&state, |app| {
                 app.apply_with(&plan, &mut report, operation.cancelled())
                     .map_err(ErrorDto::from)
+            })
+        })
+        .await
+}
+
+#[tauri::command]
+async fn quick_write(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+    control: State<'_, ApplyControl>,
+    plan: PlanDto,
+    staged_plan: Option<PlanDto>,
+) -> Result<QuickWriteDto, ErrorDto> {
+    let state = state.inner().clone();
+    let operation = control.0.admit("Write")?;
+    SESSION_QUEUE
+        .run(move || {
+            let mut report = progress_reporter(app_handle, plan.changes.len());
+            with_app_mut(&state, |app| {
+                app.quick_write_with(
+                    &plan,
+                    staged_plan.as_ref(),
+                    &mut report,
+                    operation.cancelled(),
+                )
+                .map_err(ErrorDto::from)
             })
         })
         .await
@@ -2275,6 +2322,7 @@ fn main() {
             read_cover_summary,
             read_external_cover,
             read_cover_image,
+            artwork_import_sources,
             preview_cover_remove,
             preview_remove_tag_block,
             preview_convert_tag_block,
@@ -2289,6 +2337,7 @@ fn main() {
             export_html,
             export_xml,
             apply_plan,
+            quick_write,
             cancel_apply,
             detect_bpm,
             cancel_detect_bpm,

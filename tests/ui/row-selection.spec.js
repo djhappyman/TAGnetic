@@ -72,7 +72,7 @@ test('dragging the filename selects intersected rows without reordering or enter
 });
 
 test('track surfaces show an arrow on hover and a text cursor only while editing', async ({ page }) => {
-  const cells = rows(page).first().locator('td:not(.sel)');
+  const cells = rows(page).first().locator('td:not(.sel):not(.table-fill)');
   for (const cell of await cells.all()) {
     await cell.hover();
     expect(await cell.evaluate(node => getComputedStyle(node).cursor)).toBe('default');

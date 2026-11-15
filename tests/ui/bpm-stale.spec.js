@@ -51,8 +51,9 @@ async function open(page, root) {
   await page.locator('#root').press('Enter');
 }
 async function startScan(page) {
-  await page.getByRole('button', { name: 'More', exact: true }).click();
-  await page.locator('#detect-bpm').click();
+  // The ribbon iteration keeps this legacy controller mounted, without a toolbar entry.
+  // Exercise its stale-result boundary directly; ribbon UI is tested separately.
+  await page.locator('#detect-bpm').evaluate(button => button.click());
   await expect.poll(() => page.evaluate(() => window.__bpm.pending.length)).toBe(1);
 }
 async function finishScan(page) {

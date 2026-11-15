@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Compact command ribbon and responsive workspace.
+
+### Added
+
+- Overlay scrollbars fade in during vertical or horizontal scrolling and fade
+  away after idle, without reserving table space. Both remain draggable.
+- Grouped command ribbon with delayed tooltips, file selection and ordering,
+  Autonumber, value formatting, tag removal and artwork import/export controls.
+- Compact command dialogs offer Cancel, Stage and immediate Write. Write keeps
+  existing staged proposals intact and retains confirmed progress and Undo.
+- Autonumber owns track/disc display formats; artwork import supports a tag-based
+  filename or the first available image in each track's folder.
+
+### Changed
+
+- Row bands fill the viewport while data columns retain their chosen widths.
+  Auto-fit measures full contents, and manual resizing disables automatic fitting.
+- The existing panel control opens a smooth, width-limited sidebar. The folder
+  bar, filter and player adapt while table columns retain their geometry.
+- Transformations appear only in Tags. Playlist commands remain part of Export,
+  and lyric import is reserved for its future backend.
+- Preview feedback uses the shared notification system; the clipping status
+  strip is removed. Selection highlighting works with editable staged tags.
+
+### Fixed
+
+- Filter disclosure and sidebar resizing preserve loaded table rows and active
+  cell edits instead of rebuilding the table on each animation frame.
+- Large cell ranges avoid copying the full selection during scrolling. Variable
+  row heights update an indexed layout while large libraries remain virtualized.
+- Fractional row heights keep the scrollbar extent stable as tracks enter view.
+- Artwork import avoids discarded track snapshots and repeated folder work.
+  Immediate Write indexes affected paths when preserving larger staged plans.
+- Unchanged Autonumber display formats avoid redundant table redraws.
+
 ## [1.4.4] - 2026-11-15
 
 **Tagnetic Alpha 3** — safer backend operations, recovery and exports.

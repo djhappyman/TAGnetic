@@ -1,5 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { t } from '../js/i18n.js';
+  import { FolderOpen, FolderPlus, Undo2, ListChecks, ListX, ArrowDown, ArrowUp, Group, ChevronDown, PanelRightOpen, PanelRightClose } from '@lucide/svelte';
+  import RibbonTools from './RibbonTools.svelte';
   import BrandWordmark from './BrandWordmark.svelte';
   import { subscribeWorkspaceState, setWorkspaceMode, setWorkspaceSubtab, type WorkspaceMode, type WorkspaceSubtab } from '$lib/workspace-state';
   import DockWorkspace from './DockWorkspace.svelte';
@@ -23,6 +26,21 @@
   let subtab = $state<WorkspaceSubtab>('online');
   // Narrow windows show one working pane at a time. Dock modules stay mounted, so
   // a cell edit, staged field or scroll position survives the switch.
+  let sidebarClosed = $state(false);
+  function setSidebarClosed(value: boolean, persist = true) {
+    sidebarClosed = value;
+    document.body.classList.toggle('panel-collapsed', value);
+    if (value) { dock?.reveal('files'); document.getElementById('panel-toggle')?.focus({preventScroll:true}); }
+    if (persist) try { localStorage.setItem('tagrex.sidebarCollapsed', value ? '1' : '0'); } catch { /* Session-only preference. */ }
+  }
+  onMount(() => {
+    try { setSidebarClosed(localStorage.getItem('tagrex.sidebarCollapsed') === '1', false); } catch { /* Open by default. */ }
+  });
+  function toggleSidebar() {
+    const closed = !sidebarClosed;
+    setSidebarClosed(closed);
+    if (!closed) dock?.reveal('inspector');
+  }
   let viewOpen = $state(false);
   let moreOpen = $state(false);
   let arranging = $state(false);
@@ -42,11 +60,15 @@
     const onClick = (event: MouseEvent) => {
       // Choosing a tool is a deliberate edit/search move: on a narrow window it
       // reveals that tool instead of leaving it below an unusable table slice.
-      if ((event.target as Element).closest('.mode-tab')) dock?.reveal('inspector');
+      if ((event.target as Element).closest('.mode-tab')) { setSidebarClosed(false); dock?.reveal('inspector'); }
       if ((event.target as Element).closest('#gen-job-transform')) dock?.reveal('transformations');
     };
     const revealFiles = () => dock?.reveal('files');
-    const revealModule = (event: Event) => dock?.reveal((event as CustomEvent<string>).detail);
+    const revealModule = (event: Event) => {
+      const module = (event as CustomEvent<string>).detail;
+      if (module !== 'files') setSidebarClosed(false);
+      dock?.reveal(module);
+    };
     node.addEventListener('click', onClick);
     document.addEventListener('tagrex:focus-filter', revealFiles, true);
     document.addEventListener('tagrex:reveal-module', revealModule);
@@ -57,28 +79,44 @@
   function alignPlayer(footer: HTMLElement) {
     const files = document.getElementById('dock-module-files');
     const pane = files?.querySelector<HTMLElement>('.files-col');
+    const address = files?.querySelector<HTMLElement>('.library-header');
     const frame = document.querySelector<HTMLElement>('.dock-frame');
     let pending = 0;
     const sync = () => {
       pending = 0;
       const bounds = footer.getBoundingClientRect();
-      const table = pane?.getBoundingClientRect();
+      const table = (frame?.dataset.sidebarDrawer === 'true' ? address : pane)?.getBoundingClientRect();
       const compactLayout = frame?.dataset.dockCompact === 'true';
       const visible = !compactLayout && table && table.width > 0 && table.height > 0;
       const left = visible ? Math.max(0, table.left - bounds.left) : 9;
-      const width = visible ? Math.min(table.width, bounds.width - left) : Math.max(0, bounds.width - 18);
+      const innerWidth = Math.max(0, bounds.width - left - 12);
+      const actionbar = document.getElementById('diff-actionbar');
+      const busy = document.getElementById('busy-pill');
+      const scope = document.getElementById('status-transform-scope');
+      const controlsVisible = !!((actionbar && !actionbar.hidden) || (busy && !busy.hidden) || (scope && !scope.hidden));
+      const preview = document.getElementById('diff-preview');
+      const apply = document.getElementById('diff-apply');
+      const controlsWidth = controlsVisible ? Math.max(248, Math.min(360, (preview?.scrollWidth || 0) + (apply?.scrollWidth || 0) + 36)) : 0;
+      const stacked = bounds.width < 600 && controlsVisible;
+      const sidebarSpace = visible ? Math.max(0, innerWidth - table.width) : 0;
+      const reserve = stacked ? 0 : Math.max(sidebarSpace, controlsWidth);
+      const width = Math.max(0, innerWidth - reserve);
       footer.style.setProperty('--player-offset', `${left}px`);
       footer.style.setProperty('--player-width', `${width}px`);
-      const fullWidth = compactLayout || left + width > bounds.width - 24;
-      footer.classList.toggle('player-full-width', fullWidth);
-      footer.classList.toggle('narrow-actions', !fullWidth && bounds.width - left - width - 21 <= 280);
+      if (footer.classList.contains('player-full-width') || footer.classList.contains('narrow-actions')) {
+        footer.classList.remove('player-full-width', 'narrow-actions');
+      }
+      footer.classList.toggle('stacked-actions', stacked);
     };
     const schedule = () => { if (!pending) pending = requestAnimationFrame(sync); };
     const resize = new ResizeObserver(schedule);
-    for (const node of [footer, pane, frame]) if (node) resize.observe(node);
+    for (const node of [footer, pane, address, frame]) if (node) resize.observe(node);
     const layout = new MutationObserver(schedule);
     if (files) layout.observe(files, { attributes:true, attributeFilter:['data-dock-area', 'hidden'] });
-    if (frame) layout.observe(frame, { attributes:true, attributeFilter:['data-dock-compact'] });
+    if (frame) layout.observe(frame, { attributes:true, attributeFilter:['data-dock-compact', 'data-sidebar-drawer', 'data-sidebar-closed'] });
+    const actionbar = document.getElementById('diff-actionbar');
+    if (actionbar) layout.observe(actionbar, {attributes:true, attributeFilter:['hidden','class'], childList:true, subtree:true, characterData:true});
+    for (const id of ['busy-pill','status-transform-scope']) { const node = document.getElementById(id); if (node) layout.observe(node, {attributes:true, attributeFilter:['hidden']}); }
     window.addEventListener('resize', schedule);
     schedule();
     return () => { resize.disconnect(); layout.disconnect(); window.removeEventListener('resize', schedule); if (pending) cancelAnimationFrame(pending); };
@@ -132,6 +170,7 @@
     if (isSubtab) setWorkspaceSubtab(value);
     else {
       setWorkspaceMode(value);
+      setSidebarClosed(false);
       dock?.reveal('inspector');
     }
   }
@@ -180,8 +219,6 @@
       <div id="view-panel" class="toolbar-panel view-panel" class:open={viewOpen} role="group" aria-label="View options" data-i18n-aria-label="toolbar.viewPanel" aria-hidden={!viewOpen} inert={!viewOpen}>
         <div class="tray-row">
           <div class="col-picker group-ctl">
-            <Button variant="ghost" size="sm" id="group-btn" class="tray-action" title="Group rows by a key. File order is unchanged." aria-label="Group rows by a key"><svg class="ico"><use href="#i-group"/></svg><span class="tray-label" data-i18n="toolbar.group">Group by</span></Button>
-            <div id="group-menu" class="col-menu" hidden></div>
           </div>
           <Button variant="ghost" size="icon-sm" id="toggle-groups" class="icon tray-icon" hidden data-i18n-title="toolbar.collapseGroups" title="Collapse every group" data-i18n-aria-label="toolbar.collapseGroups" aria-label="Collapse every group"><svg class="ico"><use href="#i-collapse-all"/></svg></Button>
         </div>
@@ -210,12 +247,14 @@
     </span>
 
     <Button variant="ghost" size="icon-sm" id="settings-open" class="icon gear" data-i18n-title="topbar.settings" title="Settings" data-i18n-aria-label="topbar.settings" aria-label="Settings"><svg class="ico"><use href="#i-settings"/></svg></Button>
-    <Button variant="ghost" size="icon-sm" id="panel-toggle" class="icon" data-i18n-title="topbar.collapsePanelTitle" title="Collapse the mode panel to give the table more room." data-i18n-aria-label="topbar.collapsePanel" aria-label="Collapse the mode panel"><svg class="ico"><use href="#i-collapse"/></svg></Button>
+    <Button variant="ghost" size="icon-sm" id="panel-toggle" class="icon" aria-expanded={!sidebarClosed} aria-controls="mode-col" disabled={applying} onclick={toggleSidebar} data-i18n-title={sidebarClosed ? 'topbar.expandPanelTitle' : 'topbar.collapsePanelTitle'} title={t(sidebarClosed ? 'topbar.expandPanelTitle' : 'topbar.collapsePanelTitle')} data-i18n-aria-label={sidebarClosed ? 'topbar.expandPanel' : 'topbar.collapsePanel'} aria-label={t(sidebarClosed ? 'topbar.expandPanel' : 'topbar.collapsePanel')}>{#if sidebarClosed}<PanelRightOpen class="ico" size={17}/>{:else}<PanelRightClose class="ico" size={17}/>{/if}</Button>
   </div>
-  <div class="command-toolbar" role="group" data-i18n-aria-label="toolbar.actions" aria-label="File actions">
+    <Button id="arrange-done" variant="ghost" size="sm" hidden={!arranging} onclick={finishArranging} data-i18n="action.done">Done</Button>
+  <!-- Legacy controller targets stay mounted during ribbon iteration. -->
+  <div hidden inert aria-hidden="true">
     <Button id="preset-library" variant="ghost" size="sm" disabled={applying} onclick={openPresetLibrary} data-i18n-title="presets.title" title="Transformation presets"><svg class="ico"><use href="#i-wand"/></svg><span data-i18n="toolbar.presetsShort">Presets</span></Button>
     <Button variant="ghost" size="sm" id="detect-bpm" class="toolbar-command search-toggle" title="Detect BPM" aria-label="Detect BPM"><svg class="ico glyph-search"><use href="#i-metronome"/></svg><svg class="ico glyph-stop"><use href="#i-stop"/></svg><span class="tray-label" data-i18n="toolbar.bpmShort">BPM</span></Button>
-    <Button variant="ghost" size="icon-sm" id="undo" class="icon" disabled data-i18n-title="topbar.undo" title="Undo the last applied batch" data-i18n-aria-label="topbar.undo" aria-label="Undo the last applied batch"><svg class="ico"><use href="#i-undo"/></svg></Button>
+
     <div class="toolbar-overflow">
       <Button id="more-btn" variant="ghost" size="icon-sm" class="toolbar-trigger" aria-expanded={moreOpen} aria-controls="more-panel" onclick={() => openPanel('more')} data-i18n-aria-label="toolbar.more" aria-label="More"><svg class="ico"><use href="#i-more"/></svg></Button>
       <div id="more-panel" class="toolbar-panel more-panel" class:open={moreOpen} role="group" aria-label="Selection actions" data-i18n-aria-label="toolbar.morePanel" aria-hidden={!moreOpen} inert={!moreOpen}>
@@ -228,14 +267,45 @@
         </div>
       </div>
     </div>
-    <Button id="arrange-done" variant="ghost" size="sm" hidden={!arranging} onclick={finishArranging} data-i18n="action.done">Done</Button>
+
   </div>
 </header>
 
 <main class="workarea">
 
-  <DockWorkspace bind:controller={dock}>
+  <DockWorkspace bind:controller={dock} drawer closed={sidebarClosed}>
   <DockModule moduleId="files" title="Files" defaultArea="left" headerless={!arranging}>
+  <div class="ribbon-strip">
+  <div class="command-toolbar command-ribbon" role="group" aria-label="File commands">
+    <div class="ribbon-group" role="group" aria-label="Folders">
+      <Button id="ribbon-open-folder" variant="ghost" size="icon-sm" class="icon ribbon-command" title="Open folder" aria-label="Open folder" disabled={applying}><FolderOpen class="ico" size={17} strokeWidth={1.7} /></Button>
+      <Button id="ribbon-add-folder" variant="ghost" size="icon-sm" class="icon ribbon-command" title="Add folder to the current list" aria-label="Add folder" disabled={applying}><FolderPlus class="ico" size={17} strokeWidth={1.7} /></Button>
+    </div>
+    <span class="ribbon-divider" aria-hidden="true"></span>
+    <div class="ribbon-group" role="group" aria-label="History">
+    <Button variant="ghost" size="icon-sm" id="undo" class="icon ribbon-command" disabled data-i18n-title="topbar.undo" title="Undo the last applied batch" data-i18n-aria-label="topbar.undo" aria-label="Undo the last applied batch"><Undo2 class="ico" size={17} strokeWidth={1.7} /></Button>
+    </div>
+    <span class="ribbon-divider" aria-hidden="true"></span>
+    <div class="ribbon-group" role="group" aria-label="Selection">
+      <Button id="ribbon-select-all" variant="ghost" size="icon-sm" class="icon ribbon-command" title="Select all listed files" aria-label="Select all listed files" disabled><ListChecks class="ico" size={17} strokeWidth={1.7} /></Button>
+      <Button id="ribbon-clear-selection" variant="ghost" size="icon-sm" class="icon ribbon-command" title="Clear selection" aria-label="Clear selection" disabled><ListX class="ico" size={17} strokeWidth={1.7} /></Button>
+    </div>
+    <span class="ribbon-divider" aria-hidden="true"></span>
+    <div class="ribbon-group" role="group" aria-label="File order">
+      <Button id="ribbon-move-down" variant="ghost" size="icon-sm" class="icon ribbon-command" title="Move selected files down within their group" aria-label="Move selected files down" disabled><ArrowDown class="ico" size={17} strokeWidth={1.7} /></Button>
+      <Button id="ribbon-move-up" variant="ghost" size="icon-sm" class="icon ribbon-command" title="Move selected files up within their group" aria-label="Move selected files up" disabled><ArrowUp class="ico" size={17} strokeWidth={1.7} /></Button>
+    </div>
+    <span class="ribbon-divider" aria-hidden="true"></span>
+    <div class="ribbon-group" role="group" aria-label="List organisation">
+      <div class="col-picker group-ctl">
+        <Button id="group-btn" variant="ghost" size="icon-sm" class="icon ribbon-command ribbon-menu-trigger" title="Group files" aria-label="Group files" aria-expanded="false" aria-controls="group-menu"><Group class="ico" size={17} strokeWidth={1.7} /><ChevronDown class="ribbon-chevron" size={10} /></Button>
+        <div id="group-menu" class="col-menu" hidden></div>
+      </div>
+
+    </div>
+    <RibbonTools />
+  </div>
+  </div>
   <section class="files-col">
     <div class="file-view-tabs" role="tablist" aria-label="File views" data-i18n-aria-label="staging.views">
       <Button id="files-tab" variant="ghost" size="sm" role="tab" aria-selected="true" aria-controls="files-view" aria-labelledby="files-tab-label" aria-describedby="status-sel"><span id="files-tab-label" data-i18n="staging.files">Files</span><span class="files-tab-counts" aria-hidden="true"><span id="files-selected" class="files-tab-selection"><span id="files-selected-count">0</span></span><span class="files-count-divider">/</span><span id="files-total-count">0</span></span><span id="status-sel" class="sr-only"></span></Button>
@@ -561,26 +631,10 @@
         </Tabs.Trigger>
       </Tabs.List>
 
-      <Tabs.Content value="transform" hidden={generatorJob !== 'transform'}><p class="hint muted">Select presets in the Transformations module.</p></Tabs.Content>
+      <Tabs.Content value="transform" hidden={generatorJob !== 'transform'}><p class="hint muted">Choose transformations from the Tags sidebar.</p></Tabs.Content>
 
       <Tabs.Content value="number" class="panel-block" hidden={generatorJob !== 'number'}>
-        <h2><span data-i18n="generator.numberTracks">Number tracks</span> <span id="autonum-count" class="muted"></span></h2>
-        <p class="hint muted" style="padding: 0" data-i18n="generator.numberHint">Writes track numbers in table order.</p>
-
-        <div class="panel-actions">
-          <span class="panel-field"><label for="autonum-start" data-i18n="generator.startAt">Start at</label><Input id="autonum-start" type="number" min="0" step="1" value="1" /></span>
-          <span class="panel-field"><label for="autonum-disc" data-i18n="generator.discNo">Disc #</label><Input id="autonum-disc" type="text" data-i18n-placeholder="generator.discPlaceholder" placeholder="none" data-i18n-title="generator.discTitle" title="Write this disc number to every numbered file. Leave it blank to keep each file's disc number." spellcheck="false" /></span>
-          <label class="rule-flag" data-i18n-title="generator.trackTotalTitle" title="Also writes the track total, the number of files being numbered, to every file.">
-            <NativeCheckbox id="autonum-total" /><span data-i18n="generator.trackTotal">Track total</span>
-          </label>
-          <label class="rule-flag" data-i18n-title="generator.perGroupTitle" title="Restarts at the start value for each group when grouping is on.">
-            <NativeCheckbox id="autonum-per-group" /><span data-i18n="generator.perGroup">Restart per group</span>
-          </label>
-          <label class="rule-flag" data-i18n-title="generator.keepSidesTitle" title="Leaves positions like A1 or B2 unchanged instead of renumbering them.">
-            <NativeCheckbox id="autonum-keep-sides" checked /><span data-i18n="generator.keepSides">Keep vinyl sides</span>
-          </label>
-          <Button variant="default" size="sm" id="autonum-run" class="primary" data-i18n="generator.numberRun">Number</Button>
-        </div>
+        <Button variant="outline" onclick={() => { const dialog = document.getElementById('ribbon-number-dialog'); if (dialog) dialog.hidden = false; }}>Open Autonumber</Button>
       </Tabs.Content>
 
       <Tabs.Content value="sides" class="panel-block" hidden={generatorJob !== 'sides'}>
@@ -675,7 +729,7 @@
     </section>
   </aside>
   </DockModule>
-  <DockModule moduleId="transformations" title="Transformations" defaultArea="right" defaultIndex={0} defaultWeight={0.6} chromeTarget="h2" collapsible>
+  <DockModule moduleId="transformations" visible={mode === 'tagger'} title="Transformations" defaultArea="right" defaultIndex={0} defaultWeight={0.6} chromeTarget="h2" collapsible>
   {#snippet headerHelp()}
     <Popover.Root>
       <Popover.Trigger>

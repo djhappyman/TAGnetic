@@ -7,8 +7,14 @@ import { positionControllerToast } from "../lib/controller-surfaces.js";
 
 export const el = (id) => document.getElementById(id);
 
-/// A transient status message at the bottom of the window; `isError` tints it.
+/// Routine results are visible in the workspace itself. Only actionable
+/// failures need a transient notification; detailed reports stay available.
 export function toast(message, isError) {
+  if (!isError) {
+    const current = el('toast');
+    if (current?.classList.contains('error')) { clearTimeout(toast._timer); current.hidden = true; }
+    return;
+  }
   showToast(String(message), [], !!isError);
 }
 

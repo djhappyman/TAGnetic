@@ -682,7 +682,6 @@ body button[data-slot="button"].settings-nav-item { min-height: 34px; border-rad
   .workarea[data-pane="library"] .mode-col,
   .workarea[data-pane="inspector"] .files-col { display: none !important; }
   .col-splitter { display: none; }
-  #panel-toggle { display: none; }
   .compact-actions {
     display: block;
     position: fixed;

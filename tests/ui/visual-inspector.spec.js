@@ -384,7 +384,9 @@ test('dock menus use menu geometry and compact controls keep a 24px hit box', as
   expect(handle.height).toBeGreaterThan(4);
   expect(handle.background).toBe('rgba(0, 0, 0, 0)');
   expect(handle.seamWidth).toBe('1px');
-  expect(handle.seamBackground).not.toBe('rgba(0, 0, 0, 0)');
+  expect(handle.seamBackground).toBe('rgba(0, 0, 0, 0)');
+  await splitter.hover();
+  await expect.poll(() => splitter.evaluate(node => getComputedStyle(node, '::after').backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
 
   // The module layout menu: 16px shell, 8px rows, concentric 8px inset.
   await page.locator('.mode-col .subtabs').click({ button: 'right' });
