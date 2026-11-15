@@ -60,6 +60,7 @@ async function stable(page){
 async function finish(page){
   await page.evaluate(()=>{window.progressObserver.disconnect();window.finishWrite();});
   await expect(page.locator('#diff-actionbar')).toBeHidden();
+  await expect(page.locator('#diff-apply')).toBeDisabled();
   expect(await page.evaluate(()=>window.tagrex.selectedPaths())).toEqual([]);
   await expect(page.locator('#tracks-body tr.selected')).toHaveCount(0);
   await expect(page.locator('#tracks-body .sheet-active,#tracks-body .sheet-range')).toHaveCount(0);

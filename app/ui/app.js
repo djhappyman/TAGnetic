@@ -1679,6 +1679,9 @@ function exitDiffState() {
   setPreviewSource(null);
   setDiffByPath(null);
   setApplySelection(new Set());
+  // A validated proposal may already have enabled Apply before a revert. The
+  // empty plan must clear that state too, not merely hide its action footer.
+  applyBtn.disabled = true;
   document.body.classList.remove("diffing", 'automatic-transform-preview');
   syncFileView();
   el("diff-actionbar").hidden = true;

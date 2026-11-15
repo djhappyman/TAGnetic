@@ -40,6 +40,8 @@ test('typing the saved value clears both staging and dirty input styling',async(
   for(const key of ['title','year','bpm']){
     const input=page.locator(`#editor-field-${key}`),old=await input.inputValue();
     await input.fill(key==='title'?'Changed title':'2025');await expect(page.locator('#staged-edits')).toBeVisible();
+    // Cover the validated state too, not only reverting before the debounce.
+    await expect(page.locator('#diff-apply')).toBeEnabled();
     await input.fill(old);await expect(page.locator('#staged-edits')).toBeHidden();
     await expect(input).not.toHaveClass(/dirty/);await expect(page.locator('#diff-apply')).toBeDisabled();
   }
@@ -62,8 +64,10 @@ test('discard restores number and text values without leaving phantom staging',a
   await page.locator('#tracks-body tr[data-path]').first().click();await page.locator('.subtab[data-subtab="editor"]').click();
   const keys=['title','year','track','disc','bpm'],saved={};
   for(const key of keys){saved[key]=await page.locator(`#editor-field-${key}`).inputValue();await page.locator(`#editor-field-${key}`).fill(key==='title'?'Pending':'12');}
+  // Discard also works before validation (the short year here is invalid).
   await expect(page.locator('#staged-edits')).toBeVisible();await page.locator('#diff-discard').click();
   for(const key of keys)await expect(page.locator(`#editor-field-${key}`)).toHaveValue(saved[key]);
+  await expect(page.locator('#diff-apply')).toBeDisabled();
   await expect(page.locator('#staged-edits')).toBeHidden();await expect(page.locator('.field-input.dirty')).toHaveCount(0);
 });
 
