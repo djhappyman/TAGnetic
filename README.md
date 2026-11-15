@@ -1,84 +1,92 @@
-# Tagnetic
+<p align="center">
+  <img src="app/ui/assets/tagnetic-icon.svg" width="88" height="88" alt="Tagnetic logo">
+</p>
 
-<img src="app/ui/assets/tagnetic-icon.svg" width="64" height="64" alt="Tagnetic app icon" />
+<h1 align="center">Tagnetic</h1>
 
-**Music tags, beautifully organised.**
+<p align="center">
+  <b>A free music tag editor for Windows, macOS and Linux.</b><br>
+  Edit tags, organise files, find artwork and spot duplicates.<br>
+  Preview your changes, save when ready and undo an applied batch later.
+</p>
 
-A desktop music library editor built around a familiar table, quick previews and deliberate saving. Edit tags, tidy file names, find metadata and manage artwork, with a clear view of what will change before you Apply.
+<p align="center">
+  <a href="https://github.com/djhappyman/TAGnetic/releases">Download</a> ·
+  <a href="docs/guide/README.md">User guide</a> ·
+  <a href="CHANGELOG.md">What’s new</a> ·
+  <a href="https://github.com/djhappyman/TAGnetic/issues">Report an issue</a>
+</p>
 
-[Downloads](https://github.com/djhappyman/TAGnetic/releases) · [User guide](docs/guide/README.md) · [Roadmap](docs/ROADMAP.md) · [Report an issue](https://github.com/djhappyman/TAGnetic/issues)
+<p align="center">
+  <img src="docs/img/tagnetic-workspace.svg" width="1000" alt="Tagnetic showing a music collection grouped by folder, online release results with cover artwork, and six staged changes ready to review.">
+</p>
 
-Tagnetic is an independent project built on [TagRex](https://github.com/tagrex/tagrex), with its own interface and product direction. Shared improvements continue to be offered upstream.
+## What it can do
 
-> **In active development.** The interface and workflow are still being refined. Tagnetic is the new project name; existing builds and some documentation still use **TagRex Personal**. Published downloads are snapshots and may not include everything on `main`.
+| Feature | What you can do |
+| --- | --- |
+| **Edit music tags** | Edit tracks in a table or update a whole selection. Copy, paste, number tracks and choose the columns you need. |
+| **Search with chips** | Type a name or genre, choose a suggested filter and keep narrowing the results. Combine conditions and save presets to use again. |
+| **Find artists across collaborations** | Find Hixxy on his own or in credits such as Hixxy & Sharkey and Hixxy feat. another artist. Searches ignore letter case. |
+| **Find duplicates** | Check for exact file copies, matching audio or likely copies of the same recording. Compare tags and file details without changing your files. |
+| **Look up releases** | Find tags and artwork on Discogs, MusicBrainz, Beatport, Bandcamp and Soundeo. You can also read tags from file names or pasted tracklists. |
+| **Organise files** | Rename tracks and build folders from their tags. Preview the resulting names and locations before applying them. |
+| **Clean up tags** | Fix spacing, change case, replace text and reuse your own transformation presets. |
+| **Manage artwork** | Browse, import, rotate, embed and export cover images. |
+| **Check BPM and keys** | Detect tempo from the audio and convert between musical and Camelot key notation. |
+| **Preview and undo** | Review before-and-after values in Staged. Applied batches stay available for Undo, even after restarting the app. |
+| **Export and listen** | Create playlists and reports, or check a track with the built-in player and waveform. |
+| **Make it yours** | Choose light or dark themes, adjust the panels, save layouts and use keyboard shortcuts. |
 
-## Edit, preview, apply
+Supports MP3, FLAC, M4A/MP4, AAC, WAV, AIFF, Ogg Vorbis, Opus, Speex, Musepack, Monkey’s Audio and WavPack.
 
-1. **Choose your files.** Browse the table, select a range or narrow the library with filters.
-2. **Make your changes.** Edit cells or use the inspector, online sources and transformation presets. Keep editing to build up staged changes.
-3. **Review in Staged.** See the affected files with before-and-after values, then refine individual cells before saving.
-4. **Apply when ready.** Save the staged changes to your files. Applied batches are recorded for Undo.
+## Find and compare duplicates
 
-Previewing does not write changes to your music files. Apply is the save boundary.
+Choose a matching method and scan the open files. Results appear in groups as they are found. Select a group to compare every copy, including its tags, path, format, duration and artwork.
 
-## A workbench for your collection
+Duplicate scanning is read-only. It does not delete or merge your music.
 
-- **Familiar editing.** Keyboard navigation, range selection, copy and paste, grouped rows and direct cell editing.
-- **Useful filters.** Start with text, then add field conditions or filter by artwork status.
-- **Reusable transformations.** Clean up spacing, change case and build your own rules, with automatic previews.
-- **Metadata from several sources.** Search Discogs, MusicBrainz, Beatport, Bandcamp and Soundeo, or read tags from file names and text lists.
-- **Artwork tools.** Browse covers, zoom, pan and rotate images in a dedicated picker.
-- **A workspace that fits.** Adjustable panels, saved layouts, compact playback, four offline interface font choices and ten themes with light and dark appearances.
+<p align="center">
+  <img src="docs/img/tagnetic-duplicates.svg" width="1000" alt="Tagnetic duplicate review with an example library: two copies grouped by track name, with shared tags, album differences and per-copy details in the sidebar.">
+  <br>
+  <sub>Duplicate review with an example library.</sub>
+</p>
 
-Performance is an ongoing focus: reducing repeated file reads, directory scans, artwork processing and interface updates. Responsive editing across libraries containing tens of thousands of files is a goal we measure, rather than a blanket performance claim.
+## A simple workflow
+
+1. **Open a folder.** Browse the files or narrow them with search chips.
+2. **Stage your changes.** Edit tags, import a release, change artwork or rename files.
+3. **Review and Apply.** Check the before-and-after values in Staged, then save. Undo an applied batch if you need to.
 
 ## Download
 
-Get builds from [this repository’s Releases](https://github.com/djhappyman/TAGnetic/releases). Earlier packages are named **TagRex Personal**. The original TagRex downloads provide its interface, not Tagnetic’s.
+Get Tagnetic from [this repository’s Releases](https://github.com/djhappyman/TAGnetic/releases).
 
-The release workflow targets:
-
-| Platform | Packages |
+| Platform | Downloads |
 | --- | --- |
 | Windows x64 and ARM64 | `.exe` installer |
 | macOS Apple Silicon and Intel | Universal `.dmg` |
 | Linux x64 | `.deb`, `.rpm`, AppImage |
 | Linux ARM64 | `.deb`, `.rpm` |
 
-Use the assets actually attached to a release. Development artifacts are available from successful **Build and release** runs in [GitHub Actions](https://github.com/djhappyman/TAGnetic/actions/workflows/build-release.yml). Packaging checks do not replace hands-on testing in each native webview.
+Tagnetic is in active development and releases are currently alpha builds. In-app updates are disabled; download new versions from Releases. See [build and installation notes](docs/BUILDING.md) for more details.
 
-The app keeps its settings and Undo history separate from upstream TagRex. In-app updates are disabled, so it will not offer original-project updates over this fork. Current packages have no paid Windows signing or Apple notarization. See [build and release instructions](docs/BUILDING.md).
+<details>
+<summary><b>Build from source</b></summary>
 
-## Where we’re heading
-
-- Faster, predictable editing and review on large libraries.
-- Clearer previews, filters and feedback for bulk changes.
-- Consistent controls, spacing and typography throughout the app.
-- Better keyboard access, localization and native platform testing.
-
-The [working roadmap](docs/ROADMAP.md) expands on these priorities. They describe the direction, not promised delivery dates.
-
-## Development
-
-Use Node 22.12+ and Rust compatible with the workspace minimum, plus the platform’s [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
+Use Node 22.12+, Rust and the platform’s [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
 
 ```sh
 npm ci
-npm run check
-npm run test:unit
-npm run build
-cargo test --workspace --locked
-npm run test:ui
+npm run desktop:dev
 ```
 
-See [development notes](docs/development.md) for native development and the local MCP bridge, and the [contribution workflow](docs/WORKFLOW.md) for verification and PR guidance. Test writes and Undo only on disposable audio fixtures.
+See [development notes](docs/development.md), [build instructions](docs/BUILDING.md) and the [contribution workflow](docs/WORKFLOW.md).
+
+</details>
 
 ## Built on TagRex
 
-Tagnetic would not exist without [TagRex](https://github.com/tagrex/tagrex), created by [ThaVip3r](https://github.com/ThaVip3r) and its contributors. Its Rust/Tauri foundation, tagging engine, providers, player and recovery work made this project possible.
+Tagnetic is an independent project built on [TagRex](https://github.com/tagrex/tagrex), created by [ThaVip3r](https://github.com/ThaVip3r) and its contributors. Their tagging engine, player and recovery work made this project possible.
 
-Original copyright notices and the [GPL-3.0-only licence](LICENSE) are retained. The [original README](docs/upstream/README.md) is preserved, and the inherited [user guide](docs/guide/README.md) remains useful for core operations, although interface details can differ.
-
-Tagnetic is independently maintained and is not an official TagRex release. Shared backend fixes are offered to upstream `main`; eligible interface contributions go to its experimental `next` branch. See the [upstream contribution ledger](docs/UPSTREAM.md).
-
-For Tagnetic issues and suggestions, use [this repository’s issue tracker](https://github.com/djhappyman/TAGnetic/issues).
+Original copyright notices and the [GPL-3.0-only licence](LICENSE) are retained. The [original TagRex README](docs/upstream/README.md) is preserved. Shared improvements are tracked in the [upstream contribution ledger](docs/UPSTREAM.md).
