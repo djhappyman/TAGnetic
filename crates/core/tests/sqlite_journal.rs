@@ -561,6 +561,7 @@ fn an_interrupted_batch_can_be_undone_after_a_restart() {
             allowed_roots: roots(dir.path()),
             copy_stamps: Vec::new(),
             applied_values: Vec::new(),
+            block_fingerprints: Vec::new(),
             interrupted: true,
             id3v2_revisions: Vec::new(),
         })
@@ -619,6 +620,7 @@ fn the_id3v2_revisions_survive_a_restart() {
         allowed_roots: Vec::new(),
         copy_stamps: Vec::new(),
         applied_values: Vec::new(),
+        block_fingerprints: Vec::new(),
         interrupted: true,
         id3v2_revisions: revisions.clone(),
     };
@@ -1540,4 +1542,102 @@ fn failed_apply_does_not_invent_outcomes_for_unreached_external_edits() {
         .contains_key(&TagField::Artist));
     assert_eq!(std::fs::read(&untouched).unwrap(), restored_bytes);
     assert!(journal.batches().unwrap().is_empty());
+}
+
+fn whole_block_plan(path: &Path) -> ChangePlan {
+    use tagrex_core::model::TagBlockKind;
+    let kind = TagBlockKind::VorbisComments;
+    let mut block = tagrex_core::plan::BlockChange::removal(
+        kind,
+        TagEngine::read_block(path, kind).unwrap().unwrap(),
+    );
+    block.old_bytes = TagEngine::dump_vorbis(path).unwrap();
+    ChangePlan {
+        changes: vec![FileChange {
+            path: path.to_path_buf(),
+            block_changes: vec![block],
+            ..FileChange::default()
+        }],
+        ..ChangePlan::default()
+    }
+}
+
+#[test]
+fn whole_block_undo_fingerprints_survive_restart_and_protect_later_metadata() {
+    use tagrex_core::plan::{PlanError, UndoMode};
+    for mode in [UndoMode::Strict, UndoMode::KeepChanged, UndoMode::Overwrite] {
+        let dir = TempDir::new("block-fingerprint");
+        let path = dir.flac("track.flac");
+        let mut file = TagEngine::read(&path).unwrap();
+        file.tags.insert(TagField::Artist, "Before".into());
+        TagEngine::write(&file).unwrap();
+        let plan = whole_block_plan(&path);
+        let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+        let batch = Executor::apply(&plan, &mut journal, &roots(dir.path())).unwrap();
+        assert_eq!(batch.block_fingerprints.len(), 1);
+        assert_eq!(batch.block_fingerprints[0].before.len(), 32);
+        assert_eq!(
+            batch.block_fingerprints[0].after.as_ref().unwrap().len(),
+            32
+        );
+        let applied_bytes = std::fs::read(&path).unwrap();
+        drop(journal);
+        let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+        assert_eq!(
+            journal.batch(batch.id).unwrap().unwrap().block_fingerprints,
+            batch.block_fingerprints
+        );
+        let mut later = TagEngine::read(&path).unwrap();
+        later
+            .tags
+            .insert(TagField::Custom("EXTERNAL_CUE".into()), "9,9,9".into());
+        TagEngine::write(&later).unwrap();
+        let protected_bytes = std::fs::read(&path).unwrap();
+        assert!(matches!(
+            Executor::undo_with_mode(
+                &mut journal,
+                batch.id,
+                &roots(dir.path()),
+                mode,
+                &mut |_| {}
+            ),
+            Err(PlanError::ChangedSinceApplied(_))
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), protected_bytes);
+        assert!(journal.batch(batch.id).unwrap().is_some());
+        std::fs::write(&path, &applied_bytes).unwrap();
+        Executor::undo(&mut journal, batch.id, &roots(dir.path())).unwrap();
+        assert_eq!(
+            TagEngine::read(&path)
+                .unwrap()
+                .tags
+                .get(&TagField::Artist)
+                .map(String::as_str),
+            Some("Before")
+        );
+    }
+}
+
+#[test]
+fn interrupted_whole_block_write_refuses_unknown_outcome_and_preserves_exact_restored_bytes() {
+    use tagrex_core::plan::PlanError;
+    let dir = TempDir::new("block-unknown-outcome");
+    let path = dir.flac("track.flac");
+    let mut file = TagEngine::read(&path).unwrap();
+    file.tags.insert(TagField::Artist, "Before".into());
+    TagEngine::write(&file).unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let batch = interrupt_before_finish(&dir, &whole_block_plan(&path));
+    assert!(batch.block_fingerprints[0].after.is_none());
+    let applied = std::fs::read(&path).unwrap();
+    let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+    assert!(matches!(
+        Executor::undo(&mut journal, batch.id, &roots(dir.path())),
+        Err(PlanError::ChangedSinceApplied(_))
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), applied);
+    assert!(journal.batch(batch.id).unwrap().is_some());
+    std::fs::write(&path, &original).unwrap();
+    Executor::undo(&mut journal, batch.id, &roots(dir.path())).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), original);
 }

@@ -7986,6 +7986,7 @@ mod tests {
             allowed_roots: Vec::new(),
             copy_stamps: Vec::new(),
             applied_values: Vec::new(),
+            block_fingerprints: Vec::new(),
             interrupted: false,
             id3v2_revisions: Vec::new(),
         };
@@ -8206,6 +8207,7 @@ mod tests {
             allowed_roots: vec![dir.0.clone()],
             copy_stamps: Vec::new(),
             applied_values: Vec::new(),
+            block_fingerprints: Vec::new(),
             interrupted: true,
             id3v2_revisions: Vec::new(),
         };

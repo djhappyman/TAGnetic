@@ -95,6 +95,9 @@ pub struct AppliedBatch {
     /// values keep their original behavior. Missing outcomes in an interrupted
     /// batch are unknown; only already-restored fields are safe without them.
     pub applied_values: Vec<AppliedValue>,
+    /// Before/after file identity for whole-block writes, including private frames.
+    /// Empty for legacy batches. An unknown interrupted outcome fails closed.
+    pub block_fingerprints: Vec<BlockFingerprint>,
     /// Recorded before its first write and never finished (#659): the process
     /// stopped part-way through the apply. Undoing it puts back what it reached.
     pub interrupted: bool,
@@ -103,6 +106,15 @@ pub struct AppliedBatch {
     /// to, so a 2.3 file comes out as 2.4; undo puts the recorded revision
     /// back. Empty for a batch recorded before this existed.
     pub id3v2_revisions: Vec<FileRevision>,
+}
+
+/// Whole-file SHA-256 identity around a block edit. The path is the original
+/// plan path; transfers are resolved through the plan when checking Undo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockFingerprint {
+    pub path: PathBuf,
+    pub before: Vec<u8>,
+    pub after: Option<Vec<u8>>,
 }
 
 /// The ID3v2 revision one file was in before a batch wrote it (#666).
@@ -483,6 +495,13 @@ impl SqliteJournal {
                  field    TEXT NOT NULL,
                  value    TEXT
              );
+             CREATE TABLE IF NOT EXISTS block_fingerprints (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+                 path TEXT NOT NULL,
+                 before_hash BLOB NOT NULL CHECK(length(before_hash) = 32),
+                 after_hash BLOB CHECK(after_hash IS NULL OR length(after_hash) = 32)
+             );
              CREATE TABLE IF NOT EXISTS id3v2_revisions (
                  id       INTEGER PRIMARY KEY AUTOINCREMENT,
                  batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
@@ -557,6 +576,7 @@ impl SqliteJournal {
              CREATE INDEX IF NOT EXISTS idx_allowed_roots_batch ON allowed_roots(batch_id);
              CREATE INDEX IF NOT EXISTS idx_copy_stamps_batch ON copy_stamps(batch_id);
              CREATE INDEX IF NOT EXISTS idx_applied_values_batch ON applied_values(batch_id);
+             CREATE INDEX IF NOT EXISTS idx_block_fingerprints_batch ON block_fingerprints(batch_id);
              CREATE INDEX IF NOT EXISTS idx_id3v2_revisions_batch ON id3v2_revisions(batch_id);",
         )?;
         Ok(Self { conn })
@@ -778,6 +798,10 @@ impl UndoJournal for SqliteJournal {
         if affected == 0 {
             return Err(JournalError::UnknownBatch(id));
         }
+        tx.execute(
+            "DELETE FROM block_fingerprints WHERE batch_id = ?1",
+            rusqlite::params![id.0],
+        )?;
         insert_outcome(&tx, id.0, batch)?;
         tx.commit()?;
         Ok(())
@@ -804,6 +828,7 @@ impl UndoJournal for SqliteJournal {
             "allowed_roots",
             "copy_stamps",
             "applied_values",
+            "block_fingerprints",
         ] {
             tx.execute(
                 &format!("DELETE FROM {table} WHERE batch_id = ?1"),
@@ -901,6 +926,9 @@ fn insert_outcome(
         )?;
     }
 
+    for fingerprint in &batch.block_fingerprints {
+        tx.execute("INSERT INTO block_fingerprints (batch_id,path,before_hash,after_hash) VALUES (?1,?2,?3,?4)", rusqlite::params![batch_id, fingerprint.path.to_string_lossy(), fingerprint.before, fingerprint.after])?;
+    }
     for applied in &batch.applied_values {
         tx.execute(
             "INSERT INTO applied_values (batch_id, path, field, value) \
@@ -991,6 +1019,7 @@ impl SqliteJournal {
             allowed_roots: self.load_paths("allowed_roots", id)?,
             copy_stamps: self.load_copy_stamps(id)?,
             applied_values: self.load_applied_values(id)?,
+            block_fingerprints: self.load_block_fingerprints(id)?,
             id3v2_revisions: self.load_id3v2_revisions(id)?,
             // Set by the caller, which read the batch row.
             interrupted: false,
@@ -1006,6 +1035,21 @@ impl SqliteJournal {
                 path: PathBuf::from(row.get::<_, String>(0)?),
                 len: u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
                 modified_ns: row.get::<_, i64>(2)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    fn load_block_fingerprints(
+        &self,
+        batch_id: i64,
+    ) -> Result<Vec<BlockFingerprint>, JournalError> {
+        let mut statement = self.conn.prepare("SELECT path,before_hash,after_hash FROM block_fingerprints WHERE batch_id = ?1 ORDER BY id")?;
+        let rows = statement.query_map(rusqlite::params![batch_id], |row| {
+            Ok(BlockFingerprint {
+                path: PathBuf::from(row.get::<_, String>(0)?),
+                before: row.get(1)?,
+                after: row.get(2)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)

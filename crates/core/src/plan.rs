@@ -16,7 +16,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 use crate::journal::{
-    AppliedBatch, AppliedValue, BatchId, CopyStamp, FileRevision, JournalError, UndoJournal,
+    AppliedBatch, AppliedValue, BatchId, BlockFingerprint, CopyStamp, FileRevision, JournalError,
+    UndoJournal,
 };
 use crate::model::{
     is_storable_custom_name_at, CoverArt, Id3v2Revision, TagBlockContent, TagBlockKind, TagEngine,
@@ -325,6 +326,7 @@ impl Executor {
             allowed_roots: roots.clone(),
             copy_stamps: Vec::new(),
             applied_values: Vec::new(),
+            block_fingerprints: capture_block_fingerprints(plan)?,
             interrupted: true,
             id3v2_revisions: id3v2_revisions(plan),
         };
@@ -334,25 +336,31 @@ impl Executor {
         written.revisions.clone_from(&batch.id3v2_revisions);
         let mut steps = Steps::new(total, progress, cancel);
         steps.done = plan.changes.len();
-        let removed_dirs =
-            match Self::write_phase(plan, &roots, &batch.removed_dirs, &mut written, &mut steps) {
-                Ok(removed_dirs) => removed_dirs,
-                Err(error) => {
-                    let error = written.roll_back_after(plan, &[], error);
-                    if !matches!(error, PlanError::RollbackIncomplete { .. }) {
-                        let _ = journal.rollback(batch.id);
-                    } else {
-                        batch.created_dirs.clone_from(&written.created_dirs);
-                        batch.applied_values = merge_applied_values(
-                            &written.applied_values,
-                            applied_values(plan, &written),
-                        );
-                        batch.copy_stamps = copy_stamps(plan);
-                        let _ = journal.retain_interrupted(batch.id, &batch);
-                    }
-                    return Err(error);
+        let removed_dirs = match Self::write_phase(
+            plan,
+            &roots,
+            &batch.removed_dirs,
+            &mut batch.block_fingerprints,
+            &mut written,
+            &mut steps,
+        ) {
+            Ok(removed_dirs) => removed_dirs,
+            Err(error) => {
+                let error = written.roll_back_after(plan, &[], error);
+                if !matches!(error, PlanError::RollbackIncomplete { .. }) {
+                    let _ = journal.rollback(batch.id);
+                } else {
+                    batch.created_dirs.clone_from(&written.created_dirs);
+                    batch.applied_values = merge_applied_values(
+                        &written.applied_values,
+                        applied_values(plan, &written),
+                    );
+                    batch.copy_stamps = copy_stamps(plan);
+                    let _ = journal.retain_interrupted(batch.id, &batch);
                 }
-            };
+                return Err(error);
+            }
+        };
         batch.created_dirs = std::mem::take(&mut written.created_dirs);
         batch.removed_dirs = removed_dirs;
         batch.copy_stamps = copy_stamps(plan);
@@ -384,6 +392,7 @@ impl Executor {
         plan: &ChangePlan,
         roots: &[PathBuf],
         pruning_intent: &[PathBuf],
+        block_fingerprints: &mut [BlockFingerprint],
         written: &mut Written,
         steps: &mut Steps,
     ) -> Result<Vec<PathBuf>, PlanError> {
@@ -461,6 +470,18 @@ impl Executor {
         // A move can leave the folder it emptied behind (#153). Removing those
         // is opt-in per plan, and only ever the directories THIS batch emptied —
         // recorded so undo can put them back.
+        // Observe only after all tag writes and transfers, before pruning can
+        // remove a directory needed by error rollback.
+        for fingerprint in block_fingerprints {
+            let change = plan
+                .changes
+                .iter()
+                .find(|change| change.path == fingerprint.path)
+                .expect("fingerprint belongs to this plan");
+            fingerprint.after = Some(file_fingerprint(
+                effective_rename(change).unwrap_or(&change.path),
+            )?);
+        }
         Ok(if plan.prune_empty_dirs {
             prune_emptied_dirs(pruning_intent, roots, &written.created_dirs)
         } else {
@@ -561,6 +582,7 @@ impl Executor {
         }
 
         let changed = changed_since_applied(&batch)?;
+        let restored_blocks = ensure_block_undo_safe(&batch)?;
         ensure_covers_undo_safe(&batch)?;
         match mode {
             UndoMode::Strict => {
@@ -617,6 +639,10 @@ impl Executor {
                 continue;
             }
             steps.begin(&change.path)?;
+            if restored_blocks.contains(&change.path) {
+                steps.done();
+                continue;
+            }
             // Blocks come back before the field and image values are restored,
             // mirroring apply in reverse. It matters when the block that was
             // stripped is the one the app reads from: put it back first and the
@@ -1181,6 +1207,67 @@ fn changed_since_applied(batch: &AppliedBatch) -> Result<Vec<(usize, KeptField)>
     Ok(changed)
 }
 
+/// Streaming hashes avoid retaining audio or depending on modeled tag fields.
+fn file_fingerprint(path: &Path) -> Result<Vec<u8>, PlanError> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).map_err(PlanError::Io)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(PlanError::Io)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(digest.finalize().to_vec())
+}
+
+fn capture_block_fingerprints(plan: &ChangePlan) -> Result<Vec<BlockFingerprint>, PlanError> {
+    let mut seen = HashSet::new();
+    plan.changes
+        .iter()
+        .filter(|change| {
+            !change.copy && !change.block_changes.is_empty() && seen.insert(change.path.clone())
+        })
+        .map(|change| {
+            Ok(BlockFingerprint {
+                path: change.path.clone(),
+                before: file_fingerprint(&change.path)?,
+                after: None,
+            })
+        })
+        .collect()
+}
+
+/// Reject any later file-content change before reversing transfers or writing
+/// whole blocks. Already-restored files need no metadata rewrite on retry.
+fn ensure_block_undo_safe(batch: &AppliedBatch) -> Result<HashSet<PathBuf>, PlanError> {
+    let mut restored = HashSet::new();
+    for fingerprint in &batch.block_fingerprints {
+        let Some(change) = batch
+            .plan
+            .changes
+            .iter()
+            .find(|change| change.path == fingerprint.path)
+        else {
+            return Err(PlanError::ChangedSinceApplied(fingerprint.path.clone()));
+        };
+        let current_path = match effective_rename(change) {
+            Some(target) if !is_untransferred(target, &change.path, false) => target,
+            _ => &change.path,
+        };
+        let current = file_fingerprint(current_path)?;
+        if current == fingerprint.before {
+            restored.insert(change.path.clone());
+        } else if fingerprint.after.as_ref() != Some(&current) {
+            return Err(PlanError::ChangedSinceApplied(current_path.to_path_buf()));
+        }
+    }
+    Ok(restored)
+}
+
 /// Cover sets include bytes, ordering, picture types and descriptions. Field
 /// override modes cannot choose which images to keep, so refuse an ambiguous
 /// image restore in every mode before reversing any transfer. Completed plans
@@ -1189,6 +1276,15 @@ fn changed_since_applied(batch: &AppliedBatch) -> Result<Vec<(usize, KeptField)>
 fn ensure_covers_undo_safe(batch: &AppliedBatch) -> Result<(), PlanError> {
     for change in &batch.plan.changes {
         if change.copy {
+            continue;
+        }
+        // A successful whole-file fingerprint check already includes covers,
+        // including normalized/combined block writes.
+        if batch
+            .block_fingerprints
+            .iter()
+            .any(|fingerprint| fingerprint.path == change.path)
+        {
             continue;
         }
         let Some(covers) = &change.cover_change else {
