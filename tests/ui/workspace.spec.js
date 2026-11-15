@@ -46,7 +46,7 @@ test('every workspace mode and tagging subtab remains usable after mounting', as
   await openApp(page);
   await expect(page).toHaveTitle('Tagnetic');
   await expect(page.getByRole('img', { name: 'Tagnetic', exact: true })).toBeVisible();
-  await expect(page.locator('.brand')).toHaveText('TAGnetic');
+  await expect(page.locator('.brand svg.brand-wordmark')).toBeVisible();
   for (const mode of ['renamer', 'generator', 'deduplicator', 'exporter', 'tagger']) {
     const tab = page.locator(`.mode-tab[data-mode="${mode}"]`);
     await tab.focus();
