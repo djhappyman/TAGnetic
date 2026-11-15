@@ -8,7 +8,7 @@
 //! of plans. **No module writes tags or renames files directly; all writes go
 //! through [`Executor`].** This is an invariant, not a preference.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -335,7 +335,10 @@ impl Executor {
                     let _ = journal.rollback(batch.id);
                 } else {
                     batch.created_dirs.clone_from(&written.created_dirs);
-                    batch.applied_values = applied_values(plan);
+                    batch.applied_values = merge_applied_values(
+                        &written.applied_values,
+                        applied_values(plan, &written),
+                    );
                     batch.copy_stamps = copy_stamps(plan);
                     let _ = journal.retain_interrupted(batch.id, &batch);
                 }
@@ -345,7 +348,8 @@ impl Executor {
         batch.created_dirs = std::mem::take(&mut written.created_dirs);
         batch.removed_dirs = removed_dirs;
         batch.copy_stamps = copy_stamps(plan);
-        batch.applied_values = applied_values(plan);
+        batch.applied_values =
+            merge_applied_values(&written.applied_values, applied_values(plan, &written));
         batch.interrupted = false;
         if let Err(error) = journal.finish(batch.id, &batch) {
             written.created_dirs.clone_from(&batch.created_dirs);
@@ -354,7 +358,8 @@ impl Executor {
                 let _ = journal.rollback(batch.id);
             } else {
                 batch.interrupted = true;
-                batch.applied_values = applied_values(plan);
+                batch.applied_values =
+                    merge_applied_values(&batch.applied_values, applied_values(plan, &written));
                 batch.copy_stamps = copy_stamps(plan);
                 let _ = journal.retain_interrupted(batch.id, &batch);
             }
@@ -387,6 +392,11 @@ impl Executor {
             apply_cover_change(&change.path, change, Direction::Apply)?;
             written.tag_steps[index] = 3;
             write_blocks(&change.path, change, Direction::Apply)?;
+            // Keep observations before progress can hand control to a caller or
+            // a later step can make this path temporarily unreadable.
+            written
+                .applied_values
+                .extend(applied_values_at(change, &change.path));
             steps.complete(&change.path, ApplyStep::Tags);
         }
         // ...then the moves and copies, creating any folders the targets need.
@@ -799,6 +809,8 @@ struct Written {
     created_dirs: Vec<PathBuf>,
     /// The ID3v2 revision of each file before the batch, as journaled (#666).
     revisions: Vec<FileRevision>,
+    /// Observed field outcomes of completed in-place writes, before rollback.
+    applied_values: Vec<AppliedValue>,
 }
 
 impl Written {
@@ -809,6 +821,7 @@ impl Written {
             sidecars: Vec::new(),
             created_dirs: Vec::new(),
             revisions: Vec::new(),
+            applied_values: Vec::new(),
         }
     }
 
@@ -1042,26 +1055,58 @@ fn restore_revision(path: &Path, revisions: &[FileRevision]) -> Result<(), PlanE
     Ok(())
 }
 
-/// What each changed field of every file `plan` wrote in place reads as, once
-/// the batch is written (#658). A file that cannot be read gets nothing, and is
-/// undone unchecked. A copy is not here: undo removes it, under its stamp.
-fn applied_values(plan: &ChangePlan) -> Vec<AppliedValue> {
-    let mut values = Vec::new();
-    for change in &plan.changes {
-        if change.copy || change.tag_changes.is_empty() {
-            continue;
-        }
-        let path = effective_rename(change).unwrap_or(&change.path);
-        let Ok(current) = TagEngine::read(path) else {
-            continue;
-        };
-        values.extend(change.tag_changes.iter().map(|field_change| AppliedValue {
+/// Observe fields only after a write, using the final plan path as the journal
+/// key even when transfers have not run yet. An unreadable outcome is unknown.
+fn applied_values_at(change: &FileChange, now_at: &Path) -> Vec<AppliedValue> {
+    if change.copy || change.tag_changes.is_empty() {
+        return Vec::new();
+    }
+    let Ok(current) = TagEngine::read(now_at) else {
+        return Vec::new();
+    };
+    let path = effective_rename(change).unwrap_or(&change.path);
+    change
+        .tag_changes
+        .iter()
+        .map(|field_change| AppliedValue {
             path: path.to_path_buf(),
             field: field_change.field.clone(),
             value: current.tags.get(&field_change.field).cloned(),
-        }));
+        })
+        .collect()
+}
+
+/// Current values take precedence (including successful restoration to `old`),
+/// while a temporarily unreadable path must not erase an earlier observation.
+fn merge_applied_values(
+    known: &[AppliedValue],
+    mut current: Vec<AppliedValue>,
+) -> Vec<AppliedValue> {
+    let mut seen: BTreeSet<_> = current
+        .iter()
+        .map(|value| (value.path.clone(), value.field.clone()))
+        .collect();
+    // Prefer the last observation if a plan wrote the same path/field twice.
+    for value in known.iter().rev() {
+        if seen.insert((value.path.clone(), value.field.clone())) {
+            current.push(value.clone());
+        }
     }
-    values
+    current
+}
+
+/// Field outcomes read at their final paths, after writes or rollback. An
+/// unreached entry is not an execution outcome: sampling it could authorize
+/// Undo to overwrite an external edit to a file we never wrote.
+fn applied_values(plan: &ChangePlan, written: &Written) -> Vec<AppliedValue> {
+    plan.changes
+        .iter()
+        .zip(&written.tag_steps)
+        .filter(|(_, steps)| **steps != 0)
+        .flat_map(|(change, _)| {
+            applied_values_at(change, effective_rename(change).unwrap_or(&change.path))
+        })
+        .collect()
 }
 
 /// Every field of `batch` that no longer reads as the batch left it (#658),
@@ -1080,9 +1125,14 @@ fn changed_since_applied(batch: &AppliedBatch) -> Result<Vec<(usize, KeptField)>
             continue;
         }
         let path = effective_rename(change).unwrap_or(&change.path);
-        let Some(values) = recorded.get(path) else {
+        let values = recorded.get(path);
+        if values.is_none() && !batch.interrupted {
+            // Completed legacy records intentionally retain their old behavior.
             continue;
-        };
+        }
+        if change.tag_changes.is_empty() {
+            continue;
+        }
         // Where the file is now: back at its own path when an earlier undo
         // already moved it there.
         let now_at = match effective_rename(change) {
@@ -1090,19 +1140,29 @@ fn changed_since_applied(batch: &AppliedBatch) -> Result<Vec<(usize, KeptField)>
             _ => path,
         };
         let current = TagEngine::read(now_at)?;
-        for applied in values {
-            let now = current.tags.get(&applied.field);
-            let old = change
-                .tag_changes
-                .iter()
-                .find(|field_change| field_change.field == applied.field)
-                .and_then(|field_change| field_change.old.as_ref());
+        for field_change in &change.tag_changes {
+            let now = current.tags.get(&field_change.field);
+            let old = field_change.old.as_ref();
+            let applied = values.and_then(|values| {
+                values
+                    .iter()
+                    .find(|value| value.field == field_change.field)
+            });
+            // The plan's `new` value is intent, not proof that an interrupted
+            // write produced it. Only an already-restored field is safe when
+            // execution evidence is absent, even in an override mode.
+            let Some(applied) = applied else {
+                if batch.interrupted && now != old {
+                    return Err(PlanError::ChangedSinceApplied(now_at.to_path_buf()));
+                }
+                continue;
+            };
             if now != applied.value.as_ref() && now != old {
                 changed.push((
                     index,
                     KeptField {
                         path: now_at.to_path_buf(),
-                        field: applied.field.clone(),
+                        field: field_change.field.clone(),
                     },
                 ));
             }
@@ -1511,6 +1571,16 @@ fn write_tag_changes(
         return Ok(());
     }
     let mut track = TagEngine::read(path)?;
+    // An unreached interrupted entry, or an already-restored retry, needs no
+    // write. Besides avoiding normalization, this preserves untouched bytes.
+    if matches!(direction, Direction::Undo)
+        && change
+            .tag_changes
+            .iter()
+            .all(|field| track.tags.get(&field.field) == field.old.as_ref())
+    {
+        return Ok(());
+    }
     for field_change in &change.tag_changes {
         let value = match direction {
             Direction::Apply => &field_change.new,
