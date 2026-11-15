@@ -33,6 +33,13 @@ Compact command ribbon and responsive workspace.
 
 ### Fixed
 
+- Bulk value formatting publishes one complete staged update instead of
+  repeatedly rebuilding previews for each track.
+- Native artwork picks and drops prepare images in the background without
+  passing source image bytes through the frontend. Chosen images are explicitly
+  marked as front covers while other embedded images remain intact.
+- Rotated artwork encodes asynchronously while retaining the browser's image
+  format and colour handling.
 - Filter disclosure and sidebar resizing preserve loaded table rows and active
   cell edits instead of rebuilding the table on each animation frame.
 - Large cell ranges avoid copying the full selection during scrolling. Variable

@@ -47,11 +47,30 @@ export async function rotateArtwork(cover: CoverArt, degrees: number, decoded?: 
   const swapped = angle === 90 || angle === 270;
   canvas.width = swapped ? image.naturalHeight : image.naturalWidth;
   canvas.height = swapped ? image.naturalWidth : image.naturalHeight;
-  const context = canvas.getContext('2d');
-  if (!context) throw new Error('Image canvas unavailable');
-  context.translate(canvas.width / 2, canvas.height / 2);
-  context.rotate(angle * Math.PI / 180);
-  context.drawImage(image, -image.naturalWidth / 2, -image.naturalHeight / 2);
-  const mime = cover.mime === 'image/jpeg' ? 'image/jpeg' : 'image/png';
-  return { ...cover, mime, data_base64: canvas.toDataURL(mime, .95).split(',')[1] };
+  try {
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Image canvas unavailable');
+    context.translate(canvas.width / 2, canvas.height / 2);
+    context.rotate(angle * Math.PI / 180);
+    context.drawImage(image, -image.naturalWidth / 2, -image.naturalHeight / 2);
+    const mime = cover.mime === 'image/jpeg' ? 'image/jpeg' : 'image/png';
+    // Keep the browser's existing codec/color handling, but let encoding and
+    // base64 conversion yield to input and animation instead of using toDataURL.
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('Image encoding failed')), mime, .95);
+    });
+    const data_base64 = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => typeof reader.result === 'string'
+        ? resolve(reader.result.slice(reader.result.indexOf(',') + 1))
+        : reject(new Error('Image encoding failed'));
+      reader.onerror = () => reject(reader.error || new Error('Image encoding failed'));
+      reader.onabort = () => reject(new Error('Image encoding aborted'));
+      reader.readAsDataURL(blob);
+    });
+    return { ...cover, mime, data_base64 };
+  } finally {
+    // Release the full-resolution backing store after success or failure.
+    canvas.width = canvas.height = 0;
+  }
 }

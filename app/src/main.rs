@@ -695,6 +695,54 @@ async fn preview_cover_embed(
         .await
 }
 
+/// Read and resize the chosen image without holding the shared session.
+#[tauri::command]
+async fn preview_cover_embed_path(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    image_path: String,
+) -> Result<PlanDto, ErrorDto> {
+    let state = state.inner().clone();
+    let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+    let session = state.clone();
+    let targets = paths.clone();
+    let (options, generation) = SESSION_QUEUE
+        .run(move || {
+            with_app(&session, |app| {
+                let options = app.cover_embed_options(&targets).map_err(ErrorDto::from)?;
+                Ok((options, LIBRARY_GENERATION.load(Ordering::SeqCst)))
+            })
+        })
+        .await?;
+    let cover = IMAGE_READ_QUEUE
+        .run(move || {
+            options
+                .read_image(&PathBuf::from(image_path))
+                .map_err(ErrorDto::from)
+        })
+        .await?;
+    SESSION_QUEUE
+        .run(move || preview_prepared_cover_embed(&state, generation, &paths, cover))
+        .await
+}
+
+fn preview_prepared_cover_embed(
+    state: &AppState,
+    generation: u64,
+    paths: &[PathBuf],
+    cover: tagrex_commands::PreparedCoverEmbed,
+) -> Result<PlanDto, ErrorDto> {
+    if LIBRARY_GENERATION.load(Ordering::SeqCst) != generation {
+        return Err(shell_error(
+            "The open library changed. Choose the artwork again.",
+        ));
+    }
+    with_app(state, |app| {
+        app.preview_prepared_cover_embed(paths, cover)
+            .map_err(ErrorDto::from)
+    })
+}
+
 #[tauri::command]
 async fn export_cover(
     state: State<'_, AppState>,
@@ -2317,6 +2365,7 @@ fn main() {
             preview_tag_edits,
             preview_live_edits,
             preview_cover_embed,
+            preview_cover_embed_path,
             preview_cover_set,
             export_cover,
             read_cover_summary,
@@ -2428,6 +2477,47 @@ mod tests {
         let current = super::LIBRARY_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
         let plan = super::preview_detected_bpm(&state, current, &[]).unwrap();
         assert!(plan.changes.is_empty());
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cover_path_results_reject_replaced_library_before_accessing_the_session() {
+        let root = std::env::temp_dir().join(format!(
+            "tagrex-cover-path-generation-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("chosen.png");
+        std::fs::write(&source, b"PNG").unwrap();
+        let app = super::App::open(&root, &root.join("journal.sqlite")).unwrap();
+        let options = app.cover_embed_options(&[]).unwrap();
+        let state: super::AppState = Default::default();
+        let earlier = super::LIBRARY_GENERATION
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .wrapping_sub(1);
+        let error = super::preview_prepared_cover_embed(
+            &state,
+            earlier,
+            &[],
+            options.read_image(&source).unwrap(),
+        )
+        .unwrap_err();
+        assert!(error.text.contains("The open library changed"));
+        // A current session builds the normal empty preview without media writes.
+        let state = std::sync::Arc::new(std::sync::Mutex::new(Some(app)));
+        let current = super::LIBRARY_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
+        let plan = super::preview_prepared_cover_embed(
+            &state,
+            current,
+            &[],
+            options.read_image(&source).unwrap(),
+        )
+        .unwrap();
+        assert!(plan.changes.is_empty());
+        assert!(plan.cover_assets.is_empty());
+        assert_eq!(std::fs::read(&source).unwrap(), b"PNG");
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
