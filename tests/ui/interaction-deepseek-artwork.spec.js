@@ -113,9 +113,9 @@ test('returning to an image whose decode is still running reuses that decode', a
 test('Retry reselects the displayed image after a transient rotated-Apply failure', async ({ page }) => {
   await open(page, '?count=1');
   await page.evaluate(() => {
-    const encode = HTMLCanvasElement.prototype.toDataURL;
+    const encode = HTMLCanvasElement.prototype.toBlob;
     let fail = true;
-    HTMLCanvasElement.prototype.toDataURL = function (...args) {
+    HTMLCanvasElement.prototype.toBlob = function (...args) {
       if (fail) { fail = false; throw new Error('Transient rotation encoding failure'); }
       return encode.apply(this, args);
     };

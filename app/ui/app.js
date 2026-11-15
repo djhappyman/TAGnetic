@@ -6,7 +6,7 @@ import { initStaging, renderStaging } from "./js/staging.js";
 import { connectWorkspaceController, publishWorkspaceMode, publishWorkspaceSubtab } from './lib/workspace-state';
 import { compileQuery, normalizeConditions, conditionLabel, coverState } from "./js/filter-query.js";
 import { createGroupMotion } from "./js/group-motion.js";
-import { clearLiveInputs, hasLiveInputs, liveInputChanged, recordLiveField, hasInvalidLiveFields, hasInvalidPreview, removeAppliedLiveInputs, undoLiveImport, adoptLiveCoverPlan } from "./js/live-preview.js";
+import { clearLiveInputs, hasLiveInputs, liveInputChanged, recordLiveField, recordLiveFields, hasInvalidLiveFields, hasInvalidPreview, removeAppliedLiveInputs, undoLiveImport, adoptLiveCoverPlan } from "./js/live-preview.js";
 "use strict";
 
 import { TAURI, invoke } from "./js/invoke.js";
@@ -3154,8 +3154,10 @@ connectRibbonActions(async (action, options) => {
       if (!isSelectionCurrent(subject)) throw new Error('The selection changed. Try again.');
       await writeQuickPlan(plan);
     } else {
-      paths.forEach((path,index) => recordLiveField([path], options.field, values[index] || ''));
-      await hooks.previewEdits();
+      // Adopt first so returning a later field to its base cannot resurrect a
+      // previous staged value when the complete batch is announced.
+      adoptTagOnlyPreview();
+      recordLiveFields(paths.map((path,index) => ({path, field:options.field, value:values[index] || ''})));
     }
     return {dialog:'ribbon-format-dialog'};
   } else if (action === 'import-artwork') {
