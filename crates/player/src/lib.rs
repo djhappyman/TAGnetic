@@ -15,6 +15,9 @@
 //! the previous WebView `<audio>` player couldn't play.
 //!
 //! The same decoder also feeds tempo detection in [`tempo`] (#536).
+//!
+//! The thread outlives a missing output device: it keeps taking commands, says
+//! so in the status, and retries the device on the next play.
 
 mod aiff;
 mod mp4;
@@ -54,6 +57,11 @@ pub struct PlayerStatus {
     /// really is — and say so, rather than showing a position nothing is playing
     /// from. Cleared when a track starts or playback stops.
     pub seek_refused: bool,
+    /// No audio output device could be opened: a headless session, a sound
+    /// server that is not running, or a device that is busy or unplugged. The
+    /// player keeps running and a later play retries the device, so this can
+    /// clear without a restart. Nothing is playing while it is set.
+    pub output_unavailable: bool,
 }
 
 enum Cmd {
@@ -78,7 +86,7 @@ impl Player {
         let (tx, rx) = std::sync::mpsc::channel();
         let status = Arc::new(Mutex::new(PlayerStatus::default()));
         let status_for_thread = Arc::clone(&status);
-        std::thread::spawn(move || audio_thread(rx, status_for_thread));
+        std::thread::spawn(move || audio_thread(rx, status_for_thread, open_output));
         Self { tx, status }
     }
 
@@ -129,32 +137,57 @@ struct Track {
     duration: Duration,
 }
 
-fn audio_thread(rx: Receiver<Cmd>, status: Arc<Mutex<PlayerStatus>>) {
-    // If no audio device is available (e.g. a headless box), give up quietly:
-    // commands are dropped and the status stays idle. The rest of the app is
-    // unaffected.
-    let mut device = match open_output() {
-        Ok(device) => device,
+/// The playback loop.
+///
+/// `open` is how the thread gets an output device. It is a parameter so tests
+/// can drive this loop with an opener that fails deterministically — on a
+/// developer machine the real opener would find the sound card and prove
+/// nothing about the no-device path.
+fn audio_thread<F>(rx: Receiver<Cmd>, status: Arc<Mutex<PlayerStatus>>, mut open: F)
+where
+    F: FnMut() -> Result<MixerDeviceSink, DeviceSinkError>,
+{
+    // A missing output device (a headless box, a sound server that is not
+    // running yet, a device that is busy at login) must not end this thread:
+    // the user can plug one in or start the sound server later, and the next
+    // play retries the device, so preview recovers without an app restart.
+    // Until then `output_unavailable` says why nothing plays.
+    let mut device = match open() {
+        Ok(device) => Some(device),
         Err(err) => {
-            eprintln!("audio: no output device, preview disabled: {err}");
-            return;
+            eprintln!("audio: no output device, preview waits for one: {err}");
+            None
         }
     };
     // The device sink lives as long as this thread; its parting message on drop
     // is noise in a terminal-launched build.
-    device.log_on_drop(false);
+    if let Some(output) = device.as_mut() {
+        output.log_on_drop(false);
+    }
 
-    let mut sink = new_sink(&device);
-    let mut queue: VecDeque<Track> = VecDeque::new();
-    let mut clock = PlayClock::default();
-    let mut paused = false;
     // Play and Stop each replace the sink, and a fresh sink is always full
     // volume — so the level has to live out here and be re-applied to every new
     // sink, or turning the volume down would silently reset on the next track.
+    // It also outlives a stretch with no device, so a level set then applies to
+    // the sink the first device-backed play creates.
     let mut volume: f32 = 1.0;
+    let mut sink = fresh_sink(device.as_ref(), volume);
+    let mut queue: VecDeque<Track> = VecDeque::new();
+    let mut clock = PlayClock::default();
+    let mut paused = false;
     // Whether the decoder refused the last seek on the current track (#190).
     let mut seek_refused = false;
-    sink.set_volume(volume);
+
+    // Publish the startup state before waiting for the first command, so a
+    // status poll right after launch already reports a missing device.
+    write_status(
+        &status,
+        &queue,
+        &clock,
+        paused,
+        seek_refused,
+        device.is_none(),
+    );
 
     loop {
         // Wait for a command, but wake every 200 ms to advance the queue and
@@ -162,16 +195,34 @@ fn audio_thread(rx: Receiver<Cmd>, status: Arc<Mutex<PlayerStatus>>) {
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(cmd) => match cmd {
                 Cmd::Play(path) => {
+                    // The one place a device is retried: a track the user has
+                    // just asked for plays as soon as a device is there. A
+                    // second failure is harmless and leaves the status honest.
+                    if device.is_none() {
+                        match open() {
+                            Ok(mut fresh) => {
+                                fresh.log_on_drop(false);
+                                device = Some(fresh);
+                            }
+                            Err(err) => eprintln!("audio: still no output device: {err}"),
+                        }
+                    }
                     // Silence the old sink, then play on a fresh one — a new
                     // Sink guarantees a clean, re-appendable queue regardless of
                     // rodio's drop-vs-stop semantics.
-                    sink.stop();
-                    sink = new_sink(&device);
-                    sink.set_volume(volume);
+                    if let Some(old) = sink.take() {
+                        old.stop();
+                    }
+                    sink = fresh_sink(device.as_ref(), volume);
                     queue.clear();
                     paused = false;
                     seek_refused = false;
-                    if enqueue(&sink, &mut queue, path) {
+                    // Without a device there is no sink to append to: the track
+                    // is not reported as playing, so the status stays idle.
+                    let started = sink
+                        .as_ref()
+                        .is_some_and(|sink| enqueue(sink, &mut queue, path));
+                    if started {
                         clock.start();
                     } else {
                         clock.stop();
@@ -181,27 +232,34 @@ fn audio_thread(rx: Receiver<Cmd>, status: Arc<Mutex<PlayerStatus>>) {
                     // Only prime a next track when exactly the current one is
                     // queued; ignore otherwise (already primed, or idle).
                     if queue.len() == 1 {
-                        enqueue(&sink, &mut queue, path);
+                        if let Some(sink) = sink.as_ref() {
+                            enqueue(sink, &mut queue, path);
+                        }
                     }
                 }
                 Cmd::Pause => {
                     if !queue.is_empty() {
-                        sink.pause();
-                        clock.pause();
-                        paused = true;
+                        if let Some(sink) = sink.as_ref() {
+                            sink.pause();
+                            clock.pause();
+                            paused = true;
+                        }
                     }
                 }
                 Cmd::Resume => {
                     if !queue.is_empty() {
-                        sink.play();
-                        clock.resume();
-                        paused = false;
+                        if let Some(sink) = sink.as_ref() {
+                            sink.play();
+                            clock.resume();
+                            paused = false;
+                        }
                     }
                 }
                 Cmd::Stop => {
-                    sink.stop();
-                    sink = new_sink(&device);
-                    sink.set_volume(volume);
+                    if let Some(old) = sink.take() {
+                        old.stop();
+                    }
+                    sink = fresh_sink(device.as_ref(), volume);
                     queue.clear();
                     clock.stop();
                     paused = false;
@@ -209,7 +267,9 @@ fn audio_thread(rx: Receiver<Cmd>, status: Arc<Mutex<PlayerStatus>>) {
                 }
                 Cmd::SetVolume(level) => {
                     volume = level.clamp(0.0, 1.0);
-                    sink.set_volume(volume);
+                    if let Some(sink) = sink.as_ref() {
+                        sink.set_volume(volume);
+                    }
                 }
                 Cmd::Seek(secs) => {
                     if !queue.is_empty() {
@@ -217,15 +277,19 @@ fn audio_thread(rx: Receiver<Cmd>, status: Arc<Mutex<PlayerStatus>>) {
                         // when the audio did (#190). A decoder that refuses is
                         // reported instead of being papered over.
                         let target = Duration::from_secs_f64(secs.max(0.0));
-                        match sink.try_seek(target) {
-                            Ok(()) => {
+                        match sink.as_ref().map(|sink| sink.try_seek(target)) {
+                            Some(Ok(())) => {
                                 clock.seek(target);
                                 seek_refused = false;
                             }
-                            Err(err) => {
+                            Some(Err(err)) => {
                                 eprintln!("audio: seek refused: {err}");
                                 seek_refused = true;
                             }
+                            // A queue can only exist on a sink, so this is
+                            // unreachable; staying silent beats moving a clock
+                            // that has no audio behind it.
+                            None => {}
                         }
                     }
                 }
@@ -237,7 +301,7 @@ fn audio_thread(rx: Receiver<Cmd>, status: Arc<Mutex<PlayerStatus>>) {
         // The sink drains sources as they finish. When it holds fewer than our
         // queue, a track boundary was crossed: drop the finished front and
         // restart the clock for the new current track.
-        while queue.len() > sink.len() && !queue.is_empty() {
+        while queue.len() > sink.as_ref().map_or(0, Sink::len) && !queue.is_empty() {
             queue.pop_front();
             clock.start();
             seek_refused = false; // a new track, and a new answer on seeking
@@ -248,7 +312,14 @@ fn audio_thread(rx: Receiver<Cmd>, status: Arc<Mutex<PlayerStatus>>) {
             seek_refused = false;
         }
 
-        write_status(&status, &queue, &clock, paused, seek_refused);
+        write_status(
+            &status,
+            &queue,
+            &clock,
+            paused,
+            seek_refused,
+            device.is_none(),
+        );
     }
 }
 
@@ -282,7 +353,17 @@ fn open_output() -> Result<MixerDeviceSink, DeviceSinkError> {
 
 /// A fresh queue on the output device. Play and Stop each start one, because a
 /// new sink guarantees a clean, re-appendable queue regardless of rodio's
-/// drop-vs-stop semantics.
+/// drop-vs-stop semantics. Without a device there is nothing to build one on,
+/// so the level is carried by [`audio_thread`]'s `volume` until a device is
+/// open again.
+fn fresh_sink(device: Option<&MixerDeviceSink>, volume: f32) -> Option<Sink> {
+    device.map(|output| {
+        let sink = new_sink(output);
+        sink.set_volume(volume);
+        sink
+    })
+}
+
 fn new_sink(device: &MixerDeviceSink) -> Sink {
     Sink::connect_new(device.mixer())
 }
@@ -429,6 +510,7 @@ fn write_status(
     clock: &PlayClock,
     paused: bool,
     seek_refused: bool,
+    output_unavailable: bool,
 ) {
     let mut guard = status.lock().unwrap();
     match queue.front() {
@@ -451,9 +533,15 @@ fn write_status(
                 duration_secs: duration,
                 wants_next: queue.len() == 1 && near_end,
                 seek_refused,
+                output_unavailable,
             };
         }
-        None => *guard = PlayerStatus::default(),
+        None => {
+            *guard = PlayerStatus {
+                output_unavailable,
+                ..PlayerStatus::default()
+            }
+        }
     }
 }
 
@@ -690,5 +778,181 @@ mod tests {
             c.position_at(t0 + Duration::from_secs(11)),
             Duration::from_secs(51)
         );
+    }
+}
+
+/// # D1: the player survives a machine with no output device.
+///
+/// These tests inject the opener, so they are deterministic both on a machine
+/// with a working sound card (the real opener would find it and prove nothing
+/// about the no-device path) and on a headless one. They cover thread survival,
+/// retries and the status; playback after a device appears needs a real device
+/// and is not claimed here.
+#[cfg(test)]
+mod without_an_output_device {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    /// A player thread whose device opener always fails, plus the handles to
+    /// observe it: how often a device was asked for, and when the thread ended.
+    struct DeviceFreePlayer {
+        tx: Sender<Cmd>,
+        status: Arc<Mutex<PlayerStatus>>,
+        attempts: Arc<AtomicUsize>,
+        done: Receiver<()>,
+        handle: std::thread::JoinHandle<()>,
+    }
+
+    impl DeviceFreePlayer {
+        fn new() -> Self {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (done_tx, done) = std::sync::mpsc::channel();
+            let status = Arc::new(Mutex::new(PlayerStatus::default()));
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let status_for_thread = Arc::clone(&status);
+            let attempts_for_thread = Arc::clone(&attempts);
+            let handle = std::thread::spawn(move || {
+                audio_thread(rx, status_for_thread, move || {
+                    attempts_for_thread.fetch_add(1, Ordering::SeqCst);
+                    Err(DeviceSinkError::NoDevice)
+                });
+                let _ = done_tx.send(());
+            });
+            Self {
+                tx,
+                status,
+                attempts,
+                done,
+                handle,
+            }
+        }
+
+        fn send(&self, cmd: Cmd) {
+            self.tx.send(cmd).expect("the audio thread is gone");
+        }
+
+        fn status(&self) -> PlayerStatus {
+            self.status.lock().unwrap().clone()
+        }
+
+        fn attempts(&self) -> usize {
+            self.attempts.load(Ordering::SeqCst)
+        }
+
+        /// Wait for `cond` with a deadline, so a regression fails the test
+        /// instead of hanging it.
+        fn wait_until(&self, what: &str, mut cond: impl FnMut(&Self) -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                if cond(self) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            panic!("timed out waiting for {what}");
+        }
+
+        /// Dropping the command channel must end the thread; every test ends
+        /// this way, so a thread that will not stop fails loudly.
+        ///
+        /// The idle-with-no-device snapshot is the same before and after every
+        /// command here, so tests read the status once the attempt counter
+        /// proves the command was processed, rather than racing a rewrite.
+        fn finish(self, what: &str) {
+            let Self {
+                tx, done, handle, ..
+            } = self;
+            drop(tx);
+            done.recv_timeout(Duration::from_secs(10))
+                .unwrap_or_else(|_| panic!("the audio thread outlived its channel ({what})"));
+            handle.join().unwrap();
+        }
+    }
+
+    /// A small, valid AIFF, so a regression that pretends to play without a
+    /// sink is caught by the status and not only by a missing decoder.
+    fn playable_file(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "tagrex-player-no-device-{}-{name}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("track.aiff");
+        std::fs::write(&path, aiff::tests::aiff(44_100, 2280)).unwrap();
+        path
+    }
+
+    fn clean_up(path: &std::path::Path) {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn startup_without_a_device_keeps_the_thread_and_says_so() {
+        let player = DeviceFreePlayer::new();
+        player.wait_until("the startup open attempt", |p| p.attempts() >= 1);
+        player.wait_until("output_unavailable after the failed open", |p| {
+            p.status().output_unavailable
+        });
+
+        let status = player.status();
+        assert!(status.output_unavailable);
+        assert_eq!(status.path, None, "an idle player reported a track");
+        assert_eq!(status.position_secs, 0.0);
+        assert!(!status.is_paused);
+        assert!(!status.wants_next);
+        assert!(!status.seek_refused);
+
+        player.finish("idle after a failed startup");
+    }
+
+    #[test]
+    fn play_retries_the_device_and_a_second_failure_is_harmless() {
+        let track = playable_file("retry");
+        let player = DeviceFreePlayer::new();
+        player.wait_until("the startup open attempt", |p| p.attempts() >= 1);
+
+        player.send(Cmd::Play(track.clone()));
+        player.wait_until("the device retry from play", |p| p.attempts() >= 2);
+        // A second play is another retry, not a dead thread.
+        player.send(Cmd::Play(track.clone()));
+        player.wait_until("the second device retry", |p| p.attempts() >= 3);
+
+        let status = player.status();
+        assert!(status.output_unavailable);
+        assert_eq!(status.path, None, "a track played without a device");
+        assert_eq!(status.position_secs, 0.0);
+
+        player.finish("after failed plays");
+        clean_up(&track);
+    }
+
+    #[test]
+    fn control_commands_without_a_device_are_harmless() {
+        let player = DeviceFreePlayer::new();
+        player.wait_until("the startup open attempt", |p| p.attempts() >= 1);
+
+        // One consumer on a FIFO channel, so the final play retry proves every
+        // command before it was processed — and that none of them panicked.
+        player.send(Cmd::Pause);
+        player.send(Cmd::Resume);
+        player.send(Cmd::Seek(12.5));
+        player.send(Cmd::SetVolume(0.25));
+        player.send(Cmd::Stop);
+        player.send(Cmd::SetNext(PathBuf::from("/nonexistent/next.aiff")));
+        player.send(Cmd::Play(PathBuf::from("/nonexistent/track.aiff")));
+        player.wait_until("the play retry after the control commands", |p| {
+            p.attempts() >= 2
+        });
+
+        let status = player.status();
+        assert!(status.output_unavailable);
+        assert_eq!(status.path, None, "a control command played a track");
+        assert!(!status.is_paused);
+        assert_eq!(status.position_secs, 0.0);
+
+        player.finish("after device-free control commands");
     }
 }
