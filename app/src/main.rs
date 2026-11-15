@@ -7,11 +7,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 mod blocking;
 mod media_session;
+mod operation_control;
 mod update;
 #[cfg(target_os = "linux")]
 mod webkit_compositor;
@@ -1059,7 +1060,7 @@ fn progress_reporter(
 /// [`AppState`]: the apply holds that lock for its whole run, and the request has
 /// to get through while it does.
 #[derive(Default)]
-struct ApplyControl(Arc<AtomicBool>);
+struct ApplyControl(operation_control::OperationControl);
 
 #[derive(serde::Serialize, Clone)]
 struct ApplyProgressDto {
@@ -1079,13 +1080,12 @@ async fn apply_plan(
     plan: PlanDto,
 ) -> Result<BatchDto, ErrorDto> {
     let state = state.inner().clone();
-    let control = control.0.clone();
-    control.store(false, Ordering::SeqCst);
+    let operation = control.0.admit("Apply")?;
     SESSION_QUEUE
         .run(move || {
             let mut report = progress_reporter(app_handle, plan.changes.len());
             with_app_mut(&state, |app| {
-                app.apply_with(&plan, &mut report, &control)
+                app.apply_with(&plan, &mut report, operation.cancelled())
                     .map_err(ErrorDto::from)
             })
         })
@@ -1094,13 +1094,13 @@ async fn apply_plan(
 
 #[tauri::command]
 fn cancel_apply(control: State<ApplyControl>) {
-    control.0.store(true, Ordering::SeqCst);
+    control.0.cancel();
 }
 
 /// Asks a running BPM detection to stop (#536). Shared with the blocking thread
 /// the detection runs on, hence the `Arc`.
 #[derive(Default)]
-struct BpmControl(Arc<AtomicBool>);
+struct BpmControl(operation_control::OperationControl);
 
 /// What a BPM detection found (#536): the plan for the tempos it measured, and
 /// what it could not measure, for the toast.
@@ -1148,11 +1148,12 @@ async fn detect_bpm(
     control: State<'_, BpmControl>,
     paths: Vec<String>,
 ) -> Result<BpmDetectionDto, ErrorDto> {
-    control.0.store(false, Ordering::SeqCst);
-    let cancel = control.0.clone();
+    let operation = control.0.admit("BPM detection")?;
+    let preparation = operation.clone();
     let session = state.inner().clone();
     let (limit, generation) = SESSION_QUEUE
         .run(move || {
+            let _operation = preparation;
             with_app(&session, |app| {
                 Ok((
                     app.bpm_max_length(),
@@ -1161,6 +1162,7 @@ async fn detect_bpm(
             })
         })
         .await?;
+    let measurement = operation.clone();
     let measured = tauri::async_runtime::spawn_blocking(move || {
         let mut detector = tagrex_player::tempo::TempoDetector::new().map_err(shell_error)?;
         let total = paths.len();
@@ -1185,7 +1187,7 @@ async fn detect_bpm(
                 too_long += 1;
                 continue;
             }
-            match detector.detect(&target, &cancel) {
+            match detector.detect(&target, measurement.cancelled()) {
                 Ok(Some(bpm)) => detected.push((target, bpm)),
                 Ok(None) => no_tempo += 1,
                 Err(tagrex_player::tempo::TempoError::Failed(_)) => failed.push(path.clone()),
@@ -1204,7 +1206,10 @@ async fn detect_bpm(
     let (detected, analysed, no_tempo, too_long, failed, cancelled) = measured;
     let session = state.inner().clone();
     let plan = SESSION_QUEUE
-        .run(move || preview_detected_bpm(&session, generation, &detected))
+        .run(move || {
+            let _operation = operation;
+            preview_detected_bpm(&session, generation, &detected)
+        })
         .await?;
     Ok(BpmDetectionDto {
         plan,
@@ -1218,7 +1223,7 @@ async fn detect_bpm(
 
 #[tauri::command]
 fn cancel_detect_bpm(control: State<BpmControl>) {
-    control.0.store(true, Ordering::SeqCst);
+    control.0.cancel();
 }
 
 // `async` for the same reason as `apply_plan` (#448): a synchronous command runs
