@@ -532,7 +532,7 @@ impl Executor {
                 Some(target) => {
                     ensure_within_roots(target, &roots)?;
                     resolve_target_within_roots(&change.path, &roots)?;
-                    ensure_untransfer_safe(target, &change.path, change.copy, &batch.copy_stamps)?;
+                    ensure_untransfer_safe(target, &change.path, change.copy, &batch)?;
                 }
                 None => ensure_within_roots(&change.path, &roots)?,
             }
@@ -545,7 +545,7 @@ impl Executor {
                 }
                 ensure_within_roots(to, &roots)?;
                 resolve_target_within_roots(from, &roots)?;
-                ensure_untransfer_safe(to, from, change.copy, &batch.copy_stamps)?;
+                ensure_untransfer_safe(to, from, change.copy, &batch)?;
             }
         }
 
@@ -978,16 +978,21 @@ fn ensure_target_free(from: &Path, to: &Path, copy: bool) -> Result<(), PlanErro
 /// since is not the batch's to replace (the file itself is fine, which is what a
 /// case-only rename looks like). A copy is removed only while the file at its
 /// path is still the copy as the batch left it; a batch recorded before stamps
-/// existed has none, and its copies are removed as before.
+/// existed has none, and its copies are removed as before. An interrupted
+/// batch has no such legacy exemption: no stamp means no proof of ownership.
 fn ensure_untransfer_safe(
     target: &Path,
     original: &Path,
     copy: bool,
-    stamps: &[CopyStamp],
+    batch: &AppliedBatch,
 ) -> Result<(), PlanError> {
     if copy {
-        let Some(stamp) = stamps.iter().find(|stamp| stamp.path == target) else {
-            return Ok(());
+        let Some(stamp) = batch.copy_stamps.iter().find(|stamp| stamp.path == target) else {
+            return if batch.interrupted {
+                Err(PlanError::Stale(target.to_path_buf()))
+            } else {
+                Ok(())
+            };
         };
         if CopyStamp::of(target).as_ref() == Some(stamp) {
             Ok(())

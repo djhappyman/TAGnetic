@@ -906,3 +906,179 @@ fn image_pool_checks_bytes_on_hash_collision_and_keeps_other_batch_references() 
         0
     );
 }
+
+/// Stop at the transaction boundary without running Apply's error rollback.
+/// Unwinding here models process termination; reopening SQLite reads only the
+/// durable write-ahead record, rather than the in-memory completed batch.
+struct StopBeforeFinish(SqliteJournal);
+
+impl UndoJournal for StopBeforeFinish {
+    fn record(
+        &mut self,
+        batch: &AppliedBatch,
+    ) -> Result<BatchId, tagrex_core::journal::JournalError> {
+        self.0.record(batch)
+    }
+    fn batches(&self) -> Result<Vec<AppliedBatch>, tagrex_core::journal::JournalError> {
+        self.0.batches()
+    }
+    fn finish(
+        &mut self,
+        _: BatchId,
+        _: &AppliedBatch,
+    ) -> Result<(), tagrex_core::journal::JournalError> {
+        panic!("simulated termination before finish")
+    }
+    fn rollback(&mut self, id: BatchId) -> Result<(), tagrex_core::journal::JournalError> {
+        self.0.rollback(id)
+    }
+}
+
+fn interrupt_before_finish(dir: &TempDir, plan: &ChangePlan) -> AppliedBatch {
+    let mut journal = StopBeforeFinish(SqliteJournal::open(&dir.db()).unwrap());
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Executor::apply(plan, &mut journal, &roots(dir.path())).unwrap();
+    }))
+    .is_err());
+    drop(journal);
+    let reopened = SqliteJournal::open(&dir.db()).unwrap();
+    let batch = reopened.batches().unwrap().remove(0);
+    assert!(batch.interrupted);
+    assert!(batch.copy_stamps.is_empty());
+    batch
+}
+
+#[test]
+fn interrupted_unstamped_copies_and_sidecars_are_never_deleted() {
+    use tagrex_core::plan::{PlanError, UndoMode};
+    for mode in [UndoMode::Strict, UndoMode::KeepChanged, UndoMode::Overwrite] {
+        for sidecar_only in [false, true] {
+            let dir = TempDir::new("unstamped-copy");
+            let source = dir.flac("source.flac");
+            let target = dir.path().join("target.flac");
+            let sidecar = dir.path().join("source.cue");
+            let sidecar_target = dir.path().join("target.cue");
+            std::fs::write(&sidecar, b"original cue").unwrap();
+            let source_bytes = std::fs::read(&source).unwrap();
+            let plan = ChangePlan {
+                changes: vec![FileChange {
+                    path: source.clone(),
+                    rename_to: Some(target.clone()),
+                    copy: true,
+                    sidecar_renames: vec![(sidecar.clone(), sidecar_target.clone())],
+                    ..FileChange::default()
+                }],
+                ..ChangePlan::default()
+            };
+            let batch = interrupt_before_finish(&dir, &plan);
+            if sidecar_only {
+                std::fs::remove_file(&target).unwrap();
+            }
+            let replacement = if sidecar_only {
+                &sidecar_target
+            } else {
+                &target
+            };
+            std::fs::write(replacement, b"later unrelated replacement").unwrap();
+            let before = std::fs::read(&sidecar_target).unwrap();
+            let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+            assert!(
+                matches!(Executor::undo_with_mode(&mut journal, batch.id, &roots(dir.path()), mode, &mut |_| {}), Err(PlanError::Stale(path)) if path == *replacement)
+            );
+            assert_eq!(
+                std::fs::read(replacement).unwrap(),
+                b"later unrelated replacement"
+            );
+            assert_eq!(std::fs::read(&sidecar_target).unwrap(), before);
+            assert_eq!(std::fs::read(&source).unwrap(), source_bytes);
+            assert_eq!(std::fs::read(&sidecar).unwrap(), b"original cue");
+            assert!(journal.batch(batch.id).unwrap().unwrap().interrupted);
+            // Once both uncertain destinations are absent, Undo is satisfied.
+            if target.exists() {
+                std::fs::remove_file(&target).unwrap();
+            }
+            std::fs::remove_file(&sidecar_target).unwrap();
+            Executor::undo_with_mode(
+                &mut journal,
+                batch.id,
+                &roots(dir.path()),
+                mode,
+                &mut |_| {},
+            )
+            .unwrap();
+            assert!(journal.batches().unwrap().is_empty());
+        }
+    }
+}
+
+#[test]
+fn completed_legacy_unstamped_copies_remain_undoable() {
+    let dir = TempDir::new("legacy-copy");
+    let source = dir.flac("source.flac");
+    let target = dir.path().join("target.flac");
+    let plan = ChangePlan {
+        changes: vec![FileChange {
+            path: source.clone(),
+            rename_to: Some(target.clone()),
+            copy: true,
+            ..FileChange::default()
+        }],
+        ..ChangePlan::default()
+    };
+    let mut batch = interrupt_before_finish(&dir, &plan);
+    batch.interrupted = false;
+    let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+    journal.finish(batch.id, &batch).unwrap();
+    drop(journal);
+    let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+    Executor::undo(&mut journal, batch.id, &roots(dir.path())).unwrap();
+    assert!(source.exists() && !target.exists());
+}
+
+#[test]
+fn interrupted_unchanged_copy_requires_observed_stamp() {
+    use tagrex_core::plan::{PlanError, UndoMode};
+    for mode in [UndoMode::Strict, UndoMode::KeepChanged, UndoMode::Overwrite] {
+        for stamp_known in [false, true] {
+            let dir = TempDir::new("copy-evidence");
+            let source = dir.flac("source.flac");
+            let target = dir.path().join("target.flac");
+            let plan = ChangePlan {
+                changes: vec![FileChange {
+                    path: source.clone(),
+                    rename_to: Some(target.clone()),
+                    copy: true,
+                    ..FileChange::default()
+                }],
+                ..ChangePlan::default()
+            };
+            let mut batch = interrupt_before_finish(&dir, &plan);
+            let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+            if stamp_known {
+                batch.copy_stamps.push(CopyStamp::of(&target).unwrap());
+                journal.retain_interrupted(batch.id, &batch).unwrap();
+            }
+            drop(journal);
+            let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+            let result = Executor::undo_with_mode(
+                &mut journal,
+                batch.id,
+                &roots(dir.path()),
+                mode,
+                &mut |_| {},
+            );
+            if stamp_known {
+                result.unwrap();
+            } else {
+                assert!(matches!(result, Err(PlanError::Stale(path)) if path == target));
+                assert_eq!(std::fs::read(&target).unwrap(), MINIMAL_FLAC);
+                assert!(journal.batch(batch.id).unwrap().is_some());
+                std::fs::remove_file(&target).unwrap();
+                Executor::undo(&mut journal, batch.id, &roots(dir.path())).unwrap();
+            }
+            assert_eq!(std::fs::read(&source).unwrap(), MINIMAL_FLAC);
+            assert!(!target.exists());
+            assert!(journal.batches().unwrap().is_empty());
+        }
+    }
+}

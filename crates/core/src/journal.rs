@@ -83,8 +83,9 @@ pub struct AppliedBatch {
     pub allowed_roots: Vec<PathBuf>,
     /// What each copy this batch made looked like once the batch was done
     /// (#604). Undo removes a copy only while the file at its path still
-    /// matches. Empty for a batch recorded before this existed; its copies are
-    /// removed without the check, as they always were.
+    /// matches. Completed legacy batches with no stamps keep their original
+    /// behavior. An interrupted batch with an existing unstamped destination
+    /// has no proof of ownership, so Undo refuses to remove it.
     pub copy_stamps: Vec<CopyStamp>,
     /// What each changed field read as once the batch was written (#658). Undo
     /// refuses a file whose fields have changed since, rather than writing the
