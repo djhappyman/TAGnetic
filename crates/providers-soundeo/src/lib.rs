@@ -291,6 +291,8 @@ fn results_section(html: &str) -> &str {
 /// Parse a release from its album page. `url` is the page we fetched, used as
 /// the id and the release URL.
 fn parse_release(html: &str, url: &str) -> Result<Release, ProviderError> {
+    let release_key = release_id_from_url(url)
+        .ok_or_else(|| ProviderError::Other("invalid Soundeo release identifier".into()))?;
     let table = info_table(html);
     let get = |key: &str| table.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
 
@@ -325,13 +327,10 @@ fn parse_release(html: &str, url: &str) -> Result<Release, ProviderError> {
     // The tracklist: the page's track rows that point back at this release, in
     // page order. The leading "Artist - " that Soundeo repeats in each track
     // title is dropped when it matches the release artist.
-    let release_key = release_id_from_url(url);
     let tracks: Vec<ReleaseTrack> = parse_trackitems(html)
         .into_iter()
         .filter(|item| {
-            release_key
-                .as_deref()
-                .is_none_or(|id| item.release_href.contains(id))
+            release_id_from_url(&item.release_href).as_deref() == Some(release_key.as_str())
         })
         .enumerate()
         .map(|(index, item)| ReleaseTrack {
@@ -456,14 +455,14 @@ fn strip_artist_prefix(track_title: &str, artist: &str) -> String {
 /// (`…/gianesini-nothing-5972146.html` → `5972146`), used to keep only this
 /// release's own tracks.
 fn release_id_from_url(url: &str) -> Option<String> {
-    let file = url.rsplit('/').next()?.trim_end_matches(".html");
-    let id: String = file
-        .rsplit('-')
-        .next()?
-        .chars()
-        .filter(|c| c.is_ascii_digit())
-        .collect();
-    (!id.is_empty()).then_some(id)
+    let uri: ureq::http::Uri = url.parse().ok()?;
+    let file = uri.path().strip_prefix("/release/")?;
+    if file.contains('/') {
+        return None;
+    }
+    let (slug, id) = file.strip_suffix(".html")?.rsplit_once('-')?;
+    (!slug.is_empty() && !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| id.to_string())
 }
 
 /// Turn a relative Soundeo path into an absolute URL.
@@ -702,6 +701,49 @@ mod tests {
         // The "Gianesini - " prefix is stripped; the mix is kept.
         assert_eq!(release.tracks[0].title, "Nothing (Original Mix)");
         assert_eq!(release.tracks[0].duration_secs, Some(302)); // 5:02
+    }
+
+    #[test]
+    fn release_identity_uses_only_a_well_formed_path_suffix() {
+        for suffix in ["", "?utm_campaign=2026", "#2026", "?q=123#456"] {
+            assert_eq!(
+                release_id_from_url(&format!(
+                    "https://soundeo.com/release/artist-title-5972146.html{suffix}"
+                )),
+                Some("5972146".into())
+            );
+        }
+        assert_eq!(
+            release_id_from_url("/release/title-123.html"),
+            Some("123".into())
+        );
+        for invalid in [
+            "/release/title-12x3.html",
+            "/release/title-.html",
+            "/release/title-123",
+            "/release/title-123.html.html",
+            "/track/title-123.html",
+            "/release/-123.html",
+            "/release/sub/title-123.html",
+        ] {
+            assert_eq!(release_id_from_url(invalid), None, "{invalid}");
+        }
+    }
+
+    #[test]
+    fn release_tracks_match_the_exact_id_even_with_query_and_fragment() {
+        let html = r#"<meta property="og:title" content="Artist - Title">
+          <div class="trackitem" data-track-id="1"><strong><a href="/track/a-1.html">Artist - Own</a></strong><span><a href="/release/title-123.html?x=99">Title</a></span></div>
+          <div class="trackitem" data-track-id="2"><strong><a href="/track/a-2.html">Artist - Unrelated</a></strong><span><a href="/release/title-1234.html">Other</a></span></div>
+          <div class="trackitem" data-track-id="3"><strong><a href="/track/a-3.html">Artist - Malformed</a></strong><span><a href="/release/title-12x3.html">Other</a></span></div>"#;
+        let release = parse_release(
+            html,
+            "https://soundeo.com/release/title-123.html?campaign=2026#456",
+        )
+        .unwrap();
+        assert_eq!(release.tracks.len(), 1);
+        assert_eq!(release.tracks[0].title, "Own");
+        assert!(parse_release(html, "https://soundeo.com/release/title-invalid.html").is_err());
     }
 
     #[test]
