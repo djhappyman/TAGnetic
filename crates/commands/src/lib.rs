@@ -11457,12 +11457,14 @@ mod tests {
         use std::time::{Duration, Instant};
         let dir = TempDir::new("text-list-special");
         let fifo = dir.0.join("list.fifo");
-        rustix::fs::mkfifoat(
-            rustix::fs::CWD,
-            &fifo,
-            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        )
-        .unwrap();
+        // rustix's mkfifoat is unavailable on Apple platforms. The POSIX
+        // utility creates the same disposable fixture on Linux and macOS.
+        let status = std::process::Command::new("mkfifo")
+            .args(["-m", "600"])
+            .arg(&fifo)
+            .status()
+            .expect("create the FIFO fixture with mkfifo");
+        assert!(status.success(), "mkfifo fixture creation failed: {status}");
         let started = Instant::now();
         for path in [fifo.as_path(), dir.0.as_path(), Path::new("/dev/zero")] {
             assert!(matches!(
