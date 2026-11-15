@@ -249,26 +249,34 @@ test('image changes fade over a preserved canvas without dark dips or colour lif
   // Ready means decoded; the first image may still be fading in on a busy browser.
   // Settle that entrance before checking the transition between two images.
   await expect(dialog(page).locator('.aw-frame')).toHaveCSS('opacity', '1');
-  await tile(page, 2).click(); await expect(cta(page)).toBeEnabled();
-  const samples = await page.evaluate(async () => {
-    for (let attempt = 0; attempt < 60; attempt++) {
-      const frames = [...document.querySelectorAll('.aw-frame')];
-      const incoming = frames.find((frame) => !frame.inert);
+  // Arm before clicking: driver round trips can outlast the entire 140 ms fade.
+  await page.evaluate(() => {
+    const layers = document.querySelector('.aw-layers');
+    window.artworkTest.fadeSample = new Promise((resolve) => {
+      layers.addEventListener('introstart', resolve, { capture: true, once: true });
+    }).then(async (event) => {
+      const frames = [...layers.querySelectorAll('.aw-frame')];
+      const incoming = event.target;
       const animation = incoming?.getAnimations().find((animation) => animation.effect.getTiming().duration === 140);
-      if (frames.length === 2 && animation) {
-        animation.pause(); animation.currentTime = 70;
-        return frames.map((frame) => ({
-          duration: animation.effect.getTiming().duration,
-          hasTransform: animation.effect.getKeyframes().some((key) => 'transform' in key),
-          blend: getComputedStyle(frame).mixBlendMode,
-          opacity: Number(getComputedStyle(frame).opacity),
-          incoming: frame === incoming,
-        }));
-      }
-      await new Promise(requestAnimationFrame);
-    }
-    return [];
+      if (frames.length !== 2 || !animation) throw new Error('Expected two frames and a 140 ms artwork intro');
+      window.artworkTest.fadeAnimation = animation;
+      animation.pause();
+      await animation.ready;
+      animation.currentTime = 70;
+      await incoming.querySelector('.aw-hero').decode();
+      // Present the sought animation state and decoded image before sampling pixels.
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      return frames.map((frame) => ({
+        duration: animation.effect.getTiming().duration,
+        hasTransform: animation.effect.getKeyframes().some((key) => 'transform' in key),
+        blend: getComputedStyle(frame).mixBlendMode,
+        opacity: Number(getComputedStyle(frame).opacity),
+        incoming: frame === incoming,
+      }));
+    });
   });
+  await tile(page, 2).click(); await expect(cta(page)).toBeEnabled();
+  const samples = await page.evaluate(() => window.artworkTest.fadeSample);
   expect(samples).toHaveLength(2);
   for (const sample of samples) {
     expect(sample.duration).toBe(140);
@@ -285,7 +293,12 @@ test('image changes fade over a preserved canvas without dark dips or colour lif
     const context = canvas.getContext('2d'); context.drawImage(image, -Math.floor(x), -Math.floor(y));
     return [...context.getImageData(0, 0, 1, 1).data];
   }, { screenshot, x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 });
-  for (let i = 0; i < 3; i++) expect(Math.abs(pixel[i] - [116, 74, 116][i])).toBeLessThanOrEqual(3);
+  const frozen = await page.evaluate(() => {
+    const animation = window.artworkTest.fadeAnimation;
+    return { playState: animation.playState, pending: animation.pending, currentTime: animation.currentTime };
+  });
+  expect(frozen).toEqual({ playState: 'paused', pending: false, currentTime: 70 });
+  for (let i = 0; i < 3; i++) expect(Math.abs(pixel[i] - [116, 74, 116][i]), `Captured RGBA ${JSON.stringify(pixel)}`).toBeLessThanOrEqual(3);
 });
 
 test('panning updates the image in the input event without waiting for framework rendering', async ({ page }) => {
