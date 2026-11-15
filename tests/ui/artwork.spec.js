@@ -246,6 +246,9 @@ test('subtitle includes exact artist, release and label inspection links', async
 
 test('image changes fade over a preserved canvas without dark dips or colour lift', async ({ page }) => {
   await open(page);
+  // Ready means decoded; the first image may still be fading in on a busy browser.
+  // Settle that entrance before checking the transition between two images.
+  await expect(dialog(page).locator('.aw-frame')).toHaveCSS('opacity', '1');
   await tile(page, 2).click(); await expect(cta(page)).toBeEnabled();
   const samples = await page.evaluate(async () => {
     for (let attempt = 0; attempt < 60; attempt++) {
