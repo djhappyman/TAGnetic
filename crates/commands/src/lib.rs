@@ -13,7 +13,10 @@
 //! keys use [`TagField`]'s lossless storage-key codec.
 
 mod cover_encoding;
+pub mod duplicates;
 mod output;
+pub mod query;
+mod query_members;
 mod read_cache;
 mod sidecars;
 
@@ -2318,11 +2321,18 @@ impl ImageFetch {
     }
 }
 
+struct PendingQuery {
+    index: std::sync::Arc<query::QueryIndex>,
+    paths: HashSet<PathBuf>,
+}
+
 /// A tagging session rooted at one library directory. The root doubles as the
 /// [`Executor`] `allowed_root`, so every write is confined to the opened
 /// library.
 pub struct App {
     read_cache: RefCell<read_cache::ReadCache>,
+    query_index: RefCell<Option<std::sync::Arc<query::QueryIndex>>>,
+    query_pending: RefCell<Option<PendingQuery>>,
     library_root: PathBuf,
     /// When set, the session operates on this explicit list of files (a
     /// drag-and-drop of files and/or several folders, #127) instead of scanning
@@ -2384,6 +2394,17 @@ pub struct App {
     extra_roots: RefCell<Vec<PathBuf>>,
 }
 
+impl Drop for App {
+    fn drop(&mut self) {
+        if let Some(index) = self.query_index.get_mut().take() {
+            index.invalidate();
+        }
+        if let Some(pending) = self.query_pending.get_mut().take() {
+            pending.index.invalidate();
+        }
+    }
+}
+
 impl App {
     /// Open a session for `library_root`, storing the undo journal at
     /// `journal_path` (typically inside the app's config dir). Settings default
@@ -2401,6 +2422,8 @@ impl App {
         let (journal, journal_set_aside) = SqliteJournal::open_or_recover(journal_path)?;
         Ok(Self {
             read_cache: RefCell::default(),
+            query_index: RefCell::default(),
+            query_pending: RefCell::default(),
             library_root,
             file_filter: None,
             journal,
@@ -2546,6 +2569,7 @@ impl App {
     /// here — they belong to [`ProviderHub`], which outlives any open library
     /// (#166).
     pub fn apply_settings(&self, settings: &SettingsDto) {
+        self.invalidate_query();
         self.read_cache.borrow_mut().clear();
         tagrex_core::model::set_write_id3v23(settings.id3_v23);
         tagrex_core::model::set_read_priority(&settings.read_priority);
@@ -2766,13 +2790,103 @@ impl App {
     /// this order is also what mapping-by-position (rename masks, release
     /// import) lines up against.
     pub fn list_tracks(&self) -> Vec<TrackDto> {
-        let mut tracks: Vec<TrackDto> = self
+        let mut records: Vec<(TrackDto, query::QueryRow)> = self
             .source_paths()
             .into_iter()
-            .map(|path| self.track_dto(&path))
+            .map(|path| {
+                let track = self.track_dto(&path);
+                let row = self.query_row(&track);
+                (track, row)
+            })
             .collect();
-        tracks.sort_by(|a, b| natural_cmp(&a.path, &b.path));
+        records.sort_by(|(a, _), (b, _)| natural_cmp(&a.path, &b.path));
+        let (tracks, rows): (Vec<_>, Vec<_>) = records.into_iter().unzip();
+        self.invalidate_query();
+        *self.query_index.borrow_mut() =
+            Some(std::sync::Arc::new(query::QueryIndex::from_rows(rows)));
         tracks
+    }
+
+    fn query_row(&self, track: &TrackDto) -> query::QueryRow {
+        let mut row = query::QueryRow::from_track(track);
+        let read = self.read_snapshot(Path::new(&track.path)).ok();
+        let props = read.as_ref().map(|read| read.props);
+        let metadata = std::fs::metadata(&track.path).ok();
+        row.set_technical(
+            metadata.as_ref().map(|m| m.len()),
+            props.as_ref().and_then(|p| p.bitrate_kbps),
+            props.as_ref().and_then(|p| p.sample_rate_hz),
+            props.as_ref().and_then(|p| p.channels),
+        );
+        if let Some(read) = read {
+            row.set_file_context(
+                read.file.format,
+                read.props,
+                metadata.and_then(|m| m.modified().ok()),
+            );
+        }
+        row
+    }
+
+    fn invalidate_query(&self) {
+        if let Some(previous) = self.query_index.borrow_mut().take() {
+            previous.invalidate();
+        }
+        if let Some(pending) = self.query_pending.borrow_mut().take() {
+            pending.index.invalidate();
+        }
+    }
+
+    fn invalidate_query_plan(&self, plan: &PlanDto) {
+        if plan.changes.iter().any(|change| change.rename_to.is_some()) {
+            self.invalidate_query();
+            return;
+        }
+        let pending = self.query_pending.borrow_mut().take();
+        let (previous, mut paths) = if let Some(current) = self.query_index.borrow_mut().take() {
+            (Some(current), HashSet::new())
+        } else if let Some(pending) = pending {
+            (Some(pending.index), pending.paths)
+        } else {
+            (None, HashSet::new())
+        };
+        if let Some(index) = previous {
+            index.invalidate();
+            paths.extend(
+                plan.changes
+                    .iter()
+                    .map(|change| PathBuf::from(&change.path)),
+            );
+            *self.query_pending.borrow_mut() = Some(PendingQuery { index, paths });
+        }
+    }
+
+    /// Share the current immutable query snapshot without sending rows through IPC.
+    /// Warm queries reuse this `Arc` and never probe files.
+    pub fn query_snapshot(&self) -> std::sync::Arc<query::QueryIndex> {
+        let dirty = self
+            .query_pending
+            .borrow()
+            .as_ref()
+            .map(|pending| pending.paths.iter().cloned().collect::<Vec<_>>());
+        if let Some(paths) = dirty {
+            if self.read_track_rows(&paths).is_err() {
+                self.invalidate_query();
+            }
+        }
+        if self.query_index.borrow().is_none() {
+            self.list_tracks();
+        }
+        self.query_index
+            .borrow()
+            .as_ref()
+            .expect("list_tracks initializes query snapshot")
+            .clone()
+    }
+
+    /// Current query generation, without constructing a snapshot or reading files.
+    pub fn query_snapshot_id(&self) -> Option<u64> {
+        self.query_index.borrow().as_ref().map(|index| index.id)
     }
 
     /// Refresh one source file without rescanning or parsing its neighbours.
@@ -2827,7 +2941,31 @@ impl App {
     /// outside the library fails before a partial batch is returned.
     pub fn read_track_rows(&self, paths: &[PathBuf]) -> Result<Vec<TrackDto>, AppError> {
         self.validate_track_paths(paths)?;
-        Ok(paths.iter().map(|path| self.track_dto(path)).collect())
+        let mut rows = Vec::with_capacity(paths.len());
+        let tracks = paths
+            .iter()
+            .map(|path| {
+                let track = self.track_dto(path);
+                rows.push(self.query_row(&track));
+                track
+            })
+            .collect();
+        let previous = self.query_index.borrow().clone();
+        let pending = self.query_pending.borrow_mut().take();
+        if let Some(previous) = previous {
+            *self.query_index.borrow_mut() = Some(std::sync::Arc::new(previous.with_updates(rows)));
+        } else if let Some(mut pending) = pending {
+            for path in paths {
+                pending.paths.remove(path);
+            }
+            pending.index = std::sync::Arc::new(pending.index.with_updates(rows));
+            if pending.paths.is_empty() {
+                *self.query_index.borrow_mut() = Some(pending.index);
+            } else {
+                *self.query_pending.borrow_mut() = Some(pending);
+            }
+        }
+        Ok(tracks)
     }
 
     /// Find likely duplicate files across the opened library (#40), by
@@ -5742,6 +5880,7 @@ impl App {
             }
         }
         trash::delete_all(paths).map_err(|err| AppError::Trash(err.to_string()))?;
+        self.invalidate_query();
         // A drop-of-files session lists an explicit set rather than a folder
         // (#127), and a trashed file has to leave it — otherwise the next
         // re-read still asks for it and shows it as unreadable rather than gone.
@@ -5757,6 +5896,7 @@ impl App {
 
     /// Apply a previewed plan to disk and record it for undo.
     pub fn apply(&mut self, plan: &PlanDto) -> Result<BatchDto, AppError> {
+        self.invalidate_query_plan(plan);
         self.read_cache.borrow_mut().clear();
         plan.validate_cover_assets()?;
         let change_plan = plan.to_change_plan();
@@ -5868,6 +6008,7 @@ impl App {
         progress: &mut dyn FnMut(&ApplyProgress),
         cancel: &AtomicBool,
     ) -> Result<BatchDto, AppError> {
+        self.invalidate_query_plan(plan);
         self.read_cache.borrow_mut().clear();
         plan.validate_cover_assets()?;
         let change_plan = plan.to_change_plan();
@@ -5910,6 +6051,7 @@ impl App {
         mode: UndoMode,
         progress: &mut dyn FnMut(&ApplyProgress),
     ) -> Result<UndoReportDto, AppError> {
+        self.invalidate_query();
         let roots = self.allowed_roots();
         self.read_cache.borrow_mut().clear();
         let report =
@@ -8655,6 +8797,102 @@ mod tests {
 
     fn open_app(dir: &TempDir) -> App {
         App::open(dir.0.clone(), &dir.0.join("journal.sqlite")).unwrap()
+    }
+
+    #[test]
+    fn query_snapshot_reuses_rows_and_tracks_apply_undo_and_refresh() {
+        let dir = TempDir::new("query-generation");
+        let path = dir.tagged_flac("x.flac", "Old Artist", "Title");
+        let mut app = open_app(&dir);
+        let old = app.query_snapshot();
+        assert_eq!(old.rows[0].value("artist"), "Old Artist");
+        assert!(std::sync::Arc::ptr_eq(&old, &app.query_snapshot()));
+        let plan = app
+            .preview_tag_edits(&[TagEditDto {
+                path: path.to_string_lossy().into_owned(),
+                field: "artist".into(),
+                value: Some("New Artist".into()),
+            }])
+            .unwrap();
+        assert!(
+            old.is_current(),
+            "preview must leave saved-tag search unchanged"
+        );
+        let batch = app.apply(&plan).unwrap();
+        assert!(!old.is_current());
+        let applied = app.query_snapshot();
+        assert_ne!(old.id, applied.id);
+        assert_eq!(applied.rows[0].value("artist"), "New Artist");
+        app.undo(batch.id).unwrap();
+        assert!(!applied.is_current());
+        let undone = app.query_snapshot();
+        assert_eq!(undone.rows[0].value("artist"), "Old Artist");
+        app.read_track(&path).unwrap();
+        assert!(
+            !undone.is_current(),
+            "an explicit metadata refresh supersedes old results"
+        );
+    }
+
+    #[test]
+    fn warm_query_snapshot_does_not_probe_files_and_drop_invalidates_workers() {
+        let dir = TempDir::new("query-warm");
+        let path = dir.tagged_flac("x.flac", "Artist", "Title");
+        let app = open_app(&dir);
+        let snapshot = app.query_snapshot();
+        std::fs::remove_file(path).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&snapshot, &app.query_snapshot()));
+        assert_eq!(snapshot.rows.len(), 1);
+        app.list_tracks();
+        assert!(!snapshot.is_current());
+        let refreshed = app.query_snapshot();
+        assert!(refreshed.rows.is_empty());
+        drop(app);
+        assert!(!refreshed.is_current());
+    }
+
+    #[test]
+    fn tag_only_apply_refreshes_dirty_rows_without_rereading_unaffected_files() {
+        let dir = TempDir::new("query-incremental");
+        let changed = dir.tagged_flac("changed.flac", "Old Artist", "Changed");
+        let untouched = dir.tagged_flac("untouched.flac", "Untouched Artist", "Untouched");
+        let mut app = open_app(&dir);
+        let before = app.query_snapshot();
+        let before_untouched = before
+            .rows
+            .iter()
+            .find(|row| row.path == untouched.to_string_lossy())
+            .unwrap()
+            .clone();
+        let plan = app
+            .preview_tag_edits(&[TagEditDto {
+                path: changed.to_string_lossy().into_owned(),
+                field: "artist".into(),
+                value: Some("New Artist".into()),
+            }])
+            .unwrap();
+        std::fs::remove_file(&untouched).unwrap();
+        app.apply(&plan).unwrap();
+        assert!(!before.is_current());
+        // No frontend readback has happened: a query refreshes its own dirty set.
+        let after = app.query_snapshot();
+        assert_eq!(after.rows.len(), 2);
+        assert_eq!(
+            after
+                .rows
+                .iter()
+                .find(|row| row.path == changed.to_string_lossy())
+                .unwrap()
+                .value("artist"),
+            "New Artist"
+        );
+        let after_untouched = after
+            .rows
+            .iter()
+            .find(|row| row.path == untouched.to_string_lossy())
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(&before_untouched, after_untouched));
+        assert_eq!(after_untouched.value("artist"), "Untouched Artist");
     }
 
     // #46: editing one field must not flatten a multi-value one on the way past.

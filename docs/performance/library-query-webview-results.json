@@ -1,0 +1,345 @@
+{
+  "date": "2026-11-15T16:35:58.915Z",
+  "iterations": 40,
+  "method": "Same workloads as pure benchmark. Baseline evaluator and full Rust IPC round trips measured in actual development WebKit. Warm runs, 4ms heartbeat, 8ms yield between samples. No table rendering or audio scan. Synthetic setup includes fixture serialization; no real App replacement.",
+  "results": [
+    {
+      "allRowsPayload": {
+        "heartbeatMaxGapMs": 8,
+        "heartbeatOver50ms": 0,
+        "matched": 10000,
+        "maxMs": 4,
+        "medianMs": 2,
+        "p95Ms": 4
+      },
+      "indexMs": 32.161034,
+      "queries": [
+        {
+          "baseline": {
+            "heartbeatMaxGapMs": 17,
+            "heartbeatOver50ms": 0,
+            "maxMs": 2,
+            "medianMs": 1,
+            "p95Ms": 2
+          },
+          "matched": 110,
+          "name": "Free text",
+          "native": {
+            "heartbeatMaxGapMs": 24,
+            "heartbeatOver50ms": 0,
+            "maxMs": 15,
+            "medianMs": 1,
+            "p95Ms": 12
+          },
+          "nativeEngineMs": 0.6438659999999999
+        },
+        {
+          "baseline": {
+            "heartbeatMaxGapMs": 22,
+            "heartbeatOver50ms": 0,
+            "maxMs": 1,
+            "medianMs": 1,
+            "p95Ms": 1
+          },
+          "matched": 829,
+          "name": "Genre + missing artwork",
+          "native": {
+            "heartbeatMaxGapMs": 8,
+            "heartbeatOver50ms": 0,
+            "maxMs": 2,
+            "medianMs": 1,
+            "p95Ms": 1
+          },
+          "nativeEngineMs": 0.054587
+        },
+        {
+          "baseline": {
+            "heartbeatMaxGapMs": 15,
+            "heartbeatOver50ms": 0,
+            "maxMs": 3,
+            "medianMs": 1,
+            "p95Ms": 1
+          },
+          "matched": 3,
+          "name": "Artist equality + artwork",
+          "native": {
+            "heartbeatMaxGapMs": 12,
+            "heartbeatOver50ms": 0,
+            "maxMs": 4,
+            "medianMs": 1,
+            "p95Ms": 3
+          },
+          "nativeEngineMs": 0.111119
+        },
+        {
+          "baseline": {
+            "heartbeatMaxGapMs": 11,
+            "heartbeatOver50ms": 0,
+            "maxMs": 3,
+            "medianMs": 2,
+            "p95Ms": 2
+          },
+          "matched": 265,
+          "name": "Alternative conditions + text",
+          "native": {
+            "heartbeatMaxGapMs": 10,
+            "heartbeatOver50ms": 0,
+            "maxMs": 3,
+            "medianMs": 1,
+            "p95Ms": 2
+          },
+          "nativeEngineMs": 0.7180650000000001
+        },
+        {
+          "baseline": {
+            "heartbeatMaxGapMs": 11,
+            "heartbeatOver50ms": 0,
+            "maxMs": 3,
+            "medianMs": 1,
+            "p95Ms": 2
+          },
+          "matched": 20,
+          "name": "Bounded regex",
+          "native": {
+            "heartbeatMaxGapMs": 8,
+            "heartbeatOver50ms": 0,
+            "maxMs": 1,
+            "medianMs": 1,
+            "p95Ms": 1
+          },
+          "nativeEngineMs": 0.091655
+        }
+      ],
+      "rows": 10000,
+      "setupRoundTripMs": 146
+    },
+    {
+      "allRowsPayload": {
+        "heartbeatMaxGapMs": 8,
+        "heartbeatOver50ms": 0,
+        "matched": 50000,
+        "maxMs": 8,
+        "medianMs": 6,
+        "p95Ms": 8
+      },
+      "indexMs": 105.018132,
+      "queries": [
+        {
+          "baseline": {
+            "heartbeatMaxGapMs": 19,
+            "heartbeatOver50ms": 0,
+            "maxMs": 11,
+            "medianMs": 4,
+            "p95Ms": 10
+          },
+          "matched": 550,
+          "name": "Free text",
+          "native": {
+            "heartbeatMaxGapMs": 12,
+            "heartbeatOver50ms": 0,
+            "maxMs": 9,
+            "medianMs": 4,
+            "p95Ms": 6
+          },
+          "nativeEngineMs": 2.768207
+        },
+        {
+          "baseline": {
+            "heartbeatMaxGapMs": 15,
+            "heartbeatOver50ms": 0,
+            "maxMs": 10,
+            "medianMs": 3,
+            "p95Ms": 6
+          },
+          "matched": 4146,
+          "name": "Genre + missing artwork",
+          "native": {
+            "heartbeatMaxGapMs": 8,
+            "heartbeatOver50ms": 0,
+            "maxMs": 3,
+            "medianMs": 1,
+            "p95Ms": 2
+          },
+          "nativeEngineMs": 0.186876
+        },
+        {
+          "baseline": {
+            "heartbeatMaxGapMs": 16,
+            "heartbeatOver50ms": 0,
+            "maxMs": 8,
+            "medianMs": 4,
+            "p95Ms": 6
+          },
+          "matched": 16,
+          "name": "Artist equality + artwork",
+          "native": {
+            "heartbeatMaxGapMs": 13,
+            "heartbeatOver50ms": 0,
+            "maxMs": 3,
+            "medianMs": 1,
+            "p95Ms": 2
+          },
+          "nativeEngineMs": 0.14519700000000002
+        },
+        {
+          "baseline": {
+            "heartbeatMaxGapMs": 21,
+            "heartbeatOver50ms": 0,
+            "maxMs": 13,
+            "medianMs": 6,
+            "p95Ms": 11
+          },
+          "matched": 825,
+          "name": "Alternative conditions + text",
+          "native": {
+            "heartbeatMaxGapMs": 15,
+            "heartbeatOver50ms": 0,
+            "maxMs": 13,
+            "medianMs": 4,
+            "p95Ms": 9
+          },
+          "nativeEngineMs": 3.718497
+        },
+        {
+          "baseline": {
+            "heartbeatMaxGapMs": 16,
+            "heartbeatOver50ms": 0,
+            "maxMs": 7,
+            "medianMs": 2,
+            "p95Ms": 3
+          },
+          "matched": 100,
+          "name": "Bounded regex",
+          "native": {
+            "heartbeatMaxGapMs": 8,
+            "heartbeatOver50ms": 0,
+            "maxMs": 3,
+            "medianMs": 1,
+            "p95Ms": 1
+          },
+          "nativeEngineMs": 0.06368399999999999
+        }
+      ],
+      "rows": 50000,
+      "setupRoundTripMs": 653
+    },
+    {
+      "allRowsPayload": {
+        "heartbeatMaxGapMs": 10,
+        "heartbeatOver50ms": 0,
+        "matched": 100000,
+        "maxMs": 17,
+        "medianMs": 11,
+        "p95Ms": 17
+      },
+      "indexMs": 198.450432,
+      "queries": [
+        {
+          "baseline": {
+            "heartbeatMaxGapMs": 14,
+            "heartbeatOver50ms": 0,
+            "maxMs": 10,
+            "medianMs": 6,
+            "p95Ms": 9
+          },
+          "matched": 1100,
+          "name": "Free text",
+          "native": {
+            "heartbeatMaxGapMs": 14,
+            "heartbeatOver50ms": 0,
+            "maxMs": 10,
+            "medianMs": 7,
+            "p95Ms": 9
+          },
+          "nativeEngineMs": 6.103843
+        },
+        {
+          "baseline": {
+            "heartbeatMaxGapMs": 17,
+            "heartbeatOver50ms": 0,
+            "maxMs": 14,
+            "medianMs": 6,
+            "p95Ms": 11
+          },
+          "matched": 8293,
+          "name": "Genre + missing artwork",
+          "native": {
+            "heartbeatMaxGapMs": 9,
+            "heartbeatOver50ms": 0,
+            "maxMs": 3,
+            "medianMs": 2,
+            "p95Ms": 3
+          },
+          "nativeEngineMs": 0.327552
+        },
+        {
+          "baseline": {
+            "heartbeatMaxGapMs": 17,
+            "heartbeatOver50ms": 0,
+            "maxMs": 9,
+            "medianMs": 6,
+            "p95Ms": 9
+          },
+          "matched": 32,
+          "name": "Artist equality + artwork",
+          "native": {
+            "heartbeatMaxGapMs": 12,
+            "heartbeatOver50ms": 0,
+            "maxMs": 6,
+            "medianMs": 1,
+            "p95Ms": 3
+          },
+          "nativeEngineMs": 0.202106
+        },
+        {
+          "baseline": {
+            "heartbeatMaxGapMs": 27,
+            "heartbeatOver50ms": 0,
+            "maxMs": 21,
+            "medianMs": 15,
+            "p95Ms": 21
+          },
+          "matched": 2635,
+          "name": "Alternative conditions + text",
+          "native": {
+            "heartbeatMaxGapMs": 18,
+            "heartbeatOver50ms": 0,
+            "maxMs": 14,
+            "medianMs": 8,
+            "p95Ms": 13
+          },
+          "nativeEngineMs": 7.222742
+        },
+        {
+          "baseline": {
+            "heartbeatMaxGapMs": 21,
+            "heartbeatOver50ms": 0,
+            "maxMs": 13,
+            "medianMs": 4,
+            "p95Ms": 7
+          },
+          "matched": 200,
+          "name": "Bounded regex",
+          "native": {
+            "heartbeatMaxGapMs": 17,
+            "heartbeatOver50ms": 0,
+            "maxMs": 11,
+            "medianMs": 1,
+            "p95Ms": 2
+          },
+          "nativeEngineMs": 0.066294
+        }
+      ],
+      "rows": 100000,
+      "setupRoundTripMs": 1318
+    }
+  ],
+  "statePreserved": {
+    "edits": 0,
+    "preview": 0,
+    "selected": 1,
+    "tracks": 53,
+    "undoBatches": 37
+  },
+  "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/60.5 Safari/605.1.15"
+}

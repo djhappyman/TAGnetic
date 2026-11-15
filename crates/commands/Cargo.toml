@@ -22,6 +22,11 @@ base64 = "0.23.1"
 # Reading the shape of a pasted tracklist to suggest a FROM TEXT mask (#522).
 # The same regex the core's mask engine is built on.
 regex = "1.13.1"
+# Read-only duplicate evidence: existing workspace decoder and SHA-256, plus
+# local Chromaprint comparisons (no AcoustID lookup or external service).
+sha2 = "0.10.9"
+symphonia = { version = "0.5.5", features = ["all"] }
+rusty-chromaprint = "0.3.0"
 # Move files to the system Trash (#213). Cross-platform (Finder's trash, the
 # Windows recycle bin, the freedesktop trash spec). `default-features = false`
 # drops the `chrono` timestamp reader, which only matters for *listing* what is

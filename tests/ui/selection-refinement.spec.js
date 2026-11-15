@@ -72,7 +72,6 @@ test('column sorting keeps folder positions and sorts numeric filenames only ins
   await page.locator('#tracks th[data-sort="title"]').click();
   await expect(rows(page)).toHaveCount(3);
   expect(await headers.evaluateAll(nodes=>nodes.map(node=>node.dataset.group))).toEqual(original);
-  if(!await page.locator('#filter').isVisible())await page.locator('#filter-panel-toggle').click();
   await page.locator('#filter').fill('title:A Folder');
   await expect(headers).toHaveCount(1);
   await page.locator('#tracks th[data-sort="file"]').click();

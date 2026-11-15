@@ -5,7 +5,7 @@ import { resolve, sep } from 'node:path';
 const root = resolve('.test-dist');
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
-    window.__audit = { reads: [], externalReads: [], pending: [], externalPending: [], wait: false, externalWait: false, historyReads: 0, listReads: 0, rowReads: [], undoSnapshots: [] };
+    window.__audit = { reads: [], externalReads: [], pending: [], externalPending: [], wait: false, externalWait: false, historyReads: 0, listReads: 0, queryReads: 0, rowReads: [], undoSnapshots: [] };
     window.__audit.summary = (name) => {
       const image = { mime: 'image/svg+xml', data_base64: btoa('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>'), kind: 'front', description: name };
       return { total: 1, with_cover: 1, distinct: false, samples: [image], shared_set: [image] };
@@ -40,6 +40,7 @@ test.beforeEach(async ({ page }) => {
         }
         body = body.replace(/case\s*["'`]read_cover_summary["'`]\s*:\s*\{\s*let\s+\w+=(\w+)\.paths/, (match, args) => match.replace('{', `{ if(window.__audit) return window.__audit.read(${args}.paths);`));
         body = body.replace(/case\s*["'`]read_external_cover["'`]\s*:/, '$& if(window.__audit) return window.__audit.external();');
+        body = body.replace(/case\s*["'`]library_query["'`]\s*:/, '$& if(window.__audit) window.__audit.queryReads++;');
         body = body.replace(/case\s*["'`]history["'`]\s*:/, '$& if(window.__audit) window.__audit.historyReads++;');
         body = body.replace(/case\s*["'`]list_tracks["'`]\s*:/, '$& if(window.__audit) window.__audit.listReads++;');
       }
@@ -73,7 +74,6 @@ test('filter, sorting and regrouping preserve an unstaged draft and its input', 
   const title = page.locator('#fields-body input[data-key="title"]');
   await title.fill('UNSTAGED DRAFT');
   await title.evaluate(node => window.__draftInput = node);
-  await page.locator('#filter-panel-toggle').click();
   await page.locator('#filter').fill('mp3');
   await page.waitForTimeout(220);
   await expect(title).toHaveValue('UNSTAGED DRAFT');
@@ -160,20 +160,21 @@ test('rapid Editor selection bounds native reads and keeps only the latest waiti
   expect(await page.evaluate(() => window.__audit.pending[2].paths)).toEqual(['/music/02 - wish mountain - radio.mp3']);
 });
 
-test('large filter queries reuse normalized metadata and publish the latest complete result', async ({ page }) => {
+test('large native filter queries avoid frontend tag enumeration and library rescans', async ({ page }) => {
   await page.evaluate(async () => {
     await window.tagrex.invoke('open_drop', { paths: Array.from({ length: 5000 }, (_, i) => `track-${String(i).padStart(4, '0')}.mp3`) });
     document.getElementById('root').value = '/dropped';
     await window.tagrex.openLibrary();
-    window.__filterReads = 0;
+    window.__filterReads = 0;window.__audit.queryReads=0;window.__audit.listReads=0;
     for (const track of window.tagrex.tracks) {
       track.tags = new Proxy(track.tags, { ownKeys(target) { window.__filterReads++; return Reflect.ownKeys(target); } });
     }
   });
-  await page.locator('#filter-panel-toggle').click();
   await page.locator('#filter').fill('track-0');
   await expect(page.locator('#status-sel')).toContainText('1000/5000');
-  expect(await page.evaluate(() => window.__filterReads)).toBe(5000);
+  expect(await page.evaluate(() => window.__filterReads)).toBe(0);
+  expect(await page.evaluate(() => window.__audit.queryReads)).toBeGreaterThan(0);
+  expect(await page.evaluate(() => window.__audit.listReads)).toBe(0);
   await page.evaluate(() => window.__filterReads = 0);
   await page.locator('#filter').fill('track-00');
   await expect(page.locator('#status-sel')).toContainText('100/5000');

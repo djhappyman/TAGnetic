@@ -7,10 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Compact command ribbon and responsive workspace.
+## [1.4.5] - 2026-11-15
+
+**Tagnetic Alpha 4** — native library search, duplicate review and a compact workspace.
 
 ### Added
 
+- In-field search chips with delayed, case-insensitive metadata suggestions,
+  coloured chip previews, editable all/any groups, exclusions, numeric ranges,
+  local phrase proposals and reusable presets. Artist chips include collaborators
+  while preserving complete artist credits and punctuation-sensitive names.
+- Rust library queries and facets use versioned saved-metadata snapshots and
+  compact result indices. Tag-only Apply refreshes affected rows incrementally.
+- The command bar switches to read-only duplicate groups: verified byte copies,
+  complete decoded-audio matches or likely recordings using local fingerprints,
+  with progress, cancellation and evidence for review. Verified groups appear
+  during scanning under track names, retaining copy rows, selection and scroll
+  position as results arrive. Scan files sits below the sidebar's ready message;
+  the ordinary file table stays visible until scanning starts. Selecting a result
+  selects every group copy and compares saved tags and copy details in the sidebar.
 - Overlay scrollbars fade in during vertical or horizontal scrolling and fade
   away after idle, without reserving table space. Both remain draggable.
 - Grouped command ribbon with delayed tooltips, file selection and ordering,
@@ -22,6 +37,14 @@ Compact command ribbon and responsive workspace.
 
 ### Changed
 
+- Search stays open with value-only muted chips and one suggested rule per field.
+  Regex and case-sensitive controls are removed; recalled presets search literally
+  and case-insensitively too.
+- Duplicates mode clears the previous query and reveals its inspector on compact
+  layouts. Suggestions use only verified scan results, while Scan files always
+  examines all opened files. Selected groups grow as more copies are verified.
+- Duplicate comparison shows shared saved tags, differing fields, full copy paths,
+  formats, durations and artwork status, with bounded pages for large groups.
 - Row bands fill the viewport while data columns retain their chosen widths.
   Auto-fit measures full contents, and manual resizing disables automatic fitting.
 - The existing panel control opens a smooth, width-limited sidebar. The folder
@@ -40,8 +63,10 @@ Compact command ribbon and responsive workspace.
   marked as front covers while other embedded images remain intact.
 - Rotated artwork encodes asynchronously while retaining the browser's image
   format and colour handling.
-- Filter disclosure and sidebar resizing preserve loaded table rows and active
-  cell edits instead of rebuilding the table on each animation frame.
+- Sidebar resizing preserves loaded table rows and active cell edits instead of
+  rebuilding the table on each animation frame.
+- Cancelled scans and stale search replies cannot restore dismissed results or
+  suggestions. Keyboard group selection preserves pending previews and Apply scope.
 - Large cell ranges avoid copying the full selection during scrolling. Variable
   row heights update an indexed layout while large libraries remain virtualized.
 - Fractional row heights keep the scrollbar extent stable as tracks enter view.

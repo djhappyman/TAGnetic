@@ -28,20 +28,24 @@ const settle = page => page.evaluate(async () => {
   await new Promise(resolve => requestAnimationFrame(resolve));
 });
 
-test('filter disclosure animates without rewriting inherited file-column styles', async ({ page }) => {
+test('permanent filter and preset interactions do not rewrite inherited file-column styles', async ({ page }) => {
   await settle(page);
   await page.evaluate(() => {
     window.fileColumnStyleChanges = 0;
     const observer = new MutationObserver(records => { window.fileColumnStyleChanges += records.length; });
     observer.observe(document.querySelector('.files-col'), { attributes: true, attributeFilter: ['style'] });
   });
-  for (const expanded of ['true', 'false']) {
-    await page.locator('#filter-panel-toggle').click();
-    await expect(page.locator('#filter-panel-toggle')).toHaveAttribute('aria-expanded', expanded);
+  for (let iteration = 0; iteration < 2; iteration++) {
+    await page.keyboard.press('Control+f');
+    await expect(page.locator('#filter')).toBeFocused();
+    await page.locator('#presets-btn').click();
+    await expect(page.locator('#presets-menu')).toBeVisible();
+    await page.keyboard.press('Escape');
     await settle(page);
   }
   expect(await page.evaluate(() => window.fileColumnStyleChanges)).toBe(0);
-  await expect(page.locator('#filter')).toBeHidden();
+  await expect(page.locator('#filter')).toBeVisible();
+  await expect(page.locator('#filter-panel-toggle')).toHaveCount(0);
 });
 
 for (const theme of ['light', 'dark']) test(`${theme}: status text updates preserve player allocation until geometry changes`, async ({ page }) => {

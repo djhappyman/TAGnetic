@@ -1,10 +1,13 @@
+import { interpretQueryText } from './js/query-language.js';
 import { connectRibbonActions } from './js/ribbon-actions.js';
 import { formatNumber } from './js/number-format.js';
 import { movableDirections, shiftSelectedOrder } from './js/row-order.js';
 import { createApplyFeedback } from './js/apply-feedback.js';
 import { initStaging, renderStaging } from "./js/staging.js";
 import { connectWorkspaceController, publishWorkspaceMode, publishWorkspaceSubtab } from './lib/workspace-state';
-import { compileQuery, normalizeConditions, conditionLabel, coverState } from "./js/filter-query.js";
+import { normalizeConditions, coverState } from "./js/filter-query.js";
+import { emptyRoot, normalizeRoot, legacyRoot, normalizeQuery, queryLabel, registerQueryFields, scopedText, newCondition, defaultOperator } from "./js/query-model.js";
+import { createLibraryQueryClient } from "./js/library-query-client.js";
 import { createGroupMotion } from "./js/group-motion.js";
 import { clearLiveInputs, hasLiveInputs, liveInputChanged, recordLiveField, recordLiveFields, hasInvalidLiveFields, hasInvalidPreview, removeAppliedLiveInputs, undoLiveImport, adoptLiveCoverPlan } from "./js/live-preview.js";
 "use strict";
@@ -56,7 +59,8 @@ import { scheduleMaskExample, syncCarryToggles } from "./js/renamer.js";
 import "./js/maskbuilder.js";
 import { previewTagsFromName, refreshNameProbe, scheduleNameProbe } from "./js/fromname.js";
 import { refreshTextProbe, scheduleTextProbe } from "./js/fromtext.js";
-import { refreshDeduplicator, runDuplicateScan } from "./js/dedup.js";
+import { createDuplicateJobs } from "./js/duplicate-jobs.js";
+import { duplicateGroupTitle, duplicateSelectionDetail } from "./js/duplicate-selection.js";
 import {
   chooseCover,
   embedCoverFile,
@@ -172,9 +176,6 @@ import {
   applyValueFont,
   checkboxColEnabled,
   applyCheckboxCol,
-  regexModeEnabled,
-  caseSensitiveEnabled,
-  saveFilterMode,
   tableFontPx,
   applyTableFont,
   tracklistFontPx,
@@ -204,8 +205,6 @@ import {
   sortKey, setSortKey, sortDir, setSortDir,
   manualOrder, setManualOrder,
   filterText, setFilterText,
-  filterRegex, setFilterRegex,
-  filterCase, setFilterCase,
   filterError, setFilterError,
   filterQuery, setFilterQuery,
   groupBy, setGroupByValue, collapsedGroups,
@@ -303,11 +302,10 @@ function sessionSnapshot() {
     version: 1, root: resumableRoot,
     mode: currentMode,
     subtab: document.querySelector('.subtab.active')?.dataset.subtab,
-    filter: filterText, conditions: filterConditions, conditionMode: filterConditionMode, regex: filterRegex, caseSensitive: filterCase,
+    filter: filterText, queryRoot: filterRoot, commandMode, duplicateKind, conditions: [], conditionMode: filterConditionMode,
     sortKey, sortDir, groupBy,
     collapsed: [...collapsedGroups], selection: [...selection],
     scrollTop: tableWrap.scrollTop, scrollLeft: tableWrap.scrollLeft,
-    filterOpen: el('filter-panel-toggle')?.getAttribute('aria-expanded') === 'true',
   };
 }
 function flushSessionView() {
@@ -415,38 +413,97 @@ let filterConditionMode = 'all';
 let filterPending = false;
 let filterMessage = '';
 
-function filterModel() {
-  return { version: 1, text: filterText, regex: filterRegex, caseSensitive: filterCase,
-    conditions: filterConditions, mode: filterConditionMode };
+let filterRoot = emptyRoot();
+let commandMode = 'search';
+let duplicateKind = 'exact';
+let duplicateMessage = '';
+let duplicateScanning=false;
+let duplicateStatus='not_scanned';
+let duplicateFoundCount=0;
+let duplicateLatestRevision=0;
+let duplicateRenderedRevision=0;
+let duplicateRefreshPending=false;
+let duplicateQueryKey='';
+let duplicateGroupOrder=new Map();
+let duplicateGroupLookup=new Map();
+let duplicateGroups = [];
+let duplicateScanStarted=false;
+let selectedDuplicateGroupId=null;
+let duplicateSelectionCache=null;
+let duplicateSelectionRevision=-1;
+let nativeMatchPaths = null;
+let nativeMatchRevision = -1;
+let scheduledQueryRevision = -1;
+let queryRetry=0;
+const libraryQueryClient = createLibraryQueryClient(invoke);
+function resetDuplicatePublications(){duplicateLatestRevision=0;duplicateRenderedRevision=0;duplicateRefreshPending=false;duplicateQueryKey='';duplicateGroupOrder.clear();clearDuplicateSelection();}
+function duplicateResultsActive(){return commandMode==='duplicates'&&duplicateScanStarted;}
+function clearDuplicateSelection(){
+  const hadSelection=selectedDuplicateGroupId!=null||duplicateSelectionCache!=null;
+  selectedDuplicateGroupId=null;duplicateSelectionCache=null;duplicateSelectionRevision=-1;
+  if(hadSelection)document.dispatchEvent(new CustomEvent('tagrex:duplicate-selection',{detail:{group:null}}));
+}
+function selectionMatchesDuplicate(group){return group.paths.length===selection.size&&group.paths.every(path=>selection.has(path));}
+function publishDuplicateSelection(force=false){
+  const group=duplicateResultsActive()&&selectedDuplicateGroupId!=null?duplicateGroupLookup.get(`duplicate:${selectedDuplicateGroupId}`):null;
+  if(!group||!selectionMatchesDuplicate(group)){
+    const hadSelection=selectedDuplicateGroupId!=null||duplicateSelectionCache!=null;
+    clearDuplicateSelection();
+    if(force&&!hadSelection)document.dispatchEvent(new CustomEvent('tagrex:duplicate-selection',{detail:{group:null}}));
+    return;
+  }
+  if(force||duplicateSelectionCache?.source!==group||duplicateSelectionRevision!==contentRevision){
+    duplicateSelectionCache={source:group,detail:duplicateSelectionDetail(group,trackAt)};
+    duplicateSelectionRevision=contentRevision;
+    document.dispatchEvent(new CustomEvent('tagrex:duplicate-selection',{detail:{group:duplicateSelectionCache.detail}}));
+  }
+}
+function reconcileDuplicateSelection(groups){
+  if(selectedDuplicateGroupId==null)return;
+  const previous=duplicateGroupLookup.get(`duplicate:${selectedDuplicateGroupId}`);
+  const next=groups.find(group=>group.id===selectedDuplicateGroupId);
+  if(!next||!previous||!selectionMatchesDuplicate(previous)){clearDuplicateSelection();return;}
+  // Selection belongs to this whole group, so newly verified copies join it.
+  if(!selectionMatchesDuplicate(next)){selection.clear();for(const path of next.paths)selection.add(path);}
+}
+document.addEventListener('tagrex:request-duplicate-selection',()=>publishDuplicateSelection(true));
+function refreshDuplicatePublications(){
+  if(commandMode!=='duplicates'||filterError||duplicateLatestRevision<=duplicateRenderedRevision)return;
+  if(filterPending){duplicateRefreshPending=true;return;}
+  scheduleFilterRender();
+}
+function orderedDuplicateGroups(groups){
+  for(const group of groups)if(!duplicateGroupOrder.has(group.id))duplicateGroupOrder.set(group.id,duplicateGroupOrder.size);
+  if(groups.every((group,i)=>!i||duplicateGroupOrder.get(groups[i-1].id)<=duplicateGroupOrder.get(group.id)))return groups;
+  return [...groups].sort((a,b)=>duplicateGroupOrder.get(a.id)-duplicateGroupOrder.get(b.id));
+}
+function hasLibraryQuery() { return commandMode==='duplicates'?duplicateScanStarted:!!filterText||!!filterRoot.children.length; }
+function filterModel(extraField=null) {
+  const keys=allColumnKeys();registerQueryFields(keys.map(key=>({key,label:columnLabel(key)})));
+  const used=new Set(extraField?[extraField]:[]);
+  const visit=node=>{if(node.kind==='group')node.children.forEach(visit);else used.add(node.field);};visit(filterRoot);
+  const scoped=scopedText(filterText);if(scoped)used.add(scoped.field);
+  return {...normalizeQuery({text:filterText,root:filterRoot,commandMode,duplicateKind}),customFields:[...used].flatMap(key=>{const field=customColumnOf(key);return field?[{key,mask:field.pattern}]:[];})};
 }
 function publishFilterState() {
   document.dispatchEvent(new CustomEvent('tagrex:filter-state', { detail: {
-    ...filterModel(), pending: filterPending, error: filterMessage,
-    matched: matchingTrackCount, total: tracks.length,
-    hidden: [...selection].filter(path => !viewPathIndex.has(path)).length,
+    // Feedback must also work for invalid input. Revalidating here would throw
+    // before the error could be shown or Apply disabled.
+    text:filterText, root:filterRoot, mode:commandMode,
+    commandMode, duplicateKind, duplicateMessage, duplicateScanning, duplicateStatus, duplicateScanStarted,
+    conditions:filterConditions, pending:filterPending, error:filterMessage,
+    matched:matchingTrackCount, total:tracks.length,
+    hidden:[...selection].filter(path=>!viewPathIndex.has(path)).length,
   } }));
 }
 function recompileFilter() {
-  const compiled = compileQuery(filterModel(), {
-    fields: allColumnKeys(), fieldValue,
-    coverLabel: state => msg(`table.artwork.${state}`),
-    searchText(track, folded) {
-      let cached = trackSearchText.get(track);
-      if (!cached || cached.tags !== track.tags || cached.path !== track.path) {
-        const text = [fileName(track.path), ...Object.values(track.tags)].join(' ');
-        cached = { tags: track.tags, path: track.path, text, lower: text.toLowerCase() };
-        trackSearchText.set(track, cached);
-      }
-      return folded ? cached.lower : cached.text;
-    },
-  });
-  filterMessage = compiled.error;
-  setFilterError(!!compiled.error);
-  // Invalid input retains the previous predicate instead of broadening scope.
-  if (!compiled.error) setFilterQuery(compiled);
+  try {
+    const model=filterModel();
+    filterMessage='';queryRetry=0;setFilterError(false);setFilterQuery({model,match:null});
+  } catch(error) {filterMessage=error.message;setFilterError(true);}
 }
 function matchesFilter(track) {
-  return healthAllows(track.path) && (!filterQuery.match || filterQuery.match(track));
+  return healthAllows(track.path) && (!hasLibraryQuery() || !nativeMatchPaths || nativeMatchPaths.has(track.path));
 }
 
 function updateSortIndicators() {
@@ -468,17 +525,9 @@ function updateSortIndicators() {
 }
 
 // ---- filter mode + saved presets (#44) ----
-// Reflect the current mode flags onto the two in-box toggles and the input's
-// error state, and re-derive the parsed query. Call after any change to the
-// filter text or flags, before renderTracks.
+// Revalidate query rules and reflect the input/error state before rendering.
 function syncFilterControls() {
   recompileFilter();
-  const reBtn = el("filter-regex");
-  const caseBtn = el("filter-case");
-  reBtn.classList.toggle("on", filterRegex);
-  reBtn.setAttribute("aria-pressed", String(filterRegex));
-  caseBtn.classList.toggle("on", filterCase);
-  caseBtn.setAttribute("aria-pressed", String(filterCase));
   const box = el("filter");
   // The error and the empty state belong to the field around the box (#547):
   // the red border, and a clear button only when there is text to clear.
@@ -491,14 +540,16 @@ function syncFilterControls() {
   updateDiffBar();
 }
 
-// A named preset captures the full view query: filter text + mode flags, the
+// A named preset captures the full view query: filter text and rules, the
 // sort column/direction, and the grouping — everything the user tuned by hand.
 // Older UIs must not see a structured preset and silently ignore its conditions.
 const PRESETS_STORAGE_KEY = "tagrex.filterPresets";
-const conditionPresetsKey = `${PRESETS_STORAGE_KEY}.conditions.v1`;
+const legacyConditionPresetsKey = `${PRESETS_STORAGE_KEY}.conditions.v1`;
+const conditionPresetsKey = `${PRESETS_STORAGE_KEY}.conditions.v2`;
 function loadPresets() {
   const byName = new Map();
-  for (const key of [PRESETS_STORAGE_KEY, conditionPresetsKey]) {
+  const stores=localStorage.getItem(conditionPresetsKey)!==null?[conditionPresetsKey]:[PRESETS_STORAGE_KEY,legacyConditionPresetsKey];
+  for (const key of stores) {
     try {
       const list = JSON.parse(localStorage.getItem(key) || '[]');
       if (Array.isArray(list)) for (const preset of list) {
@@ -510,22 +561,21 @@ function loadPresets() {
 }
 function savePresets(list) {
   try {
-    localStorage.setItem(conditionPresetsKey, JSON.stringify(list.filter(p => p.conditions?.length)));
-    localStorage.setItem(PRESETS_STORAGE_KEY, JSON.stringify(list.filter(p => !p.conditions?.length)));
-  } catch { /* Optional persistence; current filtering remains usable. */ }
+    const converted=list.map(p=>({...p,queryVersion:2,root:p.root?normalizeRoot(p.root):legacyRoot(normalizeConditions(p.conditions),p.conditionMode||'all'),conditions:[]}));
+    localStorage.setItem(conditionPresetsKey,JSON.stringify(converted));
+  } catch { /* Keep the original stores recoverable when validation/storage fails. */ }
 }
 
 // Store the current view under `name` (replacing a same-named one).
 function saveCurrentPreset(name) {
   name = name.trim();
   if (!name) return;
+  if (filterError) { toast('Fix the query before saving a preset.', true); return false; }
   const list = loadPresets().filter((p) => p.name !== name);
   list.push({
     name,
-    queryVersion: 1, conditions: filterConditions, conditionMode: filterConditionMode,
+    queryVersion: 2, root: filterRoot, commandMode, duplicateKind, conditions: [], conditionMode: filterRoot.mode,
     filter: filterText,
-    regex: filterRegex,
-    caseSensitive: filterCase,
     sortKey,
     sortDir,
     group: groupBy,
@@ -539,14 +589,18 @@ function saveCurrentPreset(name) {
 // then reflect them onto every control and repaint.
 function applyPreset(p) {
   try {
-    if ((p.queryVersion != null && p.queryVersion !== 1) || (p.conditionMode != null && !['all', 'any'].includes(p.conditionMode))) throw new Error('Unsupported saved filter version.');
-    filterConditions = normalizeConditions(p.conditions);
-    filterConditionMode = p.conditionMode === 'any' ? 'any' : 'all';
+    if ((p.queryVersion != null && ![1,2].includes(p.queryVersion)) || (p.conditionMode != null && !['all', 'any'].includes(p.conditionMode))) throw new Error('Unsupported saved filter version.');
+    filterRoot = p.queryVersion === 2 ? normalizeRoot(p.root) : legacyRoot(normalizeConditions(p.conditions), p.conditionMode === 'any' ? 'any' : 'all');
+    filterConditions = filterRoot.children;filterConditionMode=filterRoot.mode;
+    const nextMode=p.commandMode==='duplicates'?'duplicates':'search';
+    const nextKind=['exact','same_audio','likely'].includes(p.duplicateKind)?p.duplicateKind:'exact';
+    if(nextMode!==commandMode||nextKind!==duplicateKind){
+      if(commandMode==='duplicates'){duplicateJobs.cancel();duplicateJobs.invalidate();}
+      duplicateGroups=[];duplicateMessage='';duplicateScanStarted=false;duplicateScanning=false;duplicateStatus='not_scanned';duplicateFoundCount=0;resetDuplicatePublications();
+    }
+    commandMode=nextMode;duplicateKind=nextKind;
   } catch (error) { toast(error.message, true); return; }
   setFilterText(p.filter || "");
-  setFilterRegex(!!p.regex);
-  setFilterCase(!!p.caseSensitive);
-  saveFilterMode();
   el("filter").value = filterText;
   syncFilterControls();
 
@@ -554,6 +608,8 @@ function applyPreset(p) {
 
   if (p.sortKey) applySort(p.sortKey, p.sortDir === -1 ? -1 : 1);
   else renderTracks();
+  setMode(commandMode==='duplicates'?'deduplicator':currentMode==='deduplicator'?'tagger':currentMode);
+  scheduleFilterRender();
 }
 
 let presetsMenuKey = null;
@@ -614,8 +670,9 @@ function renderPresetsMenu() {
   save.textContent = msg("action.save");
   const commit = () => {
     if (input.value.trim()) {
-      saveCurrentPreset(input.value);
+      if (saveCurrentPreset(input.value) === false) return;
       input.value = "";
+      menu.hidden = true;
     }
   };
   save.addEventListener("click", commit);
@@ -632,12 +689,11 @@ function renderPresetsMenu() {
 // A human-readable one-liner for a preset's tooltip.
 function presetSummary(p) {
   const bits = [];
-  try { bits.push(...normalizeConditions(p.conditions).map(conditionLabel)); } catch { bits.push('Invalid conditions'); }
+  try { bits.push(...(p.root ? normalizeRoot(p.root) : legacyRoot(normalizeConditions(p.conditions),p.conditionMode||'all')).children.map(queryLabel)); } catch { bits.push('Invalid conditions'); }
+  if(p.commandMode==='duplicates') bits.push(`Duplicates: ${p.duplicateKind||'exact'}`);
   if (p.filter) {
     bits.push(
-      msg("app.presetFilter", { filter: p.filter }) +
-        (p.regex ? " (regex)" : "") +
-        (p.caseSensitive ? " (Aa)" : ""),
+      msg("app.presetFilter", { filter: p.filter }),
     );
   }
   if (p.sortKey) {
@@ -887,6 +943,13 @@ function buildGroupHeader(key, count) {
   tr.dataset.group = key;
   tr.tabIndex = -1;
   tr.setAttribute('aria-expanded', String(!collapsed));
+  const duplicate=duplicateGroupLookup.get(key);
+  if(commandMode==='duplicates'&&duplicate&&!stagedView){
+    tr.classList.add('duplicate-group');
+    tr.innerHTML=`<td class="group-cell" colspan="${tableColumnKeys().length+2}"><span class="group-heading-content"><span class="group-caret">${ico('caret-down')}</span><span class="group-label"></span><span class="group-count muted"></span></span></td>`;
+    paintDuplicateHeader(tr,duplicate,count);
+    return tr;
+  }
   const dest = destGroups.get(key);
   if (dest || key === UNCHANGED_GROUP_KEY) {
     // A destination group (#385): where these files land, whether that folder
@@ -917,6 +980,14 @@ function buildGroupHeader(key, count) {
       <span class="group-count muted">· ${tn("unit.file", count)}</span>
     </span></td>`;
   return tr;
+}
+
+function paintDuplicateHeader(row,group,count){
+  const title=duplicateGroupTitle(group,trackAt);
+  const label=row.querySelector('.group-label'),copies=row.querySelector('.group-count');
+  if(label.textContent!==title)label.textContent=title;
+  const text=`${count} copies`;if(copies.textContent!==text)copies.textContent=text;
+  row.setAttribute('aria-label',`${title}, ${text}. ${group.reason}`);
 }
 
 // ---- the windowed table (#189) ----
@@ -1045,11 +1116,14 @@ function labelDestGroups() {
 // Rebuild the model from the track list, the filter, the grouping and the staged
 // plan. No DOM work at all — the window render is what touches the table.
 function buildViewModel(preparedFilter = null) {
-  const folderOrder = folderOrderForSort();
+  const duplicateView=duplicateResultsActive()&&!stagedView;
+  const folderOrder = duplicateView?null:folderOrderForSort();
   // A staged change always stays visible so the whole plan can be reviewed and
   // scoped, even if the current filter would otherwise hide it (#117).
-  matchingTrackCount = 0;
-  const visible = tracks.filter((track) => {
+  matchingTrackCount = duplicateView?(nativeMatchPaths?.size||0):0;
+  // Native duplicate groups already define their full companion scope. Avoid
+  // filtering and folder-ordering the entire library again on each publication.
+  const visible = duplicateView?[]:tracks.filter((track) => {
     const matches = preparedFilter ? preparedFilter.has(track.path) : matchesFilter(track);
     if (matches) matchingTrackCount += 1;
     if (stagedView) return !!diffByPath?.has(track.path); // every pending file, regardless of the Files filter
@@ -1060,18 +1134,32 @@ function buildViewModel(preparedFilter = null) {
   navPaths = [];
   groupPaths = new Map();
   viewGroups = [];
+  viewPathIndex=new Map();navPathIndex=new Map();itemIndexByPath=new Map();
   const pushTrack = (track, groupKey, shown) => {
-    if (shown) viewItems.push({ kind: "track", track, groupKey });
+    if (shown) {itemIndexByPath.set(track.path,viewItems.length);viewItems.push({ kind: "track", track, groupKey });}
     if (track.unreadable) return; // inert: never selectable, never navigable
+    viewPathIndex.set(track.path,viewPaths.length);
     viewPaths.push(track.path);
-    if (shown) navPaths.push(track.path);
+    if (shown) {navPathIndex.set(track.path,navPaths.length);navPaths.push(track.path);}
   };
   destGrouping = Boolean(
     stagedView && diffByPath &&
       [...diffByPath.values()].some((c) => c.rename_to && diffDir(c.rename_to) !== diffDir(c.path)),
   );
   destGroups = new Map();
-  if (destGrouping) {
+  if(duplicateView){
+    duplicateGroupLookup=new Map();
+    for(const group of duplicateGroups){
+      const key=`duplicate:${group.id}`;duplicateGroupLookup.set(key,group);
+      const shown=!collapsedGroups.has(key),paths=[];let header=null;
+      for(const path of group.paths){
+        const track=trackAt(path);if(!track)continue;
+        if(!header){header={kind:'group',key,count:0};viewGroups.push(key);viewItems.push(header);}
+        header.count++;pushTrack(track,key,shown);if(!track.unreadable)paths.push(path);
+      }
+      if(header)groupPaths.set(key,paths);
+    }
+  } else if (destGrouping) {
     // Destinations first, in first-appearance order; whatever the plan leaves
     // where it is follows in one "staying where they are" group.
     const destOrder = [];
@@ -1146,12 +1234,6 @@ function buildViewModel(preparedFilter = null) {
   } else {
     for (const track of visible) pushTrack(track, null, true);
   }
-  viewPathIndex = new Map(viewPaths.map((p, i) => [p, i]));
-  navPathIndex = new Map(navPaths.map((p, i) => [p, i]));
-  itemIndexByPath = new Map();
-  viewItems.forEach((item, i) => {
-    if (item.kind === "track") itemIndexByPath.set(item.track.path, i);
-  });
   itemHeights = new Array(viewItems.length).fill(null);
   rowEstimateMeasured = groupEstimateMeasured = false;
   recomputeItemTops();
@@ -1254,7 +1336,7 @@ function dropRow(tr) {
 // every scroll event: it is bounded by the window, not by the library — and a
 // scroll that moves the window by a row or two only builds those rows, because
 // an overlapping window is trimmed and extended rather than rebuilt.
-function renderWindow({ force = false, refreshGrid = true, scrollOnly = false } = {}) {
+function renderWindow({ force = false, refreshGrid = true, scrollOnly = false, preserveDuplicateRows = false } = {}) {
   // Before the table is shown for the first time it has no height yet; a nominal
   // one keeps the first render from being a single row.
   const viewportHeight = tableWrap.clientHeight || 600;
@@ -1271,6 +1353,25 @@ function renderWindow({ force = false, refreshGrid = true, scrollOnly = false } 
   const last = windowed ? Math.min(viewItems.length - 1, itemIndexAt(viewportTop + viewportHeight) + OVERSCAN_ROWS) : viewItems.length - 1;
   if (!force && first === renderedFirst && last === renderedLast) return;
   if (force) spreadsheet?.beforePaint();
+  if(force&&preserveDuplicateRows&&commandMode==='duplicates'&&!stagedView){
+    const prior=new Map([...tracksBody.children].filter(row=>!row.classList.contains('spacer')).map(row=>[row.dataset.path?`track:${row.dataset.path}`:`group:${row.dataset.group}`,row]));
+    const spacers=[...tracksBody.children].filter(row=>row.classList.contains('spacer'));
+    const desired=[spacers[0]||spacerRow(0)];
+    renderedFirst=first;renderedLast=last;renderedRows=new Map();
+    for(let i=first;i<=last;i++){
+      const item=viewItems[i],key=item.kind==='track'?`track:${item.track.path}`:`group:${item.key}`;
+      const row=prior.get(key)||buildItemRow(i);
+      row.setAttribute('aria-rowindex',String(gridRowNumber(i)));
+      if(item.kind==='track')renderedRows.set(item.track.path,row);
+      else {const group=duplicateGroupLookup.get(item.key);if(group)paintDuplicateHeader(row,group,item.count);}
+      desired.push(row);
+    }
+    desired.push(spacers[1]||spacerRow(0));
+    const wanted=new Set(desired);let cursor=tracksBody.firstElementChild;
+    for(const row of desired){if(row===cursor)cursor=cursor.nextElementSibling;else tracksBody.insertBefore(row,cursor);}
+    for(const row of [...tracksBody.children])if(!wanted.has(row))row.remove();
+    setSpacerHeights();measureRenderedRows();if(refreshGrid)spreadsheet?.refresh({scrollOnly});return;
+  }
   const rowCount = renderedLast - renderedFirst + 1;
   const intact = rowCount > 0 && tracksBody.children.length === rowCount + 2;
   const overlaps = intact && first <= renderedLast && last >= renderedFirst;
@@ -1418,20 +1519,23 @@ document.addEventListener("tagrex:dock-resize-end", () => {
   if (tableResizeNeedsMeasure) scheduleTableResize();
 });
 
-function renderTracks({ preparedFilter = null } = {}) {
+function renderTracks({ preparedFilter = null, preserveDuplicateRows = false } = {}) {
+  const anchorIndex=preserveDuplicateRows?itemIndexAt(tableWrap.scrollTop):-1;
+  const anchor=anchorIndex>=0?viewItems[anchorIndex]:null;
+  const anchorOffset=anchor?itemOffsets.top(anchorIndex)-tableWrap.scrollTop:0;
   setReviewColumns(stagedView);
   syncTableColumns();
-  filterRenderVersion++;
-  filterPending = false;
+  if(hasLibraryQuery() && nativeMatchRevision!==contentRevision && scheduledQueryRevision!==contentRevision && !filterError) scheduleFilterRender();
   updateSortIndicators();
   tracksEmpty.hidden = stagedView ? !!diffByPath?.size : tracks.length > 0;
   tracksEmpty.textContent = stagedView ? msg('staging.empty') : msg('table.empty');
   headHeight = el("tracks").tHead?.offsetHeight || headHeight;
   buildViewModel(preparedFilter);
-  renderWindow({ force: true, refreshGrid: false });
+  if(anchor){const index=anchor.kind==='track'?itemIndexByPath.get(anchor.track.path):viewItems.findIndex(item=>item.kind==='group'&&item.key===anchor.key);if(index!=null&&index>=0)tableWrap.scrollTop=itemOffsets.top(index)-anchorOffset;}
+  renderWindow({ force: true, refreshGrid: false, preserveDuplicateRows });
 
   // The group toggle only makes sense while grouped (#32).
-  el("toggle-groups").hidden = !groupBy;
+  el("toggle-groups").hidden = !groupBy && !duplicateResultsActive();
   syncGroupToggle();
 
   // While diffing the sel column is the apply scope, not the selection, so the
@@ -1443,7 +1547,7 @@ function renderTracks({ preparedFilter = null } = {}) {
   // Sticky autofit (#151): re-fit only when what the cells show has actually
   // changed — this runs on every paint, including a plain row click.
   maybeAutofit();
-  scheduleAutomaticTransformPreview();
+  if(commandMode!=='duplicates') scheduleAutomaticTransformPreview();
   updateTransformScope();
   publishFilterState();
 }
@@ -1762,7 +1866,7 @@ function updateDiffBar(scope) {
   if (applyBtn.getAttribute("aria-label") !== applyLabel) applyBtn.setAttribute("aria-label", applyLabel);
   const label = el("ab-apply-label");
   if (label.textContent !== applyLabel) label.textContent = applyLabel;
-  applyBtn.disabled = filterPending || !!filterError || n === 0 || !!tracksBody.querySelector('[contenteditable="true"]') || scope.planInvalid || (isAutomaticTransformPreview() && (scope.busy || scope.invalid || scope.failed));
+  applyBtn.disabled = commandMode==='duplicates' || filterPending || !!filterError || n === 0 || !!tracksBody.querySelector('[contenteditable="true"]') || scope.planInvalid || (isAutomaticTransformPreview() && (scope.busy || scope.invalid || scope.failed));
   const pending = filterPending || (isAutomaticTransformPreview() && scope.busy);
   const blocked = applyBtn.disabled;
   el("diff-actionbar").dataset.blocked = String(blocked);
@@ -2234,20 +2338,19 @@ async function afterOpen(label, version = openVersion, savedView = null) {
   setSortDir(1);
   setManualOrder(false);
   filterConditions = [];
+  filterRoot=emptyRoot();nativeMatchPaths=null;duplicateGroups=[];duplicateJobs.invalidate();duplicateScanStarted=false;duplicateScanning=false;duplicateStatus='not_scanned';duplicateFoundCount=0;duplicateMessage='';resetDuplicatePublications();libraryQueryClient.invalidate();nativeMatchRevision=-1;scheduledQueryRevision=-1;
   filterConditionMode = "all";
   setFilterText("");
   el("filter").value = "";
   clearHealth(); // a check belongs to the library it was run on (#436)
-  syncFilterControls(); // clears the parsed query + any regex-error state
+  syncFilterControls(); // clears invalid query state
   setGroupBy(dropFolders ? "drop" : groupByPref(), { persist: false, rerender: false });
   folderOrderForSort();
   if (savedView) {
-    filterConditions = normalizeConditions(savedView.conditions);
-    filterConditionMode = savedView.conditionMode === "any" ? "any" : "all";
+    filterRoot=savedView.queryRoot?normalizeRoot(savedView.queryRoot):legacyRoot(normalizeConditions(savedView.conditions),savedView.conditionMode==='any'?'any':'all');
+    filterConditions=filterRoot.children;filterConditionMode=filterRoot.mode;commandMode=savedView.commandMode||'search';duplicateKind=savedView.duplicateKind||'exact';
     setFilterText(savedView.filter);
     el("filter").value = savedView.filter;
-    setFilterRegex(savedView.regex);
-    setFilterCase(savedView.caseSensitive);
     syncFilterControls();
     const validColumns = new Set(allColumnKeys());
     setSortKey(validColumns.has(savedView.sortKey) || savedView.sortKey === 'artwork' ? savedView.sortKey : null);
@@ -2265,8 +2368,6 @@ async function afterOpen(label, version = openVersion, savedView = null) {
   }
   renderTracks();
   if (savedView) {
-    const toggle = el('filter-panel-toggle');
-    if (toggle && (toggle.getAttribute('aria-expanded') === 'true') !== savedView.filterOpen) toggle.click();
     tableWrap.scrollTop = savedView.scrollTop;
     tableWrap.scrollLeft = savedView.scrollLeft;
     renderWindow();
@@ -2425,6 +2526,7 @@ function freezeMutationSurfaces({ scrollableFiles = false } = {}) {
 }
 
 async function apply() {
+  if(commandMode==='duplicates')return;
   if (!previewPlan || previewPlan.changes.length === 0) return;
   if (isAutomaticTransformPreview() && (automaticTransformScope().busy || automaticTransformScope().failed || automaticTransformScope().invalid)) return;
   if (filterPending || filterError || hasInvalidPreview(previewPlan)) return;
@@ -2628,12 +2730,13 @@ const MODE_REFRESH = {
   tagger: refreshTagger,
   generator: refreshGenerator,
   exporter: refreshExporter,
-  deduplicator: refreshDeduplicator,
+  deduplicator: () => {},
 };
 // TAGGER is the primary tool, so it's the default tab (see index.html). Keep
 // this in sync with the tab/panel marked active/visible there.
 
 function setMode(name) {
+  const queryToggle=el('query-mode-toggle'),fromQueryToggle=document.activeElement===queryToggle;
   publishWorkspaceMode(name);
   setCurrentMode(name);
   // The dock borrows the GENERATOR panel's chain block (#149, #233); this puts
@@ -2652,22 +2755,36 @@ function setMode(name) {
   // read-only results replace the file table (and the Files/Preview strip), the
   // way its controls sit in the right panel like every other mode. Leaving it
   // restores the normal table view.
-  const dedup = name === "deduplicator" && !isAutomaticTransformPreview();
-  document.body.classList.toggle("mode-deduplicator", dedup);
-  // TAGGER manages its own scroll/gutter per subtab (#374) — .mode-col's own
-  // gutter reservation is redundant dead weight while it's showing.
-  document.body.classList.toggle("mode-tagger", name === "tagger");
-  if (dedup) {
-    // The read-only scan owns the main area; a staged plan's diff-state stays
-    // intact underneath — its floating bar just hides until a normal mode returns.
-    el("files-view").hidden = true;
-    el("duplicates-view").hidden = false;
-    el("diff-actionbar").hidden = true;
-  } else {
-    el("duplicates-view").hidden = true;
-    showView("files");
-    if (diffByPath) el("diff-actionbar").hidden = false;
+  const dedup=name==='deduplicator';
+  const changed=commandMode!==(dedup?'duplicates':'search');
+  if(commandMode==='duplicates'&&!dedup){duplicateJobs.cancel();duplicateJobs.invalidate();duplicateGroups=[];duplicateMessage='';}
+  commandMode=dedup?'duplicates':'search';
+  if(changed){
+    filterRoot=emptyRoot();filterConditions=[];filterConditionMode='all';
+    nativeMatchPaths=null;duplicateGroups=[];duplicateScanStarted=false;duplicateScanning=false;duplicateStatus='not_scanned';duplicateFoundCount=0;resetDuplicatePublications();
+    libraryQueryClient.cancel();
+    setFilterText('');el('filter').value='';
+    el('filter').dispatchEvent(new Event('input',{bubbles:true}));
+    document.dispatchEvent(new Event('tagrex:query-suggest-dismiss'));
   }
+  document.body.classList.toggle('mode-deduplicator',dedup);
+  document.body.classList.toggle('mode-tagger',name==='tagger');
+  el('duplicates-view').hidden=true;
+  showView('files');
+  if(dedup)el('diff-actionbar').hidden=true;
+  else if(diffByPath)el('diff-actionbar').hidden=false;
+  if(dedup){
+    document.dispatchEvent(new CustomEvent('tagrex:reveal-module',{detail:'inspector'}));
+    // A compact layout can hide the file pane containing the mode toggle.
+    // Keep keyboard focus in the newly revealed workflow in that case.
+    if(fromQueryToggle)requestAnimationFrame(()=>requestAnimationFrame(()=>{
+      if(document.querySelector('.dock-frame')?.dataset.dockCompact==='true'||!queryToggle.getClientRects().length){
+        const scan=el('query-duplicate-scan');
+        (scan&&!scan.disabled?scan:el('query-duplicate-kind'))?.focus({preventScroll:true});
+      }
+    }));
+  }
+  if(changed){syncFilterControls();scheduleFilterRender();}
   (MODE_REFRESH[name] || (() => {}))();
 }
 
@@ -2841,6 +2958,7 @@ function showFileCtx(x, y, tr) {
 // this is a filter over it — and a re-read (#212) brings them all back, which is
 // what makes "remove from the list" safe to offer beside a deletion.
 function dropFromList(paths) {
+  if(commandMode==='duplicates')return;
   const gone = new Set(paths);
   for (const path of gone) {
     selection.delete(path);
@@ -2856,6 +2974,7 @@ function dropFromList(paths) {
 }
 
 async function trashFiles(paths) {
+  if(commandMode==='duplicates'){toast('Return to Search before changing files.',true);return;}
   const ok = await confirmDialog(
     msg("confirm.trash", { files: tn("unit.file", paths.length) }),
     msg("action.moveToTrash"),
@@ -2990,13 +3109,13 @@ function syncRibbonSelection() {
   el('ribbon-select-all').disabled = applying || undoing || filterPending || !total;
   el('ribbon-clear-selection').disabled = applying || undoing || filterPending || !count;
   const moves = movableDirections(ribbonOrderGroups(), selection);
-  const blocked = applying || undoing || filterPending || Boolean(diffByPath && !isAutomaticTransformPreview());
+  const blocked = commandMode==='duplicates' || applying || undoing || filterPending || Boolean(diffByPath && !isAutomaticTransformPreview());
   el('ribbon-move-up').disabled = blocked || !moves.up;
   el('ribbon-move-down').disabled = blocked || !moves.down;
   el('group-btn').disabled = applying || undoing;
   const blocks = new Map();
   for (const path of selectedPaths()) for (const block of trackAt(path)?.tag_blocks || []) blocks.set(block.kind, {kind:block.kind, label:block.label});
-  document.dispatchEvent(new CustomEvent('tagrex:ribbon-state', {detail:{count:selectedPaths().length, busy:applying || undoing, blocks:[...blocks.values()]}}));
+  document.dispatchEvent(new CustomEvent('tagrex:ribbon-state', {detail:{count:selectedPaths().length, busy:applying || undoing || commandMode==='duplicates', blocks:[...blocks.values()]}}));
 }
 function ribbonOrderGroups() {
   return groupBy ? [...groupPaths.values()] : [viewPaths];
@@ -3402,7 +3521,7 @@ function anchorSelection(path) {
 }
 
 function usingReviewSelection() {
-  return Boolean(diffByPath && !isAutomaticTransformPreview() && (stagedView || !editablePreview()));
+  return commandMode!=='duplicates'&&Boolean(diffByPath && !isAutomaticTransformPreview() && (stagedView || !editablePreview()));
 }
 
 function rowSelectionSet() {
@@ -3456,6 +3575,7 @@ function paintRowSelection() {
 function syncSelectionUI({ deferPanels = false, refreshGrid = true, refreshPanels = false } = {}) {
   syncRibbonSelection();
   paintRowSelection();
+  publishDuplicateSelection();
   updateStatus(rowSelectionSet().size);
   if (usingReviewSelection()) {
     updateDiffBar();
@@ -3471,6 +3591,12 @@ function syncSelectionUI({ deferPanels = false, refreshGrid = true, refreshPanel
     updatePanelCounts(paths.length);
   }
   if (refreshGrid) spreadsheet?.refresh();
+  if(commandMode==='duplicates'){
+    // Reviewing a duplicate group changes selection, never a staged Apply scope
+    // or an editor preview that the user left in another mode.
+    if(!deferPanels)scheduleSessionSave();
+    return;
+  }
   let scopeAnnounced = false;
   if (!isAutomaticTransformRefresh()) {
     if (refreshPanels) selectionPanelsPending = true;
@@ -3525,6 +3651,11 @@ function updatePanelCounts(count = selectedPaths().length) {
 }
 
 function selectRow(tr, e, { deferPanels = false } = {}) {
+  if(duplicateResultsActive()){
+    const key=viewItems[itemIndexByPath.get(tr.dataset.path)]?.groupKey;
+    if(selectDuplicateGroup(key)){setActiveRow(tr,!deferPanels);if(deferPanels)tr.focus({preventScroll:true});}
+    return;
+  }
   if (usingReviewSelection()) { selectReviewRow(tr, e); return; }
   if (tr.classList.contains("unreadable")) return; // inert — can't be selected
   const path = tr.dataset.path;
@@ -3571,6 +3702,7 @@ function selectReviewRow(tr, event) {
 // A plain group right-click replaces; Ctrl/Cmd-click toggles the complete
 // filtered group, including collapsed/offscreen members, and preserves others.
 function selectGroup(key, mode = 'replace') {
+  if(duplicateResultsActive()){selectDuplicateGroup(key);return;}
   const manual = usingReviewSelection();
   const paths = (groupPaths.get(key) || []).filter(path => !manual || diffByPath.has(path));
   if (!paths.length) return;
@@ -3587,8 +3719,20 @@ function selectGroup(key, mode = 'replace') {
   syncSelectionUI();
 }
 
+function selectDuplicateGroup(key){
+  const group=duplicateGroupLookup.get(key);
+  if(!duplicateResultsActive()||!group)return false;
+  selectedDuplicateGroupId=group.id;
+  if(!selectionMatchesDuplicate(group)){selection.clear();for(const path of group.paths)selection.add(path);}
+  anchorSelection(group.paths[0]);
+  spreadsheet?.clearRange({refresh:false});
+  syncSelectionUI();
+  return true;
+}
+
 // Enter edit mode on a cell and select its text (double-click, per the hint).
 function beginCellEdit(cell) {
+  if(commandMode==='duplicates')return;
   if (cell.dataset.field) {
     const field = diffByPath?.get(cell.dataset.path)?.tag_changes.find(change => change.field === cell.dataset.field);
     cell.textContent = field ? field.new ?? '' : currentFieldValue(cell.dataset.path,cell.dataset.field);
@@ -3618,7 +3762,7 @@ tracksBody.addEventListener("click", (e) => {
   if (!tr || !tr.dataset.path) return;
   const cell = e.target.closest("td.editable");
   if (cell && cell.isContentEditable) return; // mid-edit: don't reselect
-  if (e.detail === 0) selectRow(tr, e);
+  if (e.detail === 0||duplicateResultsActive()) selectRow(tr, e);
 });
 
 // A plain click in the empty area below the rows deselects, like a file manager
@@ -3663,7 +3807,7 @@ function marqueePaths(top, bottom) {
 }
 initRowSelection({
   wrap: tableWrap, getSelection: rowSelectionSet,
-  enabled: () => !applying && !undoing,
+  enabled: () => !applying && !undoing && !duplicateResultsActive(),
   pathsInRange: (top,bottom) => marqueePaths(top,bottom).filter(path => !usingReviewSelection() || diffByPath.has(path)),
   onPress: (event) => {
     const before = {selAnchor,selBase,reviewAnchor,reviewBase,activeRowPath};
@@ -3801,6 +3945,9 @@ tracksBody.addEventListener("keydown", (e) => {
   if (e.target.isContentEditable || e.target.matches("input, textarea, select")) return;
   const tr = e.target.closest("tr");
   if (!tr || !tr.dataset.path) return;
+  if(duplicateResultsActive()&&(e.key==='Enter'||e.key===' ')){
+    e.preventDefault();e.stopImmediatePropagation();selectRow(tr,e);return;
+  }
   if (e.key === "ArrowDown" || e.key === "ArrowUp") {
     e.preventDefault();
     const i = navPathIndex.get(tr.dataset.path);
@@ -3968,7 +4115,11 @@ function toggleGroup(key) {
 tracksBody.addEventListener('click', event => {
   const head = event.target.closest('tr.group-head');
   if (!head || applying || undoing) return;
-  if (event.ctrlKey || event.metaKey) selectGroup(head.dataset.group, 'toggle');
+  if(duplicateResultsActive()){
+    if(event.target.closest('.group-caret'))toggleGroup(head.dataset.group);
+    else {selectDuplicateGroup(head.dataset.group);head.focus({preventScroll:true});}
+  }
+  else if (event.ctrlKey || event.metaKey) selectGroup(head.dataset.group, 'toggle');
   else toggleGroup(head.dataset.group);
 });
 tracksBody.addEventListener('keydown', event => {
@@ -3978,8 +4129,12 @@ tracksBody.addEventListener('keydown', event => {
     event.preventDefault(); event.stopPropagation(); selectGroup(head.dataset.group, 'replace');
   } else if (event.key === 'Enter' || event.key === ' ') {
     event.preventDefault(); event.stopPropagation();
-    if (event.ctrlKey || event.metaKey) selectGroup(head.dataset.group, 'toggle');
+    if(duplicateResultsActive())selectDuplicateGroup(head.dataset.group);
+    else if (event.ctrlKey || event.metaKey) selectGroup(head.dataset.group, 'toggle');
     else toggleGroup(head.dataset.group);
+  } else if(duplicateResultsActive()&&(event.key==='ArrowLeft'||event.key==='ArrowRight')){
+    event.preventDefault();event.stopPropagation();
+    if(collapsedGroups.has(head.dataset.group)===(event.key==='ArrowRight'))toggleGroup(head.dataset.group);
   }
 });
 
@@ -4014,25 +4169,37 @@ el("toggle-groups").addEventListener("click", () => {
 // usable until a complete latest-generation replacement is ready. Any table
 // mutation, query change or content revision cancels the pending derivation.
 async function renderFilteredTracks() {
-  if (filterError) { filterPending = false; publishFilterState(); updateDiffBar(); return; }
-  if (tracks.length < 3000) { renderTracks(); return; }
-  const version = ++filterRenderVersion;
-  const source = tracks;
-  const query = filterQuery;
-  const revision = contentRevision;
-  const matches = new Set();
-  const current = () => version === filterRenderVersion && tracks === source &&
-    filterQuery === query && revision === contentRevision;
-  for (let i = 0; i < source.length;) {
-    const until = performance.now() + 4;
-    do {
-      const track = source[i++];
-      if (matchesFilter(track)) matches.add(track.path);
-    } while (i < source.length && performance.now() < until);
-    if (i < source.length) await new Promise(resolve => setTimeout(resolve, 0));
-    if (!current()) return;
+  if(filterError){filterPending=false;publishFilterState();updateDiffBar();return;}
+  const version=++filterRenderVersion, revision=contentRevision, source=tracks;
+  scheduledQueryRevision=revision;
+  if(!hasLibraryQuery()) {
+    libraryQueryClient.cancel();nativeMatchPaths=null;duplicateGroups=[];duplicateMessage='';nativeMatchRevision=revision;filterPending=false;renderTracks();return;
   }
-  renderTracks({ preparedFilter: matches });
+  filterPending=true;publishFilterState();updateDiffBar();
+  try {
+    const model={...filterModel(),coverLabels:{embedded:msg('table.artwork.embedded'),missing:msg('table.artwork.missing'),unknown:msg('table.artwork.unknown')}};
+    const key=JSON.stringify([revision,model]);
+    const result=await libraryQueryClient.run(model);
+    if(!result||version!==filterRenderVersion||revision!==contentRevision||source!==tracks)return;
+    const preserve=commandMode==='duplicates'&&duplicateQueryKey===key&&['running','complete'].includes(result.duplicateStatus);
+    nativeMatchPaths=new Set(result.matchedPaths);duplicateGroups=commandMode==='duplicates'?orderedDuplicateGroups(result.groups):result.groups;duplicateStatus=result.duplicateStatus;
+    if(duplicateResultsActive())reconcileDuplicateSelection(duplicateGroups);
+    if(commandMode==='duplicates'){
+      duplicateQueryKey=key;duplicateRenderedRevision=result.groupsRevision??duplicateLatestRevision;
+      duplicateLatestRevision=Math.max(duplicateLatestRevision,duplicateRenderedRevision);
+      duplicateFoundCount=result.groupsCount??Math.max(duplicateFoundCount,result.groups.length);
+      const count=duplicateFoundCount===result.groups.length?`${duplicateFoundCount} duplicate groups`:`${result.groups.length} of ${duplicateFoundCount} groups match`;
+      if(result.duplicateStatus!=='running')duplicateMessage=result.duplicateStatus==='not_scanned'?'Not scanned. Choose a match type and Scan.':result.duplicateStatus==='failed'?`Scan failed · ${result.errors||0} errors. Retry the scan.`:result.duplicateStatus==='cancelled'?'Scan cancelled.':`${count} · ${result.skipped||0} skipped · ${result.errors||0} errors`;
+    }else duplicateMessage='';
+    nativeMatchRevision=revision;filterPending=false;filterMessage='';setFilterError(false);renderTracks({preserveDuplicateRows:preserve});
+    if(duplicateRefreshPending){duplicateRefreshPending=false;refreshDuplicatePublications();}
+  } catch(error) {
+    if(version!==filterRenderVersion)return;
+    if(/supersed|cancelled|snapshot|library changed|library revision/i.test(error.message||'')&&queryRetry++<3){libraryQueryClient.invalidate();setFilterError(false);scheduleFilterRender();return;}
+    filterMessage=`${error.message || error}. Showing the last valid results.`;setFilterError(true);filterPending=false;
+    el('filter').setAttribute('aria-invalid','true');el('filter').parentElement.classList.add('has-error');el('filter').title=filterMessage;
+    publishFilterState();updateDiffBar();
+  }
 }
 
 // Typing re-renders the whole table, which on a large library is far slower
@@ -4040,8 +4207,7 @@ async function renderFilteredTracks() {
 // the keystroke, so the box itself never feels laggy.
 let filterTimer = null;
 el("filter").addEventListener("input", (e) => {
-  // Keep the raw text — case matters in regex/case-sensitive mode; lowercasing
-  // for a plain match happens in matchesFilter.
+  // Preserve the user's spelling; matching is literal and case-insensitive.
   filterRenderVersion++;
   setFilterText(e.target.value.trim());
   syncFilterControls();
@@ -4050,6 +4216,7 @@ el("filter").addEventListener("input", (e) => {
 function scheduleFilterRender() {
   filterRenderVersion++;
   filterPending = !filterError;
+  scheduledQueryRevision=contentRevision;
   clearTimeout(filterTimer);
   publishFilterState();
   updateDiffBar();
@@ -4058,11 +4225,75 @@ function scheduleFilterRender() {
 document.addEventListener('tagrex:filter-conditions', event => {
   try {
     const conditions = normalizeConditions(event.detail.conditions);
-    filterConditions = conditions;
-    filterConditionMode = event.detail.mode === 'any' ? 'any' : 'all';
+    filterRoot=legacyRoot(conditions,event.detail.mode==='any'?'any':'all');
+    filterConditions=filterRoot.children;filterConditionMode=filterRoot.mode;
     syncFilterControls();
     scheduleFilterRender();
   } catch (error) { toast(error.message, true); }
+});
+const duplicateJobs=createDuplicateJobs(invoke,state=>{
+  duplicateScanning=state.status==='running';
+  duplicateStatus=state.status==='error'?'failed':state.status;
+  duplicateFoundCount=state.groupsCount??state.groups?.length??0;
+  const phase={stamping:'Checking files',hashing:'Checking file contents',decoding:'Reading decoded audio',fingerprinting:'Reading audio fingerprints',comparing:'Comparing recordings'}[state.phase]||'Scanning files';
+  const progress=state.phase==='comparing'?`${phase} · ${duplicateFoundCount} groups found`:`${phase}: ${state.processed||0} of ${state.total||tracks.length} files · ${duplicateFoundCount} groups found`;
+  duplicateMessage=commandMode!=='duplicates'?'':state.status==='error'?state.error:state.status==='failed'?(state.message||'Scan failed. Retry with a narrower library.'):state.status==='running'?progress:state.status==='cancelled'?'Scan cancelled.':`${duplicateFoundCount} groups · ${state.skipped||0} skipped · ${state.errors||0} errors`;
+  if(state.groupsRevision!=null)duplicateLatestRevision=Math.max(duplicateLatestRevision,state.groupsRevision);
+  if(state.status==='cancelled'||state.status==='error'||state.status==='failed'){
+    // A query may already hold a pre-cancel publication. Reject its response
+    // before clearing the visible scope, then fetch the authoritative revision.
+    duplicateGroups=[];duplicateRefreshPending=false;clearDuplicateSelection();
+    if(duplicateResultsActive()){
+      clearTimeout(filterTimer);filterRenderVersion++;libraryQueryClient.cancel();filterPending=false;
+      nativeMatchPaths=new Set();renderTracks();
+    }
+  }
+  publishFilterState();
+  if(state.groupsRevision!=null)refreshDuplicatePublications();
+},()=>{if(commandMode==='duplicates')scheduleFilterRender();});
+function runDuplicateScan(){
+  if(commandMode!=='duplicates')setMode('deduplicator');
+  clearTimeout(filterTimer);filterRenderVersion++;libraryQueryClient.cancel();filterPending=false;
+  duplicateScanStarted=true;
+  resetDuplicatePublications();duplicateFoundCount=0;duplicateGroups=[];nativeMatchPaths=new Set();
+  nativeMatchRevision=scheduledQueryRevision=contentRevision;renderTracks();
+  return duplicateJobs.start(duplicateKind);
+}
+let previousQueryMode='tagger';
+document.addEventListener('tagrex:query-mode',event=>{
+  if(event.detail.mode==='duplicates'){if(currentMode!=='deduplicator')previousQueryMode=currentMode;setMode('deduplicator');}
+  else setMode(previousQueryMode==='deduplicator'?'tagger':previousQueryMode);
+});
+document.addEventListener('tagrex:query-duplicate-kind',event=>{
+  duplicateJobs.cancel();duplicateJobs.invalidate();duplicateKind=event.detail.kind;duplicateScanStarted=false;duplicateScanning=false;duplicateGroups=[];duplicateStatus='not_scanned';duplicateFoundCount=0;duplicateMessage='';resetDuplicatePublications();syncFilterControls();scheduleFilterRender();
+});
+document.addEventListener('tagrex:query-scan',runDuplicateScan);
+document.addEventListener('tagrex:query-scan-cancel',()=>duplicateJobs.cancel());
+document.addEventListener('tagrex:filter-root',event=>{
+  try{filterRoot=normalizeRoot(event.detail.root);filterConditions=filterRoot.children;filterConditionMode=filterRoot.mode;syncFilterControls();scheduleFilterRender();}
+  catch(error){event.preventDefault();toast(error.message,true);}
+});
+let suggestionTimer=null, suggestionVersion=0;
+document.addEventListener('tagrex:query-suggest-dismiss',()=>{clearTimeout(suggestionTimer);suggestionVersion++;libraryQueryClient.cancelSuggestions();});
+document.addEventListener('tagrex:query-suggest',event=>{
+  const version=++suggestionVersion,text=event.detail.text;
+  clearTimeout(suggestionTimer);
+  if(!text.trim()||(commandMode==='duplicates'&&!['running','complete'].includes(duplicateStatus))||(commandMode==='duplicates'&&!duplicateFoundCount)){libraryQueryClient.cancelSuggestions();document.dispatchEvent(new CustomEvent('tagrex:query-suggestions',{detail:{text,suggestions:[],proposals:[],ready:false}}));return;}
+  suggestionTimer=setTimeout(async()=>{
+    const parsed=interpretQueryText(text),prefix=scopedText(text);
+    const proposals=parsed.complete&&parsed.nodes.length?[{nodes:parsed.nodes}]:[];
+    const respond=suggestions=>{if(version===suggestionVersion)document.dispatchEvent(new CustomEvent('tagrex:query-suggestions',{detail:{text,suggestions,proposals,highlight:parsed.remaining||prefix?.text||text,ready:true}}));};
+    if(parsed.complete&&!parsed.remaining)return respond([]);
+    const field=parsed.field||prefix?.field;
+    const needle=parsed.nodes.length?parsed.remaining:prefix?prefix.text.trim():text;
+    try{
+      const model={...filterModel(field),text:''};
+      const extra=parsed.field?parsed.nodes.slice(0,-1):parsed.nodes;
+      if(extra.length)model.root=normalizeRoot(model.root.mode==='all'?{...model.root,children:[...model.root.children,...extra]}:{kind:'group',id:`suggest-root-${version}`,mode:'all',children:[model.root,...extra]});
+      const suggestions=await libraryQueryClient.suggest(model,needle,field);
+      if(suggestions)respond(suggestions.map(s=>extra.length?{...s,nodes:[...extra,{...newCondition(s.field,s.value),operator:s.operator||defaultOperator(s.field)}]}:s));
+    }catch{respond([]);}
+  },160);
 });
 document.addEventListener('tagrex:request-filter-state', publishFilterState);
 // The field's clear button (#547): the same as deleting the text by hand.
@@ -4071,19 +4302,6 @@ el("filter-clear").addEventListener("click", () => {
   box.value = "";
   box.dispatchEvent(new Event("input", { bubbles: true }));
   box.focus();
-});
-// Regex / case toggles (#44): flip the flag, persist, recompile, repaint.
-el("filter-regex").addEventListener("click", () => {
-  setFilterRegex(!filterRegex);
-  saveFilterMode();
-  syncFilterControls();
-  renderTracks();
-});
-el("filter-case").addEventListener("click", () => {
-  setFilterCase(!filterCase);
-  saveFilterMode();
-  syncFilterControls();
-  renderTracks();
 });
 // Presets popover (#44): mirrors the columns picker — toggle + outside-click close.
 el("presets-btn").addEventListener("click", (e) => {
@@ -4137,6 +4355,7 @@ tracksBody.addEventListener("keydown", (e) => {
 // Range edits use one validated preview and the existing Apply/Undo gate. They
 // never feed the immediate single-cell write queue or replace an existing draft.
 function spreadsheetBatchProblem() {
+  if(commandMode==='duplicates')return 'Return to Search before editing files.';
   if (applying || undoing) return "Wait for the current write or undo to finish.";
   if (diffByPath || previewPlan) return "Apply or discard the current preview first.";
   if (edits.size || pendingImportCover) return "Review or discard the existing tag edits before pasting.";
@@ -4201,6 +4420,7 @@ spreadsheet = initSpreadsheet({
     return changed ? changed.new ?? '' : currentFieldValue(path, field);
   },
   readOnly: (field) => {
+    if(commandMode==='duplicates')return 'Duplicate review is read-only.';
     if (isFieldLocked(field)) return `${columnLabel(field)} is locked. Unlock it before batch editing.`;
     if (field === "file" || customColumnOf(field) || VIRTUAL_COLUMNS.some(([key]) => key === field)) {
       return `${columnLabel(field)} is read-only.`;
@@ -4209,6 +4429,7 @@ spreadsheet = initSpreadsheet({
   },
   validate: (field, value, path) => validateFieldValue(field, value, [path]),
   isReviewing: () => applying || !editablePreview(),
+  rowActivation: event => duplicateResultsActive()&&(event.key==='Enter'||event.key===' '),
   batchProblem: spreadsheetBatchProblem,
   stage: stageSpreadsheetEdits,
   beginEdit: beginCellEdit,
@@ -4237,9 +4458,6 @@ loadFieldLocks();
 
 // Apply the saved column choice (#43) and build the header before any library
 // is opened.
-// The persisted filter-mode flags (#44), read at start-up into shared state.
-setFilterRegex(regexModeEnabled());
-setFilterCase(caseSensitiveEnabled());
 loadCustomColumns(); // before loadColumns: it validates keys against the pool
 loadColumns();
 loadColumnWidths();
@@ -4293,7 +4511,7 @@ initActionGroups().then(() => {
   syncCarryToggles();
 });
 initBuiltinGroups();
-// Reflect saved filter-mode flags (#44) onto the toggles.
+// Initialize the literal, case-insensitive query controls.
 syncFilterControls();
 // Wire the placeholder reference (#148) and warm its catalogue, so the column
 // headers can name their placeholder without an await per header. The head is
@@ -4370,6 +4588,11 @@ window.tagrex = {
   },
   get previewPlan() {
     return previewPlan;
+  },
+  // Keep diagnostics attached to the active controller after Vite replaces a
+  // module; importing the bare state URL can observe an older module instance.
+  get querySession() {
+    return { root: sessionRoot, edits: edits.size, preview: diffByPath?.size || 0 };
   },
 };
 

@@ -185,7 +185,7 @@ test('Files owns immediate counts and grows for large numbers without clipping',
   await page.locator('#tracks-body tr[data-path]').first().click({modifiers:['Control']});
   await expect(page.locator('#files-selected-count')).toHaveText('0');
   await expect(page.locator('#files-selected')).toBeVisible();
-  await page.locator('#filter-panel-toggle').click();await page.locator('#filter').fill('Radio');
+  await page.locator('#filter').fill('Radio');
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(1);
   await expect(page.locator('#files-total-count')).toHaveText('3');
   await expect(page.locator('#files-tab')).toHaveAccessibleDescription(/1\/3/);

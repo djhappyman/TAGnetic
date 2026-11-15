@@ -447,43 +447,38 @@ test('resizing the dock keeps the table rows and the active field draft intact',
   await expect(page.locator('#diff-apply')).toBeEnabled();
 });
 
-test('the filter rail is one integrated 28px control row with a floating builder', async ({ page }) => {
+test('the filter rail is one integrated 32px control row with a floating builder', async ({ page }) => {
   const head = await style(page, '#filter-panel', ['backgroundColor', 'borderTopWidth', 'padding']);
   expect(head.backgroundColor).toBe('rgba(0, 0, 0, 0)');
   expect(head.borderTopWidth).toBe('0px');
-  expect(head.padding).toBe('0px 8px 4px');
-  expect(number((await style(page, '#filter-panel-toggle', ['height'])).height)).toBe(28);
-  await page.locator('#filter-panel-toggle').click();
+  expect(head.padding).toBe('8px 12px');
+  await expect(page.locator('#filter-panel-toggle')).toHaveCount(0);
   await expect(page.locator('#filter')).toBeVisible();
   const field = await style(page, '.filter-ctl', ['height', 'minHeight', 'borderRadius']);
-  expect(number(field.height)).toBe(28);
-  expect(number(field.minHeight)).toBe(28);
+  expect(number(field.height)).toBe(32);
+  expect(number(field.minHeight)).toBe(32);
   expect(field.borderRadius).toBe('10px');
   const input = await style(page, '#filter', ['height', 'borderRadius']);
   expect(number(input.borderRadius)).toBe(10);
-  const flag = await box(page, '#filter-regex');
-  expect(flag.width).toBeGreaterThanOrEqual(24);
-  expect(flag.height).toBeGreaterThanOrEqual(24);
-  // An invalid pattern changes ink, never geometry.
-  await page.locator('#filter-regex').click();
-  await page.locator('#filter').fill('[');
+  await expect(page.locator('#filter-regex, #filter-case')).toHaveCount(0);
+  // Invalid rule input changes ink, never geometry.
+  await page.locator('#filter').fill('x'.repeat(2049));
   await expect(page.locator('#filter')).toHaveAttribute('aria-invalid', 'true');
-  expect(number((await style(page, '.filter-ctl', ['height'])).height)).toBe(28);
+  expect(number((await style(page, '.filter-ctl', ['height'])).height)).toBe(32);
   await page.locator('#filter').fill('');
   // The condition builder floats clear of the dock and stays fully visible.
-  const add = page.locator('#filter-add');
-  await add.click();
-  const builder = page.locator('.filter-builder');
+  await page.locator('#filter').press('Alt+Enter');
+  const builder = page.locator('#query-editor');
   await expect(builder).toBeVisible();
   const builderBox = await builder.boundingBox();
   expect(builderBox.x).toBeGreaterThanOrEqual(0);
   expect(builderBox.y).toBeGreaterThanOrEqual(0);
   expect(builderBox.x + builderBox.width).toBeLessThanOrEqual(1440 + 1);
   expect(builderBox.y + builderBox.height).toBeLessThanOrEqual(900 + 1);
-  const control = await style(page, '.filter-builder input', ['borderRadius', 'minHeight']);
+  const control = await style(page, '#query-editor input:not([type=checkbox])', ['borderRadius', 'height']);
   expect(control.borderRadius).toBe('10px');
-  expect(number(control.minHeight)).toBe(32);
+  expect(number(control.height)).toBeGreaterThanOrEqual(28);
   await page.keyboard.press('Escape');
   await expect(builder).toBeHidden();
-  await expect(add).toBeFocused();
+  await expect(page.locator('#filter')).toBeFocused();
 });

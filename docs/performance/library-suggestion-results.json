@@ -1,0 +1,223 @@
+{
+  "date": "2026-11-15T16:59:02.619Z",
+  "iterations": 40,
+  "method": "Native development commands opt-level2. Fresh immutable index per term, empty query before first suggestion; cold includes lazy facet construction. Warm samples reuse facets. No IPC or table rendering. One rule per field and all distinct-row counts validated against fixture rows.",
+  "results": [
+    {
+      "rows": 10000,
+      "text": "Artist 17",
+      "coldMs": 23.258607,
+      "elapsedMs": 23.258607,
+      "medianMs": 0.13907,
+      "p95Ms": 0.20488599999999998,
+      "returned": 1,
+      "suggestions": [
+        {
+          "count": 110,
+          "field": "artist",
+          "operator": "contains",
+          "value": "Artist 17"
+        }
+      ],
+      "truncated": false
+    },
+    {
+      "rows": 10000,
+      "text": "Hardcore",
+      "coldMs": 14.805862,
+      "elapsedMs": 14.805862,
+      "medianMs": 0.165521,
+      "p95Ms": 0.29700499999999996,
+      "returned": 1,
+      "suggestions": [
+        {
+          "count": 1250,
+          "field": "genre",
+          "operator": "member",
+          "value": "Hardcore"
+        }
+      ],
+      "truncated": false
+    },
+    {
+      "rows": 10000,
+      "text": "17",
+      "coldMs": 20.934834,
+      "elapsedMs": 20.934834,
+      "medianMs": 0.282379,
+      "p95Ms": 0.348509,
+      "returned": 4,
+      "suggestions": [
+        {
+          "count": 299,
+          "field": "title",
+          "operator": "contains",
+          "value": "17"
+        },
+        {
+          "count": 285,
+          "field": "year",
+          "operator": "contains",
+          "value": "17"
+        },
+        {
+          "count": 200,
+          "field": "album",
+          "operator": "contains",
+          "value": "17"
+        },
+        {
+          "count": 200,
+          "field": "artist",
+          "operator": "contains",
+          "value": "17"
+        }
+      ],
+      "truncated": false
+    },
+    {
+      "rows": 50000,
+      "text": "Artist 17",
+      "coldMs": 116.810483,
+      "elapsedMs": 116.810483,
+      "medianMs": 0.7005600000000001,
+      "p95Ms": 1.031762,
+      "returned": 1,
+      "suggestions": [
+        {
+          "count": 550,
+          "field": "artist",
+          "operator": "contains",
+          "value": "Artist 17"
+        }
+      ],
+      "truncated": false
+    },
+    {
+      "rows": 50000,
+      "text": "Hardcore",
+      "coldMs": 80.057524,
+      "elapsedMs": 80.057524,
+      "medianMs": 0.846407,
+      "p95Ms": 1.209781,
+      "returned": 1,
+      "suggestions": [
+        {
+          "count": 6250,
+          "field": "genre",
+          "operator": "member",
+          "value": "Hardcore"
+        }
+      ],
+      "truncated": false
+    },
+    {
+      "rows": 50000,
+      "text": "17",
+      "coldMs": 121.347966,
+      "elapsedMs": 121.347966,
+      "medianMs": 1.404116,
+      "p95Ms": 1.7223309999999998,
+      "returned": 4,
+      "suggestions": [
+        {
+          "count": 2475,
+          "field": "title",
+          "operator": "contains",
+          "value": "17"
+        },
+        {
+          "count": 1990,
+          "field": "album",
+          "operator": "contains",
+          "value": "17"
+        },
+        {
+          "count": 1428,
+          "field": "year",
+          "operator": "contains",
+          "value": "17"
+        },
+        {
+          "count": 1000,
+          "field": "artist",
+          "operator": "contains",
+          "value": "17"
+        }
+      ],
+      "truncated": false
+    },
+    {
+      "rows": 100000,
+      "text": "Artist 17",
+      "coldMs": 224.571486,
+      "elapsedMs": 224.571486,
+      "medianMs": 1.641292,
+      "p95Ms": 2.117255,
+      "returned": 1,
+      "suggestions": [
+        {
+          "count": 1100,
+          "field": "artist",
+          "operator": "contains",
+          "value": "Artist 17"
+        }
+      ],
+      "truncated": false
+    },
+    {
+      "rows": 100000,
+      "text": "Hardcore",
+      "coldMs": 164.866435,
+      "elapsedMs": 164.866435,
+      "medianMs": 1.947694,
+      "p95Ms": 2.288111,
+      "returned": 1,
+      "suggestions": [
+        {
+          "count": 12500,
+          "field": "genre",
+          "operator": "member",
+          "value": "Hardcore"
+        }
+      ],
+      "truncated": false
+    },
+    {
+      "rows": 100000,
+      "text": "17",
+      "coldMs": 230.63466699999998,
+      "elapsedMs": 230.63466699999998,
+      "medianMs": 3.056903,
+      "p95Ms": 5.063601,
+      "returned": 4,
+      "suggestions": [
+        {
+          "count": 3970,
+          "field": "title",
+          "operator": "contains",
+          "value": "17"
+        },
+        {
+          "count": 2990,
+          "field": "album",
+          "operator": "contains",
+          "value": "17"
+        },
+        {
+          "count": 2857,
+          "field": "year",
+          "operator": "contains",
+          "value": "17"
+        },
+        {
+          "count": 2000,
+          "field": "artist",
+          "operator": "contains",
+          "value": "17"
+        }
+      ],
+      "truncated": false
+    }
+  ]
+}

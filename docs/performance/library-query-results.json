@@ -1,0 +1,336 @@
+{
+  "baselineRef": "213f06c",
+  "date": "2026-11-15T16:34:28.264Z",
+  "node": "v22.23.3",
+  "cpu": "12th Gen Intel(R) Core(TM) i7-12700K",
+  "platform": "linux/x64",
+  "iterations": 40,
+  "binary": "/mnt/Games/Development/tagrex/build-cache/personal-debug/debug/examples/query_bench",
+  "method": "Identical synthetic DTOs and equivalent queries; warm medians/p95 after index construction. Baseline is checkpoint JS evaluator, native is isolated Rust example. Development profile with tagrex-commands opt-level=2. Excludes IPC, disk scan, audio analysis and table rendering. Index construction reported separately. All counts and deterministic index checksums must match.",
+  "results": [
+    {
+      "rows": 10000,
+      "indexMs": 25.972645,
+      "profile": "debug",
+      "queries": [
+        {
+          "name": "Free text",
+          "baseline": {
+            "coldMs": 9.455856999999998,
+            "medianMs": 0.454697000000003,
+            "p95Ms": 0.4800949999999986,
+            "matched": 110,
+            "checksum": 15891990
+          },
+          "rust": {
+            "checksum": 15891990,
+            "coldMs": 0.34875900000000004,
+            "matched": 110,
+            "medianMs": 0.137704,
+            "p95Ms": 0.191981,
+            "query": 0
+          },
+          "speedup": 3.3019883227793168
+        },
+        {
+          "name": "Genre + missing artwork",
+          "baseline": {
+            "coldMs": 2.952078,
+            "medianMs": 0.2554400000000072,
+            "p95Ms": 0.3628980000000013,
+            "matched": 829,
+            "checksum": 128441283
+          },
+          "rust": {
+            "checksum": 128441283,
+            "coldMs": 4.070618,
+            "matched": 829,
+            "medianMs": 0.010716,
+            "p95Ms": 0.016022,
+            "query": 1
+          },
+          "speedup": 23.83725270623434
+        },
+        {
+          "name": "Artist equality + artwork",
+          "baseline": {
+            "coldMs": 1.7315880000000021,
+            "medianMs": 0.22205200000000502,
+            "p95Ms": 0.3154210000000006,
+            "matched": 3,
+            "checksum": 373602
+          },
+          "rust": {
+            "checksum": 373602,
+            "coldMs": 2.2022880000000002,
+            "matched": 3,
+            "medianMs": 0.009588000000000001,
+            "p95Ms": 0.013356,
+            "query": 2
+          },
+          "speedup": 23.1593658740097
+        },
+        {
+          "name": "Alternative conditions + text",
+          "baseline": {
+            "coldMs": 2.636408000000003,
+            "medianMs": 0.7397040000000032,
+            "p95Ms": 1.378612000000004,
+            "matched": 265,
+            "checksum": 53286918
+          },
+          "rust": {
+            "checksum": 53286918,
+            "coldMs": 4.082202,
+            "matched": 265,
+            "medianMs": 0.123509,
+            "p95Ms": 0.145432,
+            "query": 3
+          },
+          "speedup": 5.9890696224566895
+        },
+        {
+          "name": "Bounded regex",
+          "baseline": {
+            "coldMs": 0.9022950000000094,
+            "medianMs": 0.22935000000001082,
+            "p95Ms": 0.7018229999999903,
+            "matched": 20,
+            "checksum": 2848110
+          },
+          "rust": {
+            "checksum": 2848110,
+            "coldMs": 0.324367,
+            "matched": 20,
+            "medianMs": 0.017993,
+            "p95Ms": 0.01916,
+            "query": 4
+          },
+          "speedup": 12.746623686989988
+        }
+      ],
+      "suggestion": {
+        "elapsedMs": 2.310437,
+        "returned": 1,
+        "truncated": false
+      },
+      "commandsOptLevel": 2
+    },
+    {
+      "rows": 50000,
+      "indexMs": 125.86854699999999,
+      "profile": "debug",
+      "queries": [
+        {
+          "name": "Free text",
+          "baseline": {
+            "coldMs": 40.36525099999997,
+            "medianMs": 2.7208229999999958,
+            "p95Ms": 3.2378230000000485,
+            "matched": 550,
+            "checksum": 420459950
+          },
+          "rust": {
+            "checksum": 420459950,
+            "coldMs": 1.687792,
+            "matched": 550,
+            "medianMs": 1.2358689999999999,
+            "p95Ms": 1.882095,
+            "query": 0
+          },
+          "speedup": 2.2015464422200055
+        },
+        {
+          "name": "Genre + missing artwork",
+          "baseline": {
+            "coldMs": 1.9775210000000243,
+            "medianMs": 1.7637670000000298,
+            "p95Ms": 1.915253000000007,
+            "matched": 4146,
+            "checksum": 3212464038
+          },
+          "rust": {
+            "checksum": 3212464038,
+            "coldMs": 18.289643,
+            "matched": 4146,
+            "medianMs": 0.049081,
+            "p95Ms": 0.058831,
+            "query": 1
+          },
+          "speedup": 35.9358407530415
+        },
+        {
+          "name": "Artist equality + artwork",
+          "baseline": {
+            "coldMs": 1.3706270000000131,
+            "medianMs": 1.285519000000022,
+            "p95Ms": 1.8956059999999297,
+            "matched": 16,
+            "checksum": 12222544
+          },
+          "rust": {
+            "checksum": 12222544,
+            "coldMs": 10.1682,
+            "matched": 16,
+            "medianMs": 0.026675,
+            "p95Ms": 0.032063,
+            "query": 2
+          },
+          "speedup": 48.191902530460055
+        },
+        {
+          "name": "Alternative conditions + text",
+          "baseline": {
+            "coldMs": 3.47032200000001,
+            "medianMs": 3.5981850000000577,
+            "p95Ms": 3.8395629999999983,
+            "matched": 825,
+            "checksum": 567650278
+          },
+          "rust": {
+            "checksum": 567650278,
+            "coldMs": 20.910781999999998,
+            "matched": 825,
+            "medianMs": 0.454758,
+            "p95Ms": 0.59263,
+            "query": 3
+          },
+          "speedup": 7.912307205150999
+        },
+        {
+          "name": "Bounded regex",
+          "baseline": {
+            "coldMs": 1.2091609999999946,
+            "medianMs": 1.1340889999999035,
+            "p95Ms": 1.9400850000000673,
+            "matched": 100,
+            "checksum": 76240550
+          },
+          "rust": {
+            "checksum": 76240550,
+            "coldMs": 0.396587,
+            "matched": 100,
+            "medianMs": 0.01845,
+            "p95Ms": 0.020835999999999997,
+            "query": 4
+          },
+          "speedup": 61.46823848237959
+        }
+      ],
+      "suggestion": {
+        "elapsedMs": 11.916747,
+        "returned": 1,
+        "truncated": false
+      },
+      "commandsOptLevel": 2
+    },
+    {
+      "rows": 100000,
+      "indexMs": 252.78872800000002,
+      "profile": "debug",
+      "queries": [
+        {
+          "name": "Free text",
+          "baseline": {
+            "coldMs": 74.29026599999997,
+            "medianMs": 6.022418000000016,
+            "p95Ms": 9.250960999999961,
+            "matched": 1100,
+            "checksum": 1693419900
+          },
+          "rust": {
+            "checksum": 1693419900,
+            "coldMs": 3.675042,
+            "matched": 1100,
+            "medianMs": 3.4891959999999997,
+            "p95Ms": 3.9277340000000005,
+            "query": 0
+          },
+          "speedup": 1.7260188306991113
+        },
+        {
+          "name": "Genre + missing artwork",
+          "baseline": {
+            "coldMs": 3.9692049999998744,
+            "medianMs": 4.31286799999998,
+            "p95Ms": 4.658249000000069,
+            "matched": 8293,
+            "checksum": 12852897867
+          },
+          "rust": {
+            "checksum": 12852897867,
+            "coldMs": 37.666433,
+            "matched": 8293,
+            "medianMs": 0.099336,
+            "p95Ms": 0.13727999999999999,
+            "query": 1
+          },
+          "speedup": 43.41696867198176
+        },
+        {
+          "name": "Artist equality + artwork",
+          "baseline": {
+            "coldMs": 4.792858000000024,
+            "medianMs": 2.895571000000018,
+            "p95Ms": 3.733064999999897,
+            "matched": 32,
+            "checksum": 49183088
+          },
+          "rust": {
+            "checksum": 49183088,
+            "coldMs": 19.822302999999998,
+            "matched": 32,
+            "medianMs": 0.047558,
+            "p95Ms": 0.054578,
+            "query": 2
+          },
+          "speedup": 60.88504562849611
+        },
+        {
+          "name": "Alternative conditions + text",
+          "baseline": {
+            "coldMs": 7.966679999999997,
+            "medianMs": 7.911971999999878,
+            "p95Ms": 10.034541999999874,
+            "matched": 2635,
+            "checksum": 5457556138
+          },
+          "rust": {
+            "checksum": 5457556138,
+            "coldMs": 49.879628000000004,
+            "matched": 2635,
+            "medianMs": 1.190078,
+            "p95Ms": 1.45687,
+            "query": 3
+          },
+          "speedup": 6.64828019676011
+        },
+        {
+          "name": "Bounded regex",
+          "baseline": {
+            "coldMs": 2.6595570000004045,
+            "medianMs": 2.502422999999908,
+            "p95Ms": 2.7765940000003866,
+            "matched": 200,
+            "checksum": 307481100
+          },
+          "rust": {
+            "checksum": 307481100,
+            "coldMs": 0.25605,
+            "matched": 200,
+            "medianMs": 0.018972,
+            "p95Ms": 0.021335000000000003,
+            "query": 4
+          },
+          "speedup": 131.90085388993822
+        }
+      ],
+      "suggestion": {
+        "elapsedMs": 24.045758,
+        "returned": 1,
+        "truncated": false
+      },
+      "commandsOptLevel": 2
+    }
+  ]
+}

@@ -131,7 +131,6 @@ test('hover hints stay off while query suggestions and explicit help remain usab
 });
 
 test('context menu keyboard selection preserves the text field editing path', async ({ page }) => {
-  await page.locator('#filter-panel-toggle').click();
   await page.locator('#filter').fill('Keyboard selection');
   await page.locator('#filter').click({ button: 'right' });
   await expect(page.locator('#edit-ctx [data-slot="context-menu-content"]')).toBeFocused();

@@ -449,6 +449,9 @@ export function initSpreadsheet(options) {
       return;
     }
     if (event.target.closest('input,textarea,select,button')) return;
+    // A review mode can give Enter/Space to the owner's whole-row action.
+    // Leave those events intact for its bubbling selection handler.
+    if (options.rowActivation?.(event)) return;
     const targetPoint = pointOf(event.target);
     if (targetPoint && !same(targetPoint, active)) choose(targetPoint, false, false);
     const rowPath = event.target.closest('tr[data-path]')?.dataset.path;

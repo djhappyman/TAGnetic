@@ -17,7 +17,7 @@ function harness(overrides = {}) {
   const node = () => ({ dataset: {}, textContent: '', setAttribute(k, v) { this[k] = v; }, getAttribute(k) { return this[k] ?? null; } });
   const calls = { validity: 0, scope: 0, event: 0, panels: 0, save: 0, paints: [], sets: 0 };
   const c = vm.createContext({
-    filterPending: false, filterError: false, stagedView: true, syncRibbonSelection: () => {},
+    filterPending: false, filterError: false, commandMode: 'search', stagedView: true, syncRibbonSelection: () => {}, publishDuplicateSelection: () => {},
     calls, previewPlan: { changes: [{ path: 'a', tag_changes: [] }] }, automaticPlan: null,
     automaticVersion: 0, automaticTimer: null, automaticQueuedRun: null, clearTimeout() {},
     automaticBusy: false, automaticBlocked: false, automaticFailed: false,
@@ -129,6 +129,18 @@ test('selection sync keeps one public announcement and fallback scope updates, w
   }
   const { c, calls } = harness(); // manual preview early return
   c.syncSelectionUI(); assert.equal(calls.event, 0); assert.equal(calls.save, 0);
+});
+
+test('duplicate review selection leaves manual and automatic preview scopes intact', () => {
+  for(const automatic of [false,true]){
+    const {c,calls}=harness({commandMode:'duplicates'});
+    if(automatic)c.automaticPlan=c.previewPlan;
+    const plan=c.previewPlan,scope=c.applySelection;
+    c.syncSelectionUI();
+    assert.equal(c.previewPlan,plan);assert.equal(c.applySelection,scope);
+    assert.equal(calls.event,0);assert.equal(calls.scope,0);assert.equal(calls.panels,0);
+    assert.equal(calls.save,1);assert.equal(c.usingReviewSelection(),false);
+  }
 });
 
 test('cover summaries allocate no selection Set for tag-only/empty plans and repaint after discard/replacement', () => {
