@@ -4,6 +4,27 @@ Tagnetic builds on [tagrex/tagrex](https://github.com/tagrex/tagrex). This fork'
 
 ## Current coverage
 
+The 1.4.4 backend audit candidates are being integrated in the personal release.
+Their upstream status remains **proposed**, with no additional upstream PR
+submitted by this release task. Preserve upstream's inline artwork journal and
+waveform API when preparing the corresponding focused contributions.
+
+| 1.4.4 concern | Classification and route |
+| --- | --- |
+| Interrupted Undo, exact block preflight, pruning recovery and whole-block before/after fingerprints | Standalone backend → `tagrex/tagrex:main`; the fingerprint follow-up is fork commit `bbdd892` |
+| Operation cancellation/admission, Beatport session lifecycle and bounded text/image work | Standalone backend → `tagrex/tagrex:main` |
+| Provider SOCKS, release identity/URL validation and Beatport pagination | Standalone backend → `tagrex/tagrex:main` |
+| Read diagnostics, durable settings, unavailable output recovery and safe export names | Standalone backend → `tagrex/tagrex:main` |
+| Per-window navigation policy | Standalone backend → `tagrex/tagrex:main`; adapt application origins to upstream configuration |
+| Read-error, audio-output and settings-recovery interface feedback | Shared interface → `tagrex/tagrex:next`; reconcile with the unmerged foundation below |
+| 1.4.4 version, changelog and personal packages | Fork-only personal release metadata |
+
+New whole-block batches persist content fingerprints; legacy history remains
+readable and retains its older evidence rules. Native audio-device recovery,
+live provider authentication and OS-specific filesystem/runtime behavior need
+their own validation beyond ordinary compilation and fixture tests. MCP live
+collaboration is a separate design exercise, not part of these changes.
+
 | Concern | Upstream route |
 | --- | --- |
 | Tagnetic branding, icons and personal release metadata | Fork-only; independent product identity |

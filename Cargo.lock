@@ -4917,7 +4917,7 @@ dependencies = [
 
 [[package]]
 name = "tagrex"
-version = "1.4.3"
+version = "1.4.4"
 dependencies = [
  "block2 0.6.2",
  "libc",
@@ -4952,7 +4952,7 @@ dependencies = [
 
 [[package]]
 name = "tagrex-commands"
-version = "1.4.3"
+version = "1.4.4"
 dependencies = [
  "base64 0.23.1",
  "regex",
@@ -4972,7 +4972,7 @@ dependencies = [
 
 [[package]]
 name = "tagrex-core"
-version = "1.4.3"
+version = "1.4.4"
 dependencies = [
  "encoding_rs",
  "httpdate",
@@ -4989,7 +4989,7 @@ dependencies = [
 
 [[package]]
 name = "tagrex-player"
-version = "1.4.3"
+version = "1.4.4"
 dependencies = [
  "anyhow",
  "beat-this",
@@ -5002,7 +5002,7 @@ dependencies = [
 
 [[package]]
 name = "tagrex-providers-bandcamp"
-version = "1.4.3"
+version = "1.4.4"
 dependencies = [
  "serde_json",
  "tagrex-core",
@@ -5011,7 +5011,7 @@ dependencies = [
 
 [[package]]
 name = "tagrex-providers-beatport"
-version = "1.4.3"
+version = "1.4.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -5021,7 +5021,7 @@ dependencies = [
 
 [[package]]
 name = "tagrex-providers-discogs"
-version = "1.4.3"
+version = "1.4.4"
 dependencies = [
  "serde_json",
  "tagrex-core",
@@ -5030,7 +5030,7 @@ dependencies = [
 
 [[package]]
 name = "tagrex-providers-musicbrainz"
-version = "1.4.3"
+version = "1.4.4"
 dependencies = [
  "serde_json",
  "tagrex-core",
@@ -5039,7 +5039,7 @@ dependencies = [
 
 [[package]]
 name = "tagrex-providers-soundeo"
-version = "1.4.3"
+version = "1.4.4"
 dependencies = [
  "regex",
  "tagrex-core",
