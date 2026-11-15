@@ -70,9 +70,11 @@ pub struct AppliedBatch {
     /// without touching directories that already existed.
     #[allow(clippy::struct_field_names)]
     pub created_dirs: Vec<PathBuf>,
-    /// Directories this batch emptied and then removed (#153), deepest first.
-    /// Rollback recreates exactly these, before anything moves back, so a file
-    /// has a folder to return to.
+    /// Source parents Undo may need to recreate, deepest first (#153). The
+    /// initial write-ahead record includes verified pruning candidates, before
+    /// any removal can run. Stored batches can retain those candidates even
+    /// when not all were removed; recreating an existing authorized parent is
+    /// harmless and ensures files have folders to return to.
     #[allow(clippy::struct_field_names)]
     pub removed_dirs: Vec<PathBuf>,
     /// The roots this batch was authorized to write inside, canonicalized. Only
@@ -83,13 +85,15 @@ pub struct AppliedBatch {
     pub allowed_roots: Vec<PathBuf>,
     /// What each copy this batch made looked like once the batch was done
     /// (#604). Undo removes a copy only while the file at its path still
-    /// matches. Empty for a batch recorded before this existed; its copies are
-    /// removed without the check, as they always were.
+    /// matches. Completed legacy batches with no stamps keep their original
+    /// behavior. An interrupted batch with an existing unstamped destination
+    /// has no proof of ownership, so Undo refuses to remove it.
     pub copy_stamps: Vec<CopyStamp>,
     /// What each changed field read as once the batch was written (#658). Undo
     /// refuses a file whose fields have changed since, rather than writing the
-    /// old values over somebody's later edit. Empty for a batch recorded before
-    /// this existed; it is undone without the check, as it always was.
+    /// old values over somebody's later edit. Completed legacy batches with no
+    /// values keep their original behavior. Missing outcomes in an interrupted
+    /// batch are unknown; only already-restored fields are safe without them.
     pub applied_values: Vec<AppliedValue>,
     /// Recorded before its first write and never finished (#659): the process
     /// stopped part-way through the apply. Undoing it puts back what it reached.

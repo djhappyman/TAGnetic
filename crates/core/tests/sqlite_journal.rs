@@ -570,6 +570,16 @@ fn an_interrupted_batch_can_be_undone_after_a_restart() {
     let batches = journal.batches().unwrap();
     assert_eq!(batches.len(), 1);
     assert!(batches[0].interrupted);
+    // An initial interrupted record has intent, but no observed outcome. The
+    // reached field is ambiguous until explicitly restored; no transfers run.
+    assert!(matches!(
+        Executor::undo(&mut journal, batches[0].id, &roots(dir.path())),
+        Err(tagrex_core::plan::PlanError::ChangedSinceApplied(_))
+    ));
+    assert!(moved.exists() && !reached.exists());
+    let mut file = TagEngine::read(&moved).unwrap();
+    file.tags.remove(&TagField::Artist);
+    TagEngine::write(&file).unwrap();
     Executor::undo(&mut journal, batches[0].id, &roots(dir.path())).unwrap();
 
     assert!(reached.exists() && !moved.exists());
@@ -905,4 +915,629 @@ fn image_pool_checks_bytes_on_hash_collision_and_keeps_other_batch_references() 
             .unwrap(),
         0
     );
+}
+
+/// Stop at the transaction boundary without running Apply's error rollback.
+/// Unwinding here models process termination; reopening SQLite reads only the
+/// durable write-ahead record, rather than the in-memory completed batch.
+struct StopBeforeFinish(SqliteJournal);
+
+impl UndoJournal for StopBeforeFinish {
+    fn record(
+        &mut self,
+        batch: &AppliedBatch,
+    ) -> Result<BatchId, tagrex_core::journal::JournalError> {
+        self.0.record(batch)
+    }
+    fn batches(&self) -> Result<Vec<AppliedBatch>, tagrex_core::journal::JournalError> {
+        self.0.batches()
+    }
+    fn finish(
+        &mut self,
+        _: BatchId,
+        _: &AppliedBatch,
+    ) -> Result<(), tagrex_core::journal::JournalError> {
+        panic!("simulated termination before finish")
+    }
+    fn rollback(&mut self, id: BatchId) -> Result<(), tagrex_core::journal::JournalError> {
+        self.0.rollback(id)
+    }
+}
+
+fn interrupt_before_finish(dir: &TempDir, plan: &ChangePlan) -> AppliedBatch {
+    let mut journal = StopBeforeFinish(SqliteJournal::open(&dir.db()).unwrap());
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Executor::apply(plan, &mut journal, &roots(dir.path())).unwrap();
+    }))
+    .is_err());
+    drop(journal);
+    let reopened = SqliteJournal::open(&dir.db()).unwrap();
+    let batch = reopened.batches().unwrap().remove(0);
+    assert!(batch.interrupted);
+    assert!(batch.copy_stamps.is_empty());
+    batch
+}
+
+#[test]
+fn interrupted_unstamped_copies_and_sidecars_are_never_deleted() {
+    use tagrex_core::plan::{PlanError, UndoMode};
+    for mode in [UndoMode::Strict, UndoMode::KeepChanged, UndoMode::Overwrite] {
+        for sidecar_only in [false, true] {
+            let dir = TempDir::new("unstamped-copy");
+            let source = dir.flac("source.flac");
+            let target = dir.path().join("target.flac");
+            let sidecar = dir.path().join("source.cue");
+            let sidecar_target = dir.path().join("target.cue");
+            std::fs::write(&sidecar, b"original cue").unwrap();
+            let source_bytes = std::fs::read(&source).unwrap();
+            let plan = ChangePlan {
+                changes: vec![FileChange {
+                    path: source.clone(),
+                    rename_to: Some(target.clone()),
+                    copy: true,
+                    sidecar_renames: vec![(sidecar.clone(), sidecar_target.clone())],
+                    ..FileChange::default()
+                }],
+                ..ChangePlan::default()
+            };
+            let batch = interrupt_before_finish(&dir, &plan);
+            if sidecar_only {
+                std::fs::remove_file(&target).unwrap();
+            }
+            let replacement = if sidecar_only {
+                &sidecar_target
+            } else {
+                &target
+            };
+            std::fs::write(replacement, b"later unrelated replacement").unwrap();
+            let before = std::fs::read(&sidecar_target).unwrap();
+            let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+            assert!(
+                matches!(Executor::undo_with_mode(&mut journal, batch.id, &roots(dir.path()), mode, &mut |_| {}), Err(PlanError::Stale(path)) if path == *replacement)
+            );
+            assert_eq!(
+                std::fs::read(replacement).unwrap(),
+                b"later unrelated replacement"
+            );
+            assert_eq!(std::fs::read(&sidecar_target).unwrap(), before);
+            assert_eq!(std::fs::read(&source).unwrap(), source_bytes);
+            assert_eq!(std::fs::read(&sidecar).unwrap(), b"original cue");
+            assert!(journal.batch(batch.id).unwrap().unwrap().interrupted);
+            // Once both uncertain destinations are absent, Undo is satisfied.
+            if target.exists() {
+                std::fs::remove_file(&target).unwrap();
+            }
+            std::fs::remove_file(&sidecar_target).unwrap();
+            Executor::undo_with_mode(
+                &mut journal,
+                batch.id,
+                &roots(dir.path()),
+                mode,
+                &mut |_| {},
+            )
+            .unwrap();
+            assert!(journal.batches().unwrap().is_empty());
+        }
+    }
+}
+
+#[test]
+fn completed_legacy_unstamped_copies_remain_undoable() {
+    let dir = TempDir::new("legacy-copy");
+    let source = dir.flac("source.flac");
+    let target = dir.path().join("target.flac");
+    let plan = ChangePlan {
+        changes: vec![FileChange {
+            path: source.clone(),
+            rename_to: Some(target.clone()),
+            copy: true,
+            ..FileChange::default()
+        }],
+        ..ChangePlan::default()
+    };
+    let mut batch = interrupt_before_finish(&dir, &plan);
+    batch.interrupted = false;
+    let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+    journal.finish(batch.id, &batch).unwrap();
+    drop(journal);
+    let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+    Executor::undo(&mut journal, batch.id, &roots(dir.path())).unwrap();
+    assert!(source.exists() && !target.exists());
+}
+
+#[test]
+fn interrupted_unchanged_copy_requires_observed_stamp() {
+    use tagrex_core::plan::{PlanError, UndoMode};
+    for mode in [UndoMode::Strict, UndoMode::KeepChanged, UndoMode::Overwrite] {
+        for stamp_known in [false, true] {
+            let dir = TempDir::new("copy-evidence");
+            let source = dir.flac("source.flac");
+            let target = dir.path().join("target.flac");
+            let plan = ChangePlan {
+                changes: vec![FileChange {
+                    path: source.clone(),
+                    rename_to: Some(target.clone()),
+                    copy: true,
+                    ..FileChange::default()
+                }],
+                ..ChangePlan::default()
+            };
+            let mut batch = interrupt_before_finish(&dir, &plan);
+            let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+            if stamp_known {
+                batch.copy_stamps.push(CopyStamp::of(&target).unwrap());
+                journal.retain_interrupted(batch.id, &batch).unwrap();
+            }
+            drop(journal);
+            let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+            let result = Executor::undo_with_mode(
+                &mut journal,
+                batch.id,
+                &roots(dir.path()),
+                mode,
+                &mut |_| {},
+            );
+            if stamp_known {
+                result.unwrap();
+            } else {
+                assert!(matches!(result, Err(PlanError::Stale(path)) if path == target));
+                assert_eq!(std::fs::read(&target).unwrap(), MINIMAL_FLAC);
+                assert!(journal.batch(batch.id).unwrap().is_some());
+                std::fs::remove_file(&target).unwrap();
+                Executor::undo(&mut journal, batch.id, &roots(dir.path())).unwrap();
+            }
+            assert_eq!(std::fs::read(&source).unwrap(), MINIMAL_FLAC);
+            assert!(!target.exists());
+            assert!(journal.batches().unwrap().is_empty());
+        }
+    }
+}
+
+#[test]
+fn interrupted_missing_field_outcomes_refuse_later_edits_in_every_mode() {
+    use tagrex_core::plan::{PlanError, UndoMode};
+    for mode in [UndoMode::Strict, UndoMode::KeepChanged, UndoMode::Overwrite] {
+        for partial_evidence in [false, true] {
+            let dir = TempDir::new("unknown-fields");
+            let track = dir.flac("track.flac");
+            let untouched = dir.flac("untouched.flac");
+            let before_untouched = std::fs::read(&untouched).unwrap();
+            let plan = ChangePlan {
+                changes: vec![FileChange {
+                    path: track.clone(),
+                    tag_changes: vec![
+                        FieldChange {
+                            field: TagField::Artist,
+                            old: None,
+                            new: Some("Applied".to_string()),
+                        },
+                        FieldChange {
+                            field: TagField::Title,
+                            old: None,
+                            new: Some("Applied title".to_string()),
+                        },
+                    ],
+                    ..FileChange::default()
+                }],
+                ..ChangePlan::default()
+            };
+            let mut batch = interrupt_before_finish(&dir, &plan);
+            // Include an unreached entry; refusal must leave it byte-for-byte.
+            batch.plan.changes.push(
+                set_artist(&untouched, None, Some("Never reached"))
+                    .changes
+                    .remove(0),
+            );
+            if partial_evidence {
+                batch.applied_values.push(AppliedValue {
+                    path: track.clone(),
+                    field: TagField::Title,
+                    value: Some("Applied title".to_string()),
+                });
+            }
+            let mut file = TagEngine::read(&track).unwrap();
+            file.tags
+                .insert(TagField::Artist, "Later external edit".to_string());
+            TagEngine::write(&file).unwrap();
+            let before = std::fs::read(&track).unwrap();
+            let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+            // record a fixture representing a partially retained execution outcome
+            journal.rollback(batch.id).unwrap();
+            let id = journal.record(&batch).unwrap();
+            drop(journal);
+            let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+            assert!(
+                matches!(Executor::undo_with_mode(&mut journal, id, &roots(dir.path()), mode, &mut |_| {}), Err(PlanError::ChangedSinceApplied(path)) if path == track)
+            );
+            assert_eq!(std::fs::read(&track).unwrap(), before);
+            assert_eq!(std::fs::read(&untouched).unwrap(), before_untouched);
+            assert!(journal.batch(id).unwrap().unwrap().interrupted);
+            // Restore uncertain fields explicitly, then retry known and unreached fields.
+            let mut file = TagEngine::read(&track).unwrap();
+            file.tags.remove(&TagField::Artist);
+            if !partial_evidence {
+                file.tags.remove(&TagField::Title);
+            }
+            TagEngine::write(&file).unwrap();
+            Executor::undo_with_mode(&mut journal, id, &roots(dir.path()), mode, &mut |_| {})
+                .unwrap();
+            assert!(!TagEngine::read(&track)
+                .unwrap()
+                .tags
+                .contains_key(&TagField::Title));
+            assert_eq!(std::fs::read(&untouched).unwrap(), before_untouched);
+            assert!(journal.batches().unwrap().is_empty());
+        }
+    }
+}
+
+#[test]
+fn interrupted_pruning_restores_authorized_source_parents_and_sidecars() {
+    use std::sync::atomic::AtomicBool;
+    for stop_before_transfer in [false, true] {
+        let dir = TempDir::new("prune-recovery");
+        let parent = dir.path().join("artist/album");
+        let scans = parent.join("Scans");
+        std::fs::create_dir_all(&scans).unwrap();
+        let source = parent.join("track.flac");
+        std::fs::write(&source, MINIMAL_FLAC).unwrap();
+        let sidecar = scans.join("cover.jpg");
+        std::fs::write(&sidecar, b"disposable scan").unwrap();
+        let target = dir.path().join("new/track.flac");
+        let sidecar_target = dir.path().join("new/cover.jpg");
+        let plan = ChangePlan {
+            prune_empty_dirs: true,
+            changes: vec![FileChange {
+                path: source.clone(),
+                rename_to: Some(target.clone()),
+                sidecar_renames: vec![(sidecar.clone(), sidecar_target.clone())],
+                ..FileChange::default()
+            }],
+            ..ChangePlan::default()
+        };
+        let batch = if stop_before_transfer {
+            let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Executor::apply_with(
+                    &plan,
+                    &mut journal,
+                    &roots(dir.path()),
+                    &mut |progress| {
+                        if progress.done == 1 {
+                            panic!("stop before first transfer");
+                        }
+                    },
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            }))
+            .is_err());
+            drop(journal);
+            SqliteJournal::open(&dir.db())
+                .unwrap()
+                .batches()
+                .unwrap()
+                .remove(0)
+        } else {
+            let batch = interrupt_before_finish(&dir, &plan);
+            assert!(
+                !parent.exists(),
+                "pruning really ran before simulated termination"
+            );
+            batch
+        };
+        assert!(batch.removed_dirs.contains(&parent));
+        assert!(batch.removed_dirs.contains(&scans));
+        assert!(!batch.removed_dirs.contains(&dir.path().to_path_buf()));
+        let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+        Executor::undo(&mut journal, batch.id, &roots(dir.path())).unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), MINIMAL_FLAC);
+        assert_eq!(std::fs::read(&sidecar).unwrap(), b"disposable scan");
+        assert!(!target.exists() && !sidecar_target.exists());
+        assert!(journal.batches().unwrap().is_empty());
+    }
+}
+
+fn recovery_cover(byte: u8, description: &str) -> tagrex_core::model::CoverArt {
+    tagrex_core::model::CoverArt {
+        mime: "image/png".to_string(),
+        data: vec![0x89, 0x50, 0x4e, 0x47, byte].into(),
+        description: description.to_string(),
+        ..tagrex_core::model::CoverArt::default()
+    }
+}
+
+#[test]
+fn later_cover_sets_survive_undo_refusal_and_allow_retry() {
+    use tagrex_core::model::{CoverArt, CoverKind};
+    use tagrex_core::plan::{CoverChange, PlanError, UndoMode};
+    for mode in [UndoMode::Strict, UndoMode::KeepChanged, UndoMode::Overwrite] {
+        for interrupted in [false, true] {
+            for edit in 0..4 {
+                let dir = TempDir::new("cover-conflict");
+                let parent = dir.path().join("old");
+                std::fs::create_dir_all(&parent).unwrap();
+                let track = parent.join("track.flac");
+                std::fs::write(&track, MINIMAL_FLAC).unwrap();
+                let moved = dir.path().join("moved.flac");
+                let old = vec![recovery_cover(1, "Original")];
+                let new = vec![
+                    recovery_cover(2, "Front"),
+                    CoverArt {
+                        kind: CoverKind::Back,
+                        ..recovery_cover(3, "Back")
+                    },
+                ];
+                TagEngine::write_covers(&track, &old).unwrap();
+                let plan = ChangePlan {
+                    prune_empty_dirs: true,
+                    changes: vec![FileChange {
+                        path: track.clone(),
+                        rename_to: Some(moved.clone()),
+                        cover_change: Some(CoverChange {
+                            old: old.clone(),
+                            new: new.clone(),
+                        }),
+                        ..FileChange::default()
+                    }],
+                    ..ChangePlan::default()
+                };
+                let batch = if interrupted {
+                    interrupt_before_finish(&dir, &plan)
+                } else {
+                    Executor::apply(
+                        &plan,
+                        &mut SqliteJournal::open(&dir.db()).unwrap(),
+                        &roots(dir.path()),
+                    )
+                    .unwrap()
+                };
+                let mut later = new.clone();
+                match edit {
+                    0 => later[0] = recovery_cover(9, "Front"),
+                    1 => later[0].description = "Later description".to_string(),
+                    2 => later[0].kind = CoverKind::Back,
+                    _ => later.reverse(),
+                }
+                TagEngine::write_covers(&moved, &later).unwrap();
+                let before = std::fs::read(&moved).unwrap();
+                let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+                assert!(
+                    matches!(Executor::undo_with_mode(&mut journal, batch.id, &roots(dir.path()), mode, &mut |_| {}), Err(PlanError::ChangedSinceApplied(path)) if path == moved)
+                );
+                assert_eq!(std::fs::read(&moved).unwrap(), before);
+                assert_eq!(TagEngine::read_covers(&moved).unwrap(), later);
+                assert!(!track.exists());
+                assert!(
+                    !parent.exists(),
+                    "refusal must not recreate pruned directories"
+                );
+                assert!(journal.batch(batch.id).unwrap().is_some());
+                // A completed batch accepts its applied state; unknown execution
+                // accepts only an explicitly restored state.
+                TagEngine::write_covers(&moved, if interrupted { &old } else { &new }).unwrap();
+                Executor::undo_with_mode(
+                    &mut journal,
+                    batch.id,
+                    &roots(dir.path()),
+                    mode,
+                    &mut |_| {},
+                )
+                .unwrap();
+                assert_eq!(TagEngine::read_covers(&track).unwrap(), old);
+                assert!(!moved.exists());
+                assert!(journal.batches().unwrap().is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn interrupted_field_recovery_at_each_tag_write_boundary() {
+    use std::sync::atomic::AtomicBool;
+    use tagrex_core::plan::PlanError;
+    for completed_files in 0..=2 {
+        let dir = TempDir::new("tag-write-boundary");
+        let tracks = [dir.flac("a.flac"), dir.flac("b.flac")];
+        let before: Vec<_> = tracks
+            .iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect();
+        let plan = ChangePlan {
+            changes: tracks
+                .iter()
+                .map(|path| set_artist(path, None, Some("Applied")).changes.remove(0))
+                .collect(),
+            ..ChangePlan::default()
+        };
+        let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Executor::apply_with(
+                &plan,
+                &mut journal,
+                &roots(dir.path()),
+                &mut |progress| {
+                    if progress.done == 2 + completed_files {
+                        panic!("simulated termination at tag boundary");
+                    }
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        }))
+        .is_err());
+        drop(journal);
+        let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+        let id = journal.batches().unwrap()[0].id;
+        let after: Vec<_> = tracks
+            .iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect();
+        let result = Executor::undo(&mut journal, id, &roots(dir.path()));
+        if completed_files == 0 {
+            result.unwrap();
+        } else {
+            assert!(matches!(result, Err(PlanError::ChangedSinceApplied(_))));
+            for (index, path) in tracks.iter().enumerate() {
+                assert_eq!(std::fs::read(path).unwrap(), after[index]);
+            }
+            assert!(journal.batch(id).unwrap().is_some());
+            for path in tracks.iter().take(completed_files) {
+                let mut file = TagEngine::read(path).unwrap();
+                file.tags.remove(&TagField::Artist);
+                TagEngine::write(&file).unwrap();
+            }
+            Executor::undo(&mut journal, id, &roots(dir.path())).unwrap();
+        }
+        for (index, path) in tracks.iter().enumerate().skip(completed_files) {
+            assert_eq!(
+                std::fs::read(path).unwrap(),
+                before[index],
+                "unreached file was not rewritten"
+            );
+        }
+        assert!(journal.batches().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn interrupted_move_recovers_after_each_pruned_parent() {
+    use std::sync::atomic::AtomicBool;
+    for pruned in 0..=3 {
+        let dir = TempDir::new("pruning-boundary");
+        let parents = [
+            dir.path().join("artist/album/Scans"),
+            dir.path().join("artist/album"),
+            dir.path().join("artist"),
+        ];
+        std::fs::create_dir_all(&parents[0]).unwrap();
+        let source = parents[1].join("track.flac");
+        let sidecar = parents[0].join("cover.jpg");
+        std::fs::write(&source, MINIMAL_FLAC).unwrap();
+        std::fs::write(&sidecar, b"disposable scan").unwrap();
+        let target = dir.path().join("new/track.flac");
+        let sidecar_target = dir.path().join("new/cover.jpg");
+        let plan = ChangePlan {
+            prune_empty_dirs: true,
+            changes: vec![FileChange {
+                path: source.clone(),
+                rename_to: Some(target.clone()),
+                sidecar_renames: vec![(sidecar.clone(), sidecar_target.clone())],
+                ..FileChange::default()
+            }],
+            ..ChangePlan::default()
+        };
+        let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Executor::apply_with(
+                &plan,
+                &mut journal,
+                &roots(dir.path()),
+                &mut |progress| {
+                    if progress.done == 1 {
+                        panic!("stop after initial record");
+                    }
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        }))
+        .is_err());
+        drop(journal);
+        // Deterministic filesystem states at the three deletion boundaries,
+        // backed by the real production write-ahead record.
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::rename(&source, &target).unwrap();
+        std::fs::rename(&sidecar, &sidecar_target).unwrap();
+        for parent in parents.iter().take(pruned) {
+            std::fs::remove_dir(parent).unwrap();
+        }
+        let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+        let id = journal.batches().unwrap()[0].id;
+        Executor::undo(&mut journal, id, &roots(dir.path())).unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), MINIMAL_FLAC);
+        assert_eq!(std::fs::read(&sidecar).unwrap(), b"disposable scan");
+        assert!(!target.exists() && !sidecar_target.exists());
+        assert!(journal.batches().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn failed_apply_does_not_invent_outcomes_for_unreached_external_edits() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tagrex_core::plan::{PlanError, UndoMode};
+    let dir = TempDir::new("unreached-external-edit");
+    let reached = dir.flac("reached.flac");
+    let saved = dir.path().join("saved.flac");
+    let untouched = dir.flac("untouched.flac");
+    let plan = ChangePlan {
+        changes: vec![
+            set_artist(&reached, None, Some("Applied"))
+                .changes
+                .remove(0),
+            set_artist(&untouched, None, Some("Never reached"))
+                .changes
+                .remove(0),
+        ],
+        ..ChangePlan::default()
+    };
+    let cancel = AtomicBool::new(false);
+    let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+    let error = Executor::apply_with(
+        &plan,
+        &mut journal,
+        &roots(dir.path()),
+        &mut |progress| {
+            if progress.completed.is_some() {
+                // Block rollback of the reached file, edit the unreached one, then
+                // cancel before its write begins. Everything is a disposable fixture.
+                std::fs::rename(&reached, &saved).unwrap();
+                std::fs::create_dir(&reached).unwrap();
+                let mut file = TagEngine::read(&untouched).unwrap();
+                file.tags
+                    .insert(TagField::Artist, "Later external edit".to_string());
+                TagEngine::write(&file).unwrap();
+                cancel.store(true, Ordering::SeqCst);
+            }
+        },
+        &cancel,
+    )
+    .unwrap_err();
+    assert!(matches!(error, PlanError::RollbackIncomplete { .. }));
+    drop(journal);
+    std::fs::remove_dir(&reached).unwrap();
+    std::fs::rename(&saved, &reached).unwrap();
+    let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+    let batch = journal.batches().unwrap().remove(0);
+    assert!(batch.interrupted);
+    assert!(batch
+        .applied_values
+        .iter()
+        .any(|value| value.path == reached));
+    assert!(batch
+        .applied_values
+        .iter()
+        .all(|value| value.path != untouched));
+    let reached_bytes = std::fs::read(&reached).unwrap();
+    let untouched_bytes = std::fs::read(&untouched).unwrap();
+    for mode in [UndoMode::Strict, UndoMode::KeepChanged, UndoMode::Overwrite] {
+        assert!(
+            matches!(Executor::undo_with_mode(&mut journal, batch.id, &roots(dir.path()), mode, &mut |_| {}),
+            Err(PlanError::ChangedSinceApplied(path)) if path == untouched)
+        );
+        assert_eq!(std::fs::read(&reached).unwrap(), reached_bytes);
+        assert_eq!(std::fs::read(&untouched).unwrap(), untouched_bytes);
+        assert!(journal.batch(batch.id).unwrap().is_some());
+    }
+    let mut file = TagEngine::read(&untouched).unwrap();
+    file.tags.remove(&TagField::Artist);
+    TagEngine::write(&file).unwrap();
+    let restored_bytes = std::fs::read(&untouched).unwrap();
+    Executor::undo(&mut journal, batch.id, &roots(dir.path())).unwrap();
+    assert!(!TagEngine::read(&reached)
+        .unwrap()
+        .tags
+        .contains_key(&TagField::Artist));
+    assert_eq!(std::fs::read(&untouched).unwrap(), restored_bytes);
+    assert!(journal.batches().unwrap().is_empty());
 }
