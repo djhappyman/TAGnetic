@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import BrandWordmark from './BrandWordmark.svelte';
   import { subscribeWorkspaceState, setWorkspaceMode, setWorkspaceSubtab, type WorkspaceMode, type WorkspaceSubtab } from '$lib/workspace-state';
   import DockWorkspace from './DockWorkspace.svelte';
   import CompactPlayer from './CompactPlayer.svelte';
@@ -143,7 +144,7 @@
 <header class="topbar" data-tauri-drag-region>
   <div class="topbar-main" data-tauri-drag-region>
     <div class="brand" role="img" aria-label="Tagnetic">
-      <span class="brand-wordmark" aria-hidden="true">TAGnetic</span>
+      <BrandWordmark />
     </div>
 
     <Tabs.List class="mode-tabs" aria-label="Tools">
