@@ -82,10 +82,10 @@
     }
   ],
   "condensed": {
-    "commit": "2eff3ae677cc17845afe5f7a09b048bcf55a4918",
+    "commit": "fe976867333b0aac7ef566dd60c3dfa93e410406",
     "path": "app/ui/assets/tagrex-ui-condensed.woff2",
-    "bytes": 45864,
-    "sha256": "22117aa1694ff02b91b2ec7773e8e57dc7a9dc08a027ea05e67ba42770ca0c91",
+    "bytes": 55860,
+    "sha256": "04b4721735de6e419254f469634c4b23b1b844bffef74528f09bff5ea9ea41a8",
     "upstream": {
       "repository": "https://github.com/IBM/plex",
       "commit": "34cadd4234d443b041e7e109a4699ed508fd2b9d",
@@ -95,8 +95,8 @@
     },
     "portable_source": {
       "path": "tools/font-sources/tagrex-condensed-subset.woff2",
-      "sha256": "4586a0ef95cf92d02718f772b60d70c7c5842274b92847156eee212f3913b2e7",
-      "description": "Renamed preserved subset, canonical regeneration input; outlines and metrics verified against pinned IBM upstream"
+      "sha256": "04b4721735de6e419254f469634c4b23b1b844bffef74528f09bff5ea9ea41a8",
+      "description": "Expanded Greek/Vietnamese subset from TagRex fe97686; all retained outlines and metrics verified against pinned IBM upstream"
     }
   },
   "baseline": {

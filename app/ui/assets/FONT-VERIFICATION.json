@@ -165,9 +165,9 @@
       }
     },
     "tagrex-ui-condensed.woff2": {
-      "bytes": 46012,
-      "sha256": "4586a0ef95cf92d02718f772b60d70c7c5842274b92847156eee212f3913b2e7",
-      "codepoints": 612,
+      "bytes": 55812,
+      "sha256": "7c5eabed90f8d02f5f6222f3fd652f517c99d1350c88d7005fbdf68758ab6000",
+      "codepoints": 801,
       "unchanged_glyphs_and_metrics": true
     }
   },
@@ -253,5 +253,5 @@
       ]
     }
   },
-  "total_woff2_bytes": 1177860
+  "total_woff2_bytes": 1187660
 }

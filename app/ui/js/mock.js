@@ -954,7 +954,10 @@ function mockInvoke(cmd, args) {
       }
       return {batch, plan:staged, tracks:structuredClone(s.tracks.filter(track => affected.has(track.path)))};
     })();
-    case "apply_plan":
+    case "apply_plan": {
+      s.redoPlans = [];
+      s.historyPlans ||= new Map();
+      const before = args.plan.changes.map(change => ({path:change.path, rename_to:change.rename_to, track:structuredClone(findTrack(change.path))}));
       for (const c of args.plan.changes) {
         const t = findTrack(c.path);
         if (!t) continue;
@@ -966,8 +969,12 @@ function mockInvoke(cmd, args) {
         }
         for (const tc of c.tag_changes) t.tags[tc.field] = tc.new || "";
       }
-      s.history.unshift({ id: s.history.length + 1, description: args.plan.description, applied_at: 0 });
-      return Promise.resolve({ id: s.history.length, description: args.plan.description, applied_at: 0 });
+      s.nextBatchId = (s.nextBatchId || 0) + 1;
+      const batch = {id:s.nextBatchId, description:args.plan.description, applied_at:0};
+      s.historyPlans.set(batch.id, {plan:structuredClone(args.plan), before});
+      s.history.unshift(batch);
+      return Promise.resolve(batch);
+    }
     case "cancel_apply":
       return Promise.resolve();
     // BPM detection (#536): a tempo made up from the path, after a pause per
@@ -1012,9 +1019,29 @@ function mockInvoke(cmd, args) {
       return Promise.resolve(s.history);
     case "take_journal_notice":
       return Promise.resolve(null);
-    case "undo":
-      s.history.shift();
-      return Promise.resolve({ kept: [] });
+    case "undo": {
+      const index = args.batchId == null ? 0 : s.history.findIndex(batch => batch.id === args.batchId);
+      const batch = index >= 0 ? s.history.splice(index, 1)[0] : null;
+      const stored = batch && s.historyPlans?.get(batch.id);
+      if (stored) {
+        for (const old of stored.before) {
+          const at = s.tracks.findIndex(track => track.path === (old.rename_to || old.path));
+          if (at >= 0 && old.track) s.tracks[at] = structuredClone(old.track);
+        }
+        (s.redoPlans ||= []).push(stored.plan);
+      }
+      return Promise.resolve({kept:[]});
+    }
+    case "redo_count": return Promise.resolve(s.redoPlans?.length || 0);
+    case "redo": return (async () => {
+      const plan = s.redoPlans?.pop();
+      if (!plan) return null;
+      const remaining = s.redoPlans;
+      const batch = await mockInvoke('apply_plan', {plan});
+      s.redoPlans = remaining;
+      return batch;
+    })();
+    case "check_import_order": return Promise.resolve(null);
     case "preview_cover_embed": {
       const changes = args.paths.map((p) => ({
         path: p,
@@ -1582,7 +1609,7 @@ function mockInvoke(cmd, args) {
       });
     case "preview_import": {
       const sideCounters = {}; // per-disc running track number for bare vinyl sides
-      const changes = args.paths.map((p, i) => {
+      const changes = args.paths.slice(0, args.selection.tracks.length || args.paths.length).map((p, i) => {
         const t = findTrack(p);
         const rt = args.selection.tracks[i];
         const tag_changes = [

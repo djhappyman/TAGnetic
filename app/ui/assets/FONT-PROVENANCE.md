@@ -63,7 +63,7 @@ and are equal. That upstream file is also commit/checksum pinned. The newer
   extended Latin, Cyrillic and all other character mappings in those inputs.
 - Disable `calt`, `liga`, `clig` and `dlig` in Mono so literal file/tag data do
   not gain programming ligatures. Other shaping/features remain available.
-- Rename identities and convert to WOFF2. Preserve the condensed face's exact
+- Rename identities and convert to WOFF2. Preserve the expanded condensed face's exact
   existing glyph table, horizontal metrics and character mappings.
 - Retain 700 in every interface variable file. The former separate sans-medium
   (actually 600) and sans-bold files are replaced by the variable sans face.
@@ -119,3 +119,10 @@ retained glyph outline and metric against the independently pinned IBM source.
 The packaged subset carries its existing renamed metadata; it introduces no new
 glyph design. No external font URL,
 local-font lookup or network font dependency exists at runtime.
+
+## Condensed coverage update
+
+The condensed source subset now includes Greek and Vietnamese from TagRex
+commit `fe976867333b0aac7ef566dd60c3dfa93e410406`. Its family remains
+TagRex Condensed at weight 400. The pinned IBM source and OFL attribution remain
+unchanged; the build verifies every glyph outline and advance width against it.

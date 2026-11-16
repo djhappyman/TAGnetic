@@ -7,3 +7,6 @@
 /test-results
 /playwright-report
 /.test-dist
+
+# Separate legacy-JavaScript lint dependencies.
+/tools/lint/node_modules

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { t } from '../js/i18n.js';
-  import { FolderOpen, FolderPlus, Undo2, ListChecks, ListX, ArrowDown, ArrowUp, Group, ChevronDown, PanelRightOpen, PanelRightClose } from '@lucide/svelte';
+  import { FolderOpen, FolderPlus, Undo2, Redo2, ListChecks, ListX, ArrowDown, ArrowUp, Group, ChevronDown, PanelRightOpen, PanelRightClose } from '@lucide/svelte';
   import RibbonTools from './RibbonTools.svelte';
   import BrandWordmark from './BrandWordmark.svelte';
   import { subscribeWorkspaceState, setWorkspaceMode, setWorkspaceSubtab, type WorkspaceMode, type WorkspaceSubtab } from '$lib/workspace-state';
@@ -289,6 +289,7 @@
     <span class="ribbon-divider" aria-hidden="true"></span>
     <div class="ribbon-group" role="group" aria-label="History">
     <Button variant="ghost" size="icon-sm" id="undo" class="icon ribbon-command" disabled data-i18n-title="topbar.undo" title="Undo the last applied batch" data-i18n-aria-label="topbar.undo" aria-label="Undo the last applied batch"><Undo2 class="ico" size={17} strokeWidth={1.7} /></Button>
+    <Button variant="ghost" size="icon-sm" id="redo" class="icon ribbon-command" disabled data-i18n-title="topbar.redo" title="Redo the last undone batch" data-i18n-aria-label="topbar.redo" aria-label="Redo the last undone batch"><Redo2 class="ico" size={17} strokeWidth={1.7} /></Button>
     </div>
     <span class="ribbon-divider" aria-hidden="true"></span>
     <div class="ribbon-group" role="group" aria-label="Selection">

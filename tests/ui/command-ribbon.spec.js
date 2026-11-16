@@ -19,8 +19,8 @@ async function picker(page, path) {
 const paths = page => page.evaluate(() => window.tagrex.tracks.map(t => t.path));
 const selected = page => page.evaluate(() => [...window.tagrex.selection]);
 
-test('sixteen commands have eight group dividers and selection follows the filtered model', async ({ page }) => {
-  await expect(page.locator('.command-ribbon button.ribbon-command')).toHaveCount(16);
+test('seventeen commands have eight group dividers and selection follows the filtered model', async ({ page }) => {
+  await expect(page.locator('.command-ribbon button.ribbon-command')).toHaveCount(17);
   await expect(page.locator('.ribbon-divider')).toHaveCount(8);
   await expect(page.locator('#more-btn')).toBeHidden();
   await page.locator('#ribbon-clear-selection').click();
@@ -314,4 +314,51 @@ test('cancelled quick Write restores the row animation and keeps pending staged 
   await expect(page.locator('#tracks-body tr[data-path]').first()).toHaveClass(/selected/);
   expect(await page.evaluate(()=>window.tagrex.previewPlan.changes)).toEqual(before.changes);
   await expect(page.locator('#diff-apply')).toBeEnabled();
+});
+
+test('Redo sits beside Undo and replays the last undone batch', async ({page}) => {
+  const before=await page.evaluate(()=>window.tagrex.tracks[0].tags.title);
+  await expect(page.locator('#redo')).toBeDisabled();
+  await expect(page.locator('#undo + #redo')).toHaveCount(1);
+  await page.locator('.subtab[data-subtab="editor"]').click();
+  await page.locator('#editor-field-title').fill('Redo ribbon fixture');
+  await expect(page.locator('#diff-apply')).toBeEnabled();
+  await page.locator('#diff-apply').click();
+  await expect(page.locator('#undo')).toBeEnabled();
+  await page.locator('#undo').click();
+  await expect(page.locator('#redo')).toBeEnabled();
+  expect(await page.evaluate(()=>window.tagrex.tracks[0].tags.title)).toBe(before);
+  await page.locator('#redo').focus();
+  await page.keyboard.press('Control+Shift+z');
+  await expect.poll(()=>page.evaluate(()=>window.tagrex.tracks[0].tags.title)).toBe('Redo ribbon fixture');
+  await expect(page.locator('#redo')).toBeDisabled();
+  await expect(page.locator('#undo')).toBeEnabled();
+});
+
+test('Redo preserves a pending editor value and revalidates its preview', async ({page}) => {
+  await page.locator('.subtab[data-subtab="editor"]').click();
+  await page.locator('#editor-field-title').fill('Saved title');
+  await expect(page.locator('#diff-apply')).toBeEnabled();
+  await page.locator('#diff-apply').click();
+  await expect(page.locator('#undo')).toBeEnabled();
+  await page.locator('#undo').click();
+  await expect(page.locator('#redo')).toBeEnabled();
+  await page.locator('#ribbon-select-all').click();
+  await page.locator('#editor-field-artist').fill('Keep this pending');
+  await expect(page.locator('#diff-apply')).toBeEnabled();
+  await page.locator('#redo').click();
+  await expect(page.locator('#editor-field-artist')).toHaveValue('Keep this pending');
+  await expect(page.locator('#diff-apply')).toBeEnabled();
+  expect(await page.evaluate(()=>window.tagrex.tracks.some(track=>track.tags.artist==='Keep this pending'))).toBe(false);
+  expect(await page.evaluate(()=>window.tagrex.previewPlan.changes.some(change=>change.tag_changes.some(field=>field.field==='artist'&&field.new==='Keep this pending')))).toBe(true);
+});
+
+
+test('a manually arranged order survives re-reading the opened files',async({page})=>{
+  const first=page.locator('#tracks-body tr[data-path]').first();
+  await first.click();
+  await page.locator('#ribbon-move-down').click();
+  const arranged=await paths(page);
+  await page.locator('#lib-refresh').click();
+  await expect.poll(()=>paths(page)).toEqual(arranged);
 });

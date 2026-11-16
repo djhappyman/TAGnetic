@@ -33,6 +33,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      - run: npm ci --prefix tools/lint
+      - run: npm run lint
       - run: npm run test:unit
       - run: npm run build
 

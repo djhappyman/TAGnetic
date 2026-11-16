@@ -69,7 +69,7 @@ Get Tagnetic from [this repository’s Releases](https://github.com/djhappyman/T
 | Linux x64 | `.deb`, `.rpm`, AppImage |
 | Linux ARM64 | `.deb`, `.rpm` |
 
-Tagnetic is in active development and releases are currently alpha builds. In-app updates are disabled; download new versions from Releases. See [build and installation notes](docs/BUILDING.md) for more details.
+Tagnetic is in active development. In-app updates are disabled; download new versions from Releases. See [build and installation notes](docs/BUILDING.md) for more details.
 
 <details>
 <summary><b>Build from source</b></summary>

@@ -6,7 +6,7 @@ test.beforeEach(async({page})=>{
   page.errors=[];page.on('pageerror',error=>page.errors.push(error.message));
   await page.route('http://tagrex.test/**',async route=>{
     const path=resolve(root,'.'+new URL(route.request().url()).pathname);if(!path.startsWith(root+sep))return route.abort();
-    try{await route.fulfill({body:await readFile(path),contentType:path.endsWith('.js')?'text/javascript':path.endsWith('.css')?'text/css':path.endsWith('.woff2')?'font/woff2':'text/html'});}catch{await route.fulfill({status:404,body:'Missing fixture'});}
+    try{let body=await readFile(path);if(path.endsWith('.js'))body=Buffer.from(body.toString().replace(/case([`"'])check_import_order\1:/g,match=>`${match}if(window.fixtureHoldOrder)return new Promise(resolve=>window.releaseOrderCheck=()=>resolve(window.fixtureOrderProposal));if(window.fixtureOrderProposal)return Promise.resolve(window.fixtureOrderProposal);`));await route.fulfill({body,contentType:path.endsWith('.js')?'text/javascript':path.endsWith('.css')?'text/css':path.endsWith('.woff2')?'font/woff2':'text/html'});}catch{await route.fulfill({status:404,body:'Missing fixture'});}
   });
   await page.goto('http://tagrex.test/app/ui/index.html');
   await expect.poll(()=>page.evaluate(()=>typeof window.tagrex?.openLibrary)).toBe('function');
@@ -246,4 +246,46 @@ test('changed provider metadata uses readable headings and remains in catalogue 
   expect(await page.locator('#tracks thead').textContent()).not.toContain('custom:');
   expect(await page.locator('#tracks thead th[data-sort]').evaluateAll(nodes=>nodes.map(node=>node.dataset.sort))).toEqual(['artwork','file','catalognumber','custom:DISCOGS_RELEASE_ID','custom:POSITION']);
   await page.screenshot({path:testInfo.outputPath('staged-columns.png')});
+});
+
+
+test('a partial release import leaves unmatched files and artwork untouched',async({page})=>{
+  await configure(page,['album','title','artist'],true);
+  await search(page);
+  const card=page.locator('.release-card').first();
+  await card.locator('.release-head').click();
+  await expect(card.locator('.tk-head')).toBeVisible();
+  await card.getByRole('checkbox',{name:'Select all tracks',exact:true}).click();
+  await card.locator('tbody [role="checkbox"]').first().click();
+  const paths=await page.evaluate(()=>window.tagrex.selectedPaths());
+  await card.locator('.release-import').click();
+  await expect(page.locator('#diff-apply')).toBeEnabled();
+  await expect.poll(()=>page.evaluate(()=>window.tagrex.previewPlan.changes.map(change=>change.path))).toEqual([paths[0]]);
+  expect(await page.evaluate(()=>window.tagrex.previewPlan.changes[0].cover_change)).toBeTruthy();
+});
+
+test('contradictory import order requires confirmation and keeps captured scope',async({page})=>{
+  await configure(page,['album','title'],false);
+  await search(page);
+  const paths=await page.evaluate(()=>window.tagrex.selectedPaths());
+  const order=[...paths].reverse();
+  await page.evaluate(order=>window.fixtureOrderProposal={order,contradicted:3,offset_secs:9},order);
+  await importFirst(page);
+  await expect(page.getByRole('button',{name:'Reorder',exact:true})).toBeVisible();
+  expect(await page.evaluate(()=>window.tagrex.previewPlan)).toBeNull();
+  await page.getByRole('button',{name:'Reorder',exact:true}).click();
+  await expect(page.locator('#diff-apply')).toBeEnabled();
+  expect(await page.evaluate(()=>window.tagrex.tracks.map(track=>track.path))).toEqual(order);
+});
+
+test('a late order proposal cannot import into a changed selection',async({page})=>{
+  await search(page);
+  const before=await page.evaluate(()=>window.tagrex.selectedPaths());
+  await page.evaluate(order=>{window.fixtureOrderProposal={order,contradicted:2,offset_secs:0};window.fixtureHoldOrder=true;},[...before].reverse());
+  await importFirst(page);
+  await expect.poll(()=>page.evaluate(()=>typeof window.releaseOrderCheck)).toBe('function');
+  await page.locator('#tracks-body tr[data-path]').last().click();
+  await page.evaluate(()=>window.releaseOrderCheck());
+  await expect(page.getByRole('button',{name:'Reorder',exact:true})).toHaveCount(0);
+  expect(await page.evaluate(()=>window.tagrex.previewPlan)).toBeNull();
 });

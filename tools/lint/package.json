@@ -1,0 +1,13 @@
+{
+  "name": "tagrex-ui-lint",
+  "private": true,
+  "description": "Undeclared-name checks for Tagnetic legacy JavaScript modules.",
+  "type": "module",
+  "scripts": {
+    "lint": "node check.js"
+  },
+  "devDependencies": {
+    "eslint": "10.15.0",
+    "globals": "17.14.0"
+  }
+}

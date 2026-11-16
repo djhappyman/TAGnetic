@@ -14,6 +14,7 @@
 
 mod cover_encoding;
 pub mod duplicates;
+mod import_matching;
 mod output;
 pub mod query;
 mod query_members;
@@ -32,7 +33,7 @@ use thiserror::Error;
 
 use base64::Engine as _;
 use tagrex_core::export::{self, CueTrack, PlaylistTrack};
-use tagrex_core::journal::{BatchHeader, BatchId, SqliteJournal};
+use tagrex_core::journal::{BatchHeader, BatchId, SqliteJournal, UndoJournal};
 use tagrex_core::mask::{portable_file_name, FileContext, Mask, MaskError};
 use tagrex_core::matching::{self, MatchOptions, TrackRef};
 use tagrex_core::model::{
@@ -2326,6 +2327,14 @@ struct PendingQuery {
     paths: HashSet<PathBuf>,
 }
 
+/// A read-only suggestion, requiring explicit frontend confirmation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportOrderProposalDto {
+    pub order: Vec<String>,
+    pub contradicted: usize,
+    pub offset_secs: i64,
+}
+
 /// A tagging session rooted at one library directory. The root doubles as the
 /// [`Executor`] `allowed_root`, so every write is confined to the opened
 /// library.
@@ -2392,6 +2401,9 @@ pub struct App {
     /// lasts. Undo of an older batch does not need this list, because the batch
     /// records the roots it was applied under.
     extra_roots: RefCell<Vec<PathBuf>>,
+    /// Session-only plans of fully undone batches, newest undone last.
+    /// A new write or an incomplete Undo clears this stack.
+    redo_plans: Vec<ChangePlan>,
 }
 
 impl Drop for App {
@@ -2441,6 +2453,7 @@ impl App {
             portable_names: Cell::new(default_portable_names()),
             locked_fields: RefCell::new(HashSet::new()),
             extra_roots: RefCell::new(Vec::new()),
+            redo_plans: Vec::new(),
         })
     }
 
@@ -5901,6 +5914,7 @@ impl App {
         plan.validate_cover_assets()?;
         let change_plan = plan.to_change_plan();
         let roots = self.allowed_roots();
+        self.redo_plans.clear();
         let batch = Executor::apply(&change_plan, &mut self.journal, &roots)?;
         Ok(BatchDto::from(&batch))
     }
@@ -5994,6 +6008,7 @@ impl App {
                 if let Err(rollback) = self.undo(batch.id) {
                     return Err(std::io::Error::other(format!("Quick Write readback failed: {error}; rollback of batch {} failed: {rollback}", batch.id)).into());
                 }
+                self.redo_plans.clear();
                 Err(error)
             }
         }
@@ -6013,6 +6028,7 @@ impl App {
         plan.validate_cover_assets()?;
         let change_plan = plan.to_change_plan();
         let roots = self.allowed_roots();
+        self.redo_plans.clear();
         let batch =
             Executor::apply_with(&change_plan, &mut self.journal, &roots, progress, cancel)?;
         Ok(BatchDto::from(&batch))
@@ -6054,9 +6070,58 @@ impl App {
         self.invalidate_query();
         let roots = self.allowed_roots();
         self.read_cache.borrow_mut().clear();
-        let report =
-            Executor::undo_with_mode(&mut self.journal, BatchId(batch_id), &roots, mode, progress)?;
+        let batch = self.journal.batch(BatchId(batch_id))?;
+        let report = match Executor::undo_with_mode(
+            &mut self.journal,
+            BatchId(batch_id),
+            &roots,
+            mode,
+            progress,
+        ) {
+            Ok(report) => report,
+            Err(error) => {
+                // A failed rollback may have confirmed only part of a batch.
+                self.redo_plans.clear();
+                return Err(error.into());
+            }
+        };
+        match batch {
+            Some(batch) if report.kept.is_empty() && !batch.interrupted => {
+                self.redo_plans.push(batch.plan);
+            }
+            _ => self.redo_plans.clear(),
+        }
         Ok(UndoReportDto::from(&report))
+    }
+
+    /// Number of fully undone batches available in this session.
+    pub fn redo_count(&self) -> usize {
+        self.redo_plans.len()
+    }
+
+    /// Replay the last fully undone plan through ordinary guarded Apply.
+    /// Stale files are refused; a failure retains the plan for a safe retry.
+    /// Journal reads resolve this fork's pooled artwork before the Undo removes
+    /// its record, so no deleted journal asset reference enters the new batch.
+    pub fn redo_with(
+        &mut self,
+        progress: &mut dyn FnMut(&ApplyProgress),
+    ) -> Result<Option<BatchDto>, AppError> {
+        let Some(plan) = self.redo_plans.last() else {
+            return Ok(None);
+        };
+        self.invalidate_query();
+        self.read_cache.borrow_mut().clear();
+        let roots = self.allowed_roots();
+        let batch = Executor::apply_with(
+            plan,
+            &mut self.journal,
+            &roots,
+            progress,
+            &AtomicBool::new(false),
+        )?;
+        self.redo_plans.pop();
+        Ok(Some(BatchDto::from(&batch)))
     }
 
     /// Recorded batches for the currently open library, newest first. The undo
@@ -6212,20 +6277,31 @@ impl App {
                     .as_ref()
                     .and_then(|track| track.tags.get(&TagField::Isrc).cloned())
                     .filter(|isrc| !isrc.is_empty());
-                let duration = TagEngine::read_duration(path)
+                let duration = self
+                    .read_snapshot(path)
                     .ok()
-                    .map(|duration| duration.as_secs())
+                    .map(|read| read.props.duration_secs)
                     .filter(|secs| *secs > 0);
                 (title, artist, duration, isrc)
             })
             .collect();
 
+        let offset = import_matching::common_offset(
+            &locals.iter().map(|local| local.2).collect::<Vec<_>>(),
+            &tracks
+                .iter()
+                .map(|track| track.duration_secs)
+                .collect::<Vec<_>>(),
+        );
         let local_refs: Vec<TrackRef> = locals
             .iter()
             .map(|(title, artist, duration, isrc)| TrackRef {
                 title,
                 artist: Some(artist.as_str()).filter(|artist| !artist.is_empty()),
-                duration_secs: *duration,
+                duration_secs: duration
+                    .and_then(|secs| i64::try_from(secs).ok())
+                    .and_then(|secs| secs.checked_sub(offset))
+                    .and_then(|secs| u64::try_from(secs).ok()),
                 isrc: isrc.as_deref(),
             })
             .collect();
@@ -6275,6 +6351,44 @@ impl App {
         }
         fill_by_length(&mut by_content, &local_refs, &candidate_refs);
         Ok(annotate(by_content))
+    }
+
+    /// Read-only duration evidence before an import. A frontend confirmation
+    /// owns any resulting reorder; unknown or ambiguous tracks propose nothing.
+    pub fn check_import_order(
+        &self,
+        paths: &[PathBuf],
+        tracks: &[ImportTrackDto],
+        release_tracks: &[ImportTrackDto],
+    ) -> Result<Option<ImportOrderProposalDto>, AppError> {
+        self.validate_track_paths(paths)?;
+        let files = paths
+            .iter()
+            .map(|path| {
+                self.read_snapshot(path)
+                    .ok()
+                    .map(|read| read.props.duration_secs)
+                    .filter(|secs| *secs > 0)
+            })
+            .collect::<Vec<_>>();
+        let listed = tracks
+            .iter()
+            .map(|track| track.duration_secs)
+            .collect::<Vec<_>>();
+        let all = release_tracks
+            .iter()
+            .map(|track| track.duration_secs)
+            .collect::<Vec<_>>();
+        Ok(import_matching::order_proposal(&files, &listed, &all).map(
+            |(order, contradicted, offset_secs)| ImportOrderProposalDto {
+                order: order
+                    .into_iter()
+                    .map(|j| paths[j].to_string_lossy().into_owned())
+                    .collect(),
+                contradicted,
+                offset_secs,
+            },
+        ))
     }
 
     /// Render `pattern` over `paths` for a mask-defined table column (#150) —
@@ -6376,6 +6490,9 @@ impl App {
         let mut side_track_counters: std::collections::HashMap<u32, u32> =
             std::collections::HashMap::new();
         for (index, path) in paths.iter().enumerate() {
+            if !selection.tracks.is_empty() && index >= selection.tracks.len() {
+                continue;
+            }
             let current = self.read_cached(path)?;
 
             // (field, desired new value) — album-level first, then per-track.
@@ -8827,9 +8944,13 @@ mod tests {
         assert!(!applied.is_current());
         let undone = app.query_snapshot();
         assert_eq!(undone.rows[0].value("artist"), "Old Artist");
+        app.redo_with(&mut |_| {}).unwrap().unwrap();
+        assert!(!undone.is_current(), "Redo invalidates saved-tag search");
+        let redone = app.query_snapshot();
+        assert_eq!(redone.rows[0].value("artist"), "New Artist");
         app.read_track(&path).unwrap();
         assert!(
-            !undone.is_current(),
+            !redone.is_current(),
             "an explicit metadata refresh supersedes old results"
         );
     }
@@ -10856,6 +10977,13 @@ mod tests {
         assert_eq!(TagEngine::read_covers(&track).unwrap(), wanted);
 
         app.undo(batch.id).unwrap();
+        assert_eq!(TagEngine::read_covers(&track).unwrap(), before);
+
+        // The journal may release its pooled image records during Undo;
+        // the session's Redo plan must still hold the exact complete set.
+        let redone = app.redo_with(&mut |_| {}).unwrap().unwrap();
+        assert_eq!(TagEngine::read_covers(&track).unwrap(), wanted);
+        app.undo(redone.id).unwrap();
         assert_eq!(TagEngine::read_covers(&track).unwrap(), before);
 
         // An empty set is how the panel removes every image.
@@ -13612,6 +13740,318 @@ mod tests {
         );
         app.undo(batch.id).unwrap();
         assert!(!app.read_track(&path).unwrap().tags.contains_key("genre"));
+    }
+
+    #[test]
+    fn redo_brings_back_the_undone_batch_and_a_new_apply_ends_it() {
+        let dir = TempDir::new("redo");
+        let track = dir.tagged_flac("x.flac", "Old Artist", "Title");
+        let mut app = open_app(&dir);
+        let artist = |track: &Path| {
+            TagEngine::read(track)
+                .unwrap()
+                .tags
+                .get(&TagField::Artist)
+                .cloned()
+        };
+        let edit = |value: &str| {
+            vec![TagEditDto {
+                path: track.to_string_lossy().into_owned(),
+                field: "artist".into(),
+                value: Some(value.into()),
+            }]
+        };
+        let mut nothing = |_: &ApplyProgress| {};
+
+        assert!(app.redo_with(&mut nothing).unwrap().is_none());
+        let batch = app
+            .apply(&app.preview_tag_edits(&edit("New Artist")).unwrap())
+            .unwrap();
+        app.undo(batch.id).unwrap();
+        assert_eq!(app.redo_count(), 1);
+
+        let redone = app
+            .redo_with(&mut nothing)
+            .unwrap()
+            .expect("a batch to redo");
+        assert_eq!(artist(&track).as_deref(), Some("New Artist"));
+        assert_eq!(app.redo_count(), 0);
+        assert_eq!(app.history().unwrap().len(), 1);
+
+        // The redone batch undoes, and can be redone again.
+        app.undo(redone.id).unwrap();
+        assert_eq!(artist(&track).as_deref(), Some("Old Artist"));
+        assert_eq!(app.redo_count(), 1);
+
+        // Any other apply ends the redo.
+        app.apply(&app.preview_tag_edits(&edit("Other Artist")).unwrap())
+            .unwrap();
+        assert_eq!(app.redo_count(), 0);
+        assert!(app.redo_with(&mut nothing).unwrap().is_none());
+        assert_eq!(artist(&track).as_deref(), Some("Other Artist"));
+    }
+
+    #[test]
+    fn redo_refuses_a_file_changed_since_and_redoes_a_rename() {
+        let dir = TempDir::new("redo-stale");
+        let track = dir.tagged_flac("x.flac", "Old Artist", "Title");
+        let mut app = open_app(&dir);
+        let mut nothing = |_: &ApplyProgress| {};
+        let plan = app
+            .preview_tag_edits(&[TagEditDto {
+                path: track.to_string_lossy().into_owned(),
+                field: "artist".into(),
+                value: Some("New Artist".into()),
+            }])
+            .unwrap();
+        let batch = app.apply(&plan).unwrap();
+        app.undo(batch.id).unwrap();
+
+        let mut changed = TagEngine::read(&track).unwrap();
+        changed
+            .tags
+            .insert(TagField::Artist, "Someone Else".to_string());
+        TagEngine::write(&changed).unwrap();
+        assert!(app.redo_with(&mut nothing).is_err());
+        assert_eq!(app.redo_count(), 1);
+        assert_eq!(
+            TagEngine::read(&track)
+                .unwrap()
+                .tags
+                .get(&TagField::Artist)
+                .map(String::as_str),
+            Some("Someone Else")
+        );
+
+        let renamed = dir.0.join("Someone Else - Title.flac");
+        let plan = app
+            .preview_rename("%artist% - %title%", std::slice::from_ref(&track))
+            .unwrap();
+        let batch = app.apply(&plan).unwrap();
+        app.undo(batch.id).unwrap();
+        assert!(track.exists() && !renamed.exists());
+        app.redo_with(&mut nothing)
+            .unwrap()
+            .expect("a batch to redo");
+        assert!(renamed.exists() && !track.exists());
+    }
+
+    /// Independent readback of a real generated audio stream, never user media.
+    #[test]
+    #[ignore = "requires ffmpeg and ffprobe for a disposable FLAC fixture"]
+    fn redo_preserves_flac_audio_with_independent_readback() {
+        use std::process::Command;
+        let dir = TempDir::new("redo-ffprobe");
+        let path = dir.0.join("tone.flac");
+        let made = Command::new("ffmpeg")
+            .args([
+                "-nostdin",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.25",
+                "-metadata",
+                "artist=Before",
+                "-c:a",
+                "flac",
+            ])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            made.status.success(),
+            "{}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+        let probe = |audio: bool| {
+            let mut command = Command::new("ffprobe");
+            command.args(["-v", "error"]);
+            if audio {
+                command.args([
+                    "-select_streams",
+                    "a:0",
+                    "-show_packets",
+                    "-show_entries",
+                    "packet=data_hash",
+                    "-show_data_hash",
+                    "sha256",
+                ]);
+            } else {
+                command.args(["-show_entries", "format_tags"]);
+            }
+            let result = command.args(["-of", "json"]).arg(&path).output().unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            serde_json::from_slice::<serde_json::Value>(&result.stdout).unwrap()
+        };
+        let audio = probe(true);
+        assert!(!audio["packets"].as_array().unwrap().is_empty());
+        let check = |artist: &str| {
+            assert_eq!(
+                probe(true),
+                audio,
+                "encoded audio packets must remain identical"
+            );
+            let tags = probe(false);
+            let value = tags["format"]["tags"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("artist"))
+                .unwrap()
+                .1
+                .as_str();
+            assert_eq!(value, Some(artist));
+        };
+        let mut app = open_app(&dir);
+        let plan = app
+            .preview_tag_edits(&[TagEditDto {
+                path: path.to_string_lossy().into_owned(),
+                field: "artist".into(),
+                value: Some("After".into()),
+            }])
+            .unwrap();
+        check("Before");
+        let batch = app.apply(&plan).unwrap();
+        check("After");
+        app.undo(batch.id).unwrap();
+        check("Before");
+        app.redo_with(&mut |_| {}).unwrap().unwrap();
+        check("After");
+    }
+
+    #[test]
+    fn partial_undo_never_offers_an_inexact_redo() {
+        let dir = TempDir::new("redo-kept");
+        let path = dir.tagged_flac("x.flac", "Old", "Title");
+        let mut app = open_app(&dir);
+        let artist = app
+            .preview_tag_edits(&[TagEditDto {
+                path: path.to_string_lossy().into_owned(),
+                field: "artist".into(),
+                value: Some("New".into()),
+            }])
+            .unwrap();
+        let a = app.apply(&artist).unwrap();
+        let title = app
+            .preview_tag_edits(&[TagEditDto {
+                path: path.to_string_lossy().into_owned(),
+                field: "title".into(),
+                value: Some("New Title".into()),
+            }])
+            .unwrap();
+        let b = app.apply(&title).unwrap();
+        app.undo(b.id).unwrap();
+        assert_eq!(app.redo_count(), 1);
+        let mut changed = TagEngine::read(&path).unwrap();
+        changed.tags.insert(TagField::Artist, "Later artist".into());
+        TagEngine::write(&changed).unwrap();
+        let kept = app
+            .undo_with_mode(a.id, UndoMode::KeepChanged, &mut |_| {})
+            .unwrap();
+        assert!(!kept.kept.is_empty());
+        assert_eq!(app.redo_count(), 0);
+        assert_eq!(
+            TagEngine::read(&path)
+                .unwrap()
+                .tags
+                .get(&TagField::Artist)
+                .map(String::as_str),
+            Some("Later artist")
+        );
+    }
+
+    #[test]
+    fn preview_import_leaves_a_file_without_a_track_untouched() {
+        let dir = TempDir::new("import-leftover");
+        let a = dir.tagged_flac("a.flac", "Old A", "Old Title A");
+        let b = dir.tagged_flac("b.flac", "Old B", "Old Title B");
+        let app = open_app(&dir);
+        let track = ImportTrackDto {
+            disc: None,
+            position: "1".into(),
+            artist: String::new(),
+            title: "First".into(),
+            duration_secs: None,
+            isrc: None,
+            bpm: None,
+            key: None,
+        };
+        let selection = ImportSelectionDto {
+            album: Some("The Release".into()),
+            catalog_number: Some("CAT 1".into()),
+            tracks: vec![track],
+            ..ImportSelectionDto::default()
+        };
+        let plan = app
+            .preview_import(&[a.clone(), b.clone()], &selection, false)
+            .unwrap();
+        let touched: Vec<&str> = plan.changes.iter().map(|c| c.path.as_str()).collect();
+        assert_eq!(touched, [a.to_string_lossy()]);
+
+        let album_only = ImportSelectionDto {
+            tracks: Vec::new(),
+            ..selection
+        };
+        let plan = app.preview_import(&[a, b], &album_only, false).unwrap();
+        assert_eq!(plan.changes.len(), 2);
+    }
+
+    #[test]
+    fn auto_align_sees_past_an_artist_prefix_and_dotted_initials() {
+        let dir = TempDir::new("align-prefix");
+        let file = |name: &str| {
+            let path = dir.0.join(name);
+            std::fs::write(&path, MINIMAL_FLAC).unwrap();
+            path
+        };
+        let listed = |position: &str, title: &str| ImportTrackDto {
+            disc: None,
+            position: position.into(),
+            artist: "Agzamoff".into(),
+            title: title.into(),
+            duration_secs: None,
+            isrc: None,
+            bpm: None,
+            key: None,
+        };
+        let paths = [
+            file("Agzamoff - BadbWoy (eQlips Groove Dubz Mix).flac"),
+            file("Agzamoff - BadbWoy (Generator Remix).flac"),
+            file("Agzamoff - BadbWoy (J.Jean & A.T.T.O.S. Remix).flac"),
+            file("Agzamoff - BadbWoy (Original Mix).flac"),
+            file("Agzamoff - BadbWoy (Serg O Mega Blast Mix).flac"),
+            file("Agzamoff - BadbWoy (Static Electric 4X4 Remix).flac"),
+        ];
+        let app = open_app(&dir);
+        let tracks = vec![
+            listed("1", "Badbwoy (J Jean & ATTOS Remix)"),
+            listed("2", "Badbwoy (Generator Remix)"),
+            listed("3", "Badbwoy (Serg O Mega Blast Mix)"),
+            listed("4", "Badbwoy (DLRM Remix)"),
+            listed("5", "Badbwoy (Static Electric 4x4 Remix)"),
+            listed("6", "Badbwoy (eQlips Groove Dubz Mix)"),
+        ];
+        let aligned = app.auto_align(&paths, &tracks).unwrap();
+        let matched: Vec<Option<usize>> = aligned.iter().map(|m| m.map(|m| m.track)).collect();
+        assert_eq!(matched, [Some(5), Some(1), Some(0), None, Some(2), Some(4)]);
+
+        let paths = [
+            file("Agzamoff - Hear Dis (SoundBwoy Addiction Edit).flac"),
+            file("Agzamoff - Hear Dis (Lost Remix).flac"),
+        ];
+        let tracks = vec![
+            listed("1", "Hear Dis (Soundwoy Addiction Edit)"),
+            listed("2", "Hear Dis (Lost Remix)"),
+        ];
+        let aligned = app.auto_align(&paths, &tracks).unwrap();
+        let matched: Vec<Option<usize>> = aligned.iter().map(|m| m.map(|m| m.track)).collect();
+        assert_eq!(matched, [Some(0), Some(1)]);
     }
 
     #[test]

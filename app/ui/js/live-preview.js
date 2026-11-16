@@ -78,12 +78,12 @@ export function adoptLiveCoverPlan(plan, paths) {
 export function beginLiveImport() { importBusy = true; const version = ++importVersion; liveInputChanged(); return version; }
 export function finishLiveImport(version) { if (version === importVersion && importBusy) { importBusy = false; liveInputChanged(); } }
 export function isLiveImportCurrent(version) { return version === importVersion; }
-export function replaceLiveImport(plan, image, paths, version) {
+export function replaceLiveImport(plan, image, paths, version, scope = paths) {
   if (!isLiveImportCurrent(version)) return false;
   importHistory.push({ imported:new Map(imported), cover, coverPaths, coverAssignments });
   if (importHistory.length > 20) importHistory.shift();
   imported = new Map(imported);
-  const affected = new Set(paths);
+  const affected = new Set(scope);
   for (const path of affected) imported.delete(path);
   coverAssignments = coverAssignments.map(item => ({cover:item.cover, paths:item.paths.filter(path => !affected.has(path))})).filter(item => item.paths.length);
   if (image) coverAssignments.push({cover:image, paths:[...paths]});
