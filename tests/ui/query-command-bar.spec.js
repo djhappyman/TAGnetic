@@ -74,12 +74,18 @@ test('selected duplicate result shows shared tags, differences and every copy in
  await page.locator('#query-mode-toggle').click();await expect(result).toHaveCount(0);
 });
 test('large group details page copies without mounting the whole group',async({page})=>{
+ await page.evaluate(async()=>{
+  await window.tagrex.invoke('open_drop',{paths:Array.from({length:45},(_,i)=>`copies/copy-${i}.flac`)});
+  document.getElementById('root').value='/dropped';await window.tagrex.openLibrary();
+  for(const track of window.tagrex.tracks){track.mockHash='same-copies';track.tags.title='Many copies';}
+ });
  await openHydratedDuplicates(page);
- await page.evaluate(()=>document.dispatchEvent(new CustomEvent('tagrex:duplicate-selection',{detail:{group:{id:'large',title:'Many copies',reason:'Exact files',tracks:Array.from({length:45},(_,i)=>({path:`/music/copy-${i}.flac`,format:'flac',duration_secs:60,has_cover:false,tags:{title:'Many copies'}})),sharedTags:{title:'Many copies'},differingTags:[]}}})));
+ await page.locator('#query-duplicate-scan').click();
+ await expect(page.locator('tr.duplicate-group')).toHaveCount(1);await expect(rows(page)).toHaveCount(45);await rows(page).first().click();
  const result=page.locator('#duplicate-result-details');await expect(result.locator('.duplicate-copy')).toHaveCount(20);await expect(result.locator('.duplicate-copy-pages')).toContainText('1–20 of 45');
  await result.getByRole('button',{name:'Next copies',exact:true}).click();await expect(result.locator('.duplicate-copy-pages')).toContainText('21–40 of 45');
  await result.getByRole('button',{name:'Next copies',exact:true}).click();await expect(result.locator('.duplicate-copy')).toHaveCount(5);await expect(result.locator('.duplicate-copy-pages')).toContainText('41–45 of 45');
- await page.evaluate(()=>document.dispatchEvent(new CustomEvent('tagrex:duplicate-selection',{detail:{group:null}})));await expect(result).toHaveCount(0);
+ await page.locator('#query-mode-toggle').click();await expect(result).toHaveCount(0);
 });
 test('committed filter is one tinted pill with matching remove ink and accessible hit areas',async({page})=>{
  await chip(page,'hardcore','Genre: Hardcore');
@@ -387,8 +393,12 @@ test('query toggle reveals a closed compact inspector and moves keyboard focus i
 
 test('a ready-state query error remains visible instead of showing the scan prompt',async({page})=>{
  await openHydratedDuplicates(page);
- await page.evaluate(()=>document.dispatchEvent(new CustomEvent('tagrex:filter-state',{detail:{commandMode:'duplicates',duplicateKind:'exact',duplicateStatus:'not_scanned',duplicateScanStarted:false,pending:false,error:'Invalid numeric bounds',total:3,matched:3}})));
- await expect(page.locator('#filter-feedback')).toContainText('Invalid numeric bounds');
+ await page.locator('#filter').fill('x'.repeat(2049));
+ await expect(page.locator('#filter')).toHaveAttribute('aria-invalid','true');
+ const message='Filter text must be at most 2048 characters.';
+ await expect(page.locator('#filter-feedback')).toContainText(message);
+ await page.evaluate(()=>document.dispatchEvent(new Event('tagrex:request-filter-state')));
+ await expect(page.locator('#filter-feedback')).toContainText(message);
  await expect(page.locator('#filter-feedback')).not.toHaveClass(/duplicate-ready/);
  await expect(page.locator('#filter-feedback h3')).toHaveCount(0);
 });
