@@ -184,7 +184,7 @@ test('scroll measures only entering rows after learning a uniform height', async
         return measure.call(this);
     };
   });
-  for (const top of [60, 90, 120, 150]) {
+  for (const top of [250, 500, 750, 1000]) {
     await page.locator('#files-view').evaluate((element, y) => { element.scrollTop = y; }, top);
     await page.waitForTimeout(30);
   }

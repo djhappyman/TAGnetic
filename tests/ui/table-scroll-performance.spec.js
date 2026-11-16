@@ -20,7 +20,7 @@ test.beforeEach(async({page})=>{
   });
 });
 
-for(const size of [53,3000])test(`virtual scrolling keeps the scroll extent stable with fractional row heights (${size} files)`,async({page})=>{
+for(const size of [53,371,3000])test(`virtual scrolling keeps the scroll extent stable with fractional row heights (${size} files)`,async({page})=>{
   if(size>53)await page.evaluate(async size=>{await window.tagrex.invoke('open_drop',{paths:Array.from({length:size},(_,i)=>`/music/group-${Math.floor(i/250)}/track-${i}.mp3`)});document.getElementById('root').value='/dropped';await window.tagrex.openLibrary();},size);
   const sample=await page.evaluate(async()=>{
     const viewport=document.getElementById('files-view'),heights=[];
@@ -34,7 +34,8 @@ for(const size of [53,3000])test(`virtual scrolling keeps the scroll extent stab
   expect(sample.spread,JSON.stringify(sample.heights)).toBeLessThanOrEqual(1);
 });
 
-test('loaded album rows remain mounted with zero cell mutations during scrolling',async({page})=>{
+for(const size of [53,371])test(`loaded ${size}-file rows remain mounted with zero cell mutations during scrolling`,async({page})=>{
+  if(size>53)await page.evaluate(async size=>{await window.tagrex.invoke('open_drop',{paths:Array.from({length:size},(_,i)=>`/music/all/track-${i}.mp3`)});document.getElementById('root').value='/dropped';await window.tagrex.openLibrary();},size);
   const result=await page.evaluate(async()=>{
     const viewport=document.getElementById('files-view'),body=document.getElementById('tracks-body');
     const original=[...body.querySelectorAll('tr[data-path]')];
@@ -56,4 +57,44 @@ test('large-library scroll bursts paint one bounded window per frame',async({pag
     try{for(let i=1;i<=12;i++){viewport.scrollTop=i*800;viewport.dispatchEvent(new Event('scroll'));}await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));return rows;}finally{document.createElement=create;}
   });
   expect(count).toBeLessThan(100);
+});
+
+test('a synchronous scroll reset after a view rebuild cannot leave a blank virtual window',async({page})=>{
+  await page.evaluate(async()=>{
+    await window.tagrex.invoke('open_drop',{paths:Array.from({length:3000},(_,i)=>`/music/all/track-${i}.mp3`)});
+    document.getElementById('root').value='/dropped';await window.tagrex.openLibrary();
+  });
+  await page.evaluate(()=>{
+    const viewport=document.getElementById('files-view');
+    viewport.scrollTop=5000;
+    window.tagrex.renderTracks();
+    // Layout/focus restoration can reset the offset before the browser sends
+    // the coalesced scroll event. The last painted position is still 5000.
+    viewport.scrollTop=0;
+    viewport.dispatchEvent(new Event('scroll'));
+  });
+  await expect.poll(()=>page.locator('#tracks-body > tr').first().evaluate(row=>Number.parseFloat(row.firstElementChild.style.height))).toBe(0);
+  await expect(page.locator('#tracks-body tr[data-path]').first()).toBeInViewport();
+});
+
+test('large scroll jumps retain the table body and spacers, with no wholesale body replacement',async({page})=>{
+  await page.evaluate(async()=>{
+    await window.tagrex.invoke('open_drop',{paths:Array.from({length:20000},(_,i)=>`/music/all/track-${i}.mp3`)});
+    document.getElementById('root').value='/dropped';await window.tagrex.openLibrary();
+  });
+  const result=await page.evaluate(async()=>{
+    const wrap=document.getElementById('files-view'),body=document.getElementById('tracks-body');
+    const top=body.firstElementChild,bottom=body.lastElementChild,original=body.replaceChildren;
+    let replacements=0;body.replaceChildren=function(...args){replacements++;return original.apply(this,args);};
+    try{
+      for(const position of [.3,.8,.1,1,0]){
+        wrap.scrollTop=position*(wrap.scrollHeight-wrap.clientHeight);
+        await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+        const rect=wrap.getBoundingClientRect();
+        if(![...body.querySelectorAll('tr[data-path]')].some(row=>{const r=row.getBoundingClientRect();return r.bottom>rect.top+30 && r.top<rect.bottom;}))throw Error('Blank viewport');
+      }
+      return{replacements,spacersRetained:top===body.firstElementChild&&bottom===body.lastElementChild,rows:body.querySelectorAll('tr[data-path]').length};
+    }finally{body.replaceChildren=original;}
+  });
+  expect(result.replacements).toBe(0);expect(result.spacersRetained).toBe(true);expect(result.rows).toBeLessThan(100);
 });

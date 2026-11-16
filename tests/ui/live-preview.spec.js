@@ -329,3 +329,65 @@ for (const count of [1,2,3]) test(`filename-sorted import maps ${count} selected
     await expect(page.locator('#tracks-body .applying-current')).toHaveCount(0);
   }
 });
+
+test('field lifecycle retains Files cells and text through first stage, ack and discard',async({page})=>{
+  await page.evaluate(()=>{
+    window.fieldNodes=[...document.querySelectorAll('#tracks-body tr[data-path]')].map(row=>({row,cells:[...row.cells],texts:[...row.cells].map(cell=>cell.firstChild)}));
+  });
+  await field(page,'title').fill('Stable proposal');await ready(page);
+  const retained=()=>page.evaluate(()=>window.fieldNodes.every(({row,cells,texts})=>row.isConnected&&cells.every((cell,i)=>row.cells[i]===cell&&cell.firstChild===texts[i])));
+  expect(await retained()).toBe(true);
+  await page.locator('#diff-discard').click();
+  expect(await retained()).toBe(true);
+});
+
+test('selection alone retains staged rows and the enabled Apply button without another preview',async({page})=>{
+  await field(page,'album').fill('A staged album');await ready(page);
+  await page.evaluate(()=>{
+    window.selectionPreviewCalls=window.liveCalls.preview_live_edits;
+    window.selectionApplyMutations=0;
+    window.selectionRows=[...document.querySelectorAll('#tracks-body tr[data-path]')];
+    window.selectionApplyObserver=new MutationObserver(records=>window.selectionApplyMutations+=records.length);
+    window.selectionApplyObserver.observe(document.getElementById('diff-apply'),{attributes:true,attributeFilter:['disabled']});
+  });
+  for(const index of [1,0,2,0]){
+    await page.locator('#tracks-body td[data-field="title"]').nth(index).click();
+    await expect(field(page,'title')).toHaveValue(await page.evaluate(index=>window.tagrex.tracks[index].tags.title,index));
+  }
+  await page.waitForTimeout(100);
+  const result=await page.evaluate(()=>{window.selectionApplyObserver.disconnect();return{extraPreviews:window.liveCalls.preview_live_edits-window.selectionPreviewCalls,buttonMutations:window.selectionApplyMutations,sameRows:window.selectionRows.every(row=>row.isConnected)};});
+  expect(result).toEqual({extraPreviews:0,buttonMutations:0,sameRows:true});
+});
+
+test('inline input mirrors raw whitespace into Inspector and survives Tab without Enter',async({page})=>{
+  const cell=page.locator('#tracks-body td[data-field="title"]').first();
+  await cell.dblclick();await page.keyboard.press('Control+a');
+  await page.keyboard.type('  Raw title  ');
+  await expect(field(page,'title')).toHaveValue('  Raw title  ');
+  await page.keyboard.press('Tab');await ready(page);
+  expect(titleOf(await plan(page),await selected(page))).toBe('  Raw title  ');
+});
+
+test('Staged cells edit saved-to-latest values and retain surviving Files cells',async({page})=>{
+  await field(page,'title').fill('First');await ready(page);
+  await page.evaluate(()=>window.filesTitle=document.querySelector('#tracks-body td[data-field="title"]'));
+  await page.locator('#staged-tab').click();
+  const cell=page.locator('#tracks-body td[data-field="title"]').first();
+  await expect(cell.locator('.cell-old')).toHaveText('Desert Rain');
+  await cell.dblclick();await page.keyboard.press('Control+a');await page.keyboard.type('Latest');
+  await expect(field(page,'title')).toHaveValue('Latest');
+  await page.keyboard.press('Tab');await ready(page);
+  await expect(cell.locator('.cell-old')).toHaveText('Desert Rain');
+  await page.locator('#files-tab').click();
+  expect(await page.evaluate(()=>window.filesTitle===document.querySelector('#tracks-body td[data-field="title"]'))).toBe(true);
+  await expect(page.locator('#tracks-body td[data-field="title"]').first()).toHaveText('Latest');
+});
+
+test('Escape restores only the active edit start and invalid values survive click-away',async({page})=>{
+  await field(page,'title').fill('Keep title');await ready(page);
+  const title=page.locator('#tracks-body td[data-field="title"]').first();
+  await title.dblclick();await page.keyboard.press('Control+a');await page.keyboard.type('Cancel title');await page.keyboard.press('Escape');await ready(page);
+  expect(titleOf(await plan(page),await selected(page))).toBe('Keep title');
+  await field(page,'year').fill('12');await page.locator('#files-tab').click();
+  await expect(field(page,'year')).toHaveValue('12');await expect(page.locator('#diff-apply')).toBeDisabled();
+});

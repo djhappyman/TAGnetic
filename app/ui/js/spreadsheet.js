@@ -192,11 +192,11 @@ export function initSpreadsheet(options) {
     if (rect.left < left) wrap.scrollLeft -= left - rect.left;
     else if (rect.right > bounds.right) wrap.scrollLeft += rect.right - bounds.right;
   }
-  function choose(point, extend = false, giveFocus = true) {
+  function choose(point, extend = false, giveFocus = true, followSelection = false) {
     if (!point || options.isReviewing()) return;
     if (!extend || !anchor) anchor = { ...point };
     active = { ...point };
-    options.setActiveRow(point.path);
+    options.setActiveRow(point.path, { extend, followSelection });
     refresh();
     if (giveFocus) focus();
   }
@@ -236,6 +236,7 @@ export function initSpreadsheet(options) {
       attribute(tr, 'aria-rowindex', options.rowNumber(tr.dataset.path));
       const index = r ? rowIndex(tr.dataset.path) : -1;
       const includedRow = !!r && index >= r.top && index <= r.bottom;
+      classState(tr,'sheet-cell-row',!reviewing && !!active && active.key !== 'file' && active.path === tr.dataset.path && !!r && r.top === r.bottom && r.left === r.right);
       for (let i = TABLE_DATA_COLUMN_OFFSET; i < tr.cells.length; i++) {
         const cell = tr.cells[i], key = keys[i - TABLE_DATA_COLUMN_OFFSET];
         if (!key) continue;
@@ -327,7 +328,7 @@ export function initSpreadsheet(options) {
       row = Math.max(0, Math.min(paths.length - 1, row + rowDelta));
       col = Math.max(0, Math.min(keys.length - 1, col + colDelta));
     }
-    choose({ path: paths[row], key: keys[col] }, extend);
+    choose({ path: paths[row], key: keys[col] }, extend, true, true);
     return true;
   }
   function beginEdit() {
@@ -459,7 +460,7 @@ export function initSpreadsheet(options) {
     if (!active) {
       const path = event.target.closest('tr[data-path]')?.dataset.path;
       if (!path || !['F2', 'Enter', 'ArrowLeft', 'ArrowRight'].includes(event.key)) return;
-      choose({ path, key: columns().find((key) => !options.readOnly(key)) || columns()[0] }, false, false);
+      choose({ path, key: columns().find((key) => !options.readOnly(key)) || columns()[0] }, false, false, true);
     }
     const modified = event.ctrlKey || event.metaKey;
     if (modified && event.key.toLowerCase() === 'd') {

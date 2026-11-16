@@ -175,3 +175,114 @@ test('unavailable native staging does not spin and prevents an unacknowledged Ap
   await assert.rejects(sync.flush(), /Unavailable/);
   assert.equal(reads, 1); assert.equal(errors, 1);
 });
+
+test('a refused full-stage publication retries rather than treating stale human work as accepted', async () => {
+  const library = {}, desired = plan(change('/music/a.flac', {title:'Latest human input'}));
+  let revision=1, publications=0;
+  const adopted=[];
+  const sync=createSharedStageSync({
+    read:async()=>({revision,accepted:true,plan:null,human_plan:null}),
+    publish:async human=>++publications===1
+      ? {revision:++revision,accepted:false,plan:null,human_plan:null}
+      : {revision:++revision,accepted:true,plan:human,human_plan:human},
+    clear:async()=>null,context:()=>({inputRevision:0,library,busy:false}),
+    adopt:value=>adopted.push(value),
+  });
+  await sync.start();await sync.changed(desired);await sync.flush();
+  assert.equal(publications,2);
+  assert.equal(adopted.at(-1).plan,desired);
+});
+
+test('a failed intent from before Discard cannot be queued again after the reset',async()=>{
+  const held=deferred(),library={};let attempts=0,clears=0;
+  const sync=createSharedStageSync({
+    read:async()=>({revision:1,plan:null}),
+    publish:async()=>null,
+    intents:async()=>{attempts++;await held.promise;throw new Error('Connection interrupted');},
+    clear:async()=>{clears++;return{revision:2,accepted:true,plan:null};},
+    context:()=>({inputRevision:0,library,busy:false}),adopt:()=>{},
+  });
+  await sync.start();
+  sync.intents([{path:'a',field:'title',value:'Discard me'}]);
+  await Promise.resolve();await Promise.resolve();
+  sync.clear();held.resolve();
+  await sync.flush();
+  assert.equal(attempts,1);assert.equal(clears,1);assert.equal(sync.pending(),false);
+});
+
+test('a queued structural plan and a newer scalar intent both reach the native stage',async()=>{
+  const calls=[],library={};let revision=0;
+  const sync=createSharedStageSync({
+    read:async()=>({revision,plan:null}),
+    publish:async value=>{calls.push('plan');return{revision:++revision,plan:value};},
+    intents:async()=>{calls.push('intent');return{revision:++revision,plan:null};},
+    clear:async()=>null,context:()=>({inputRevision:0,library,busy:false}),adopt:()=>{},
+  });
+  await sync.start();
+  sync.changed(plan({...change('a',{}),cover_change:{old:[],new:[]}}));
+  sync.intents([{path:'a',field:'title',value:'After cover'}]);
+  await sync.flush();
+  assert.deepEqual(calls,['plan','intent']);
+});
+
+test('failed small intents remain pending for explicit retry with their original raw values',async()=>{
+  let attempts=0;
+  const entries=[{path:'a',field:'title',value:' Raw '}];
+  const sync=createSharedStageSync({
+    read:async()=>({revision:1,plan:null,human_plan:null}),
+    intents:async values=>{assert.deepEqual(values,entries);if(++attempts===1)throw Error('Offline');return {revision:2,plan:null,human_plan:null};},
+    publish:async()=>{throw Error('Unexpected full publication');},clear:async()=>{},
+    context:()=>({inputRevision:0,library:null,busy:false}),adopt:()=>{},
+  });
+  await sync.start();await sync.intents(entries);
+  await assert.rejects(sync.flush(),/Offline/);
+  assert.equal(sync.pending(),true);
+  await sync.refresh();await sync.flush();assert.equal(attempts,2);
+});
+
+test('new native sessions may restart revisions and still hydrate once',async()=>{
+  let current={session:'one',revision:20,plan:null},adopted=[];
+  const sync=createSharedStageSync({read:async()=>current,publish:async()=>{},clear:async()=>{},context:()=>({inputRevision:0,library:null,busy:false}),adopt:value=>adopted.push(value.session)});
+  await sync.start();current={session:'two',revision:0,plan:null};await sync.refresh();
+  assert.deepEqual(adopted,['one','two']);
+});
+
+test('an explicit zero-intent recompute survives a transient failure and preserves its scope',async()=>{
+  let attempts=0;const calls=[];
+  const sync=createSharedStageSync({read:async()=>({revision:1,plan:null}),publish:async()=>{throw Error('Unexpected full plan');},
+    intents:async(entries,revision,options)=>{calls.push({entries,options});if(++attempts===1)throw Error('Offline');return{revision:2,plan:null};},
+    clear:async()=>{},context:()=>({inputRevision:0,library:null,busy:false}),adopt:()=>{}});
+  await sync.start();await sync.intents([],{recompute:true,groups:[],paths:['a']});
+  await assert.rejects(sync.flush(),/Offline/);
+  await sync.refresh();await sync.flush();
+  assert.equal(calls.length,2);assert.deepEqual(calls[1],{entries:[],options:{recompute:true,groups:[],paths:['a']}});
+});
+
+test('a native publication remains pending while its acknowledgement is in flight',async()=>{
+  const held=deferred();
+  const sync=createSharedStageSync({read:async()=>({revision:1,plan:null}),publish:async()=>{},intents:async()=>{await held.promise;return{revision:2,plan:null};},
+    clear:async()=>{},context:()=>({inputRevision:0,library:null,busy:false}),adopt:()=>{}});
+  await sync.start();sync.intents([{path:'a',field:'title',value:'Latest'}]);
+  await Promise.resolve();await Promise.resolve();assert.equal(sync.pending(),true);
+  held.resolve();await sync.flush();assert.equal(sync.pending(),false);
+});
+
+test('a session refusal resyncs without replaying old file intents into the new session',async()=>{
+  let attempts=0,reads=0;
+  const sync=createSharedStageSync({read:async()=>({session:++reads===1?'old':'new',revision:1,plan:null}),publish:async()=>{},
+    intents:async()=>{attempts++;throw Error('stage_session_mismatch');},clear:async()=>{},context:()=>({inputRevision:0,library:null,busy:false}),adopt:()=>{}});
+  await sync.start();await sync.intents([{path:'old-file',field:'title',value:'Old intent'}]);
+  await assert.rejects(sync.flush(),/stage_session_mismatch/);
+  assert.equal(attempts,1);assert.equal(sync.snapshot().session,'new');
+});
+
+test('a coalesced empty preview preserves an earlier queued withdrawal scope',async()=>{
+  const writes=[];
+  const sync=createSharedStageSync({read:async()=>({revision:1,plan:null}),publish:async(plan,revision,touched)=>{writes.push({plan,touched});return{revision:2,plan:null};},clear:async()=>{},context:()=>({inputRevision:0,library:null,busy:false}),adopt:()=>{}});
+  await sync.start();
+  const scope=[{path:'a',field:'title'},{path:'b',field:'filename'}];
+  sync.changed(null,scope);
+  sync.changed(null,[]);
+  await sync.flush();
+  assert.deepEqual(writes,[{plan:null,touched:scope}]);
+});

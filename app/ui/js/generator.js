@@ -1,4 +1,4 @@
-import { hasLiveInputs, isLiveImportBusy, liveInputs, liveInputRevision, hasInvalidLiveFields, hasInvalidPreview, optimisticLivePlan } from "./live-preview.js";
+import { nativeLiveFields, nativeRecompute, hasLiveInputs, hasStructuralLiveInputs, isLiveImportBusy, liveInputs, liveInputRevision, hasInvalidLiveFields, hasInvalidPreview, optimisticLivePlan } from "./live-preview.js";
 // The GENERATOR mode (#143 split it out of app.js).
 //
 // Everything that mass-produces values for the selection: the transformation
@@ -72,6 +72,45 @@ let automaticPainting = false;
 let automaticFailed = false;
 let automaticInFlight = false;
 let automaticQueuedRun = null;
+let nativeScopeSession = null, nativeScopeKey = null, nativeGroupKey = null, nativeDismissed = null;
+const nativeTransformPaths = new Set();
+const nativeDerivedFields = new Map();
+const fullPlanContexts = new Set();
+export function setNativeStageSession(session, derivedFields = null, changes = []) {
+  if(session && session!==nativeScopeSession){nativeScopeSession=session;nativeScopeKey=null;nativeGroupKey=null;nativeDismissed=null;nativeTransformPaths.clear();nativeDerivedFields.clear();fullPlanContexts.clear();}
+  // A webview reload can retain the native stage. Restore the human scope
+  // once from its full snapshot so switching presets off also retires earlier
+  // selections, including fields derived before this webview was mounted.
+  if(derivedFields){nativeDerivedFields.clear();for(const entry of derivedFields)nativeDerivedFields.set(entry.path+'\0'+entry.field,entry);}
+  for(const entry of changes){const key=entry.path+'\0'+entry.field;if(entry.derived)nativeDerivedFields.set(key,{path:entry.path,field:entry.field});else if(entry.derived===false)nativeDerivedFields.delete(key);}
+  if(nativeRecompute)for(const entry of nativeDerivedFields.values())nativeTransformPaths.add(entry.path);
+}
+function tagOnlyGroups(groups) {
+  return groups.every(group => group.rules.every(rule => rule.enabled === false || !['filename','fileext'].includes(rule.scope ?? group.scope)));
+}
+function scheduleNativeRecompute() {
+  const groups=presetsFor(chainContext(),{allScopes:true});
+  if (!tagOnlyGroups(groups)){
+    fullPlanContexts.add(chainContext());
+    automaticFieldScope=[...new Map([...automaticFieldScope,...nativeDerivedFields.values()].map(entry=>[entry.path+'\0'+entry.field,entry])).values()];
+  }
+  if (fullPlanContexts.has(chainContext()) || isLiveImportBusy()) return false;
+  if (!groups.length && !nativeTransformPaths.size) return false;
+  const snapshot=automaticSnapshot();
+  const groupKey=JSON.stringify([chainContext(),groups,lockedFieldKeys()]);
+  if(nativeDismissed?.revision===liveInputRevision() && nativeDismissed.groups===groupKey)return true;
+  nativeDismissed=null;
+  const paths=new Set(snapshot.paths);
+  if(groupKey!==nativeGroupKey)for(const path of nativeTransformPaths)if(trackAt(path))paths.add(path);
+  const scope=[...paths];
+  const key=JSON.stringify([groupKey,scope,modelRevision,liveInputRevision()]);
+  if(key===nativeScopeKey)return true;
+  nativeScopeKey=key;nativeGroupKey=groupKey;
+  if(!scope.length)return true;
+  if(groups.length)for(const path of scope)nativeTransformPaths.add(path);
+  document.dispatchEvent(new CustomEvent('tagrex:native-recompute',{detail:{entries:snapshot.input.edits.filter(entry=>paths.has(entry.path)),options:{recompute:true,groups,paths:scope}}}));
+  return true;
+}
 
 function isAutomaticTransformPreview(plan = previewPlan) {
   return !!plan && (plan === sharedRenderedPlan || (!!automaticPlan && (plan === automaticPlan || (plan === previewPlan && previewInputPlan === automaticPlan))));
@@ -122,7 +161,7 @@ function automaticSnapshot() {
   const paths = selectedPaths();
   const groups = presetsFor(context, { allScopes: true });
   const input = liveInputs();
-  const scope = [...new Set([...paths, ...input.paths])];
+  const scope = groups.length ? [...new Set([...paths, ...input.paths])] : [...new Set([...input.paths,...(!hasLiveInputs() ? automaticFieldScope.map(entry=>entry.path) : [])])];
   return { paths:scope, groups, input, key: JSON.stringify([context, scope, groups, lockedFieldKeys(), modelRevision, liveInputRevision()]) };
 }
 
@@ -150,7 +189,9 @@ function clearAutomaticPlan(paths = []) {
   paintAutomaticPlan(null);
 }
 
-function scheduleAutomaticTransformPreview({ modelChanged = false } = {}) {
+function scheduleAutomaticTransformPreview({ modelChanged = false, nativeStructural = false } = {}) {
+  if (nativeRecompute && !nativeStructural && scheduleNativeRecompute()) return;
+  if (nativeLiveFields && !hasStructuralLiveInputs() && !automaticPlan && !automaticFieldScope.length && !presetsFor(chainContext(), {allScopes:true}).length) return;
   if (modelChanged) modelRevision++;
   const snapshot = automaticSnapshot();
   if (isLiveImportBusy()) { cancelAutomaticRequest(); automaticBusy = true; announceAutomaticScope(); return; }
@@ -187,7 +228,7 @@ function scheduleAutomaticTransformPreview({ modelChanged = false } = {}) {
     if (automaticInFlight) { automaticQueuedRun = run; return; }
     automaticInFlight = true;
     try {
-      const plan = await invoke('preview_live_edits', { ...snapshot.input, paths:snapshot.paths, groups:snapshot.groups });
+      const plan = await invoke('preview_live_edits', { ...snapshot.input, paths:snapshot.paths, groups:nativeRecompute && !fullPlanContexts.has(chainContext()) && tagOnlyGroups(snapshot.groups) ? [] : snapshot.groups });
       if (version !== automaticVersion || automaticPaused || automaticSnapshot().key !== snapshot.key || (previewPlan && !isAutomaticTransformPreview())) return;
       automaticPlan = plan;
       const scope = sharedStagingEnabled ? automaticStageScope(automaticFieldScope, plan, snapshot.paths) : { touched: [], fields: [] };
@@ -215,6 +256,9 @@ function dismissAutomaticTransformPreview() {
   dismissedKey = automaticSnapshot().key;
   cancelAutomaticRequest();
   automaticPlan = null;
+  nativeTransformPaths.clear(); nativeScopeKey=null;
+  nativeDerivedFields.clear();
+  nativeDismissed={revision:liveInputRevision(),groups:JSON.stringify([chainContext(),presetsFor(chainContext(),{allScopes:true}),lockedFieldKeys()])};
 }
 
 function pauseAutomaticTransformPreview() {
@@ -224,7 +268,8 @@ function pauseAutomaticTransformPreview() {
 
 // Marquee movement invalidates an in-flight result cheaply; its commit takes
 // the full selection snapshot once, rather than serializing it every frame.
-function invalidateAutomaticTransformPreview() {
+function invalidateAutomaticTransformPreview({ selectionOnly = false } = {}) {
+  if (selectionOnly && !presetsFor(chainContext(), { allScopes: true }).length) return;
   cancelAutomaticRequest();
   automaticBlocked = true;
   automaticBusy = isAutomaticTransformPreview();
@@ -630,9 +675,10 @@ function adoptTagOnlyPreview() {
   }
   setPreviewPlan(null); setPreviewSource(null);
 }
-document.addEventListener('tagrex:live-input', () => {
+document.addEventListener('tagrex:live-input', event => {
+  if (nativeLiveFields && event.detail?.nativeScalar && !fullPlanContexts.has(chainContext()) && tagOnlyGroups(presetsFor(chainContext(),{allScopes:true}))) return;
   adoptTagOnlyPreview();
-  scheduleAutomaticTransformPreview();
+  scheduleAutomaticTransformPreview({nativeStructural:!event.detail?.nativeScalar});
 });
 window.addEventListener('pagehide', pauseAutomaticTransformPreview, { once: true });
 // A preset changed in the editor: keep a renamed one ticked, then let every job
@@ -683,3 +729,11 @@ export {
   refreshGenerator,
   splitVinylSides,
 };
+
+export function liveIntentOptions() {
+  const groups=presetsFor(chainContext(),{allScopes:true});
+  if(!tagOnlyGroups(groups) || fullPlanContexts.has(chainContext()))return {};
+  const paths=[...new Set([...selectedPaths(),...liveInputs().paths])];
+  if(nativeRecompute && groups.length)for(const path of paths)nativeTransformPaths.add(path);
+  return groups.length || nativeRecompute ? {groups,paths} : {};
+}

@@ -42,6 +42,23 @@ test.afterEach(async ({ page }) => {
 
 const cell = (page, field, row = 0) => page.locator(`#tracks-body tr[data-path] td[data-field="${field}"]`).nth(row);
 const calls = (page, command) => page.evaluate((key) => window.sheetCalls?.[key] || 0, command);
+
+test('keyboard cell and row navigation follow the selected file with a quiet cell highlight',async({page})=>{
+  await cell(page,'title').click();
+  await page.keyboard.press('ArrowDown');
+  const path=await cell(page,'title',1).getAttribute('data-path');
+  expect(await page.evaluate(()=>window.tagrex.selectedPaths())).toEqual([path]);
+  await expect(page.locator('#tracks-body tr.selected')).toHaveAttribute('data-path',path);
+  const paint=await cell(page,'title',1).evaluate(node=>({shadow:getComputedStyle(node).boxShadow,active:getComputedStyle(node).backgroundColor,other:getComputedStyle(node.closest('tr').querySelector('td.file')).backgroundColor}));
+  expect(paint.shadow).toBe('none');expect(paint.active).not.toBe(paint.other);
+  const stagedPaint=await cell(page,'title',1).evaluate(node=>{document.body.classList.add('automatic-transform-preview');const color=getComputedStyle(node).backgroundColor;document.body.classList.remove('automatic-transform-preview');return color;});
+  expect(stagedPaint).toBe(paint.active);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#tracks-body tr.sheet-cell-row')).toHaveCount(0);
+  await page.keyboard.press('ArrowDown');
+  const next=await cell(page,'title',2).getAttribute('data-path');
+  expect(await page.evaluate(()=>window.tagrex.selectedPaths())).toEqual([next]);
+});
 async function paste(page, text) {
   await page.evaluate((value) => {
     const data = new DataTransfer();
@@ -125,7 +142,7 @@ test('cell keyboard navigation, live preview, cancellation and row selection rem
   await expect(cell(page, 'title', 1)).toBeFocused();
   await expect(page.locator('#tracks-body tr.selected')).toHaveCount(1);
   await page.keyboard.press('Space');
-  await expect(page.locator('#tracks-body tr.selected')).toHaveCount(2);
+  await expect(page.locator('#tracks-body tr.selected')).toHaveCount(0);
 });
 
 test('Shift selects a rectangle and copies model values as TSV', async ({ page }) => {
@@ -331,11 +348,11 @@ test('fill down previews the first range row and contextual actions return focus
 
 test('range selection and fill work across rows outside the virtual window', async ({ page }) => {
   await page.evaluate(async () => {
-    await window.tagrex.invoke('open_drop', { paths: Array.from({ length: 350 }, (_, i) => `track-${String(i).padStart(3, '0')}.mp3`) });
+    await window.tagrex.invoke('open_drop', { paths: Array.from({ length: 1200 }, (_, i) => `track-${String(i).padStart(3, '0')}.mp3`) });
     document.getElementById('root').value = '/dropped';
     await window.tagrex.openLibrary();
   });
-  await expect.poll(() => page.evaluate(() => window.tagrex.tracks.length)).toBe(350);
+  await expect.poll(() => page.evaluate(() => window.tagrex.tracks.length)).toBe(1200);
   expect(await page.locator('#tracks-body tr[data-path]').count()).toBeLessThan(100);
   await cell(page, 'artist').first().click();
   await page.locator('#files-view').evaluate((element) => { element.scrollTop = 3000; });
@@ -393,7 +410,7 @@ for (const invalidKind of ['date', 'cover']) {
 
 test('wheel scrolling can unmount the focused row while keyboard navigation remains in the grid', async ({ page }) => {
   await page.evaluate(async () => {
-    await window.tagrex.invoke('open_drop', { paths: Array.from({ length: 350 }, (_, i) => `track-${String(i).padStart(3, '0')}.mp3`) });
+    await window.tagrex.invoke('open_drop', { paths: Array.from({ length: 1200 }, (_, i) => `track-${String(i).padStart(3, '0')}.mp3`) });
     document.getElementById('root').value = '/dropped';
     await window.tagrex.openLibrary();
   });

@@ -1,5 +1,9 @@
+import { presentRawField, clearRawFields } from './working-values.js';
 // Raw pending inputs. Transformed output is never fed back into this layer.
 import { edits, tracks, trackAt, setPendingImportCover, diffByPath, sharedStagingEnabled } from './state.js';
+export let nativeLiveFields = false;
+export let nativeRecompute = false;
+export function setNativeLiveFields(value, capabilities = {}) { nativeLiveFields = value; nativeRecompute = !!value && !!capabilities?.recompute && !!capabilities?.derived_scope; }
 let imported = new Map();
 let cover = null;
 let coverPaths = [];
@@ -13,13 +17,14 @@ let importHistory = [];
 const invalid = new Set();
 export function liveInputRevision() { return revision; }
 export function importedValue(path, field) { return imported.get(path)?.get(field); }
-export function liveInputChanged() {
+export function liveInputChanged({ nativeScalar = false } = {}) {
   revision++;
-  document.dispatchEvent(new CustomEvent('tagrex:live-input'));
+  document.dispatchEvent(new CustomEvent('tagrex:live-input', { detail: { nativeScalar } }));
 }
 function setLiveField(path, field, value, valid) {
   const track = trackAt(path);
   if (!track) return;
+  presentRawField(path, field, value, valid);
   const base = imported.get(path)?.get(field) ?? track.tags?.[field] ?? '';
   const staged = diffByPath?.get(path)?.tag_changes?.find(change => change.field === field);
   if (value === base && valid && !(sharedStagingEnabled && staged)) {
@@ -34,13 +39,15 @@ function setLiveField(path, field, value, valid) {
 }
 export function recordLiveField(paths, field, value, valid = true) {
   for (const path of paths) setLiveField(path, field, value, valid);
-  liveInputChanged();
+  document.dispatchEvent(new CustomEvent('tagrex:working-fields', {detail: paths.map(path => ({path,field}))}));
+  liveInputChanged({nativeScalar:true});
 }
 // A bulk action publishes only its complete pending state. Each notification
 // can synchronously snapshot and paint every pending input.
 export function recordLiveFields(entries) {
   for (const { path, field, value, valid = true } of entries) setLiveField(path, field, value, valid);
-  liveInputChanged();
+  document.dispatchEvent(new CustomEvent('tagrex:working-fields', {detail: entries}));
+  liveInputChanged({nativeScalar:true});
 }
 export function hasInvalidLiveFields(locked = []) {
   const locks = new Set(locked);
@@ -49,7 +56,10 @@ export function hasInvalidLiveFields(locked = []) {
 }
 // Any rejected proposed value blocks the whole live operation. No partial
 // success is allowed to silently omit a bad tag, image or block snapshot.
+const previewValidity = new WeakMap();
+export function setPreviewValidity(plan, invalid) { if (plan) previewValidity.set(plan, invalid); }
 export function hasInvalidPreview(plan) {
+  if (plan && typeof previewValidity !== 'undefined' && previewValidity.has(plan)) return previewValidity.get(plan);
   const badImages = images => images?.some(image => image.invalid);
   return !!plan?.changes?.some(change => change.invalid ||
     change.tag_changes?.some(field => field.invalid) ||
@@ -69,6 +79,7 @@ export function liveInputs() {
   return { edits: values, cover:null, coverPaths:[], basePlan:coverPlanTemplate && coverOperations.size ? {...coverPlanTemplate, changes:[...coverOperations.values()]} : null, covers:coverAssignments.map(item => ({cover:item.cover, paths:item.paths.filter(path => !!trackAt(path))})).filter(item => item.paths.length), paths:[...new Set([...combined.keys(), ...coverAssignments.flatMap(item => item.paths), ...coverOperations.keys()])].filter(path => !!trackAt(path)) };
 }
 export function hasLiveInputs() { return edits.size > 0 || imported.size > 0 || coverAssignments.length > 0 || coverOperations.size > 0; }
+export function hasStructuralLiveInputs() { return imported.size > 0 || coverAssignments.length > 0 || coverOperations.size > 0; }
 export function isLiveImportBusy() { return importBusy; }
 export function adoptLiveCoverPlan(plan, paths) {
   coverPlanTemplate = {...plan, cover_assets:[]};
@@ -108,12 +119,14 @@ export function undoLiveImport() {
   return true;
 }
 export function clearLiveInputs({ notify = false } = {}) {
+  clearRawFields();
   edits.clear(); imported.clear(); invalid.clear(); cover = null; coverPaths = []; coverAssignments = []; coverOperations.clear(); coverPlanTemplate = null; importHistory = []; importBusy = false; importVersion++;
   setPendingImportCover(null);
   revision++;
   if (notify) document.dispatchEvent(new CustomEvent('tagrex:live-input'));
 }
 export function removeAppliedLiveInputs(paths) {
+  clearRawFields(paths);
   for (const path of paths) {
     edits.delete(path); imported.delete(path); coverOperations.delete(path);
     for (const key of invalid) if (key.startsWith(path + '\0')) invalid.delete(key);

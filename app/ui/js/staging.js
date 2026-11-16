@@ -4,10 +4,13 @@ import { t, tn } from './i18n.js';
 // One compact summary of the actual pending plan. Preview lives beside Apply;
 // clearing here only discards the draft, never tags or files on disk.
 export function renderStaging(plan) {
-  const count = new Set((plan?.changes || []).map(change => change.path)).size;
-  el('staged-edits').hidden = count === 0;
-  el('staged-count').textContent = t('staging.fileCount', { files: tn('unit.file', count) });
-  el('staged-tab-count').textContent = count ? String(count) : '';
+  const count = plan?.changes?.length || 0;
+  const hidden = count === 0;
+  const label = t('staging.fileCount', { files: tn('unit.file', count) });
+  const badge = count ? String(count) : '';
+  if (el('staged-edits').hidden !== hidden) el('staged-edits').hidden = hidden;
+  if (el('staged-count').textContent !== label) el('staged-count').textContent = label;
+  if (el('staged-tab-count').textContent !== badge) el('staged-tab-count').textContent = badge;
 }
 export function initStaging({ onClear, isBusy }) {
   el('diff-discard').addEventListener('click', () => { if (!isBusy()) onClear(); });

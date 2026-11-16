@@ -17,7 +17,7 @@ function harness(overrides = {}) {
   const node = () => ({ dataset: {}, textContent: '', setAttribute(k, v) { this[k] = v; }, getAttribute(k) { return this[k] ?? null; } });
   const calls = { validity: 0, scope: 0, event: 0, panels: 0, save: 0, paints: [], sets: 0 };
   const c = vm.createContext({
-    filterPending: false, filterError: false, commandMode: 'search', stagedView: true, syncRibbonSelection: () => {}, publishDuplicateSelection: () => {},
+    filterPending: false, filterError: false, commandMode: 'search', stagedView: true, applying:false, undoing:false, syncRibbonSelection: () => {}, publishDuplicateSelection: () => {},
     calls, previewPlan: { changes: [{ path: 'a', tag_changes: [] }] }, automaticPlan: null,
     sharedRenderedPlan: null, previewInputPlan: null, sharedStageSync: null,
     automaticVersion: 0, automaticTimer: null, automaticQueuedRun: null, clearTimeout() {},
@@ -41,8 +41,8 @@ function harness(overrides = {}) {
     CustomEvent: class { constructor(type) { this.type = type; } },
     document: { dispatchEvent(event) { assert.equal(event.type, 'tagrex:transform-scope'); calls.event++; c.updateTransformScope(); } },
     diskCoverSummary: { total: 2, with_cover: 0, distinct: false, samples: [] },
-    coverSubject: { paths: ['a', 'hidden'] }, lastRenderedCoverSummary: null,
-    current: true, isSelectionCurrent: () => c.current,
+    coverSubject: { paths: ['a', 'hidden'] }, lastRenderedCoverSummary: null, renderedCoverSubject: null,
+    current: true, isSelectionCurrent: () => c.current, isCoverSubjectCurrent: () => c.current,
     renderCoverWell: summary => calls.paints.push(JSON.parse(JSON.stringify(summary))),
     Set: class extends Set { constructor(...args) { super(...args); calls.sets++; } },
     ...overrides,
@@ -103,7 +103,7 @@ test('each automatic synchronous rail update validates the plan once; independen
 
 test('busy, failed, dismissed, blocked, editing and empty Apply states preserve priority', () => {
   for (const [flag, text, disabled] of [
-    ['automaticBusy', 'Previewing…', true], ['liveBusy', 'Previewing…', true],
+    ['automaticBusy', '', true], ['liveBusy', '', true],
     ['automaticFailed', 'Preview failed', true], ['automaticBlocked', 'Review current preview first', false],
     ['dismissed', '', false], ['editing', '', true],
     ['empty', '', true],
@@ -159,6 +159,31 @@ test('cover summaries allocate no selection Set for tag-only/empty plans and rep
   c.current = false; c.renderPendingCoverSummary(); assert.equal(calls.paints.length, 3);
 });
 
+test('a one-file cover projection uses the stage index without visiting unrelated staged rows', () => {
+  const image = { mime: 'image/png', data_base64: 'selected-cover', kind: 'front' };
+  const change = { path: 'a', cover_change: { old: [], new: [image] } };
+  const changes = new Proxy({ length: 100000 }, { get(target, key) {
+    if (key !== 'length') throw new Error('Unrelated staged rows were visited');
+    return target.length;
+  } });
+  const { c, calls } = harness({previewPlan:{changes},coverSubject:{paths:['a']},diffByPath:new Map([['a',change]])});
+  c.renderPendingCoverSummary();
+  assert.equal(calls.paints[0].samples[0].data_base64, 'selected-cover');
+});
+
+test('artwork subject freshness ignores tag revisions but rejects a different selection or library', () => {
+  const paths=['a'],library=[];
+  const c=vm.createContext({tracks:library,selectedPaths:()=>paths});
+  vm.runInContext(source('app/ui/js/cover.js','isCoverSubjectCurrent'),c);
+  const subject={paths,library,contentRevision:0,selectionRevision:0};
+  assert.equal(c.isCoverSubjectCurrent(subject),true);
+  subject.contentRevision=-100;
+  assert.equal(c.isCoverSubjectCurrent(subject),true);
+  assert.equal(c.isCoverSubjectCurrent({...subject,paths:['a']}),false);
+  assert.equal(c.isCoverSubjectCurrent({...subject,library:[]}),false);
+  assert.equal(c.isCoverSubjectCurrent(null),false);
+});
+
 
 test('explicit Apply independently rejects a plan mutated after its last rail update', async () => {
   const { c } = harness(); c.automaticPlan = c.previewPlan;
@@ -194,6 +219,6 @@ test('pending or invalid filters block Apply without bypassing plan validation',
     const { c, nodes } = harness(flags);
     c.updateDiffBar();
     assert.equal(c.applyBtn.disabled, true);
-    assert.equal(nodes.get('ab-state').textContent, flags.filterPending ? 'diff.updating' : 'diff.checkChanges');
+    assert.equal(nodes.get('ab-state').textContent, flags.filterPending ? '' : 'diff.checkChanges');
   }
 });

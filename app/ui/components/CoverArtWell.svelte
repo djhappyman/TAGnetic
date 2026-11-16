@@ -16,12 +16,24 @@
   let decoded = $state.raw<{ src: string; width: number; height: number } | null>(null);
   let failure = $state('');
   let generation = 0;
+  let updateGeneration = 0;
+  let prepared: { image: Image; src: string; width: number; height: number } | null = null;
   let returnFocus: HTMLElement | null = null;
   const image = $derived(model.images[active]);
   const uri = (image: Image) => `data:${image.mime};base64,${image.data_base64}`;
-  export function update(next: Model, reset = true) {
+  export function invalidatePending() { updateGeneration++; }
+  export async function update(next: Model, reset = true) {
+    const version = ++updateGeneration;
+    const nextImage = next.images[0];
+    const sameImage = nextImage?.mime === image?.mime && nextImage?.data_base64 === image?.data_base64;
+    if (nextImage && !sameImage) {
+      const picture = await decodeArtwork(nextImage);
+      if (version !== updateGeneration) return;
+      prepared = { image: nextImage, src: uri(nextImage), width: picture.naturalWidth, height: picture.naturalHeight };
+    }
+    if (!nextImage) prepared = null;
     model = next;
-    if (reset) { active = 0; menuOpen = false; lightbox = false; decoded = null; generation++; }
+    if (reset && !sameImage) { active = 0; menuOpen = false; lightbox = false; decoded = null; generation++; }
   }
   function action(name: string) { menuOpen = false; model.action(name); }
   async function preview() {
@@ -31,6 +43,10 @@
     returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     failure = '';
     lightbox = true;
+    if (prepared?.image.mime === current.mime && prepared.image.data_base64 === current.data_base64) {
+      decoded = { src: prepared.src, width: prepared.width, height: prepared.height };
+      return;
+    }
     decoded = null;
     try {
       const picture = await decodeArtwork(current);
@@ -64,12 +80,14 @@
     <button type="button" class="cover-main-image" aria-label={t('artwork.title')} disabled={model.loading} onclick={preview}>
       <img src={uri(image)} alt={model.mixed ? t('cover.multiple') : image.description || t('cover.frontCover')} draggable="false" />
     </button>
-    {#if model.mixed}<p class="cover-compact-note">{t('cover.multiple')} · {t('cover.withCover', { with_cover: model.withCover, n: model.selected })}</p>
-    {:else if model.selected > 1}<p class="cover-compact-note">{t('cover.sharedAcross', { files: tn('unit.file', model.selected) })}</p>{/if}
+    <p class="cover-compact-note" aria-hidden={!model.mixed && model.selected <= 1}>
+      {#if model.mixed}{t('cover.multiple')} · {t('cover.withCover', { with_cover: model.withCover, n: model.selected })}
+      {:else if model.selected > 1}{t('cover.sharedAcross', { files: tn('unit.file', model.selected) })}{/if}
+    </p>
   {:else}
     <button type="button" class="cover-empty-target" disabled={!model.selected || model.loading} onclick={() => action('replace')}>
       <svg class="ico" aria-hidden="true"><use href="#i-image"/></svg>
-      <span>{model.loading ? t('artwork.loading') : model.selected ? t('cover.noCover') : t('cover.noSelection')}</span>
+      <span>{model.selected ? t('cover.noCover') : t('cover.noSelection')}</span>
       <small>{model.selected ? t('cover.replace') : t('cover.selectToEdit')}</small>
     </button>
   {/if}
@@ -82,7 +100,7 @@
       {#if decoded}
         <ArtworkCanvas src={decoded.src} width={decoded.width} height={decoded.height} label={t('editor.coverArt')} onrotate={previewRotation} />
       {:else if failure}<p role="alert">{failure}</p><Button variant="outline" onclick={preview}>{t('artwork.retry')}</Button>
-      {:else}<p role="status">{t('artwork.loading')}</p>{/if}
+      {/if}
     </div>
   </Dialog.Content>
 </Dialog.Root>

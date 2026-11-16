@@ -27,7 +27,7 @@ function harness(tracks, values = []) {
   const subject = { paths };
   const calls = { events: 0, pendingEntriesAtEvents: 0, invoke: [], writes: [], observed: [] };
   const c = vm.createContext({
-    edits: new Map(), tracks, trackAt: path => index.get(path), setPendingImportCover() {},
+    presentRawField() {}, clearRawFields() {}, edits: new Map(), tracks, trackAt: path => index.get(path), setPendingImportCover() {},
     applying: false, undoing: false, captureSelection: () => subject,
     current: true, isSelectionCurrent: () => c.current,
     previewPlan: null, isAutomaticTransformPreview: () => false,
@@ -35,6 +35,7 @@ function harness(tracks, values = []) {
     setPreviewPlan: plan => { c.previewPlan = plan; }, setPreviewSource() {},
     CustomEvent: class { constructor(type) { this.type = type; } },
     document: { dispatchEvent(event) {
+      if (event.type === 'tagrex:working-fields') return;
       assert.equal(event.type, 'tagrex:live-input');
       calls.events++;
       c.adoptTagOnlyPreview();
@@ -50,7 +51,7 @@ function harness(tracks, values = []) {
     writeQuickPlan: plan => calls.writes.push(plan),
     hooks: { previewEdits: async () => c.liveInputChanged() },
   });
-  vm.runInContext(read('app/ui/js/live-preview.js').replace(/^import .*;\n/m, '').replace(/^export /gm, ''), c);
+  vm.runInContext(read('app/ui/js/live-preview.js').replace(/^import .*;\n/gm, '').replace(/^export /gm, ''), c);
   vm.runInContext(adoption, c);
   c.runRibbon = vm.runInContext(`(${ribbon})`, c);
   return { c, calls, paths };

@@ -417,3 +417,53 @@ fn two_thousand_disposable_wav_files_measure_cold_and_warm_native_snapshots() {
         json!({"files":2_000,"bytes_per_file":wav.len(),"cold_snapshot_ms":cold_ms,"warm_snapshot_ms":warm_ms,"warm_saved_dtos_shared":true,"media_modified":false,"user_media_accessed":false}),
     );
 }
+
+/// Probe the optional native view/Inspector migrations before committing to
+/// them. This measures only native work: ordered manifests already exist in the
+/// query snapshot and a whole-library field aggregate is a single DTO pass. The
+/// frontend's grouping/aggregate cost cannot be measured without the WebView, so
+/// this records the native floor rather than justifying a speculative rewrite.
+#[test]
+fn native_manifest_and_inspector_aggregate_floor_probe() {
+    let fixture = ScaleFixture::new();
+    let rows = fixture.seed(100_000);
+    let index = QueryIndex::from_tracks(&rows);
+    let request: QueryRequest = serde_json::from_value(json!({
+        "requestId":1,
+        "query":{"version":2,"text":"","root":{"kind":"group","id":"root","mode":"all","children":[]}}
+    }))
+    .unwrap();
+    let started = Instant::now();
+    let manifest = index.query(&request, || false).unwrap();
+    let manifest_ms = started.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(manifest.paths.as_ref().unwrap().len(), 100_000);
+    let mut known = request.clone();
+    known.snapshot_id = Some(index.id);
+    let started = Instant::now();
+    let repeated = index.query(&known, || false).unwrap();
+    let repeated_ms = started.elapsed().as_secs_f64() * 1000.0;
+    assert!(
+        repeated.paths.is_none(),
+        "a known snapshot reuses its manifest"
+    );
+
+    let started = Instant::now();
+    let mut shared = rows[0].tags.get("genre").cloned();
+    let mut mixed = false;
+    for row in rows.iter() {
+        match row.tags.get("genre") {
+            Some(value) if shared.as_ref().is_some_and(|shared| shared != value) => mixed = true,
+            _ => {}
+        }
+    }
+    let aggregate_ms = started.elapsed().as_secs_f64() * 1000.0;
+    assert!(!mixed);
+    let _ = shared.take();
+    record(
+        "native_manifest_and_aggregate_floor",
+        json!({"rows":100_000,"ordered_manifest_ms":manifest_ms,
+            "known_snapshot_reuse_ms":repeated_ms,"genre_aggregate_pass_ms":aggregate_ms,
+            "manifest_already_native":true,"frontend_grouping_measured":false,
+            "webview_frame_pacing_measured":false}),
+    );
+}
