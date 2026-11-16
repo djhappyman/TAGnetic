@@ -188,9 +188,8 @@ test('field groups keep one 24px separation and rows one 8px gap without doubled
     children: [...node.children].map((child) => ({ tag: child.className, top: child.getBoundingClientRect().top, bottom: child.getBoundingClientRect().bottom })),
   }));
   expect(number(scroll.gap)).toBe(0);
-  const headingToFields = scroll.children[1].top - scroll.children[0].bottom;
-  const fieldsToCover = scroll.children[2].top - scroll.children[1].bottom;
-  expect(headingToFields).toBeCloseTo(24, 0);
+  expect(scroll.children).toHaveLength(2);
+  const fieldsToCover = scroll.children[1].top - scroll.children[0].bottom;
   expect(fieldsToCover).toBeCloseTo(32, 0);
 });
 
@@ -304,7 +303,7 @@ test('dock menus use menu geometry and compact controls keep a 24px hit box', as
     return {
       lock: size(pick('#fields-body .fe-lock')),
       subtab: size(pick('.subtab')),
-      help: size(pick('#subtab-editor .inspector-help')),
+      help: size(pick('.source-tools .inspector-help')),
     };
   });
   for (const [name, control] of Object.entries(geometry)) {
@@ -353,7 +352,7 @@ test('the filter rail is one integrated 32px control row with a floating builder
   const head = await style(page, '#filter-panel', ['backgroundColor', 'borderTopWidth', 'padding']);
   expect(head.backgroundColor).toBe('rgba(0, 0, 0, 0)');
   expect(head.borderTopWidth).toBe('0px');
-  expect(head.padding).toBe('8px 12px');
+  expect(head.padding).toBe('0px');
   await expect(page.locator('#filter-panel-toggle')).toHaveCount(0);
   await expect(page.locator('#filter')).toBeVisible();
   const field = await style(page, '.filter-ctl', ['height', 'minHeight', 'borderRadius']);

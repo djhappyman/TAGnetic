@@ -45,7 +45,12 @@ async function nativeTransforms(page) {
     document.dispatchEvent(new CustomEvent('tagrex:settings-saved',{detail:{...settings,action_groups:[{name:'Append once',scope:'title',rules:[{kind:'replace',scope:'title',from:'$',to:'!',regex:true,style:''}]}]}}));
   });
   await expect.poll(()=>page.evaluate(()=>window.mcpFixture.state.calls.includes('mcp_shared_stage_delta'))).toBe(true);
-  return page.locator('#groups-menu .preset-apply').filter({hasText:'Append once'});
+  const preset=page.locator('#groups-menu .preset-apply').filter({hasText:'Append once'});
+  return {async click(){
+    const previous=await page.evaluate(()=>document.querySelector('.subtab.active')?.dataset.subtab || 'editor');
+    await openTagSource(page,'transformations');await preset.click();
+    if(previous!=='transformations')await openTagSource(page,previous);
+  }};
 }
 
 test('a human edit made during an agent write remains desired while saved bases refresh', async ({ page }) => {

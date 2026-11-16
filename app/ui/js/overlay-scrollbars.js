@@ -1,3 +1,4 @@
+import { tableCoveredWidth } from './table-viewport.js';
 // All scrollbar geometry is read together before any rail style is written.
 // Independent observers must not force layout between each other's writes.
 const pendingScrollbars = new Set();
@@ -60,7 +61,7 @@ export function initTableScrollbars(wrap, { host = null } = {}) {
       } else {
         const bounds = thumb.getBoundingClientRect();
         const direction = coordinate(event) < (vertical ? bounds.top : bounds.left) ? -1 : 1;
-        write(normalized()+direction*(axis.rtl?-1:1)*(vertical?wrap.clientHeight:wrap.clientWidth));
+        write(normalized()+direction*(axis.rtl?-1:1)*(vertical?wrap.clientHeight:wrap.clientWidth-tableCoveredWidth(wrap)));
       }
     });
     listen(rail,'pointermove',event => {
@@ -69,7 +70,7 @@ export function initTableScrollbars(wrap, { host = null } = {}) {
     const release = () => { axis.drag = null; settle(); };
     for (const type of ['pointerup','pointercancel','lostpointercapture']) listen(rail,type,release);
     listen(rail,'keydown',event => {
-      const page = vertical ? wrap.clientHeight : wrap.clientWidth;
+      const page = vertical ? wrap.clientHeight : wrap.clientWidth-tableCoveredWidth(wrap);
       const moves = vertical ? {ArrowUp:-24,ArrowDown:24,PageUp:-page,PageDown:page}
         : {ArrowLeft:-24*(axis.rtl?-1:1),ArrowRight:24*(axis.rtl?-1:1),PageUp:-page,PageDown:page};
       if (!(event.key in moves) && event.key !== 'Home' && event.key !== 'End') return;
@@ -89,21 +90,32 @@ export function initTableScrollbars(wrap, { host = null } = {}) {
     let geometry = null;
     if (dirty) {
       const extents = [Math.max(0,wrap.scrollHeight-height),Math.max(0,wrap.scrollWidth-width)];
+      const covered = host ? 0 : tableCoveredWidth(wrap);
+      const table = host ? null : wrap.querySelector('table');
+      const filler = table?.querySelector('th.table-fill')?.getBoundingClientRect().width || 0;
+      const terminalSpace = table ? Math.ceil(Math.max(0,covered-filler)) : 0;
       const head = host ? 0 : wrap.querySelector('thead')?.getBoundingClientRect().height || 0;
       const bounds = host ? wrap.getBoundingClientRect() : null;
       const origin = host?.getBoundingClientRect();
       geometry = {
-        height,width,extents,head,rtl:getComputedStyle(wrap).direction === 'rtl',
+        height,width:width-covered,covered,table,terminalSpace,extents,head,rtl:getComputedStyle(wrap).direction === 'rtl',
         top:(bounds ? bounds.top-origin.top : wrap.offsetTop)+wrap.clientTop,
         left:(bounds ? bounds.left-origin.left : wrap.offsetLeft)+wrap.clientLeft,
       };
     }
     const positions = [wrap.scrollTop,Math.abs(wrap.scrollLeft)];
     return () => {
+      let remeasure = false;
+      if (geometry?.table && geometry.table.style.marginInlineEnd !== `${geometry.terminalSpace}px`) {
+        geometry.table.style.marginInlineEnd = `${geometry.terminalSpace}px`;
+        // Overflow extents update once after the terminal margin changes.
+        remeasure = true;
+        schedule(true);
+      }
       for (const [index,axis] of axes.entries()) {
         const {rail,thumb,vertical} = axis;
         if (geometry) {
-          const {extents,head,height,width,top,left} = geometry;
+          const {extents,head,height,width,top,left,covered} = geometry;
           axis.extent = extents[index];
           axis.rtl = !vertical && geometry.rtl;
           const track = vertical ? Math.max(0,height-head-(extents[1]?12:0)) : Math.max(0,width-(extents[0]?12:0));
@@ -111,6 +123,7 @@ export function initTableScrollbars(wrap, { host = null } = {}) {
           const size = Math.min(track,Math.max(24,track*visible/Math.max(visible,visible+axis.extent)));
           style(rail,'top',`${top+(vertical?head:height-12)}px`);
           if (host && vertical) style(rail,'left',`${left+width-12}px`);
+          if (!host && vertical) { style(rail,'right','auto'); style(rail,'left',`${left+width-12}px`); }
           style(rail,vertical?'height':'width',`${track}px`);
           if (!vertical) style(rail,'left',`${left}px`);
           style(thumb,vertical?'height':'width',`${size}px`);
@@ -124,7 +137,7 @@ export function initTableScrollbars(wrap, { host = null } = {}) {
         attribute(rail,'aria-valuemax',Math.round(axis.extent));
         attribute(rail,'aria-valuenow',Math.round(position));
       }
-      dirty = false;
+      dirty = remeasure;
     };
   }
   listen(wrap,'scroll',() => {
@@ -140,9 +153,12 @@ export function initTableScrollbars(wrap, { host = null } = {}) {
   for (const child of contents) if (child) resize.observe(child);
   const content = new MutationObserver(() => schedule(true));
   content.observe(host ? wrap : wrap.querySelector('table'),{childList:true,subtree:true,characterData:true});
+  const visibility = new MutationObserver(() => schedule(true));
+  const drawerFrame = wrap.closest('.dock-frame');
+  if (drawerFrame) visibility.observe(drawerFrame,{attributes:true,attributeFilter:['data-sidebar-closed','data-sidebar-drawer','data-dock-compact']});
   listen(window,'resize',() => schedule(true),{passive:true});
   const dispose = () => {
-    pendingScrollbars.delete(measure); resize.disconnect(); content.disconnect(); removers.forEach(remove=>remove());
+    pendingScrollbars.delete(measure); resize.disconnect(); content.disconnect(); visibility.disconnect(); removers.forEach(remove=>remove());
     for (const axis of axes) { clearTimeout(axis.timer); axis.rail.remove(); }
   };
   window.addEventListener('pagehide',dispose,{once:true}); schedule(true);

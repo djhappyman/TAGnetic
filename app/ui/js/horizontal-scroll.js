@@ -1,3 +1,4 @@
+import { tableCoveredWidth } from './table-viewport.js';
 // Native pixel scrolling stays native (including trackpad momentum). Smooth
 // only discrete horizontal/Shift-wheel steps; never add a second inertia tail.
 export function initHorizontalScroll(wrap) {
@@ -25,7 +26,7 @@ export function initHorizontalScroll(wrap) {
     // proportional browser scrolling. Let the engine preserve their momentum.
     if (!event.deltaMode && !event.shiftKey) { stop(); return; }
     const unit = event.deltaMode === 1 ? parseFloat(getComputedStyle(wrap).lineHeight) || 16
-      : event.deltaMode === 2 ? wrap.clientWidth : 1;
+      : event.deltaMode === 2 ? wrap.clientWidth - tableCoveredWidth(wrap) : 1;
     const next = bounds((frame ? target : wrap.scrollLeft) + delta * unit);
     if (next === wrap.scrollLeft && !frame) return;
     event.preventDefault();

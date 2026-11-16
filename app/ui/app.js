@@ -3476,9 +3476,9 @@ async function writeQuickPlan(plan) {
     else throw error;
   } finally {
     feedback.cancel(); activeApplyReview = null; endApplyProgress();
+    applying = false; release();
     el('diff-actionbar').hidden = false;
     updateDiffBar();
-    applying = false; release();
     updateStatus(rowSelectionSet().size);
     syncRibbonSelection(); spreadsheet?.refresh();
     resumeAutomaticTransformPreview({dismiss:!hasLiveInputs()});

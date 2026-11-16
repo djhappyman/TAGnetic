@@ -168,7 +168,7 @@ test('cell completion uses a real popover without blurring or writing the cell o
   await expect(menu).toBeHidden();
 });
 
-test('standard and advanced field disclosures support native Enter and Space activation', async ({ page }) => {
+test('More tags includes raw fields and supports native Enter and Space activation', async ({ page }) => {
   await library(page);
   await page.evaluate(() => { window.tagrex.tracks[0].tags['custom:RAW_TEST_FRAME'] = 'Raw metadata'; });
   await page.locator('#tracks-body tr[data-path]').nth(1).click();
@@ -188,14 +188,8 @@ test('standard and advanced field disclosures support native Enter and Space act
   await page.keyboard.press('Enter');
   await expect(standard).toHaveAttribute('aria-expanded', 'true');
   await expect(page.locator('#editor-group-standard')).toBeVisible();
-  await expect(advanced).toHaveAttribute('aria-expanded', 'false');
-  await advanced.focus();
-  await page.keyboard.press('Enter');
-  await expect(advanced).toHaveAttribute('aria-expanded', 'true');
-  await expect(page.locator('#editor-group-advanced')).toBeVisible();
-  await page.keyboard.press('Space');
-  await expect(advanced).toHaveAttribute('aria-expanded', 'false');
-  await expect(page.locator('#editor-group-advanced')).toBeHidden();
+  await expect(advanced).toHaveCount(0);
+  await expect(page.locator('#editor-group-standard input[data-key="custom:RAW_TEST_FRAME"]')).toBeVisible();
 });
 
 test('Sonner retains report nodes and native dismiss listeners across repeated messages', async ({ page }) => {

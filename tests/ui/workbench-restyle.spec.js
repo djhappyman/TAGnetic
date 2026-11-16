@@ -111,7 +111,7 @@ test('icons and all tool actions remain available at narrow widths', async ({ pa
 test('permanent playback follows the table width and stays reachable in the compact inspector', async ({ page }) => {
   await page.setViewportSize({ width:1397, height:900 });
   const alignment = () => page.evaluate(() => {
-    const pane = document.querySelector('.files-col').getBoundingClientRect();
+    const pane = document.querySelector('.library-header').getBoundingClientRect();
     const player = document.getElementById('player').getBoundingClientRect();
     return Math.abs(pane.left + 3 - player.left) + Math.abs(pane.right - 3 - player.right);
   });

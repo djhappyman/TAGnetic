@@ -76,7 +76,7 @@ test('help keeps the bottom fade and lock buttons sit inside complete field surf
   await selectAll(page);const port=page.locator('.editor-scroll');
   await port.evaluate(node=>{node.style.maxHeight='350px';node.scrollTop=0;});
   await expect(port).toHaveClass(/can-scroll-down/);
-  await page.locator('#subtab-editor .inspector-help').click();await expect(page.locator('.inspector-help-content')).toBeVisible();
+  await page.locator('.source-tools .inspector-help').click();await expect(page.locator('.inspector-help-content')).toBeVisible();
   expect(await port.evaluate(node=>getComputedStyle(node).maskImage)).toContain('linear-gradient');
   await page.keyboard.press('Escape');expect(await port.evaluate(node=>getComputedStyle(node).maskImage)).toContain('linear-gradient');
   for(const key of ['title','year','bpm','key','genre']){
@@ -95,7 +95,7 @@ for(const theme of ['light','dark'])test(`mixed values and rounded disclosure hi
   expect(colors.placeholder).toBe(colors.ghost);expect(colors.placeholder).not.toBe(colors.value);
   const group=page.locator('[data-group="standard"]'),head=group.locator('.fe-group-head');
   await expect(group.locator('.fe-group-count')).toHaveCount(0);await head.click();
-  const geometry=await group.evaluate(node=>{const h=node.querySelector('.fe-group-head'),grid=node.querySelector('.fe-grid');return {radius:getComputedStyle(h).borderRadius,background:getComputedStyle(h).backgroundColor,gap:grid.getBoundingClientRect().top-h.getBoundingClientRect().bottom};});
+  const geometry=await group.evaluate(node=>{const h=node.querySelector('.fe-group-head'),grid=node.querySelector('.fe-grid');return {radius:getComputedStyle(h).borderRadius,background:getComputedStyle(h).backgroundColor,gap:grid.firstElementChild.getBoundingClientRect().top-h.getBoundingClientRect().bottom};});
   expect(geometry.radius).toBe('10px');expect(geometry.background).not.toBe('rgba(0, 0, 0, 0)');expect(geometry.gap).toBeCloseTo(12,0);
   await page.locator('.mode-col').screenshot({path:info.outputPath(`inspector-${theme}.png`)});
 });

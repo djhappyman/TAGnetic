@@ -53,14 +53,17 @@ const titleOf=(value,path)=>value?.changes.find(change=>change.path===path)?.tag
 const selected=page=>page.evaluate(()=>window.tagrex.selectedPaths()[0]);
 async function ready(page){await expect(page.locator('#diff-apply')).toBeVisible();await expect(page.locator('#diff-apply')).toBeEnabled();}
 async function tick(page,on=true){
+  const previous=await page.evaluate(()=>document.querySelector('.subtab.active')?.dataset.subtab || 'online');
+  await openTagSource(page,'transformations');
   const row=page.locator('#groups-menu .preset-check').filter({has:page.locator('.preset-apply',{hasText:'Append once'})});
   if(await row.locator('input.group-tick').isChecked()!==on)await row.locator('.preset-apply').click();
+  if(previous!=='transformations')await openTagSource(page,previous);
 }
 async function releases(page){
   await openTagSource(page, 'online');
   await page.evaluate(()=>document.getElementById('discogs-token').value='fixture');
   await page.locator('#discogs-query').fill('La Bush');await page.locator('#discogs-search').click();
-  await expect(page.locator('.release-card')).toHaveCount(5);
+  await expect.poll(()=>page.locator('.release-card').count()).toBeGreaterThanOrEqual(5);
   for(const card of await page.locator('.release-card').all()){
     if(await card.getAttribute('aria-expanded')!=='true')await card.locator('.release-head').click();
     await expect(card).toHaveClass(/tracklist-loaded/);

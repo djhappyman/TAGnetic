@@ -120,10 +120,10 @@ test('horizontal scrolling reaches the last column with the drawer open and adju
   const open=await scroll();expect(open.max).toBeGreaterThan(0);expect(open.left).toBe(open.max);
   const last=page.locator('#tracks thead th[data-sort]').last();
   const view=await box(page,'#files-view'),end=await last.boundingBox();
-  expect(end.x+end.width).toBeLessThanOrEqual(view.x+view.width+1);
+  expect(end.x+end.width).toBeLessThanOrEqual((await box(page,'.dock-right')).x+1);
   await page.locator('#panel-toggle').click();await settled(page);
-  const closed=await scroll();expect(closed.width).toBeGreaterThan(open.width);expect(closed.left).toBe(closed.max);
-  expect(closed.content).toBe(Math.max(open.content,closed.width));
+  const closed=await scroll();expect(closed.width).toBe(open.width);expect(closed.left).toBe(closed.max);
+  expect(closed.content).toBeLessThanOrEqual(open.content);
   await page.locator('#panel-toggle').click();await settled(page);
   const reopened=await scroll();expect(reopened.max).toBe(open.max);expect(reopened.left).toBe(reopened.max);
 });
@@ -187,7 +187,7 @@ test('every visible column heading stays above scrolled staged rows on both axes
       const viewport=document.getElementById('files-view');viewport.scrollTop=600;viewport.scrollLeft=x;
       await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
       const v=viewport.getBoundingClientRect(),file=document.querySelector('#tracks th[data-sort="file"]').getBoundingClientRect();
-      return [...document.querySelectorAll('#tracks thead th')].filter(n=>{const r=n.getBoundingClientRect();return r.width&&r.x+r.width/2>Math.max(v.x,file.right)&&r.x+r.width/2<v.right-12;}).map(n=>{
+      return [...document.querySelectorAll('#tracks thead th')].filter(n=>{const r=n.getBoundingClientRect();return r.width&&r.x+r.width/2>Math.max(v.x,file.right)&&r.x+r.width/2<Math.min(v.right,document.querySelector('.dock-right').getBoundingClientRect().left)-12;}).map(n=>{
         const r=n.getBoundingClientRect(),hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);
         return{text:n.textContent.trim(),ownsHit:n.contains(hit),atTop:Math.abs(r.y-v.y)<1};
       });
@@ -238,27 +238,40 @@ test('desktop sidebar stays 420px wide without a resize handle and ignores old d
   await expect(page.locator('.dock-right')).toHaveCSS('width','420px');
 });
 
-test('stretching follows the native container without per-frame table style broadcasts',async({page})=>{
+test('rounded boundary stretches while the native table viewport stays fixed',async({page})=>{
   await page.emulateMedia({reducedMotion:'no-preference'});
   await page.locator('#group-btn').click();await page.locator('#group-menu [data-group="folder"]').click();
   const result=await page.evaluate(async()=>{
     let broadcasts=0;
     const original=CSSStyleDeclaration.prototype.setProperty;
     CSSStyleDeclaration.prototype.setProperty=function(key,...args){if(key==='--table-viewport-width')broadcasts++;return original.call(this,key,...args);};
-    const table=document.getElementById('files-view'),widths=[],clips=[];
+    const table=document.getElementById('files-view'),widths=[],clips=[],edges=[],players=[];
     try{
       document.getElementById('panel-toggle').click();
       for(let i=0;i<24;i++){
         await new Promise(requestAnimationFrame);
-        widths.push(table.clientWidth);clips.push(getComputedStyle(table.closest('.files-col')).clipPath);
+        widths.push(table.clientWidth);edges.push(document.querySelector('.files-col').clientWidth);players.push(document.getElementById('player').clientWidth);clips.push(getComputedStyle(table.closest('.files-col')).clipPath);
       }
     }finally{CSSStyleDeclaration.prototype.setProperty=original;}
     const band=document.querySelector('.group-heading-content');
-    return {broadcasts,widths,clips,container:getComputedStyle(table).containerType,band:band?.getBoundingClientRect().width,width:table.clientWidth};
+    return {broadcasts,widths,edges,players,clips,container:getComputedStyle(table).containerType,band:band?.getBoundingClientRect().width,width:table.clientWidth};
   });
   expect(result.broadcasts).toBe(0);
   expect(result.container).toBe('inline-size');
-  expect(new Set(result.widths).size).toBeGreaterThan(2);
+  expect(new Set(result.widths).size).toBe(1);
+  expect(new Set(result.edges).size).toBeGreaterThan(2);
+  expect(new Set(result.players).size).toBeGreaterThan(2);
   expect(result.clips.every(value=>value==='none')).toBe(true);
   expect(result.band).toBeCloseTo(result.width-24,0);
+});
+
+test('keyboard navigation reveals the final cell to the left of the open sidebar',async({page})=>{
+  await page.locator('#tracks-body tr[data-path]').first().locator('td[data-field="title"]').click();
+  for(let i=0;i<12;i++)await page.keyboard.press('ArrowRight');
+  const focused=await page.evaluate(()=>{
+    const n=document.activeElement,r=n.getBoundingClientRect(),edge=document.querySelector('.dock-right').getBoundingClientRect().left;
+    return {field:n.dataset.field || document.querySelector('#tracks thead tr').cells[n.cellIndex]?.dataset.sort,right:r.right,edge,visible:n.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))};
+  });
+  expect(focused.field).toBe('length');expect(focused.right).toBeLessThanOrEqual(focused.edge+1);expect(focused.visible).toBe(true);
+  expect(await page.locator('.files-col').evaluate(n=>getComputedStyle(n,'::after').content)).toBe('none');
 });

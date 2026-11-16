@@ -1,3 +1,4 @@
+import { tableViewportBounds } from './table-viewport.js';
 // Virtual membership changes once. Only viewport rows animate, using compositor
 // transforms/opacity; no prefix-array rebuild or layout writes on animation frames.
 export function createGroupMotion(wrap, body) {
@@ -38,7 +39,7 @@ export function createGroupMotion(wrap, body) {
       if (caret && rotation) animate(caret,[{transform:rotation},{transform:collapsing?'rotate(-90deg)':'rotate(0)'}],80);
       return;
     }
-    const viewport = wrap.getBoundingClientRect();
+    const viewport = tableViewportBounds(wrap);
     const top = Math.max(viewport.top, wrap.querySelector('thead').getBoundingClientRect().bottom);
     const before = new Map();
     const widths = [...(body.querySelector('tr[data-path]')?.cells || [])].map(cell => cell.getBoundingClientRect().width);
@@ -96,7 +97,7 @@ export function createGroupMotion(wrap, body) {
     if (exiting.length) {
       ghost = document.createElement('div');
       ghost.className = 'group-motion-exit'; ghost.classList.toggle('show-old',wrap.querySelector('#tracks').classList.contains('show-old')); ghost.setAttribute('aria-hidden','true'); ghost.inert = true;
-      Object.assign(ghost.style,{position:'fixed',pointerEvents:'none',overflow:'hidden',contain:'layout paint',left:`${viewport.left}px`,top:`${top}px`,width:`${wrap.clientWidth}px`,height:`${Math.max(0,viewport.bottom-top)}px`,zIndex:'25'});
+      Object.assign(ghost.style,{position:'fixed',pointerEvents:'none',overflow:'hidden',contain:'layout paint',left:`${viewport.left}px`,top:`${top}px`,width:`${viewport.width}px`,height:`${Math.max(0,viewport.bottom-top)}px`,zIndex:'25'});
       const table = document.createElement('table'), rows = document.createElement('tbody');
       table.style.borderSpacing = '0'; rows.append(...exiting); table.append(rows); ghost.append(table); document.body.append(ghost);
       const current = ghost;

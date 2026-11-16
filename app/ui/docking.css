@@ -191,11 +191,18 @@ body .dock-frame[data-sidebar-drawer='true'][data-sidebar-closed='true'] .dock-r
   transition:transform 240ms var(--workbench-ease),visibility 0s 240ms;
 }
 body .dock-frame[data-sidebar-drawer='true'] { container-type:inline-size; }
+/* Animate the existing rounded boundary, keeping the native table viewport
+   at its full fixed width inside it. Only the smaller surrounding controls reflow. */
 body .dock-frame[data-sidebar-drawer='true'] #dock-module-files > .dock-module-body > :is(.files-col,.ribbon-strip) {
   width:calc(100% - var(--sidebar-width));
   transition:width 240ms var(--workbench-ease);
 }
 body .dock-frame[data-sidebar-drawer='true'][data-sidebar-closed='true'] #dock-module-files > .dock-module-body > :is(.files-col,.ribbon-strip) { width:100%; }
+body .dock-frame[data-sidebar-drawer='true'] #files-view { width:100cqw; max-width:none; align-self:flex-start; }
+/* This terminal scroll space makes the last data column reachable to the left
+   of the overlay, even when the data would fit the full native viewport. */
+body .dock-frame[data-sidebar-drawer='true'][data-sidebar-closed='false'] #files-view { scroll-padding-inline-end:var(--sidebar-width); }
+body .dock-frame[data-sidebar-drawer='true'][data-sidebar-closed='false'] #tracks .group-heading-content { width:calc(100cqw - var(--sidebar-width) - 24px); max-width:calc(100cqw - var(--sidebar-width) - 24px); }
 /* Data columns retain their chosen widths. Only trailing fill follows the
    scrollport, so the final data column stays reachable at either pane width. */
 body .dock-frame[data-sidebar-drawer='true'] #tracks:not(.measuring) { width:100%; min-width:100%; }

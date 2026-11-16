@@ -32,7 +32,7 @@ iterating on the personal interface; older design briefs are historical context.
 - Keep the file pane's outer bottom edge fixed when moving search into the header.
   Rows fill the freed space; an 8px bottom inset and short 8px fade soften the rounded edge.
 - Keep the folder bar with the file table and common commands in the toolbar.
-  Keep the established panel arrangement fixed, with a 420px desktop sidebar and collapse in place of pane resizing. Retain the
+  Keep the established panel arrangement fixed, with a 420px desktop overlay sidebar and collapse in place of pane resizing. Keep table geometry fixed underneath it, reserving terminal horizontal scroll space so every column remains reachable; move only small controls and feedback into the uncovered area. Retain the
   Transformations source tab without exposing panel-movement menus.
 - Align the permanent player beneath the file pane as the docks resize. Anchor
   Preview and Apply beneath the inspector; keep the draft-clear control in the
