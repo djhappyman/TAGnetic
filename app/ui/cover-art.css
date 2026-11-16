@@ -13,7 +13,7 @@ body .mode-col button.cover-empty-target { display:flex; align-items:center; jus
 .cover-empty-target small { font-size:var(--type-help-size); }
 body .mode-col button.cover-empty-target:hover:not(:disabled) { background:var(--sel-tint); border-color:var(--accent); }
 body .mode-col button.cover-empty-target:disabled { cursor:default; }
-.cover-compact-note { text-align:center; color:var(--muted); font-size:var(--type-help-size); margin:8px 0 0; }
+.cover-compact-note { min-height:1.5em; line-height:1.5; text-align:center; color:var(--muted); font-size:var(--type-help-size); margin:8px 0 0; }
 .cover-edit-menu { min-width:140px; }
 [data-slot="dialog-content"].cover-lightbox { width:min(90vw, 900px); max-width:calc(100vw - 24px); height:min(84dvh, 760px); max-height:calc(100dvh - 24px); display:flex; flex-direction:column; gap:8px; padding:var(--sp-4); border-radius:var(--r-dialog); background:var(--panel); }
 .cover-lightbox-stage { position:relative; flex:1; min-height:0; min-width:0; overflow:hidden; border-radius:var(--r-media); background:var(--bg); display:grid; place-content:center; }

@@ -36,6 +36,17 @@ async function shared(page) {
   await expect.poll(() => page.evaluate(() => window.mcpFixture.state.calls.includes('mcp_shared_stage'))).toBe(true);
 }
 
+async function nativeTransforms(page) {
+  await page.evaluate(async()=>{
+    window.mcpFixture.state.shared=true;window.mcpFixture.state.liveFields=true;window.mcpFixture.state.liveRecompute=true;
+    window.mcpFixture.emit('service_changed',{});
+    const settings=await window.__TAURI__.core.invoke('load_settings',{});
+    document.dispatchEvent(new CustomEvent('tagrex:settings-saved',{detail:{...settings,action_groups:[{name:'Append once',scope:'title',rules:[{kind:'replace',scope:'title',from:'$',to:'!',regex:true,style:''}]}]}}));
+  });
+  await expect.poll(()=>page.evaluate(()=>window.mcpFixture.state.calls.includes('mcp_shared_stage_delta'))).toBe(true);
+  return page.locator('#groups-menu .preset-apply').filter({hasText:'Append once'});
+}
+
 test('a human edit made during an agent write remains desired while saved bases refresh', async ({ page }) => {
   await staged(page, 'Human before agent');
   await page.evaluate(() => window.mcpFixture.holdAgentWrite(window.tagrex.tracks[0].path, 'Saved by agent'));
@@ -256,4 +267,155 @@ test('selecting files keeps staged rename rows mounted and Inspector values live
   expect(await page.evaluate(() => window.mcpFixture.selectionRows.every(row => row.isConnected))).toBe(true);
   expect(await page.evaluate(() => window.tagrex.previewPlan.changes.length)).toBe(1);
   await expect(page.locator('#staged-tab-count')).toHaveText('1');
+});
+
+test('identical shared acknowledgements cause zero table value mutations',async({page})=>{
+  await shared(page);
+  await page.evaluate(()=>window.mcpFixture.stageAgent(window.tagrex.tracks[0].path,{title:'Agent title'}));
+  await expect(page.locator('#tracks-body')).toContainText('Agent title');
+  await page.waitForTimeout(150);
+  const result=await page.evaluate(async()=>{
+    const body=document.getElementById('tracks-body');
+    const nodes=[...body.querySelectorAll('td')].map(cell=>[cell,cell.firstChild]);
+    let mutations=0; const detail=[];
+    const observer=new MutationObserver(records=>{mutations+=records.length;detail.push(...records.map(record=>({tag:record.target.tagName,field:record.target.dataset?.field,name:record.attributeName,old:record.oldValue,value:record.target.getAttribute?.(record.attributeName)})));});
+    observer.observe(body,{subtree:true,childList:true,characterData:true,attributes:true,attributeOldValue:true});
+    window.mcpFixture.state.revision++;
+    window.mcpFixture.emit('shared_stage_changed',{revision:window.mcpFixture.state.revision});
+    await new Promise(resolve=>setTimeout(resolve,150));observer.disconnect();
+    return {mutations,detail,retained:nodes.every(([cell,text])=>cell.isConnected&&cell.firstChild===text)};
+  });
+  if (result.mutations) console.log(JSON.stringify(result));
+  expect({mutations:result.mutations,retained:result.retained}).toEqual({mutations:0,retained:true});
+});
+
+test('advertised live fields use small intents while preserving concurrent agent fields',async({page})=>{
+  await page.evaluate(()=>{window.mcpFixture.state.shared=true;window.mcpFixture.state.liveFields=true;window.mcpFixture.emit('service_changed',{});});
+  await expect.poll(()=>page.evaluate(()=>window.mcpFixture.state.calls.includes('mcp_shared_stage_delta'))).toBe(true);
+  await page.evaluate(()=>window.mcpFixture.stageAgent(window.tagrex.tracks[0].path,{artist:'Agent artist'}));
+  await expect(page.locator('#editor-field-artist')).toHaveValue('Agent artist');
+  await page.locator('#editor-field-title').fill('Intent title');
+  await expect.poll(()=>page.evaluate(()=>window.mcpFixture.state.calls.includes('mcp_publish_shared_intents'))).toBe(true);
+  await expect(page.locator('#tracks-body')).toContainText('Intent title');
+  await expect(page.locator('#editor-field-artist')).toHaveValue('Agent artist');
+  expect(await page.evaluate(()=>window.mcpFixture.state.mediaWrites)).toBe(0);
+});
+
+test('native preset composition retains earlier raw fields and the final toggle-off recomputes without new edits',async({page})=>{
+  const preset=await nativeTransforms(page);
+  await preset.click();
+  await page.locator('#editor-field-title').fill('Raw human title');
+  await expect(page.locator('#tracks-body td[data-field="title"]').first()).toContainText('Raw human title!');
+  await page.locator('#editor-field-artist').fill('Another human field');
+  await expect(page.locator('#tracks-body td[data-field="artist"]').first()).toContainText('Another human field');
+  await expect(page.locator('#tracks-body td[data-field="title"]').first()).toHaveText('Raw human title!');
+  await preset.click();
+  await expect(page.locator('#tracks-body td[data-field="title"]').first()).toHaveText('Raw human title');
+  const requests=await page.evaluate(()=>window.mcpFixture.state.intentRequests);
+  expect(requests.some(request=>request.recompute && request.groups.length===0)).toBe(true);
+  expect(requests.every(request=>request.session==='fixture')).toBe(true);
+  expect(await page.evaluate(()=>window.mcpFixture.state.mediaWrites)).toBe(0);
+});
+
+test('native preset toggle-off retires derived changes from earlier selected scopes',async({page})=>{
+  const preset=await nativeTransforms(page);
+  await preset.click();
+  await expect(page.locator('#tracks-body td[data-field="title"]').first()).toHaveText('Desert Rain!');
+  await page.locator('#tracks-body td[data-field="title"]').nth(1).click();
+  await expect(page.locator('#tracks-body td[data-field="title"]').nth(1)).toHaveText('Radio!');
+  await preset.click();
+  await expect(page.locator('#staged-tab-count')).toHaveText('');
+  await expect(page.locator('#tracks-body td[data-field="title"]').first()).toHaveText('Desert Rain');
+  await expect(page.locator('#tracks-body td[data-field="title"]').nth(1)).toHaveText('Radio');
+});
+
+test('native preset recomputation preserves artwork edits without compounding title output',async({page})=>{
+  const preset=await nativeTransforms(page);await preset.click();
+  await expect(page.locator('#tracks-body td[data-field="title"]').first()).toHaveText('Desert Rain!');
+  await page.locator('#cover-well .cover-edit').click();
+  await page.getByRole('menuitem',{name:'Remove',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>window.mcpFixture.state.stage?.changes[0]?.cover_change?.new)).toEqual([]);
+  await expect(page.locator('#tracks-body td[data-field="title"]').first()).toHaveText('Desert Rain!');
+  await preset.click();
+  await expect(page.locator('#tracks-body td[data-field="title"]').first()).toHaveText('Desert Rain');
+  expect(await page.evaluate(()=>window.mcpFixture.state.stage?.changes[0]?.cover_change?.new)).toEqual([]);
+  expect(await page.evaluate(()=>window.mcpFixture.state.mediaWrites)).toBe(0);
+});
+
+test('switching a native tag preset to filename rules still retires earlier derived scopes on toggle-off',async({page})=>{
+  const preset=await nativeTransforms(page);
+  await preset.click();
+  await expect(page.locator('#tracks-body td[data-field="title"]').first()).toHaveText('Desert Rain!');
+  await page.locator('#tracks-body td[data-field="title"]').nth(1).click();
+  await expect(page.locator('#tracks-body td[data-field="title"]').nth(1)).toHaveText('Radio!');
+  await page.evaluate(async()=>{
+    const settings=await window.__TAURI__.core.invoke('load_settings',{});
+    document.dispatchEvent(new CustomEvent('tagrex:settings-saved',{detail:{...settings,action_groups:[{name:'Append once',scope:'title',rules:[{kind:'replace',scope:'title',from:'$',to:'!',regex:true,style:''},{kind:'replace',scope:'filename',from:'$',to:'-copy',regex:true,style:''}]}]}}));
+  });
+  await expect.poll(()=>page.evaluate(()=>window.tagrex.previewPlan?.changes.some(row=>row.rename_to))).toBe(true);
+  await preset.click();
+  await expect(page.locator('#staged-tab-count')).toHaveText('');
+  await expect(page.locator('#tracks-body td[data-field="title"]').first()).toHaveText('Desert Rain');
+  await expect(page.locator('#tracks-body td[data-field="title"]').nth(1)).toHaveText('Radio');
+  expect(await page.evaluate(()=>window.mcpFixture.state.mediaWrites)).toBe(0);
+});
+
+test('native scalar staging also retains a later artwork removal and the human title', async ({page}) => {
+  await page.evaluate(() => { window.mcpFixture.state.shared=true; window.mcpFixture.state.liveFields=true; window.mcpFixture.emit('service_changed',{}); });
+  await expect.poll(() => page.evaluate(() => window.mcpFixture.state.calls.includes('mcp_shared_stage_delta'))).toBe(true);
+  await staged(page, 'Keep this human title');
+  await page.locator('#cover-well .cover-edit').click();
+  await page.getByRole('menuitem', {name:'Remove',exact:true}).click();
+  await expect.poll(() => page.evaluate(() => window.mcpFixture.state.stage?.changes[0]?.cover_change?.new)).toEqual([]);
+  await expect(page.locator('#editor-field-title')).toHaveValue('Keep this human title');
+  expect(await page.evaluate(() => window.mcpFixture.state.stage.changes[0].tag_changes.find(tag => tag.field==='title')?.new)).toBe('Keep this human title');
+  expect(await page.evaluate(() => window.mcpFixture.state.mediaWrites)).toBe(0);
+});
+
+test('native scalar staging also accepts online imports without losing an existing human field', async ({page}) => {
+  await page.evaluate(() => { window.mcpFixture.state.shared=true; window.mcpFixture.state.liveFields=true; window.mcpFixture.emit('service_changed',{}); });
+  await expect.poll(() => page.evaluate(() => window.mcpFixture.state.calls.includes('mcp_shared_stage_delta'))).toBe(true);
+  await page.locator('#editor-field-comment').fill('Keep this human comment');
+  await expect.poll(() => page.evaluate(() => window.mcpFixture.state.stage?.changes[0]?.tag_changes.find(tag => tag.field==='comment')?.new)).toBe('Keep this human comment');
+  await page.locator('.subtab[data-subtab="online"]').click();
+  await page.evaluate(() => { document.getElementById('discogs-token').value='fixture'; });
+  await page.locator('#discogs-query').fill('La Bush');
+  await page.locator('#discogs-search').click();
+  const card=page.locator('.release-card').first();
+  await expect(card).toBeVisible();
+  if(await card.getAttribute('aria-expanded')!=='true')await card.locator('.release-head').click();
+  await expect(card).toHaveClass(/tracklist-loaded/);
+  await card.locator('.release-import').click();
+  await expect.poll(() => page.evaluate(() => window.mcpFixture.state.stage?.changes.some(change => change.tag_changes.some(tag => tag.field==='album')))).toBe(true);
+  expect(await page.evaluate(() => window.mcpFixture.state.stage.changes[0].tag_changes.find(tag => tag.field==='comment')?.new)).toBe('Keep this human comment');
+  expect(await page.evaluate(() => window.mcpFixture.state.mediaWrites)).toBe(0);
+});
+
+test('agent compilation changes mirror into the existing Inspector checkbox', async ({page}) => {
+  await shared(page);
+  await page.evaluate(() => window.mcpFixture.stageAgent(window.tagrex.tracks[0].path, {[window.tagrex.tracks[0].compilation_field]:'1'}));
+  await expect(page.locator('#editor-compilation-control')).toBeChecked();
+  await page.evaluate(() => window.mcpFixture.stageAgent(window.tagrex.tracks[0].path, {[window.tagrex.tracks[0].compilation_field]:'0'}));
+  await expect(page.locator('#editor-compilation-control')).not.toBeChecked();
+  expect(await page.evaluate(() => window.mcpFixture.state.mediaWrites)).toBe(0);
+});
+
+test('first scalar staging leaves unrelated Files rows entirely untouched',async({page})=>{
+  await shared(page);
+  await page.evaluate(()=>{
+    window.unrelatedRowMutations=[];
+    const rows=[...document.querySelectorAll('#tracks-body tr[data-path]')];
+    window.unrelatedRows=rows.slice(1);
+    window.unrelatedObserver=new MutationObserver(records=>{
+      for(const record of records){
+        const target=record.target.nodeType===1?record.target:record.target.parentElement;
+        if(window.unrelatedRows.includes(target?.closest('tr[data-path]')))window.unrelatedRowMutations.push({type:record.type,attribute:record.attributeName});
+      }
+    });
+    window.unrelatedObserver.observe(document.getElementById('tracks-body'),{subtree:true,childList:true,attributes:true,characterData:true});
+  });
+  await staged(page,'Only this title changes');
+  await page.waitForTimeout(150);
+  const mutations=await page.evaluate(()=>{window.unrelatedObserver.disconnect();return window.unrelatedRowMutations;});
+  expect(mutations).toEqual([]);
 });

@@ -1676,3 +1676,1543 @@ fn transform_without_old_handle_uses_current_working_agent_values() {
         Some("Artist feat. Guest")
     );
 }
+// Live-field contract: bounded stage deltas, narrow human intents and lazy
+// artwork references. These tests never write user media; they use the
+// disposable WAV fixture and the native preview/apply engines.
+
+fn stage_revision(f: &Fixture) -> u64 {
+    f.service.shared_stage().unwrap().revision
+}
+fn stage_session(f: &Fixture) -> String {
+    f.service.live_field_capabilities().unwrap()["session"]
+        .as_str()
+        .unwrap()
+        .into()
+}
+fn human_intents(
+    f: &Fixture,
+    entries: &[(usize, &str, Option<&str>)],
+    expected: u64,
+) -> StageIntentOutcome {
+    f.service
+        .publish_human_intents(
+            entries
+                .iter()
+                .map(|(i, field, value)| StageIntent {
+                    path: f.paths[*i].to_string_lossy().into_owned(),
+                    field: (*field).into(),
+                    value: value.map(str::to_string),
+                })
+                .collect(),
+            expected,
+            &[],
+            &[],
+        )
+        .unwrap()
+}
+fn delta_payload(delta: &StageDelta) -> String {
+    serde_json::to_string(delta).unwrap()
+}
+
+#[test]
+fn stage_delta_reports_only_changed_fields_and_removals() {
+    let f = Fixture::new();
+    let initial = f.service.shared_stage_delta(None, None).unwrap();
+    assert!(initial.resync);
+    assert_eq!(initial.resync_reason.as_deref(), Some("initial"));
+    assert!(initial.snapshot.is_some());
+    assert_eq!(initial.files, 0);
+    let session = initial.session.clone();
+    assert!(session.starts_with("stage_"));
+
+    let first = human_intents(&f, &[(0, "title", Some("One"))], initial.revision);
+    assert!(first.accepted);
+    assert_eq!(first.delta.changes.len(), 1);
+    assert_eq!(first.delta.changed_files, 1);
+    assert_eq!(first.delta.files, 1);
+    assert_eq!(first.delta.staged_fields, 1);
+    assert_eq!(first.delta.changes[0].field, "title");
+    assert!(first.delta.changes[0].human, "a typed field is human-owned");
+    let tag = first.delta.changes[0].tag.as_ref().unwrap();
+    assert_eq!(tag.new.as_deref(), Some("One"));
+    assert!(!delta_payload(&first.delta).contains("data_base64"));
+
+    // A second field on the same file reports only that field.
+    let second = human_intents(&f, &[(0, "album", Some("Album"))], first.revision);
+    assert_eq!(second.delta.changes.len(), 1);
+    assert_eq!(second.delta.changes[0].field, "album");
+    assert!(second.delta.removed.is_empty());
+
+    // A different file's field does not resend the first file.
+    let third = human_intents(&f, &[(1, "title", Some("Other"))], second.revision);
+    assert_eq!(third.delta.changes.len(), 1);
+    assert_eq!(third.delta.changes[0].path, f.paths[1].to_string_lossy());
+    assert_eq!(third.delta.files, 2);
+
+    // Clearing one of two fields is a removal, not a file removal.
+    let fourth = human_intents(&f, &[(0, "album", None)], third.revision);
+    assert_eq!(fourth.delta.changes.len(), 0);
+    assert_eq!(fourth.delta.removed.len(), 1);
+    assert_eq!(fourth.delta.removed[0].field, "album");
+    assert!(fourth.delta.removed_paths.is_empty());
+
+    // Clearing the last staged field removes the file from the stage.
+    let fifth = human_intents(&f, &[(0, "title", None)], fourth.revision);
+    assert_eq!(fifth.delta.removed.len(), 1);
+    assert_eq!(
+        fifth.delta.removed_paths,
+        vec![f.paths[0].to_string_lossy().into_owned()]
+    );
+    assert_eq!(fifth.delta.files, 1);
+
+    // Nothing changed since the caller's revision: an empty, quiet delta.
+    let quiet = f
+        .service
+        .shared_stage_delta(Some(fifth.revision), Some(&session))
+        .unwrap();
+    assert!(!quiet.resync);
+    assert!(quiet.changes.is_empty() && quiet.removed.is_empty());
+    assert_eq!(quiet.revision, fifth.revision);
+}
+
+#[test]
+fn human_intents_match_full_plan_publication_and_keep_the_saved_baseline() {
+    let f = Fixture::new();
+    let original = fs::read(&f.paths[0]).unwrap();
+    let outcome = human_intents(&f, &[(0, "title", Some("First"))], 0);
+    let staged = f.service.shared_stage().unwrap().plan.unwrap();
+    assert_eq!(staged.changes.len(), 1);
+    assert_eq!(staged.changes[0].tag_changes[0].old, None);
+    assert_eq!(
+        staged.changes[0].tag_changes[0].new.as_deref(),
+        Some("First")
+    );
+    // Repeated edits move only the proposal.
+    let next = human_intents(&f, &[(0, "title", Some("Second"))], outcome.revision);
+    let staged = f.service.shared_stage().unwrap().plan.unwrap();
+    assert_eq!(staged.changes[0].tag_changes[0].old, None);
+    assert_eq!(
+        staged.changes[0].tag_changes[0].new.as_deref(),
+        Some("Second")
+    );
+    assert_eq!(next.delta.changes[0].tag.as_ref().unwrap().old, None);
+    assert_eq!(
+        next.delta.changes[0].tag.as_ref().unwrap().new.as_deref(),
+        Some("Second")
+    );
+
+    // The same value published through the existing full-plan route produces
+    // the same stage: the intent path is a cheaper route, not a rival one.
+    let full = {
+        let guard = f.service.0.app.lock().unwrap();
+        guard
+            .as_ref()
+            .unwrap()
+            .preview_tag_edits(&[tagrex_commands::TagEditDto {
+                path: f.paths[1].to_string_lossy().into_owned(),
+                field: "title".into(),
+                value: Some("Full".into()),
+            }])
+            .unwrap()
+    };
+    let before = stage_revision(&f);
+    let published = f
+        .service
+        .publish_manual_plan_with_intents(Some(full), before, Vec::new())
+        .unwrap();
+    assert!(published.accepted);
+    let query = |i: usize, field: &str| {
+        f.service
+            .shared_stage()
+            .unwrap()
+            .plan
+            .unwrap()
+            .changes
+            .iter()
+            .find(|change| change.path == f.paths[i].to_string_lossy())
+            .and_then(|change| change.tag_changes.iter().find(|value| value.field == field))
+            .and_then(|value| value.new.clone())
+    };
+    assert_eq!(query(0, "title").as_deref(), Some("Second"));
+    assert_eq!(query(1, "title").as_deref(), Some("Full"));
+
+    // Reverting to the saved (empty) value removes the field again.
+    // Staging never writes media; only Apply may.
+    assert_eq!(fs::read(&f.paths[0]).unwrap(), original);
+
+    let revert = human_intents(&f, &[(1, "title", None)], published.revision);
+    assert_eq!(revert.delta.removed.len(), 1);
+    assert_eq!(revert.delta.removed_paths.len(), 1);
+    assert_eq!(query(1, "title"), None);
+    assert_eq!(query(0, "title").as_deref(), Some("Second"));
+}
+
+#[test]
+fn grouped_intents_preserve_earlier_raw_fields_when_another_field_is_edited() {
+    let f = Fixture::new();
+    let saved = f.draft("Saved title");
+    let operation = f.commit(&saved, "grouped-intent-baseline");
+    assert_eq!(f.wait(&operation)["status"], "succeeded");
+    let groups: Vec<tagrex_commands::ActionGroupDto> = serde_json::from_value(json!([{
+        "name":"Append once", "scope":"title", "note":"",
+        "rules":[{"kind":"replace","scope":"title","from":"$","to":"!","regex":true,"style":""}]
+    }]))
+    .unwrap();
+    let path = f.paths[0].to_string_lossy().into_owned();
+    let first = f
+        .service
+        .publish_human_intents(
+            vec![StageIntent {
+                path: path.clone(),
+                field: "title".into(),
+                value: Some("Human title".into()),
+            }],
+            stage_revision(&f),
+            &groups,
+            std::slice::from_ref(&path),
+        )
+        .unwrap();
+    assert!(first.accepted);
+    assert_eq!(
+        staged_value(&f, 0, "title").as_deref(),
+        Some("Human title!")
+    );
+    let second = f
+        .service
+        .publish_human_intents(
+            vec![StageIntent {
+                path: path.clone(),
+                field: "artist".into(),
+                value: Some("Human artist".into()),
+            }],
+            first.revision,
+            &groups,
+            std::slice::from_ref(&path),
+        )
+        .unwrap();
+    assert!(second.accepted);
+    assert_eq!(
+        staged_value(&f, 0, "title").as_deref(),
+        Some("Human title!")
+    );
+    assert_eq!(
+        staged_value(&f, 0, "artist").as_deref(),
+        Some("Human artist")
+    );
+    assert_eq!(f.saved(), "Saved title");
+    let snapshot = f.service.shared_stage().unwrap();
+    assert_eq!(snapshot.derived_fields.len(), 1);
+    assert_eq!(snapshot.derived_fields[0].field, "title");
+    assert!(first
+        .delta
+        .changes
+        .iter()
+        .any(|entry| entry.field == "title" && entry.derived));
+    assert!(second
+        .delta
+        .changes
+        .iter()
+        .any(|entry| entry.field == "artist" && !entry.derived));
+}
+
+#[test]
+fn same_value_human_touch_protects_the_field_even_when_visually_unchanged() {
+    let f = Fixture::new();
+    f.call(
+        "draft.create",
+        json!({"paths":[f.paths[0]],"values":{"title":"Agent"}}),
+    )
+    .unwrap();
+    assert_eq!(staged_value(&f, 0, "title").as_deref(), Some("Agent"));
+    let revision = stage_revision(&f);
+    // The person types the saved value (empty) back over the agent proposal:
+    // no visible stage value remains, but the field is still theirs.
+    let touch = human_intents(&f, &[(0, "title", Some(""))], revision);
+    assert!(touch.accepted);
+    assert_eq!(touch.delta.changes.len(), 0);
+    assert_eq!(touch.delta.removed.len(), 1);
+    assert_eq!(staged_value(&f, 0, "title"), None);
+    // A later agent publication of a different value is excluded, not applied.
+    let next = f
+        .call(
+            "draft.create",
+            json!({"paths":[f.paths[0]],"values":{"title":"Agent later"}}),
+        )
+        .unwrap();
+    assert!(!next["protected_fields"].as_array().unwrap().is_empty());
+    assert_eq!(staged_value(&f, 0, "title"), None);
+    // An unrelated field stays editable through the same agent route.
+    f.call(
+        "draft.create",
+        json!({"paths":[f.paths[0]],"values":{"artist":"Agent artist"}}),
+    )
+    .unwrap();
+    assert_eq!(
+        staged_value(&f, 0, "artist").as_deref(),
+        Some("Agent artist")
+    );
+}
+
+#[test]
+fn stage_delta_resyncs_on_session_gaps_and_history_overflow() {
+    let f = Fixture::new();
+    let initial = f.service.shared_stage_delta(None, None).unwrap();
+    let session = initial.session.clone();
+    let other = f
+        .service
+        .shared_stage_delta(Some(initial.revision), Some("stage_other"))
+        .unwrap();
+    assert!(other.resync);
+    assert_eq!(other.resync_reason.as_deref(), Some("session"));
+    // A revision ahead of the stage is a different session, never a delta.
+    let ahead = f
+        .service
+        .shared_stage_delta(Some(initial.revision + 5), Some(&session))
+        .unwrap();
+    assert!(ahead.resync);
+    assert_eq!(ahead.resync_reason.as_deref(), Some("session"));
+    // Aged-out history resyncs rather than guessing.
+    let mut revision = initial.revision;
+    for i in 0..(staging::MAX_HISTORY_REVISIONS + 8) {
+        revision = human_intents(&f, &[(0, "title", Some(&format!("v{i}")))], revision).revision;
+    }
+    let aged = f
+        .service
+        .shared_stage_delta(Some(initial.revision), Some(&session))
+        .unwrap();
+    assert!(aged.resync);
+    assert_eq!(aged.resync_reason.as_deref(), Some("overflow"));
+    assert!(aged.files >= 1);
+    // The most recent revisions still project incrementally.
+    let recent = f
+        .service
+        .shared_stage_delta(Some(revision - 2), Some(&session))
+        .unwrap();
+    assert!(!recent.resync);
+    assert!(recent.changes.iter().all(|change| change.field == "title"));
+}
+
+#[test]
+fn stage_delta_structural_boundary_forces_resync_after_identity_move() {
+    let f = Fixture::new();
+    human_intents(&f, &[(0, "title", Some("A"))], 0);
+    let revision = stage_revision(&f);
+    {
+        let mut state = f.service.0.state.lock().unwrap();
+        staging::record_structural_for_test(&mut state);
+    }
+    let delta = f
+        .service
+        .shared_stage_delta(Some(revision), Some(&stage_session(&f)))
+        .unwrap();
+    assert!(delta.resync);
+    assert_eq!(delta.resync_reason.as_deref(), Some("structural"));
+    assert!(delta.snapshot.is_some());
+}
+
+#[test]
+fn stale_and_concurrent_human_intents_never_restore_newer_values() {
+    let f = Fixture::new();
+    let base = stage_revision(&f);
+    // An agent publication between the desktop's read and its intent merges.
+    let concurrent = f.call(
+        "draft.create",
+        json!({"paths":[f.paths[1]],"values":{"artist":"Agent"}}),
+    );
+    assert!(concurrent.is_ok());
+    let agent_delta = f
+        .service
+        .shared_stage_delta(Some(base), Some(&stage_session(&f)))
+        .unwrap();
+    assert!(agent_delta
+        .changes
+        .iter()
+        .any(|change| change.field == "artist" && !change.human));
+    let merged = human_intents(&f, &[(0, "title", Some("Human"))], base);
+    assert!(merged.accepted);
+    assert_eq!(staged_value(&f, 0, "title").as_deref(), Some("Human"));
+    assert_eq!(staged_value(&f, 1, "artist").as_deref(), Some("Agent"));
+
+    // An older human generation cannot rewind a newer one; it is told what it
+    // missed instead of being applied.
+    let stale = human_intents(&f, &[(0, "title", Some("Older"))], merged.revision - 1);
+    assert!(!stale.accepted);
+    assert_eq!(staged_value(&f, 0, "title").as_deref(), Some("Human"));
+    assert!(stale
+        .delta
+        .changes
+        .iter()
+        .any(|change| change.field == "title"));
+
+    // Discard is a barrier: a delayed intent from before it cannot resurrect
+    // the discarded value.
+    let discarded = f.service.clear_shared_stage(stage_revision(&f)).unwrap();
+    assert!(discarded.accepted);
+    assert_eq!(discarded.plan, None);
+    let delayed = human_intents(&f, &[(0, "title", Some("After discard"))], merged.revision);
+    assert!(!delayed.accepted);
+    assert_eq!(staged_value(&f, 0, "title"), None);
+    // A genuinely new intent after the barrier is a new edit.
+    let fresh = human_intents(&f, &[(0, "title", Some("Fresh"))], stage_revision(&f));
+    assert!(fresh.accepted);
+    assert_eq!(staged_value(&f, 0, "title").as_deref(), Some("Fresh"));
+}
+
+#[test]
+fn scoped_apply_writes_the_current_human_value_and_delta_reports_removal() {
+    let f = Fixture::new();
+    human_intents(&f, &[(0, "title", Some("Human"))], 0);
+    f.call(
+        "draft.create",
+        json!({"paths":[f.paths[1]],"values":{"artist":"Agent"}}),
+    )
+    .unwrap();
+    let revision = stage_revision(&f);
+    let selected = [f.paths[0].to_string_lossy().into_owned()].into();
+    let plan = f.service.shared_apply_plan(&selected).unwrap();
+    assert_eq!(plan.changes.len(), 1);
+    assert_eq!(plan.changes[0].tag_changes[0].new.as_deref(), Some("Human"));
+    {
+        let mut guard = f.service.0.app.lock().unwrap();
+        guard.as_mut().unwrap().apply(&plan).unwrap();
+    }
+    let before = stage_revision(&f);
+    let completed = f.service.complete_shared_apply(&plan, revision).unwrap();
+    assert_eq!(f.saved(), "Human");
+    assert_eq!(completed.plan.unwrap().changes.len(), 1);
+    let delta = f
+        .service
+        .shared_stage_delta(Some(before), Some(&stage_session(&f)))
+        .unwrap();
+    assert!(!delta.resync);
+    assert!(delta
+        .removed
+        .iter()
+        .any(|field| field.path == f.paths[0].to_string_lossy() && field.field == "title"));
+    assert_eq!(staged_value(&f, 1, "artist").as_deref(), Some("Agent"));
+}
+
+#[test]
+fn artwork_deltas_reference_assets_instead_of_resending_bytes() {
+    use base64::Engine;
+    let f = Fixture::new();
+    let revision = stage_revision(&f);
+    human_intents(&f, &[(0, "title", Some("Human"))], revision);
+    let image = image::DynamicImage::new_rgb8(16, 16);
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    let bytes = bytes.into_inner();
+    let asset = f
+        .call(
+            "artwork.upload",
+            json!({"data_base64":base64::engine::general_purpose::STANDARD.encode(&bytes)}),
+        )
+        .unwrap();
+    let before = stage_revision(&f);
+    f.call(
+        "draft.artwork",
+        json!({"paths":[f.paths[1]],"asset":asset["asset"],"mode":"replace_all"}),
+    )
+    .unwrap();
+    let delta = f
+        .service
+        .shared_stage_delta(Some(before), Some(&stage_session(&f)))
+        .unwrap();
+    assert!(!delta.resync);
+    let artwork = delta
+        .changes
+        .iter()
+        .find(|change| change.field == "artwork")
+        .expect("artwork change is reported");
+    let covers = &artwork.artwork.as_ref().unwrap().covers;
+    assert_eq!(covers.len(), 1);
+    assert!(covers[0].asset.starts_with("art_"));
+    let encoded = delta_payload(&delta);
+    assert!(!encoded.contains("data_base64"));
+    assert!(!encoded.contains(&base64::engine::general_purpose::STANDARD.encode(&bytes)));
+
+    // The bytes are fetched on demand, exactly as staged.
+    let fetched = f.service.shared_stage_asset(&covers[0].asset).unwrap();
+    assert_eq!(
+        fetched["data_base64"].as_str().unwrap(),
+        base64::engine::general_purpose::STANDARD.encode(&bytes)
+    );
+    assert_eq!(fetched["mime"].as_str().unwrap(), "image/png");
+    assert!(fetched["bytes"].as_u64().unwrap() >= bytes.len() as u64);
+
+    // A later tag edit must not carry artwork at all, and the reference stays
+    // valid across that revision.
+    let tag = human_intents(&f, &[(0, "title", Some("Human 2"))], stage_revision(&f));
+    assert!(tag
+        .delta
+        .changes
+        .iter()
+        .all(|change| change.field == "title"));
+    assert!(!delta_payload(&tag.delta).contains("art_"));
+    f.service.shared_stage_asset(&covers[0].asset).unwrap();
+    assert_eq!(
+        f.service
+            .shared_stage_asset("art_missing")
+            .unwrap_err()
+            .code,
+        "asset_expired"
+    );
+}
+
+#[test]
+fn large_stage_intents_and_deltas_stay_bounded() {
+    let f = Fixture::new();
+    let base = {
+        let guard = f.service.0.app.lock().unwrap();
+        guard
+            .as_ref()
+            .unwrap()
+            .preview_tag_edits(&[tagrex_commands::TagEditDto {
+                path: f.paths[0].to_string_lossy().into_owned(),
+                field: "title".into(),
+                value: Some("Title".into()),
+            }])
+            .unwrap()
+    };
+    let mut large = base.clone();
+    let template = &base.changes[0];
+    large.changes = (0..100_000)
+        .map(|i| {
+            let mut change = template.clone();
+            change.path = f
+                .media
+                .join(format!("Projected-{i}.wav"))
+                .to_string_lossy()
+                .into_owned();
+            change
+        })
+        .collect();
+    let published = f.service.publish_manual_plan(Some(large), 0).unwrap();
+    assert!(published.accepted);
+    assert_eq!(published.plan.unwrap().changes.len(), 100_000);
+    let session = stage_session(&f);
+    let before = stage_revision(&f);
+    let started = Instant::now();
+    let first = human_intents(&f, &[(0, "title", Some("Human"))], before);
+    let first_ms = started.elapsed().as_secs_f64() * 1000.0;
+    assert!(first.accepted);
+    assert_eq!(first.delta.changed_fields, 1);
+    assert_eq!(first.delta.files, 100_001);
+    assert!(delta_payload(&first.delta).len() < 2_000);
+    let started = Instant::now();
+    let second = human_intents(&f, &[(0, "title", Some("Human 2"))], first.revision);
+    let second_ms = started.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(second.delta.changed_fields, 1);
+    assert_eq!(second.delta.files, 100_001);
+    assert!(delta_payload(&second.delta).len() < 2_000);
+    let started = Instant::now();
+    let delta = f
+        .service
+        .shared_stage_delta(Some(second.revision - 1), Some(&session))
+        .unwrap();
+    let delta_ms = started.elapsed().as_secs_f64() * 1000.0;
+    assert!(!delta.resync);
+    assert_eq!(delta.changed_fields, 1);
+    let delta_bytes = serde_json::to_vec(&delta).unwrap().len();
+    assert!(delta_bytes < 2_000);
+    // The whole 100k stage is still there: the patch touched one file only.
+    assert_eq!(
+        f.service
+            .shared_stage()
+            .unwrap()
+            .plan
+            .unwrap()
+            .changes
+            .len(),
+        100_001
+    );
+    println!(
+        "LIVE_FIELDS_SCALE {}",
+        json!({"stage_files":100_001,"intent_create_ms":first_ms,"intent_update_ms":second_ms,
+            "delta_ms":delta_ms,"delta_bytes":delta_bytes})
+    );
+    // One grouped recompute over a real scope after the narrow route has built
+    // the lazy indexes. This is the native floor for a preset refresh; the
+    // frontend's paint cost is not measured here.
+    let groups: Vec<tagrex_commands::ActionGroupDto> = serde_json::from_value(json!([{
+        "name":"Append once", "scope":"title", "note":"",
+        "rules":[{"kind":"replace","scope":"title","from":"$","to":"!","regex":true,"style":""}]
+    }]))
+    .unwrap();
+    let path = f.paths[0].to_string_lossy().into_owned();
+    let started = Instant::now();
+    let recomputed = f
+        .service
+        .publish_human_intents_request(StageIntentRequest {
+            intents: Vec::new(),
+            expected_revision: second.revision,
+            groups,
+            scope: vec![path.clone()],
+            recompute: true,
+            session: None,
+        })
+        .unwrap();
+    let recompute_ms = started.elapsed().as_secs_f64() * 1000.0;
+    assert!(recomputed.accepted);
+    assert_eq!(staged_value(&f, 0, "title").as_deref(), Some("Human 2!"));
+    assert_eq!(
+        f.service
+            .shared_stage()
+            .unwrap()
+            .plan
+            .unwrap()
+            .changes
+            .len(),
+        100_001
+    );
+    println!(
+        "LIVE_FIELDS_GROUPED_SCALE {}",
+        json!({"stage_files":100_001,"recompute_ms":recompute_ms,
+            "delta_bytes":serde_json::to_vec(&recomputed.delta).unwrap().len(),
+            "changed_fields":recomputed.delta.changed_fields})
+    );
+}
+
+#[test]
+fn live_field_capabilities_and_events_are_advertised_and_bounded() {
+    let f = Fixture::new();
+    let capabilities = f.service.live_field_capabilities().unwrap();
+    assert_eq!(capabilities["version"], 1);
+    assert_eq!(capabilities["delta"], true);
+    assert_eq!(capabilities["intents"], true);
+    assert_eq!(capabilities["recompute"], true);
+    assert_eq!(capabilities["session_check"], true);
+    assert_eq!(capabilities["asset_refs"], true);
+    assert_eq!(capabilities["history_revisions"], 128);
+    assert!(capabilities["session"]
+        .as_str()
+        .unwrap()
+        .starts_with("stage_"));
+    // The status surface keeps the old keys the current UI reads and adds the
+    // capability block the new UI gates on.
+    let status = f.service.shared_stage_status().unwrap();
+    assert_eq!(status["shared_staging"], true);
+    assert_eq!(status["live_fields"]["version"], 1);
+    assert_eq!(status["revision"], 0);
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let captured = events.clone();
+    f.service
+        .set_event_sink(Arc::new(move |name, payload| {
+            if name == "shared_stage_changed" {
+                captured.lock().unwrap().push(payload);
+            }
+        }))
+        .unwrap();
+    human_intents(&f, &[(0, "title", Some("Event"))], 0);
+    let events = events.lock().unwrap();
+    let event = events.last().unwrap();
+    assert_eq!(event["session"], capabilities["session"]);
+    assert_eq!(event["revision"], 1);
+    assert_eq!(event["staged_fields"], 1);
+    assert_eq!(event["changed"][0]["field"], "title");
+    assert_eq!(event["resync"], false);
+    assert!(serde_json::to_vec(event).unwrap().len() < 2_000);
+    // The full snapshot shape the old UI reads is unchanged.
+    let snapshot = f.service.shared_stage().unwrap();
+    assert_eq!(snapshot.revision, 1);
+    assert!(snapshot.accepted);
+}
+
+#[test]
+fn an_apply_that_moves_file_identities_forces_a_delta_resync() {
+    let f = Fixture::new();
+    // Another file keeps a staged field across the move.
+    human_intents(&f, &[(1, "title", Some("Keep"))], 0);
+    let revision = stage_revision(&f);
+    let draft = f
+        .call(
+            "draft.rename",
+            json!({"paths":[f.paths[0]],"mask":"Renamed"}),
+        )
+        .unwrap();
+    let operation = f.commit(&draft, "rename-structural-delta");
+    assert_eq!(f.wait(&operation)["status"], "succeeded");
+    assert!(f.media.join("Renamed.wav").exists());
+    let delta = f
+        .service
+        .shared_stage_delta(Some(revision), Some(&stage_session(&f)))
+        .unwrap();
+    assert!(delta.resync);
+    assert_eq!(delta.resync_reason.as_deref(), Some("structural"));
+    assert_eq!(staged_value(&f, 1, "title").as_deref(), Some("Keep"));
+}
+
+// --- Live-field follow-up: raw-input/derived-result recompute, session safety
+// --- and complete delta metadata. Same disposable WAV fixture, no media writes
+// --- except the explicit Apply/artwork baseline cases below.
+
+fn append_once_group() -> Vec<tagrex_commands::ActionGroupDto> {
+    serde_json::from_value(json!([{
+        "name":"Append once", "scope":"title", "note":"",
+        "rules":[{"kind":"replace","scope":"title","from":"$","to":"!","regex":true,"style":""}]
+    }]))
+    .unwrap()
+}
+fn append_all_tags_group() -> Vec<tagrex_commands::ActionGroupDto> {
+    serde_json::from_value(json!([{
+        "name":"Append once", "scope":"tags", "note":"",
+        "rules":[{"kind":"replace","scope":"tags","from":"$","to":"!","regex":true,"style":""}]
+    }]))
+    .unwrap()
+}
+fn scope_paths(f: &Fixture, scope: &[usize]) -> Vec<String> {
+    scope
+        .iter()
+        .map(|i| f.paths[*i].to_string_lossy().into_owned())
+        .collect()
+}
+fn grouped_intents(
+    f: &Fixture,
+    entries: &[(usize, &str, Option<&str>)],
+    expected: u64,
+    groups: &[tagrex_commands::ActionGroupDto],
+    scope: &[usize],
+) -> StageIntentOutcome {
+    f.service
+        .publish_human_intents(
+            entries
+                .iter()
+                .map(|(i, field, value)| StageIntent {
+                    path: f.paths[*i].to_string_lossy().into_owned(),
+                    field: (*field).into(),
+                    value: value.map(str::to_string),
+                })
+                .collect(),
+            expected,
+            groups,
+            &scope_paths(f, scope),
+        )
+        .unwrap()
+}
+fn recompute(
+    f: &Fixture,
+    expected: u64,
+    groups: &[tagrex_commands::ActionGroupDto],
+    scope: &[usize],
+) -> StageIntentOutcome {
+    f.service
+        .publish_human_intents_request(StageIntentRequest {
+            intents: Vec::new(),
+            expected_revision: expected,
+            groups: groups.to_vec(),
+            scope: scope_paths(f, scope),
+            recompute: true,
+            session: None,
+        })
+        .unwrap()
+}
+fn raw_input_count(f: &Fixture) -> usize {
+    f.service.0.state.lock().unwrap().stage.raw_inputs.len()
+}
+fn derived_input_count(f: &Fixture) -> usize {
+    f.service.0.state.lock().unwrap().stage.derived_inputs.len()
+}
+
+#[test]
+fn grouped_intents_do_not_compound_non_idempotent_transforms() {
+    let f = Fixture::new();
+    let saved = f.draft("Saved title");
+    let operation = f.commit(&saved, "no-compound-baseline");
+    assert_eq!(f.wait(&operation)["status"], "succeeded");
+    let groups = append_once_group();
+    let path = f.paths[0].to_string_lossy().into_owned();
+    let first = f
+        .service
+        .publish_human_intents(
+            vec![StageIntent {
+                path: path.clone(),
+                field: "title".into(),
+                value: Some("Human title".into()),
+            }],
+            stage_revision(&f),
+            &groups,
+            std::slice::from_ref(&path),
+        )
+        .unwrap();
+    assert_eq!(
+        staged_value(&f, 0, "title").as_deref(),
+        Some("Human title!")
+    );
+    let second = f
+        .service
+        .publish_human_intents(
+            vec![StageIntent {
+                path: path.clone(),
+                field: "artist".into(),
+                value: Some("Human artist".into()),
+            }],
+            first.revision,
+            &groups,
+            std::slice::from_ref(&path),
+        )
+        .unwrap();
+    assert_eq!(
+        staged_value(&f, 0, "title").as_deref(),
+        Some("Human title!")
+    );
+    assert_eq!(
+        staged_value(&f, 0, "artist").as_deref(),
+        Some("Human artist")
+    );
+    // A third edit re-seeds from the raw title, never from "Human title!".
+    let third = f
+        .service
+        .publish_human_intents(
+            vec![StageIntent {
+                path: path.clone(),
+                field: "title".into(),
+                value: Some("Second title".into()),
+            }],
+            second.revision,
+            &groups,
+            std::slice::from_ref(&path),
+        )
+        .unwrap();
+    assert_eq!(
+        staged_value(&f, 0, "title").as_deref(),
+        Some("Second title!")
+    );
+    f.service
+        .publish_human_intents(
+            vec![StageIntent {
+                path,
+                field: "artist".into(),
+                value: Some("Second artist".into()),
+            }],
+            third.revision,
+            &groups,
+            std::slice::from_ref(&f.paths[0].to_string_lossy().into_owned()),
+        )
+        .unwrap();
+    assert_eq!(
+        staged_value(&f, 0, "title").as_deref(),
+        Some("Second title!")
+    );
+    assert_eq!(
+        staged_value(&f, 0, "artist").as_deref(),
+        Some("Second artist")
+    );
+    assert_eq!(f.saved(), "Saved title");
+}
+
+#[test]
+fn zero_intent_recompute_restores_raw_and_removes_derived_output() {
+    let f = Fixture::new();
+    let saved = f.draft("Saved title");
+    let operation = f.commit(&saved, "recompute-baseline");
+    assert_eq!(f.wait(&operation)["status"], "succeeded");
+    let groups = append_once_group();
+    let first = grouped_intents(
+        &f,
+        &[(0, "title", Some("Human title"))],
+        stage_revision(&f),
+        &groups,
+        &[0],
+    );
+    assert_eq!(
+        staged_value(&f, 0, "title").as_deref(),
+        Some("Human title!")
+    );
+    assert!(raw_input_count(&f) >= 1);
+    // Preset off with zero new intents: the raw value comes back.
+    let off = recompute(&f, first.revision, &[], &[0]);
+    assert!(off.accepted);
+    assert_eq!(staged_value(&f, 0, "title").as_deref(), Some("Human title"));
+    assert_eq!(staged_value(&f, 0, "artist"), None);
+    assert!(derived_input_count(&f) == 0);
+    // Preset on again with zero new intents: exactly one transform pass.
+    let on = recompute(&f, off.revision, &groups, &[0]);
+    assert_eq!(
+        staged_value(&f, 0, "title").as_deref(),
+        Some("Human title!")
+    );
+    assert_eq!(raw_input_count(&f), 1);
+    // And off once more is stable.
+    recompute(&f, on.revision, &[], &[0]);
+    assert_eq!(staged_value(&f, 0, "title").as_deref(), Some("Human title"));
+    assert_eq!(f.saved(), "Saved title");
+}
+
+#[test]
+fn zero_intent_recompute_can_enable_a_preset_and_remove_its_derived_only_output() {
+    let f = Fixture::new();
+    let saved = f.draft("Saved title");
+    let operation = f.commit(&saved, "recompute-enable-baseline");
+    assert_eq!(f.wait(&operation)["status"], "succeeded");
+    let groups = append_once_group();
+    assert_eq!(staged_value(&f, 0, "title"), None);
+    let enabled = recompute(&f, stage_revision(&f), &groups, &[0]);
+    assert!(enabled.accepted);
+    // No human input exists for this field: the preset produced it.
+    assert_eq!(
+        staged_value(&f, 0, "title").as_deref(),
+        Some("Saved title!")
+    );
+    assert_eq!(raw_input_count(&f), 0);
+    assert_eq!(derived_input_count(&f), 1);
+    let disabled = recompute(&f, enabled.revision, &[], &[0]);
+    assert!(disabled.accepted);
+    assert_eq!(staged_value(&f, 0, "title"), None);
+    assert_eq!(derived_input_count(&f), 0);
+    assert!(f
+        .service
+        .shared_stage()
+        .unwrap()
+        .plan
+        .is_none_or(|plan| plan.changes.is_empty()));
+}
+
+#[test]
+fn zero_intent_recompute_needs_the_flag_and_a_scope() {
+    let f = Fixture::new();
+    let empty = f
+        .service
+        .publish_human_intents(Vec::new(), 0, &[], &[])
+        .unwrap_err();
+    assert_eq!(empty.code, "invalid_argument");
+    let no_scope = f
+        .service
+        .publish_human_intents_request(StageIntentRequest {
+            intents: Vec::new(),
+            expected_revision: stage_revision(&f),
+            groups: Vec::new(),
+            scope: Vec::new(),
+            recompute: true,
+            session: None,
+        })
+        .unwrap_err();
+    assert_eq!(no_scope.code, "invalid_argument");
+    // A scope with nothing staged and no preset is a harmless no-op.
+    let revision = stage_revision(&f);
+    let noop = recompute(&f, revision, &[], &[0]);
+    assert!(noop.accepted);
+    assert_eq!(noop.revision, revision);
+}
+
+#[test]
+fn raw_whitespace_and_invalid_drafts_survive_recompute() {
+    let f = Fixture::new();
+    let saved = f.draft("Saved title");
+    let operation = f.commit(&saved, "raw-draft-baseline");
+    assert_eq!(f.wait(&operation)["status"], "succeeded");
+    let groups = append_once_group();
+    let first = grouped_intents(
+        &f,
+        &[
+            (0, "title", Some("  Kept  ")),
+            (0, "year", Some("not-a-year")),
+        ],
+        stage_revision(&f),
+        &groups,
+        &[0],
+    );
+    // The intent route never trims; only the transform adds its suffix.
+    assert_eq!(staged_value(&f, 0, "title").as_deref(), Some("  Kept  !"));
+    assert_eq!(staged_value(&f, 0, "year").as_deref(), Some("not-a-year"));
+    assert!(first
+        .delta
+        .changes
+        .iter()
+        .any(|change| change.field == "year" && change.tag.as_ref().unwrap().invalid));
+    let again = recompute(&f, first.revision, &groups, &[0]);
+    assert_eq!(staged_value(&f, 0, "title").as_deref(), Some("  Kept  !"));
+    assert_eq!(staged_value(&f, 0, "year").as_deref(), Some("not-a-year"));
+    assert!(again
+        .delta
+        .changes
+        .iter()
+        .all(|change| change.field != "year"));
+    let off = recompute(&f, again.revision, &[], &[0]);
+    assert!(off.accepted);
+    assert_eq!(staged_value(&f, 0, "title").as_deref(), Some("  Kept  "));
+    assert_eq!(staged_value(&f, 0, "year").as_deref(), Some("not-a-year"));
+}
+
+#[test]
+fn grouped_recompute_preserves_agent_values_inside_scope() {
+    let f = Fixture::new();
+    let saved = f.draft("Saved title");
+    let operation = f.commit(&saved, "agent-scope-baseline");
+    assert_eq!(f.wait(&operation)["status"], "succeeded");
+    f.call(
+        "draft.create",
+        json!({"paths":[f.paths[0]],"values":{"artist":"Agent artist"}}),
+    )
+    .unwrap();
+    assert_eq!(
+        staged_value(&f, 0, "artist").as_deref(),
+        Some("Agent artist")
+    );
+    let groups = append_all_tags_group();
+    let first = grouped_intents(
+        &f,
+        &[(0, "title", Some("Human title"))],
+        stage_revision(&f),
+        &groups,
+        &[0],
+    );
+    // The agent contribution is a transform input, not a saved-only value.
+    assert_eq!(
+        staged_value(&f, 0, "title").as_deref(),
+        Some("Human title!")
+    );
+    assert_eq!(
+        staged_value(&f, 0, "artist").as_deref(),
+        Some("Agent artist!")
+    );
+    let again = recompute(&f, first.revision, &groups, &[0]);
+    assert_eq!(
+        staged_value(&f, 0, "title").as_deref(),
+        Some("Human title!")
+    );
+    assert_eq!(
+        staged_value(&f, 0, "artist").as_deref(),
+        Some("Agent artist!")
+    );
+    // Disabling the preset restores the agent's own contribution.
+    recompute(&f, again.revision, &[], &[0]);
+    assert_eq!(staged_value(&f, 0, "title").as_deref(), Some("Human title"));
+    assert_eq!(
+        staged_value(&f, 0, "artist").as_deref(),
+        Some("Agent artist")
+    );
+    // A human correction of the agent field becomes the current raw input and
+    // survives a later recompute.
+    let correction = human_intents(
+        &f,
+        &[(0, "artist", Some("Human correction"))],
+        stage_revision(&f),
+    );
+    assert!(correction.accepted);
+    assert_eq!(
+        staged_value(&f, 0, "artist").as_deref(),
+        Some("Human correction")
+    );
+    recompute(&f, correction.revision, &[], &[0]);
+    assert_eq!(
+        staged_value(&f, 0, "artist").as_deref(),
+        Some("Human correction")
+    );
+}
+
+#[test]
+fn recompute_scope_does_not_disturb_other_paths() {
+    let f = Fixture::new();
+    let groups = append_once_group();
+    let first = grouped_intents(
+        &f,
+        &[(0, "title", Some("First"))],
+        stage_revision(&f),
+        &groups,
+        &[0],
+    );
+    let second = grouped_intents(
+        &f,
+        &[(1, "title", Some("Second"))],
+        first.revision,
+        &groups,
+        &[1],
+    );
+    assert_eq!(staged_value(&f, 1, "title").as_deref(), Some("Second!"));
+    // Only path 0 is in the recompute scope.
+    recompute(&f, second.revision, &[], &[0]);
+    assert_eq!(staged_value(&f, 0, "title").as_deref(), Some("First"));
+    assert_eq!(staged_value(&f, 1, "title").as_deref(), Some("Second!"));
+    // And a grouped recompute of path 1 does not touch path 0's restored raw.
+    recompute(&f, stage_revision(&f), &groups, &[1]);
+    assert_eq!(staged_value(&f, 0, "title").as_deref(), Some("First"));
+    assert_eq!(staged_value(&f, 1, "title").as_deref(), Some("Second!"));
+}
+
+#[test]
+fn full_plan_publication_keeps_raw_basis_for_a_later_recompute() {
+    let f = Fixture::new();
+    let saved = f.draft("Saved title");
+    let operation = f.commit(&saved, "full-plan-basis");
+    assert_eq!(f.wait(&operation)["status"], "succeeded");
+    let groups = append_once_group();
+    grouped_intents(
+        &f,
+        &[(0, "title", Some("Human title"))],
+        stage_revision(&f),
+        &groups,
+        &[0],
+    );
+    assert_eq!(
+        staged_value(&f, 0, "title").as_deref(),
+        Some("Human title!")
+    );
+    // Structural/artwork routes republish the whole current plan. It restates
+    // the same values, so it must not turn the derived result into raw input.
+    let current = f.service.shared_stage().unwrap().plan.unwrap();
+    let revision = stage_revision(&f);
+    f.service
+        .publish_manual_plan_with_intents(Some(current), revision, Vec::new())
+        .unwrap();
+    let second = grouped_intents(
+        &f,
+        &[(0, "artist", Some("Human artist"))],
+        stage_revision(&f),
+        &groups,
+        &[0],
+    );
+    assert_eq!(
+        staged_value(&f, 0, "title").as_deref(),
+        Some("Human title!")
+    );
+    assert_eq!(
+        staged_value(&f, 0, "artist").as_deref(),
+        Some("Human artist")
+    );
+    let _ = second;
+}
+
+#[test]
+fn full_plan_tag_change_replaces_the_raw_basis() {
+    let f = Fixture::new();
+    let saved = f.draft("Saved title");
+    let operation = f.commit(&saved, "full-plan-tag-basis");
+    assert_eq!(f.wait(&operation)["status"], "succeeded");
+    let groups = append_once_group();
+    grouped_intents(
+        &f,
+        &[(0, "title", Some("Human title"))],
+        stage_revision(&f),
+        &groups,
+        &[0],
+    );
+    assert_eq!(
+        staged_value(&f, 0, "title").as_deref(),
+        Some("Human title!")
+    );
+    // An import-style full-plan publication changes the tag value itself.
+    let imported = {
+        let guard = f.service.0.app.lock().unwrap();
+        guard
+            .as_ref()
+            .unwrap()
+            .preview_tag_edits(&[tagrex_commands::TagEditDto {
+                path: f.paths[0].to_string_lossy().into_owned(),
+                field: "title".into(),
+                value: Some("Imported title".into()),
+            }])
+            .unwrap()
+    };
+    let revision = stage_revision(&f);
+    f.service
+        .publish_manual_plan_with_intents(
+            Some(imported),
+            revision,
+            vec![StageFieldRef {
+                path: f.paths[0].to_string_lossy().into_owned(),
+                field: "title".into(),
+            }],
+        )
+        .unwrap();
+    assert_eq!(
+        staged_value(&f, 0, "title").as_deref(),
+        Some("Imported title")
+    );
+    // The next grouped edit starts from the imported value, not the stale raw.
+    grouped_intents(
+        &f,
+        &[(0, "artist", Some("Human artist"))],
+        stage_revision(&f),
+        &groups,
+        &[0],
+    );
+    assert_eq!(
+        staged_value(&f, 0, "title").as_deref(),
+        Some("Imported title!")
+    );
+}
+
+#[test]
+fn partial_apply_and_discard_retire_raw_inputs_for_their_scope_only() {
+    let f = Fixture::new();
+    let groups = append_once_group();
+    let first = grouped_intents(
+        &f,
+        &[(0, "title", Some("First"))],
+        stage_revision(&f),
+        &groups,
+        &[0],
+    );
+    let second = grouped_intents(
+        &f,
+        &[(1, "title", Some("Second"))],
+        first.revision,
+        &groups,
+        &[1],
+    );
+    assert_eq!(staged_value(&f, 0, "title").as_deref(), Some("First!"));
+    assert_eq!(staged_value(&f, 1, "title").as_deref(), Some("Second!"));
+    let revision = stage_revision(&f);
+    let selected = [f.paths[0].to_string_lossy().into_owned()].into();
+    let plan = f.service.shared_apply_plan(&selected).unwrap();
+    {
+        let mut guard = f.service.0.app.lock().unwrap();
+        guard.as_mut().unwrap().apply(&plan).unwrap();
+    }
+    f.service.complete_shared_apply(&plan, revision).unwrap();
+    // Path 0 is saved; its raw input and derived basis are retired. Path 1 is
+    // still pending and keeps its raw input.
+    let state = f.service.0.state.lock().unwrap();
+    let path0 = f.paths[0].to_string_lossy().into_owned();
+    assert!(state
+        .stage
+        .raw_inputs
+        .keys()
+        .all(|key| key.path.as_ref() != path0));
+    assert!(state
+        .stage
+        .derived_inputs
+        .keys()
+        .all(|key| key.path.as_ref() != path0));
+    assert!(state
+        .stage
+        .raw_inputs
+        .keys()
+        .any(|key| key.path.as_ref() == f.paths[1].to_string_lossy()));
+    drop(state);
+    // Discard retires the rest.
+    f.service.clear_shared_stage(stage_revision(&f)).unwrap();
+    assert_eq!(raw_input_count(&f), 0);
+    assert_eq!(derived_input_count(&f), 0);
+    let _ = second;
+}
+
+#[test]
+fn session_token_and_library_reset_block_stale_intents() {
+    let f = Fixture::new();
+    let old_session = stage_session(&f);
+    let first = human_intents(&f, &[(0, "title", Some("First"))], 0);
+    // A request from a different stage lifecycle is refused even though its
+    // expected revision is numerically plausible.
+    let wrong = f
+        .service
+        .publish_human_intents_request(StageIntentRequest {
+            intents: vec![StageIntent {
+                path: f.paths[0].to_string_lossy().into_owned(),
+                field: "title".into(),
+                value: Some("Stale".into()),
+            }],
+            expected_revision: first.revision,
+            groups: Vec::new(),
+            scope: Vec::new(),
+            recompute: false,
+            session: Some("stage_other".into()),
+        })
+        .unwrap_err();
+    assert_eq!(wrong.code, "stage_session_mismatch");
+    assert_eq!(staged_value(&f, 0, "title").as_deref(), Some("First"));
+    // Opening another library rotates the session and clears the old stage.
+    let reset = f.service.reset_shared_stage_for_library().unwrap();
+    assert!(reset.accepted);
+    assert_eq!(reset.plan, None);
+    let new_session = stage_session(&f);
+    assert_ne!(new_session, old_session);
+    assert!(reset.revision > first.revision);
+    let stale = f
+        .service
+        .publish_human_intents_request(StageIntentRequest {
+            intents: vec![StageIntent {
+                path: f.paths[0].to_string_lossy().into_owned(),
+                field: "title".into(),
+                value: Some("Old library".into()),
+            }],
+            // Numerically plausible: the current revision after the reset. Only
+            // the session token can identify the stale lifecycle.
+            expected_revision: reset.revision,
+            groups: Vec::new(),
+            scope: Vec::new(),
+            recompute: false,
+            session: Some(old_session.clone()),
+        })
+        .unwrap_err();
+    assert_eq!(stale.code, "stage_session_mismatch");
+    assert_eq!(staged_value(&f, 0, "title"), None);
+    let aged = f
+        .service
+        .shared_stage_delta(Some(first.revision), Some(&old_session))
+        .unwrap();
+    assert!(aged.resync);
+    assert_eq!(aged.resync_reason.as_deref(), Some("session"));
+    // A current-session intent after the barrier is a genuine new edit.
+    let fresh = f
+        .service
+        .publish_human_intents_request(StageIntentRequest {
+            intents: vec![StageIntent {
+                path: f.paths[0].to_string_lossy().into_owned(),
+                field: "title".into(),
+                value: Some("New library".into()),
+            }],
+            expected_revision: reset.revision,
+            groups: Vec::new(),
+            scope: Vec::new(),
+            recompute: false,
+            session: Some(new_session),
+        })
+        .unwrap();
+    assert!(fresh.accepted);
+    assert_eq!(staged_value(&f, 0, "title").as_deref(), Some("New library"));
+}
+
+#[test]
+fn artwork_delta_reports_saved_old_references_and_validity() {
+    use base64::Engine;
+    let f = Fixture::new();
+    let encode = |color: [u8; 3]| {
+        let image =
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(16, 16, image::Rgb(color)));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        base64::engine::general_purpose::STANDARD.encode(bytes.into_inner())
+    };
+    let upload = |data: String| {
+        f.call("artwork.upload", json!({"data_base64":data}))
+            .unwrap()["asset"]
+            .clone()
+    };
+    // Stage and save a first cover so a later delta has a real baseline.
+    let first = upload(encode([255, 0, 0]));
+    let draft = f
+        .call(
+            "draft.artwork",
+            json!({"paths":[f.paths[0]],"asset":first,"mode":"replace_all"}),
+        )
+        .unwrap();
+    let operation = f.commit(&draft, "artwork-old-baseline");
+    assert_eq!(f.wait(&operation)["status"], "succeeded");
+    // Stage a replacement and inspect the delta only.
+    let second = upload(encode([0, 0, 255]));
+    let revision = stage_revision(&f);
+    f.call(
+        "draft.artwork",
+        json!({"paths":[f.paths[0]],"asset":second,"mode":"replace_all"}),
+    )
+    .unwrap();
+    let delta = f
+        .service
+        .shared_stage_delta(Some(revision), Some(&stage_session(&f)))
+        .unwrap();
+    let artwork = delta
+        .changes
+        .iter()
+        .find(|change| change.field == "artwork")
+        .and_then(|change| change.artwork.as_ref())
+        .expect("artwork delta");
+    assert!(!artwork.empty);
+    assert!(!artwork.invalid);
+    assert_eq!(artwork.old.len(), 1);
+    assert_eq!(artwork.covers.len(), 1);
+    assert!(!artwork.old[0].invalid);
+    assert!(!artwork.covers[0].invalid);
+    assert_ne!(artwork.old[0].asset, artwork.covers[0].asset);
+    // The saved baseline ref is lazily fetchable with the old bytes.
+    let fetched = f.service.shared_stage_asset(&artwork.old[0].asset).unwrap();
+    assert_eq!(
+        fetched["data_base64"].as_str().unwrap(),
+        encode([255, 0, 0])
+    );
+    // No bytes in the delta itself.
+    assert!(!delta_payload(&delta).contains("data_base64"));
+}
+
+#[test]
+fn artwork_delta_flags_an_invalid_cover_without_bytes() {
+    use tagrex_commands::{CoverArtDto, CoverChangeDto, FileChangeDto, PlanDto};
+    let f = Fixture::new();
+    let plan = PlanDto {
+        cover_assets: Vec::new(),
+        description: "invalid artwork".into(),
+        message: None,
+        notes: Vec::new(),
+        changes: vec![FileChangeDto {
+            path: f.paths[0].to_string_lossy().into_owned(),
+            rename_to: None,
+            copy: false,
+            tag_changes: Vec::new(),
+            cover_change: Some(CoverChangeDto {
+                old: Vec::new(),
+                new: vec![CoverArtDto {
+                    mime: "text/plain".into(),
+                    data_base64: "aGVsbG8=".into(),
+                    data_ref: None,
+                    kind: "front".into(),
+                    description: String::new(),
+                }],
+            }),
+            sidecar_renames: Vec::new(),
+            block_changes: Vec::new(),
+            rename_root: None,
+            creates_folder: false,
+            folder_extras: Vec::new(),
+        }],
+        prune_empty_dirs: false,
+        locked_skipped: Vec::new(),
+        unrendered: Vec::new(),
+    };
+    let revision = stage_revision(&f);
+    f.service.publish_manual_plan(Some(plan), revision).unwrap();
+    let delta = f
+        .service
+        .shared_stage_delta(Some(revision), Some(&stage_session(&f)))
+        .unwrap();
+    let artwork = delta
+        .changes
+        .iter()
+        .find(|change| change.field == "artwork")
+        .and_then(|change| change.artwork.as_ref())
+        .expect("artwork delta");
+    assert!(artwork.invalid);
+    assert_eq!(artwork.covers.len(), 1);
+    assert!(artwork.covers[0].invalid);
+    assert!(!delta_payload(&delta).contains("data_base64"));
+}
+
+#[test]
+fn rename_delta_carries_full_review_metadata() {
+    use tagrex_commands::{FileChangeDto, PlanDto};
+    let f = Fixture::new();
+    let source = f.paths[0].to_string_lossy().into_owned();
+    let target = f
+        .media
+        .join("Destination")
+        .join("New name.wav")
+        .to_string_lossy()
+        .into_owned();
+    let root = f.media.to_string_lossy().into_owned();
+    let sidecar = (format!("{source}.nfo"), format!("{target}.nfo"));
+    let plan = PlanDto {
+        cover_assets: Vec::new(),
+        description: "rename".into(),
+        message: None,
+        notes: Vec::new(),
+        changes: vec![FileChangeDto {
+            path: source.clone(),
+            rename_to: Some(target.clone()),
+            copy: true,
+            tag_changes: Vec::new(),
+            cover_change: None,
+            sidecar_renames: vec![sidecar.clone()],
+            block_changes: Vec::new(),
+            rename_root: Some(root.clone()),
+            creates_folder: true,
+            folder_extras: vec![sidecar.0.clone()],
+        }],
+        prune_empty_dirs: false,
+        locked_skipped: Vec::new(),
+        unrendered: Vec::new(),
+    };
+    let revision = stage_revision(&f);
+    f.service.publish_manual_plan(Some(plan), revision).unwrap();
+    let delta = f
+        .service
+        .shared_stage_delta(Some(revision), Some(&stage_session(&f)))
+        .unwrap();
+    let rename = delta
+        .changes
+        .iter()
+        .find(|change| change.field == "filename")
+        .and_then(|change| change.rename.as_ref())
+        .expect("rename delta");
+    assert_eq!(rename.to, target);
+    assert!(rename.copy);
+    assert!(rename.creates_folder);
+    assert_eq!(rename.rename_root.as_deref(), Some(root.as_str()));
+    assert_eq!(rename.sidecars, vec![sidecar.clone()]);
+    assert_eq!(rename.folder_extras, vec![sidecar.0]);
+}
+
+#[test]
+fn raw_input_ledger_is_bounded_and_discard_clears_it() {
+    let f = Fixture::new();
+    let mut revision = stage_revision(&f);
+    // 20 x 512 = 10,240 recorded raw fields, over the 8,192 bound.
+    for batch in 0..20 {
+        let intents = (0..512)
+            .map(|i| StageIntent {
+                path: f.paths[0].to_string_lossy().into_owned(),
+                field: format!("custom:r{}", batch * 512 + i),
+                value: Some("v".into()),
+            })
+            .collect::<Vec<_>>();
+        let outcome = f
+            .service
+            .publish_human_intents(intents, revision, &[], &[])
+            .unwrap();
+        assert!(outcome.accepted);
+        revision = outcome.revision;
+    }
+    {
+        let state = f.service.0.state.lock().unwrap();
+        assert!(state.stage.raw_inputs.len() <= staging::MAX_INPUT_FIELDS);
+        assert!(state.stage.input_bytes <= staging::MAX_INPUT_BYTES);
+        assert!(!state.stage.raw_inputs.is_empty());
+    }
+    f.service.clear_shared_stage(stage_revision(&f)).unwrap();
+    assert_eq!(raw_input_count(&f), 0);
+    assert_eq!(derived_input_count(&f), 0);
+}
+
+#[test]
+fn incremental_recompute_refuses_an_evicted_transform_basis_without_compounding() {
+    let f = Fixture::new();
+    let groups = append_once_group();
+    let first = grouped_intents(
+        &f,
+        &[(0, "title", Some("Human title"))],
+        stage_revision(&f),
+        &groups,
+        &[0],
+    );
+    {
+        let mut state = f.service.0.state.lock().unwrap();
+        state.stage.raw_inputs.clear();
+        state.stage.derived_inputs.clear();
+        state.stage.input_bytes = 0;
+    }
+    let result = f
+        .service
+        .publish_human_intents_request(staging::StageIntentRequest {
+            intents: vec![],
+            expected_revision: first.revision,
+            groups,
+            scope: vec![f.paths[0].to_string_lossy().into_owned()],
+            recompute: true,
+            session: None,
+        });
+    assert_eq!(result.unwrap_err().code, "raw_basis_expired");
+    assert_eq!(
+        staged_value(&f, 0, "title").as_deref(),
+        Some("Human title!")
+    );
+    assert_eq!(stage_revision(&f), first.revision);
+}
+
+#[test]
+fn incremental_intents_refuse_filename_rules_instead_of_dropping_their_output() {
+    let f = Fixture::new();
+    let mut groups = append_once_group();
+    groups[0].scope = "filename".into();
+    groups[0].rules[0].scope = Some("filename".into());
+    let result = f.service.publish_human_intents(
+        vec![StageIntent {
+            path: f.paths[0].to_string_lossy().into_owned(),
+            field: "title".into(),
+            value: Some("Human".into()),
+        }],
+        stage_revision(&f),
+        &groups,
+        &[f.paths[0].to_string_lossy().into_owned()],
+    );
+    assert_eq!(result.unwrap_err().code, "full_plan_required");
+    assert!(f.service.shared_stage().unwrap().plan.is_none());
+}

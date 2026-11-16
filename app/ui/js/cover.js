@@ -15,7 +15,7 @@ import { el, toast } from "./dom.js";
 import { t, tn } from "./i18n.js";
 import { invoke, TAURI } from "./invoke.js";
 import { hooks } from "./hooks.js";
-import { previewPlan, selectedPaths, captureSelection, isSelectionCurrent, setPreviewPlan, setPreviewSource, trackAt } from "./state.js";
+import { previewPlan, diffByPath, selectedPaths, captureSelection, isSelectionCurrent, setPreviewPlan, setPreviewSource, trackAt, tracks } from "./state.js";
 
 const coverWell = el("cover-well");
 const coverFileInput = el("cover-file");
@@ -23,6 +23,7 @@ const coverFileInput = el("cover-file");
 let coverSubject = null;
 let diskCoverSummary = null;
 let lastRenderedCoverSummary = null;
+let renderedCoverSubject = null;
 let pickSubject = null;
 let coverRequest = 0;
 let coverReadsActive = 0;
@@ -30,6 +31,12 @@ let queuedCoverRead = null;
 let coverViewModel = { selected: 0, loading: false, images: [], mixed: false, withCover: 0, external: false, action: () => {} };
 const coverView = mount(CoverArtWell, { target: coverWell, props: { initial: coverViewModel } });
 let nativePickActive = false;
+
+// Artwork follows the selected files and saved library, not text-field
+// revisions. A tag edit must not invalidate an otherwise valid image read.
+function isCoverSubjectCurrent(subject) {
+  return !!subject && subject.library === tracks && subject.paths === selectedPaths();
+}
 
 // Keep at most two native reads outstanding; replace any waiting job with the
 // newest subject. Freshness checks still protect reverse completion order.
@@ -39,9 +46,9 @@ async function readCurrentCoverSummary(subject) {
       queuedCoverRead?.(false);
       queuedCoverRead = resolve;
     });
-    if (!proceed || !isSelectionCurrent(subject)) return null;
+    if (!proceed || !isCoverSubjectCurrent(subject)) return null;
   }
-  if (!isSelectionCurrent(subject)) return null;
+  if (!isCoverSubjectCurrent(subject)) return null;
   coverReadsActive++;
   try { return await invoke("read_cover_summary", { paths: subject.paths }); }
   finally {
@@ -270,33 +277,46 @@ async function previewClearTags() {
 // A thumbnail + state + actions that replaces the two bare Embed/Export buttons.
 // Reflects the selection's cover state: none / one shared / mixed.
 async function refreshCoverWell() {
+  if (isCoverSubjectCurrent(coverSubject)) {
+    renderPendingCoverSummary();
+    return;
+  }
   const subject = captureSelection();
   const request = ++coverRequest;
+  coverView.invalidatePending();
   const paths = subject.paths;
-  coverSubject = null;
+  coverSubject = subject;
   diskCoverSummary = null;
-  lastRenderedCoverSummary = null;
   externalCover = null;
-  coverViewModel = { selected: paths.length, loading: true, images: [], mixed: false, withCover: 0, external: false, action: () => {} };
-  coverView.update(coverViewModel);
+  // Keep the displayed image mounted while the next subject is read/decoded.
+  // Stale controls cannot act on the previous subject during that interval.
+  coverWell.inert = true;
   coverWell.setAttribute("aria-busy", "true");
   if (paths.length === 0) {
+    lastRenderedCoverSummary = null;
+    renderedCoverSubject = null;
+    coverViewModel = { selected: 0, loading: false, images: [], mixed: false, withCover: 0, external: false, action: () => {} };
     coverWell.className = "cover-well empty";
-    coverView.update({ ...coverViewModel, loading: false });
+    await coverView.update(coverViewModel);
+    if (request !== coverRequest) return;
+    coverWell.inert = false;
     coverWell.removeAttribute("aria-busy");
     return;
   }
   try {
     const summary = await readCurrentCoverSummary(subject);
-    if (!summary || request !== coverRequest || !isSelectionCurrent(subject)) return;
-    coverSubject = subject;
+    if (!summary || request !== coverRequest || !isCoverSubjectCurrent(subject)) return;
     diskCoverSummary = summary;
-    renderPendingCoverSummary();
+    await renderPendingCoverSummary();
+    if (request !== coverRequest || !isCoverSubjectCurrent(subject)) return;
+    coverWell.inert = false;
     coverWell.removeAttribute("aria-busy");
     await showExternalCoverAction(subject, request);
   } catch (e) {
-    if (request !== coverRequest || !isSelectionCurrent(subject)) return;
+    if (request !== coverRequest || !isCoverSubjectCurrent(subject)) return;
     coverWell.removeAttribute("aria-busy");
+    coverWell.inert = false;
+    coverSubject = null; // A later refresh can retry a failed read.
     coverView.update({ ...coverViewModel, loading: false });
     toast(String(e), true);
   }
@@ -315,7 +335,7 @@ async function showExternalCoverAction(subject, request) {
   } catch (e) {
     return; // best-effort; the well already rendered
   }
-  if (!found || request !== coverRequest || !isSelectionCurrent(subject)) return;
+  if (!found || request !== coverRequest || !isCoverSubjectCurrent(subject)) return;
   externalCover = { image: found, subject };
   coverViewModel = { ...coverViewModel, external: true };
   coverView.update(coverViewModel, false);
@@ -325,18 +345,23 @@ async function showExternalCoverAction(subject, request) {
 // through the same preview/apply/undo path as any other cover.
 async function embedExternalCover() {
   const current = externalCover;
-  if (!current || !isSelectionCurrent(current.subject) || current.subject !== coverSubject) return;
-  await embedCoverDto(current.image, current.subject);
+  if (!current || !isCoverSubjectCurrent(current.subject) || current.subject !== coverSubject) return;
+  await embedCoverDto(current.image, captureSelection());
 }
 
 // Project pending artwork over the cached disk summary. Typing tag values
 // never causes another artwork read or resets an unchanged lightbox/image.
 function renderPendingCoverSummary() {
-  if (!diskCoverSummary || !isSelectionCurrent(coverSubject)) return;
+  if (!diskCoverSummary || !isCoverSubjectCurrent(coverSubject)) return;
   let selected;
   const changes = [];
-  for (const change of previewPlan?.changes || []) {
-    if (!change.cover_change) continue;
+  // A single-file Inspector must not walk a library-sized stage on each
+  // acknowledgement. Broad selections still use the smaller staged list.
+  const staged = previewPlan?.changes || [];
+  const candidates = diffByPath && coverSubject.paths.length < staged.length
+    ? coverSubject.paths.map(path => diffByPath.get(path)) : staged;
+  for (const change of candidates) {
+    if (!change?.cover_change) continue;
     selected ??= new Set(coverSubject.paths);
     if (selected.has(change.path)) changes.push(change);
   }
@@ -357,28 +382,28 @@ function renderPendingCoverSummary() {
     const next = summary.samples[index];
     return image.mime === next.mime && image.data_base64 === next.data_base64 && image.description === next.description;
   });
-  if (previous && previous.total === summary.total && previous.with_cover === summary.with_cover && previous.distinct === summary.distinct && previous.pendingArtwork === summary.pendingArtwork && sameImages) return;
+  if (renderedCoverSubject === coverSubject && previous && previous.total === summary.total && previous.with_cover === summary.with_cover && previous.distinct === summary.distinct && previous.pendingArtwork === summary.pendingArtwork && sameImages) return;
   lastRenderedCoverSummary = summary;
-  renderCoverWell(summary);
+  renderedCoverSubject = coverSubject;
+  return renderCoverWell(summary);
 }
-document.addEventListener('tagrex:transform-scope', renderPendingCoverSummary);
 
 function renderCoverWell(summary) {
   const subject = coverSubject;
   coverWell.className = "cover-well" + (summary.with_cover ? "" : " empty");
   coverViewModel = {
     selected: summary.total, loading: false, mixed: !!summary.distinct,
-    withCover: summary.with_cover, pendingArtwork:!!summary.pendingArtwork, canExport:(diskCoverSummary?.with_cover || 0) > 0, external: !!externalCover && isSelectionCurrent(externalCover.subject),
+    withCover: summary.with_cover, pendingArtwork:!!summary.pendingArtwork, canExport:(diskCoverSummary?.with_cover || 0) > 0, external: !!externalCover && isCoverSubjectCurrent(externalCover.subject),
     images: summary.samples.slice(0, 1),
     action(name) {
-      if (!isSelectionCurrent(subject) || subject !== coverSubject) return;
+      if (!isCoverSubjectCurrent(subject) || subject !== coverSubject) return;
       if (name === "replace") chooseCover();
       else if (name === "remove") previewCoverRemove();
       else if (name === "export") exportCover();
       else if (name === "external") embedExternalCover();
     },
   };
-  coverView.update(coverViewModel);
+  return coverView.update(coverViewModel);
 }
 
 // Export the embedded cover of the selected files to disk (cover.<ext> next to
@@ -434,4 +459,5 @@ export {
   previewClearTags,
   previewCoverRemove,
   refreshCoverWell,
+  renderPendingCoverSummary,
 };

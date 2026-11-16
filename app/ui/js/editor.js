@@ -1,3 +1,4 @@
+import { workingField } from './working-values.js';
 import { importedValue, recordLiveField, liveInputChanged } from "./live-preview.js";
 import { attachGenrePicker } from "../lib/genre-picker";
 import { createComponentElement } from "../lib/component-elements.js";
@@ -35,16 +36,7 @@ let stagedFields = new Map();
 // The value a file currently shows for a field: a pending edit if there is one,
 // otherwise what's on disk.
 function currentFieldValue(path, key) {
-  const pending = edits.get(path);
-  if (pending && pending.has(key)) return pending.get(key);
-  const imported = importedValue(path, key);
-  if (imported !== undefined) return imported;
-  if (sharedStagingEnabled) {
-    const staged = diffByPath?.get(path)?.tag_changes?.find(change => change.field === key);
-    if (staged) return staged.new ?? '';
-  }
-  const track = trackAt(path);
-  return (track && track.tags[key]) || "";
+  return workingField(path, key).value;
 }
 
 // Preserve drafts and native input identity across table-only repaints. Hidden
@@ -53,18 +45,34 @@ let editorSubject = null;
 let editorContent = null;
 let editorPaths = new Set();
 let editorLocks = "";
+let editorLayout = null;
+function fieldEditorLayout(paths) {
+  const customs = new Set(), compilation = new Set();
+  let supported = paths.length > 0;
+  for (const path of paths) {
+    const track = trackAt(path);
+    for (const key of Object.keys(track?.tags || {})) if (key.startsWith('custom:')) customs.add(key);
+    for (const key of edits.get(path)?.keys() || []) if (key.startsWith('custom:')) customs.add(key);
+    if (track?.compilation_field) compilation.add(track.compilation_field); else supported = false;
+  }
+  return JSON.stringify([[...customs].sort(), [...compilation].sort(), supported]);
+}
 function hasEditorDraft() {
   const paths = selectedPaths();
   return stagedFields.size > 0 && paths.length === editorPaths.size && paths.every(path => editorPaths.has(path));
 }
-function resetFieldEditor() {
+function resetFieldEditor({ preserveSubject = false } = {}) {
   stagedFields.clear();
-  editorSubject = null;
-  editorContent = null;
-  editorPaths.clear();
+  if (!preserveSubject) {
+    editorSubject = null;
+    editorContent = null;
+    editorPaths.clear();
+  }
   for (const input of el("fields-body").querySelectorAll('.field-input.dirty')) input.classList.remove('dirty');
 }
 function refreshFieldEditor({ force = false, resetDraft = false } = {}) {
+  const scroller = el('subtab-editor').querySelector('.editor-scroll');
+  const scrollTop = scroller?.scrollTop;
   const paths = selectedPaths();
   const sameSubject = paths.length === editorPaths.size && paths.every(path => editorPaths.has(path));
   if (!sameSubject || resetDraft) {
@@ -91,26 +99,42 @@ function refreshFieldEditor({ force = false, resetDraft = false } = {}) {
   editorSubject = captureSelection();
   el("fields-count").textContent = paths.length ? `· ${tn("unit.file", paths.length)}` : "";
   renderTagBlocks(paths);
+  const layout = fieldEditorLayout(paths);
+  if (!force && editorLayout === layout && el('fields-body').childElementCount) {
+    refreshSharedStagedFields();
+    reflectFieldLocks();
+    if (scroller && scroller.scrollTop !== scrollTop) scroller.scrollTop = scrollTop;
+    return;
+  }
+  editorLayout = layout;
   renderFieldEditor(paths);
-  hooks.refreshCoverWell();
+  refreshSharedStagedFields();
+  reflectFieldLocks();
+  if (scroller && scroller.scrollTop !== scrollTop) scroller.scrollTop = scrollTop;
 }
 
 // Agent staging changes desired values, not the saved-track identity. Patch
 // existing inputs so a title draft/caret survives a simultaneous album update.
-function refreshSharedStagedFields() {
-  if (!sharedStagingEnabled || el('panel-tagger').hidden || el('subtab-editor').hidden) return;
+function refreshSharedStagedFields(changed = null) {
+  if (el('panel-tagger').hidden || el('subtab-editor').hidden) return;
   const paths = selectedPaths();
-  if (paths.length !== editorPaths.size || paths.some(path => !editorPaths.has(path))) { refreshFieldEditor(); return; }
+  if (!isSelectionCurrent(editorSubject)) { refreshFieldEditor(); return; }
+  const fields = changed ? new Set(changed.filter(entry => editorPaths.has(entry.path)).map(entry => entry.field)) : null;
+  if (fields && !fields.size) return;
   for (const input of el('fields-body').querySelectorAll('.field-input')) {
     const field = input.dataset.key, row = input.closest('.fe-row');
-    if (!field || !row || stagedFields.has(field)) continue;
+    if (!field || !row || (fields && !fields.has(field)) || (document.activeElement === input && stagedFields.has(field))) continue;
     const value = sharedFieldValue(paths, field);
     const focused = document.activeElement === input;
     const caret = focused ? [input.selectionStart, input.selectionEnd] : null;
     if (input.value !== (value ?? '')) input.value = value ?? '';
     input.classList.toggle('multiple', value === null);
-    input.placeholder = value === null ? (EDITOR_NUMERIC_KEYS.has(field) ? '—' : tr('editor.mixedValue')) : '';
-    if (value === null && EDITOR_NUMERIC_KEYS.has(field)) input.title = tr('editor.multipleValues');
+    const placeholder = value === null ? (EDITOR_NUMERIC_KEYS.has(field) ? '—' : tr('editor.mixedValue')) : '';
+    if (input.placeholder !== placeholder) input.placeholder = placeholder;
+    if (value === null && EDITOR_NUMERIC_KEYS.has(field)) {
+      const title = tr('editor.multipleValues');
+      if (input.title !== title) input.title = title;
+    }
     else input.removeAttribute('title');
     if (caret && caret[0] !== null) input.setSelectionRange(caret[0], caret[1]);
     input.classList.toggle('dirty', fieldHasChanges(paths, field));
@@ -122,7 +146,24 @@ function refreshSharedStagedFields() {
     row.classList.toggle('error', [...row.querySelectorAll('.field-input')].some(node => node.classList.contains('error')));
     reflectFieldClear(input);
   }
-  hooks.refreshCoverWell();
+  const compilation = el('editor-compilation');
+  const compilationRow = compilation?.closest('.fe-compilation');
+  const compilationKeys = compilationRow ? JSON.parse(compilationRow.dataset.compilationKeys || '[]') : [];
+  if (compilation && compilationKeys.length && (!fields || compilationKeys.some(key => fields.has(key)))) {
+    const values = paths.map(path => {
+      const key = trackAt(path)?.compilation_field;
+      return key ? /^(1|true|yes)$/i.test(currentFieldValue(path,key).trim()) : false;
+    });
+    const checked = values.length > 0 && values.every(Boolean);
+    const mixed = values.some(Boolean) && !checked;
+    if (compilation.checked !== checked) compilation.checked = checked;
+    if (compilation.indeterminate !== mixed) compilation.indeterminate = mixed;
+    compilationRow.classList.toggle('dirty', compilationKeys.some(key => fieldHasChanges(paths,key)));
+    const label = compilationRow.querySelector('.fe-compilation-label');
+    const title = compilationRow.dataset.supported !== 'true' ? tr('editor.compilationUnsupported') : mixed ? tr('editor.compilationMixed') : '';
+    if (label && label.title !== title) label.title = title;
+  }
+  if (!fields || fields.has('artwork') || [...fields].some(field => field.startsWith('block:'))) hooks.refreshCoverWell();
 }
 
 // Keep raw drafts, focus and the opacity transition alive when only locks
@@ -555,7 +596,6 @@ function validateFieldValue(key, value, paths = []) {
 
 function renderFieldEditor(paths) {
   const body = el("fields-body");
-  body.innerHTML = "";
 
   // Well-known fields plus any custom keys present anywhere in the selection —
   // both on disk and among pending edits, so a custom field staged a moment ago
@@ -611,11 +651,42 @@ function renderFieldEditor(paths) {
   }
   standardRows.push(...promoted);
 
-  body.appendChild(fieldGroup(tr("editor.group.core"), coreRows, paths, "core"));
-  body.appendChild(fieldGroup(tr("editor.group.standard"), standardRows, paths, "standard"));
-  // Only surface Advanced when there are raw keys to show.
-  if (advancedRows.length)
-    body.appendChild(fieldGroup(tr("editor.group.advanced"), advancedRows, paths, "advanced"));
+  const groups = [['core', coreRows], ['standard', standardRows]];
+  if (advancedRows.length) groups.push(['advanced', advancedRows]);
+  const retained = new Set();
+  for (const [index, [kind, rows]] of groups.entries()) {
+    let group = body.querySelector(`.fe-group[data-group="${kind}"]`);
+    if (!group) group = fieldGroup(tr(`editor.group.${kind}`), rows, paths, kind);
+    else reconcileFieldRows(group.querySelector('.fe-grid'), rows, paths);
+    retained.add(group);
+    if (body.children[index] !== group) body.insertBefore(group, body.children[index] || null);
+  }
+  for (const group of [...body.children]) if (!retained.has(group)) group.remove();
+}
+
+// Different files can expose an extra custom tag without replacing the core
+// form. Reuse rows by their field identities; listeners read the current scope.
+function reconcileFieldRows(grid, rows, paths) {
+  const existing = new Map([...grid.children].map(row => [row.dataset.editorRow, row]));
+  const retained = new Set();
+  for (const [index, r] of rows.entries()) {
+    const compilation = r.yearOptions ? JSON.stringify([paths.every(path => !!trackAt(path)?.compilation_field), [...new Set(paths.map(path => trackAt(path)?.compilation_field))].sort()]) : '';
+    const key = r.yearOptions ? `year:${compilation}` : r.inline ? `inline:${r.inline.map(field => field.key).join(',')}` : r.duo ? `duo:${r.duo.flatMap(pair => pair.pair).join(',')}` : r.key;
+    let row = existing.get(key);
+    if (!row) {
+      if (r.yearOptions) {
+        row = document.createElement('div'); row.className = 'fe-year-options';
+        row.append(fieldRow('year', catalogueLabel('year'), paths), compilationRow(paths));
+      } else if (r.inline) {
+        row = document.createElement('div'); row.className = 'fe-inline-fields';
+        for (const field of r.inline) row.append(fieldRow(field.key, field.label, paths));
+      } else row = r.duo ? fieldDuoRow(r.duo, paths) : fieldRow(r.key, r.label, paths);
+      row.dataset.editorRow = key;
+    }
+    retained.add(row);
+    if (grid.children[index] !== row) grid.insertBefore(row, grid.children[index] || null);
+  }
+  for (const row of [...grid.children]) if (!retained.has(row)) row.remove();
 }
 
 // All groups fold in place. Their session preferences are independent of the
@@ -646,19 +717,7 @@ function fieldGroup(title, rows, paths, kind) {
   grid.className = "fe-grid";
   grid.id = `editor-group-${kind}`;
   grid.inert = collapsed;
-  for (const r of rows) {
-    if (r.yearOptions) {
-      const shared = document.createElement('div');
-      shared.className = 'fe-year-options';
-      shared.append(fieldRow('year', catalogueLabel('year'), paths), compilationRow(paths));
-      grid.append(shared);
-    } else if (r.inline) {
-      const shared = document.createElement("div");
-      shared.className = "fe-inline-fields";
-      for (const field of r.inline) shared.append(fieldRow(field.key, field.label, paths));
-      grid.append(shared);
-    } else grid.appendChild(r.duo ? fieldDuoRow(r.duo, paths) : fieldRow(r.key, r.label, paths));
-  }
+  reconcileFieldRows(grid, rows, paths);
   group.appendChild(grid);
   head.addEventListener("click", () => {
     const next = !editorGroupCollapsed[kind];
@@ -701,7 +760,14 @@ function compilationRow(paths) {
     input.indeterminate = false;
     const checked = input.checked;
     label.title = '';
-    for (const [field, targets] of byField) {
+    const currentFields = new Map();
+    for (const path of selectedPaths()) {
+      const field = trackAt(path)?.compilation_field;
+      if (!field) continue;
+      if (!currentFields.has(field)) currentFields.set(field, []);
+      currentFields.get(field).push(path);
+    }
+    for (const [field, targets] of currentFields) {
       const grouped = new Map();
       for (const path of targets) {
         const base = importedValue(path, field) ?? trackAt(path)?.tags?.[field] ?? '';
@@ -715,7 +781,7 @@ function compilationRow(paths) {
       if (targets.some(path => edits.get(path)?.has(field))) stagedFields.set(field, checked ? '1' : '0');
       else stagedFields.delete(field);
     }
-    row.classList.toggle('dirty', [...byField].some(([field, targets]) => fieldHasChanges(targets, field)));
+    row.classList.toggle('dirty', [...currentFields].some(([field, targets]) => fieldHasChanges(targets, field)));
   });
   row.append(marker, label);
   if (keys.length) row.append(lockButton(keys, tr('editor.compilation'), refreshFieldEditor));
@@ -837,7 +903,7 @@ function fieldRow(key, label, paths) {
 
   // Reflect the field's state (dirty / error) on the row and input.
   const reflect = () => {
-    const { ok } = validateFieldValue(key, input.value, paths);
+    const { ok } = validateFieldValue(key, input.value, selectedPaths());
     row.classList.toggle("error", !ok);
     input.classList.toggle("error", !ok);
     if (!ok) input.setAttribute("aria-invalid", "true");
@@ -845,6 +911,7 @@ function fieldRow(key, label, paths) {
   };
 
   input.addEventListener("input", () => {
+    const paths = selectedPaths();
     stagedFields.set(key, input.value);
     row.classList.remove("multiple");
     input.classList.remove("multiple");
@@ -894,7 +961,7 @@ function fieldDuoRow(pairs, paths) {
   const reflectRow = () => {
     let anyError = false;
     for (const inp of inputs) {
-      const { ok } = validateFieldValue(inp.dataset.key, inp.value, paths);
+      const { ok } = validateFieldValue(inp.dataset.key, inp.value, selectedPaths());
       inp.classList.toggle("error", !ok);
       if (!ok) inp.setAttribute("aria-invalid", "true");
       else inp.removeAttribute("aria-invalid");
@@ -923,6 +990,7 @@ function fieldDuoRow(pairs, paths) {
     }
     if (!paths.length || isFieldLocked(key)) input.disabled = true;
     input.addEventListener("input", () => {
+      const paths = selectedPaths();
       stagedFields.set(key, input.value);
       input.classList.remove("multiple");
       input.placeholder = "";
@@ -1011,3 +1079,5 @@ export {
   validateFieldValue,
   applyFieldEditor,
 };
+
+document.addEventListener('tagrex:working-fields', event => refreshSharedStagedFields(event.detail));

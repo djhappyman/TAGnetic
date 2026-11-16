@@ -1,3 +1,7 @@
+import { createLiveStageTransport } from './js/live-stage-transport.js';
+import { nativeLiveFields, setNativeLiveFields } from './js/live-preview.js';
+import { liveIntentOptions, setNativeStageSession } from './js/generator.js';
+import { workingField, patchCellText, retireRevertedRawFields } from './js/working-values.js';
 import { captureFileOrder, restoreFileOrder } from "./js/file-order.js";
 import { interpretQueryText } from './js/query-language.js';
 import { connectRibbonActions } from './js/ribbon-actions.js';
@@ -75,6 +79,7 @@ import {
   previewClearTags,
   previewCoverRemove,
   refreshCoverWell,
+  renderPendingCoverSummary,
 } from "./js/cover.js";
 import {
   allColumnKeys,
@@ -263,7 +268,7 @@ let activeApplyReview = null;
 let excludedApplyPaths = new Set();
 const fileViewScroll = { files: { top:0, left:0 }, staged: { top:0, left:0 } };
 function editablePreview() {
-  return !previewPlan || !diffByPath || isAutomaticTransformPreview() || previewPlan.changes.every(change => !change.rename_to && !change.cover_change && !change.block_changes?.length);
+  return true;
 }
 function setFileView(staged) {
   if (applying || undoing) return;
@@ -274,10 +279,11 @@ function setFileView(staged) {
   stagedView = staged;
   stagedMembershipPending = false;
   syncFileView();
-  renderTracks();
+  renderTracks({ preserveDuplicateRows: true });
+  patchMountedFields();
   const scroll = fileViewScroll[stagedView ? 'staged' : 'files'];
   tableWrap.scrollTop = scroll.top; tableWrap.scrollLeft = scroll.left;
-  renderWindow({force:true});
+  renderWindow({force:true, preserveDuplicateRows:true});
   document.dispatchEvent(new CustomEvent('tagrex:reveal-module',{detail:'files'}));
 }
 function syncFileView() {
@@ -362,7 +368,7 @@ function componentOwnsEscape(event) {
 // so the row renderer, the diff renderer, sorting and filtering cannot drift on
 // what a derived cell says.
 function virtualCellText(track, key, pending) {
-  if (key === "position") return vinylPositionOf(track, pending);
+  if (key === "position") return vinylPositionOf(track, new Map(['media','disc','track'].map(field => [field, workingField(track.path, field).value])));
   if (key === "length") return track.duration_secs == null ? "" : fmtTime(track.duration_secs);
   if (key === "tagtypes") return tagBlockSummary(track);
   return null;
@@ -761,6 +767,7 @@ function presetSummary(p) {
 // Keep this order/metadata when changing the renderer; never infer library
 // membership or edit scope from the currently mounted DOM rows.
 function decorateTrackArtwork(row, track) {
+  row._columnKeys = [...tableColumnKeys()];
   const file = row.querySelector('td.file');
   if (!file) return row;
   row.querySelector('td.sel')?.setAttribute('aria-colindex', '1');
@@ -802,6 +809,7 @@ function buildTrackRow(track, groupKey) {
   const tr = document.createElement("tr");
   tr.dataset.path = track.path;
   if (groupKey !== null) tr.dataset.group = groupKey;
+  if (isPlayingPath(track.path)) tr.classList.add("playing");
   // An unreadable file (tags failed to parse) is shown but inert: it can't be
   // selected, played, or edited, and every mode's preview already skips it. It's
   // listed only so it never looks like the file vanished (#83).
@@ -821,7 +829,6 @@ function buildTrackRow(track, groupKey) {
     fillDiffRow(tr, track);
     return decorateTrackArtwork(tr, track);
   }
-  if (isPlayingPath(track.path)) tr.classList.add("playing");
   // Checkbox + row highlight both reflect the `selection` set (source of truth),
   // so re-rendering never changes what's selected.
   const isSel = selection.has(track.path);
@@ -884,7 +891,6 @@ function fillDiffRow(tr, track) {
   if (rowSelectionSet().has(track.path)) tr.classList.add('selected');
   if (!change) {
     // Untouched row: current values, no apply tick, no editing/selection.
-    tr.classList.add("untouched");
     tr.innerHTML =
       `<td class="sel"></td>` +
       `<td class="file" title="${escapeHtml(track.path)}">${escapeHtml(fileName(track.path))}</td>`;
@@ -926,7 +932,7 @@ function fillDiffRow(tr, track) {
     if (cell.title) td.title = cell.title;
     td.textContent = cell.text;
     if (automatic) markLiveEditable(td,track,field);
-    if (cell.old) {
+    if (cell.old && stagedView) {
       const old = document.createElement("span");
       old.className = "cell-old";
       old.textContent = cell.old;
@@ -1099,12 +1105,13 @@ let headHeight = 0;
 let renderedRows = new Map();
 let renderedFirst = 0;
 let renderedLast = -1;
+let lastPaintedScrollTop = tableWrap.scrollTop;
 // Rows built above and below the viewport, so a small scroll shows real rows
 // rather than a gap waiting to be filled.
 const OVERSCAN_ROWS = 10;
 // Album-sized sets stay mounted: scrolling them requires no DOM work. Large
 // collections retain the bounded window instead of allocating a whole library.
-const MOUNTED_ROW_LIMIT = 200;
+const MOUNTED_ROW_LIMIT = 512;
 
 function itemHeightAt(i) {
   const measured = itemHeights[i];
@@ -1369,6 +1376,8 @@ function buildItemRow(i) {
 }
 
 function dropRow(tr) {
+  const active = tr.querySelector('[contenteditable="true"]');
+  if (active) { active.contentEditable = 'false'; commitCellEdit(active); }
   if (tr.dataset.path) renderedRows.delete(tr.dataset.path);
   tr.remove();
 }
@@ -1389,12 +1398,22 @@ function renderWindow({ force = false, refreshGrid = true, scrollOnly = false, p
   const maxTop = Math.max(0, headHeight + itemOffsets.top(viewItems.length) - viewportHeight);
   if (tableWrap.scrollTop > maxTop) tableWrap.scrollTop = maxTop;
   const viewportTop = tableWrap.scrollTop;
+  lastPaintedScrollTop = viewportTop;
   const windowed = viewItems.length > MOUNTED_ROW_LIMIT;
+  const visibleFirst = itemIndexAt(viewportTop);
+  const visibleLast = itemIndexAt(viewportTop + viewportHeight);
+  // A scroll inside the already mounted buffer is compositor-only. Do not
+  // trim/rebuild a row at every pixel or row boundary.
+  if (!force && scrollOnly && windowed && visibleFirst >= renderedFirst && visibleLast <= renderedLast) return;
   const first = windowed ? Math.max(0, itemIndexAt(viewportTop) - OVERSCAN_ROWS) : 0;
   const last = windowed ? Math.min(viewItems.length - 1, itemIndexAt(viewportTop + viewportHeight) + OVERSCAN_ROWS) : viewItems.length - 1;
   if (!force && first === renderedFirst && last === renderedLast) return;
-  if (force) spreadsheet?.beforePaint();
-  if(force&&preserveDuplicateRows&&commandMode==='duplicates'&&!stagedView){
+  const rowCount = renderedLast - renderedFirst + 1;
+  const intact = rowCount > 0 && tracksBody.children.length === rowCount + 2;
+  const overlaps = intact && first <= renderedLast && last >= renderedFirst;
+  const jumpingWindow = !force && intact && !overlaps;
+  if (force || jumpingWindow) spreadsheet?.beforePaint();
+  if((force&&preserveDuplicateRows)||jumpingWindow){
     const prior=new Map([...tracksBody.children].filter(row=>!row.classList.contains('spacer')).map(row=>[row.dataset.path?`track:${row.dataset.path}`:`group:${row.dataset.group}`,row]));
     const spacers=[...tracksBody.children].filter(row=>row.classList.contains('spacer'));
     const desired=[spacers[0]||spacerRow(0)];
@@ -1402,6 +1421,15 @@ function renderWindow({ force = false, refreshGrid = true, scrollOnly = false, p
     for(let i=first;i<=last;i++){
       const item=viewItems[i],key=item.kind==='track'?`track:${item.track.path}`:`group:${item.key}`;
       const row=prior.get(key)||buildItemRow(i);
+      if (item.kind === 'track' && row._columnKeys?.join('\0') !== tableColumnKeys().join('\0')) {
+        const fresh = buildTrackRow(item.track, item.groupKey);
+        const oldCells = new Map(row._columnKeys.map((field, index) => [field, row.cells[index + TABLE_DATA_COLUMN_OFFSET]]));
+        const fill = row.querySelector('.table-fill');
+        const freshCells = [...fresh.cells];
+        for (const [index, field] of tableColumnKeys().entries()) row.insertBefore(oldCells.get(field) || freshCells[index + TABLE_DATA_COLUMN_OFFSET], fill);
+        for (const [field, cell] of oldCells) if (!tableColumnKeys().includes(field)) cell.remove();
+        row._columnKeys = [...tableColumnKeys()];
+      }
       row.setAttribute('aria-rowindex',String(gridRowNumber(i)));
       if(item.kind==='track')renderedRows.set(item.track.path,row);
       else {const group=duplicateGroupLookup.get(item.key);if(group)paintDuplicateHeader(row,group,item.count);}
@@ -1410,12 +1438,10 @@ function renderWindow({ force = false, refreshGrid = true, scrollOnly = false, p
     desired.push(spacers[1]||spacerRow(0));
     const wanted=new Set(desired);let cursor=tracksBody.firstElementChild;
     for(const row of desired){if(row===cursor)cursor=cursor.nextElementSibling;else tracksBody.insertBefore(row,cursor);}
-    for(const row of [...tracksBody.children])if(!wanted.has(row))row.remove();
+    for(const row of [...tracksBody.children])if(!wanted.has(row))dropRow(row);
+    if(force)patchMountedFields();
     setSpacerHeights();measureRenderedRows();if(refreshGrid)spreadsheet?.refresh({scrollOnly});return;
   }
-  const rowCount = renderedLast - renderedFirst + 1;
-  const intact = rowCount > 0 && tracksBody.children.length === rowCount + 2;
-  const overlaps = intact && first <= renderedLast && last >= renderedFirst;
   if (!force && overlaps) {
     spreadsheet?.beforePaint();
     const topSpacer = tracksBody.firstElementChild;
@@ -1496,11 +1522,11 @@ function mountMeasureRows(keys) {
   return () => borrowed.forEach((tr) => tr.remove());
 }
 
-let lastVerticalScroll = tableWrap.scrollTop;
 let scrollPaintFrame = 0;
 tableWrap.addEventListener("scroll", () => {
-  if (tableWrap.scrollTop === lastVerticalScroll) return;
-  lastVerticalScroll = tableWrap.scrollTop;
+  // Compare with the last render, not the last event: a model rebuild can
+  // paint another offset before a coalesced scroll event resets it to zero.
+  if (tableWrap.scrollTop === lastPaintedScrollTop) return;
   if (!scrollPaintFrame) scrollPaintFrame = requestAnimationFrame(() => {
     scrollPaintFrame = 0;
     renderWindow({scrollOnly:true});
@@ -1607,9 +1633,9 @@ function updateStatus(selected = selectedPaths().length, publish = true) {
   if (publish) publishFilterState();
 }
 
-function resetEdits() {
+function resetEdits({ preserveEditor = false } = {}) {
   clearLiveInputs();
-  resetFieldEditor();
+  resetFieldEditor({ preserveSubject: preserveEditor });
 }
 
 // Move pending edits from old paths to new paths after a rename is applied, so
@@ -1623,10 +1649,88 @@ function remapEditsAfterRename(plan) {
   }
 }
 
+function patchMountedFields(keys = null, {rawInput = true} = {}) {
+  const columns = tableColumnKeys();
+  const affected = keys ? new Map() : null;
+  if (affected) for (const {path,field} of keys) {
+    let fields=affected.get(path);
+    if (!fields) affected.set(path,(fields=new Set()));
+    fields.add(field);
+  }
+  for (const [path, row] of renderedRows) {
+    const fields=affected?.get(path);
+    if (affected && !fields) continue;
+    const track = trackAt(path); if (!track || track.unreadable) continue;
+    const change = diffByPath?.get(path);
+    if (!activeApplyReview && row.dataset.applyState) {
+      delete row.dataset.applyState; row.removeAttribute('aria-disabled');
+      row.classList.remove('apply-complete','applying-current');
+    }
+    row.classList.toggle('selected', rowSelectionSet().has(path));
+    row.classList.toggle('staged', !!change);
+    if (!keys) {
+      const indicator = row.querySelector('.track-artwork');
+      if (indicator) {
+        const cover = change?.cover_change;
+        const state = cover && !cover.invalid ? (cover.new.length ? 'embedded' : 'missing') : coverState(track);
+        const operation = cover && !cover.invalid ? (!cover.new.length ? 'removed' : !cover.old.length ? 'added' : 'replaced') : '';
+        const title = msg(`table.artwork.${operation || state}`);
+        if (indicator.dataset.coverState !== state) indicator.dataset.coverState = state;
+        indicator.classList.toggle('artwork-changing', !!operation);
+        if (operation && indicator.dataset.coverChange !== operation) indicator.dataset.coverChange = operation;
+        else if (!operation && indicator.hasAttribute('data-cover-change')) indicator.removeAttribute('data-cover-change');
+        if ((indicator.getAttribute('title') ?? indicator.getAttribute('aria-description') ?? '') !== title) indicator.title = title;
+        if (indicator.getAttribute('aria-label') !== title) indicator.setAttribute('aria-label', title);
+      }
+      const file = row.querySelector('td.file');
+      const destination = change?.rename_to || '';
+      if (file && (file.dataset.destination || '') !== destination) {
+        const template = document.createElement('template');
+        template.innerHTML = diffFileCellHtml(change || {path}, track);
+        const next = template.content.firstChild;
+        file.replaceChildren(...next.childNodes); file.className = next.className; file.title = next.title;
+        file.dataset.destination = destination;
+      }
+    }
+    for (const [index, field] of columns.entries()) {
+      if (field === 'file' || customColumnOf(field)) continue;
+      const cell = row.cells[index + TABLE_DATA_COLUMN_OFFSET]; if (!cell) continue;
+      if (fields && !fields.has(field) && !(field==='position' && ['track','disc','media'].some(key=>fields.has(key)))) continue;
+      const derived = virtualCellText(track, field, edits.get(path));
+      if (derived !== null) { patchCellText(cell, derived); continue; }
+      const projected = workingField(path, field);
+      const presentation = change ? diffCell(change, field, track) : { text: formatNumber(projected.value, field), cls: projected.dirty ? 'dirty' : '' };
+      // The raw overlay wins until native validation returns. Computed output
+      // remains separate while the active editor owns its raw text.
+      if (keys && rawInput && projected.raw !== undefined) {
+        presentation.text = projected.raw;
+        presentation.cls = projected.invalid ? 'error' : projected.dirty ? `dirty${projected.raw === '' ? ' cleared' : ''}` : '';
+      }
+      patchCellText(cell, presentation.text, stagedView ? presentation.old : '');
+      for (const name of ['dirty','error','unchanged','cleared','empty']) cell.classList.toggle(name, presentation.cls.split(' ').includes(name));
+      if ((cell.getAttribute('title') ?? cell.getAttribute('aria-description') ?? '') !== (presentation.title || '')) cell.title = presentation.title || '';
+    }
+  }
+}
+
+document.addEventListener('tagrex:working-fields', event => {
+  patchMountedFields(event.detail);
+  if (nativeLiveFields && sharedStageSync) {
+    const entries = event.detail.map(({path,field}) => ({path,field,value:workingField(path,field).value}));
+    applyBtn.disabled = true;
+    void sharedStageSync.intents(entries, liveIntentOptions()).then(() => updateDiffBar());
+  }
+});
+document.addEventListener('tagrex:native-recompute', event => {
+  if (!sharedStageSync) return;
+  applyBtn.disabled=true;
+  void sharedStageSync.intents(event.detail.entries,event.detail.options).then(()=>updateDiffBar());
+});
+
 function onCellEdit(td) {
   prepareTagCellEdit();
   const {path,field,original} = td.dataset;
-  const value = td.textContent.trim();
+  const value = td.textContent.replace(/\u00a0/g, ' ');
   const valid = validateFieldValue(field,value,[path]).ok;
   td.classList.toggle('error',!valid);
   td.classList.toggle('dirty',valid && value!==original);
@@ -1635,27 +1739,16 @@ function onCellEdit(td) {
 
 // Enter or blur finishes the cell's raw input; Apply is the only writer.
 function commitCellEdit(td) {
-  if (!td.isConnected) return;
+  if (!td.isConnected || !td.dataset.editingSession) return;
+  delete td.dataset.editingSession;
   // Leaving an invalid cell keeps its visible raw draft and the Apply gate.
   // It is never silently filtered out of an otherwise applicable plan.
   // Input already scheduled this revision. Ending focus must not start another
   // revision while a preview is patching rows (which also produces blur).
-  const change = diffByPath?.get(td.dataset.path);
-  const track = trackAt(td.dataset.path);
-  if (change && track) {
-    const cell = diffCell(change, td.dataset.field, track);
-    td.textContent = cell.text;
-    td.classList.toggle('dirty', cell.cls.split(' ').includes('dirty'));
-    td.classList.toggle('error', cell.cls.split(' ').includes('error'));
-    td.classList.toggle('unchanged', cell.cls.split(' ').includes('unchanged'));
-    td.classList.toggle('cleared', cell.cls.split(' ').includes('cleared'));
-    if (cell.old && stagedView) {
-      const old=document.createElement('span'); old.className='cell-old'; old.textContent=cell.old; td.append(old);
-    }
-  }
+  patchMountedFields([{path:td.dataset.path, field:td.dataset.field}]);
   if (stagedView && stagedMembershipPending) {
     stagedMembershipPending = false;
-    queueMicrotask(() => { if (!tracksBody.querySelector('[contenteditable="true"]')) { if (!diffByPath?.size) exitDiffState(); else renderTracks(); } });
+    queueMicrotask(() => { if (!tracksBody.querySelector('[contenteditable="true"]')) { if (!diffByPath?.size) exitDiffState(); else renderTracks({preserveDuplicateRows:true}); } });
   }
   if (diffByPath && !diffByPath.size) queueMicrotask(() => { if (!tracksBody.querySelector('[contenteditable="true"]')) exitDiffState(); });
   updateDiffBar();
@@ -1693,10 +1786,10 @@ function showView(which) {
 function discardPreview() {
   if (applying || undoing) return;
   const discard = () => {
-    resetEdits();
+    resetEdits({preserveEditor:true});
     dismissAutomaticTransformPreview();
     exitDiffState();
-    refreshFieldEditor({force:true,resetDraft:true});
+    refreshSharedStagedFields();
   };
   if (sharedStageSync) {
     clearingSharedStage = true;
@@ -1713,7 +1806,7 @@ function discardPreview() {
 // still because every mutating mode funnels its plan here; there is no separate
 // Preview view any more — the same #tracks table shows the change in place with a
 // persistent Apply/Discard footer. An empty plan just leaves the table untouched.
-function renderPreview(plan, { preserveView = false } = {}) {
+function renderPreview(plan, { preserveView = false, delta = null } = {}) {
   const inputPlan = plan;
   plan = resolvedPreviewPlan(plan);
   if (sharedStageSync && inputPlan !== plan && plan?.changes.length > 2048 && isAutomaticTransformRefresh()) {
@@ -1724,43 +1817,43 @@ function renderPreview(plan, { preserveView = false } = {}) {
     return;
   }
   renderStaging(plan);
-  // Reverting the last cell can empty the plan before the editor loses focus.
-  // Keep that DOM node attached until commit/blur, then remove its pending row.
-  if (!plan?.changes.length && isAutomaticTransformRefresh() && tracksBody.querySelector('[contenteditable="true"]')) {
+  if (!plan?.changes.length && tracksBody.querySelector('[contenteditable="true"]')) {
     setDiffByPath(new Map()); setApplySelection(new Set());
-    stagedMembershipPending = true;
-    updateDiffBar();
-    return;
+    stagedMembershipPending = true; updateDiffBar(); return;
   }
-  // Live typing changes values, not table membership. Keep an actively edited
-  // cell attached and patch only affected visible rows; grouping and virtual
-  // prefix sums do not need rebuilding on every keystroke.
-  if (plan && (diffByPath || tracksBody.querySelector('[contenteditable="true"]')) && isAutomaticTransformRefresh() &&
-      !plan.changes.some(change => change.rename_to) && ![...(diffByPath?.values() || [])].some(change => change.rename_to)) {
-    const previous = diffByPath || new Map();
-    const next = new Map(plan.changes.map(change => [change.path,change]));
-    setDiffByPath(next);
-    setApplySelection(new Set([...next.keys()].filter(path => !excludedApplyPaths.has(path))));
-    const membershipChanged = previous.size !== next.size || [...previous.keys()].some(path => !next.has(path));
-    const editing = tracksBody.querySelector('[contenteditable="true"]');
-    if (!next.size && !editing) { exitDiffState(); return; }
-    if (stagedView && membershipChanged) {
-      if (editing) stagedMembershipPending = true;
-      else { stagedMembershipPending = false; renderTracks(); }
+  if (!plan?.changes.length) retireRevertedRawFields();
+  const previous = diffByPath;
+  const deltaMembershipChanged = delta?.nativeDelta && delta.changedKeys.some(({path}) => !!diffByPath?.has(path) !== !!delta.changeAt(path));
+  if (plan?.changes.length) {
+    if (delta?.nativeDelta && diffByPath) {
+      for (const {path} of delta.changedKeys) {
+        const change = delta.changeAt(path);
+        if (change) { diffByPath.set(path,change); if (!excludedApplyPaths.has(path)) applySelection.add(path); }
+        else { diffByPath.delete(path); applySelection.delete(path); }
+      }
+    } else {
+      setDiffByPath(new Map(plan.changes.map(change => [change.path, change])));
+      setApplySelection(new Set([...diffByPath.keys()].filter(path => !excludedApplyPaths.has(path))));
     }
-    document.body.classList.add('diffing','automatic-transform-preview');
-    if (syncFileView()) renderTracks();
-    for (const [path,row] of renderedRows) {
-      const displaySignature = change => JSON.stringify([change?.tag_changes, !!change?.cover_change, change?.cover_change?.new?.length]);
-      if (displaySignature(previous.get(path)) === displaySignature(next.get(path))) continue;
-      if (row.querySelector('[contenteditable="true"]')) continue;
-      const track = trackAt(path); if (!track) continue;
-      const fresh = buildTrackRow(track,row.dataset.group ?? null);
-      row.className = fresh.className;
-      row.replaceChildren(...fresh.childNodes);
+    document.body.classList.add('diffing');
+    document.body.classList.toggle('automatic-transform-preview', isAutomaticTransformPreview());
+    const columnsChanged = delta?.nativeDelta && !delta.columnsChanged ? false : syncFileView();
+    const membershipChanged = delta?.nativeDelta ? deltaMembershipChanged : !previous || previous.size !== diffByPath.size || [...previous.keys()].some(path => !diffByPath.has(path));
+    const destinationsChanged = delta?.nativeDelta ? delta.changedKeys.some(({field})=>field==='filename') : previous && [...diffByPath].some(([path,change])=>change.rename_to!==previous.get(path)?.rename_to);
+    if (stagedView && (membershipChanged || columnsChanged || destinationsChanged)) {
+      if (tracksBody.querySelector('[contenteditable="true"]')) stagedMembershipPending = true;
+      else renderTracks({ preserveDuplicateRows: true });
     }
+    const scalarKeys = delta?.nativeDelta && delta.changedKeys.every(({field}) => field !== 'artwork' && field !== 'filename' && !field.startsWith('block:')) ? delta.changedKeys : null;
+    patchMountedFields(scalarKeys, {rawInput:false});
+    if (!delta?.nativeDelta || delta.changedKeys.some(({field}) => field === 'artwork' || field.startsWith('block:'))) renderPendingCoverSummary();
+    const kind = previewSource === 'spreadsheet' ? spreadsheetBatchKind : '';
+    const description = [kind, planText(previewPlan)].filter(Boolean).join(' · ');
+    const label = description ? ` · ${shortPlanDescription(description)}` : '';
+    if (el('ab-plan').textContent !== label) el('ab-plan').textContent = label;
+    if (el('diff-actionbar').title !== description) el('diff-actionbar').title = description;
     el('diff-actionbar').hidden = false;
-    renderLockedSkips(); updateDiffBar(); spreadsheet?.refresh();
+    renderLockedSkips(); updateDiffBar(); updateRefreshButton();
     return;
   }
   if (!plan || plan.changes.length === 0) {
@@ -1778,66 +1871,13 @@ function renderPreview(plan, { preserveView = false } = {}) {
     exitDiffState();
     return;
   }
-  enterDiffState({ preserveView });
 }
 
-// Entering and leaving the diff-state is a re-render of the WINDOW (#189), not
-// of the library: the staged rows the viewport holds are rebuilt, everything
-// else recedes by a rule hanging off the body-level `diffing` class, and a
-// staged file the filter would otherwise hide is in the model because the model
-// builder keeps it (#117). This is what #186 was reaching for by patching rows
-// one at a time; with the table windowed, the plain renderer is already that
-// cheap and the patching layer went away with it.
-
-// Enter the in-table diff-state: build the path->change map, tick every changed
-// file for apply by default, show the change in the table and reveal the action footer.
-// The operation without the pattern it ran, but WITH whatever the backend
-// appended after it: `Tags from name: %artist% - %title% · cleaned up` is three
-// facts, and only the middle one is redundant here (#232).
 function shortPlanDescription(description) {
   const [head, ...rest] = description.split(": ");
   if (!rest.length) return description;
   const marks = rest.join(": ").split(" · ").slice(1);
   return [head, ...marks].join(" · ");
-}
-
-function enterDiffState({ preserveView = false } = {}) {
-  setDiffByPath(new Map(previewPlan.changes.map((c) => [c.path, c])));
-  if (!isAutomaticTransformPreview() && !preserveView) excludedApplyPaths.clear();
-  setApplySelection(new Set([...diffByPath.keys()].filter(path => !excludedApplyPaths.has(path))));
-  document.body.classList.add("diffing");
-  document.body.classList.toggle('automatic-transform-preview', isAutomaticTransformPreview());
-  syncFileView();
-  if (!preserveView) showView("files"); // background staging never changes the person's view
-  if (isAutomaticTransformPreview() && currentMode === 'deduplicator') {
-    el('duplicates-view').hidden = true;
-    document.body.classList.remove('mode-deduplicator');
-  }
-  renderTracks();
-  // The pill names the OPERATION, not the pattern behind it (#232). A mask can
-  // be a hundred characters and it was typed a few centimetres above this bar,
-  // so spelling it out here is the longest thing on screen saying the least —
-  // while in the undo journal, which is where the description is stored, it is
-  // the very thing that tells you months later what a batch did. So the head of
-  // the description shows and the whole of it is a hover away.
-  const plan = el("ab-plan");
-  const backendDescription = planText(previewPlan);
-  const kind = previewSource === "spreadsheet" ? spreadsheetBatchKind : "";
-  const description = [kind, backendDescription].filter(Boolean).join(" · ");
-  plan.textContent = description ? ` · ${shortPlanDescription(description)}` : "";
-  el("diff-actionbar").title = description;
-  if (description && description !== shortPlanDescription(description)) {
-    plan.title = description;
-  } else {
-    plan.removeAttribute("title");
-  }
-  renderLockedSkips();
-  el("diff-actionbar").hidden = false;
-  updateDiffBar();
-  updateRefreshButton(); // a staged plan puts the re-read out of reach (#212)
-  // The rule chain acts on the staged plan while one is staged (#142), and its
-  // wording says so — so it has to hear about entering and leaving this state.
-  refreshGenerator();
 }
 
 // What a lock kept out of the staged plan (#48).
@@ -1866,6 +1906,7 @@ function exitDiffState() {
   setPreviewPlan(null);
   setPreviewSource(null);
   setDiffByPath(null);
+  renderPendingCoverSummary();
   setApplySelection(new Set());
   // A validated proposal may already have enabled Apply before a revert. The
   // empty plan must clear that state too, not merely hide its action footer.
@@ -1874,7 +1915,8 @@ function exitDiffState() {
   syncFileView();
   el("diff-actionbar").hidden = true;
   closePlanReport(); // a report about this plan goes with it (#562)
-  renderTracks();
+  if (stagedView) renderTracks({ preserveDuplicateRows: true });
+  else patchMountedFields();
   refreshGenerator();
   updateRefreshButton(); // the re-read is reachable again (#212)
   if (currentMode === 'deduplicator') {
@@ -1924,13 +1966,14 @@ function updateDiffBar(scope) {
   if (applyBtn.getAttribute("aria-label") !== applyLabel) applyBtn.setAttribute("aria-label", applyLabel);
   const label = el("ab-apply-label");
   if (label.textContent !== applyLabel) label.textContent = applyLabel;
-  applyBtn.disabled = commandMode==='duplicates' || filterPending || !!filterError || n === 0 || !!tracksBody.querySelector('[contenteditable="true"]') || scope.planInvalid || (isAutomaticTransformPreview() && (scope.busy || scope.invalid || scope.failed));
+  applyBtn.disabled = commandMode==='duplicates' || filterPending || !!filterError || n === 0 || !!sharedStageSync?.pending() || !!tracksBody.querySelector('[contenteditable="true"]') || scope.planInvalid || (isAutomaticTransformPreview() && (scope.busy || scope.invalid || scope.failed));
   const pending = filterPending || (isAutomaticTransformPreview() && scope.busy);
   const blocked = applyBtn.disabled;
   el("diff-actionbar").dataset.blocked = String(blocked);
-  const statusKey = blocked ? (pending ? "diff.updating" : "diff.checkChanges") : (n === 1 ? "diff.fileReady" : "diff.filesReady");
+  const statusKey = blocked ? (pending ? "" : "diff.checkChanges") : (n === 1 ? "diff.fileReady" : "diff.filesReady");
   el("ab-state").dataset.i18n = statusKey;
-  el("ab-state").textContent = msg(statusKey);
+  const stateText = statusKey ? msg(statusKey) : '';
+  if (el("ab-state").textContent !== stateText) el("ab-state").textContent = stateText;
   if (isAutomaticTransformPreview()) return; // header ticks still select tracks
   selectAll.checked = n > 0 && n === staged;
   selectAll.indeterminate = n > 0 && n < staged;
@@ -2604,7 +2647,7 @@ function freezeMutationSurfaces({ scrollableFiles = false } = {}) {
 }
 
 async function apply() {
-  if(commandMode==='duplicates')return;
+  if(applying || undoing || commandMode==='duplicates' || sharedStageSync?.pending())return;
   if (!previewPlan || previewPlan.changes.length === 0) return;
   if (isAutomaticTransformPreview() && (automaticTransformScope().busy || automaticTransformScope().failed || automaticTransformScope().invalid)) return;
   if (filterPending || filterError || hasInvalidPreview(previewPlan)) return;
@@ -3683,7 +3726,6 @@ function scheduleSelectionPanels() {
       } finally {
         el('fields-body').inert = false;
         el('fields-body').removeAttribute('aria-busy');
-        el('cover-well').inert = false;
       }
     }, 0);
   });
@@ -3729,7 +3771,7 @@ function syncSelectionUI({ deferPanels = false, refreshGrid = true, refreshPanel
       selectionPanelSubject = subject;
       selectionPanelsPending = true;
       cancelSelectionPanels();
-      invalidateAutomaticTransformPreview();
+      invalidateAutomaticTransformPreview({selectionOnly:true});
       scopeAnnounced = true; // Its public event updates the scope synchronously.
       // Old controls cannot edit a previous subject while the new view is pending.
       el('fields-body').inert = true;
@@ -3752,7 +3794,7 @@ function updateTransformScope() {
   const note = el('status-transform-scope');
   if (!note) return;
   const scope = automaticTransformScope();
-  const text = scope.busy ? 'Previewing…' : scope.invalid ? 'Fix invalid values' : scope.failed ? 'Preview failed' : scope.blocked ? 'Review current preview first' : '';
+  const text = scope.busy ? '' : scope.invalid ? 'Fix invalid values' : scope.failed ? 'Preview failed' : scope.blocked ? 'Review current preview first' : '';
   // Preview state controls validation, never a second notification strip.
   note.hidden = true;
   note.dataset.detail = String(Boolean(text));
@@ -3862,6 +3904,7 @@ function beginCellEdit(cell) {
     cell.textContent = field ? field.new ?? '' : currentFieldValue(cell.dataset.path,cell.dataset.field);
   }
   cell.dataset.editOriginal = cell.textContent;
+  cell.dataset.editingSession = 'active';
   cell.contentEditable = "true";
   cell.focus();
   // Read the library's values for this column once per edit, not per keystroke
@@ -4076,7 +4119,14 @@ tracksBody.addEventListener("keydown", (e) => {
     e.preventDefault();
     const i = navPathIndex.get(tr.dataset.path);
     const next = i === undefined ? undefined : navPaths[e.key === "ArrowDown" ? i + 1 : i - 1];
-    if (next) setActiveRowByPath(next, true);
+    if (next) {
+      if (!usingReviewSelection() && !e.ctrlKey && !e.metaKey) {
+        if (e.shiftKey && selAnchor) selectRangeFromAnchor(navPathIndex.get(selAnchor) ?? i, navPathIndex.get(next));
+        else { selection.clear(); selection.add(next); anchorSelection(next); }
+        syncSelectionUI({refreshGrid:false});
+      }
+      setActiveRowByPath(next, true);
+    }
   } else if (e.key === " ") {
     e.preventDefault(); // Space would otherwise scroll
     const path = tr.dataset.path;
@@ -4590,7 +4640,13 @@ spreadsheet = initSpreadsheet({
     commitCellEdit(cell);
   },
   reveal: scrollPathIntoView,
-  setActiveRow: (path) => setActiveRowByPath(path, false),
+  setActiveRow: (path, {extend=false,followSelection=false}={}) => {
+    setActiveRowByPath(path, false);
+    if (followSelection && !extend && commandMode!=='duplicates' && !usingReviewSelection() && (selection.size!==1 || !selection.has(path))) {
+      selection.clear();selection.add(path);anchorSelection(path);
+      syncSelectionUI({refreshGrid:false});
+    }
+  },
   focusRow: (path) => setActiveRowByPath(path, true),
   selectionSummary: () => {
     const hidden = [...selection].filter((path) => !navPathIndex.has(path)).length;
@@ -4706,25 +4762,35 @@ if (TAURI) {
     else mirrorManualPlan(event.detail);
   });
   document.addEventListener('tagrex:live-input', () => {
-    if (!sharedStageSync || clearingSharedStage) return;
+    if (!sharedStageSync || clearingSharedStage || nativeLiveFields) return;
     const touched = touchedFields();
     sharedStageSync.touched(touched);
     // Claim a directly typed field before an older native/agent response can
     // refresh that cell. The validated automatic preview follows normally.
     if (touched.length) void sharedStageSync.changed(sharedStageSync.humanPlan(), touched);
   });
-  function connectSharedStage() {
+  function connectSharedStage(capabilities) {
     if (sharedStageSync) return;
+    const live = capabilities?.version >= 1 && capabilities.delta && capabilities.intents ? createLiveStageTransport(invoke, capabilities) : null;
+    setNativeLiveFields(!!live, capabilities);
+    setNativeStageSession(capabilities?.session);
     sharedStageSync = createSharedStageSync({
-      read: () => invoke('mcp_shared_stage', {}),
-      publish: (plan, expectedRevision, touched) => invoke('mcp_publish_shared_stage', { plan, expectedRevision, touched }),
-      clear: expectedRevision => invoke('mcp_clear_shared_stage', { expectedRevision }),
+      intents: live?.publish,
+      read: live?.read || (() => invoke('mcp_shared_stage', {})),
+      publish: async (plan, expectedRevision, touched) => {
+        const value = await invoke('mcp_publish_shared_stage', { plan, expectedRevision, touched });
+        return live ? live.reconcile(value) : value;
+      },
+      clear: async expectedRevision => {
+        const value = await invoke('mcp_clear_shared_stage', { expectedRevision });
+        return live ? live.reconcile(value) : value;
+      },
       context: () => ({ inputRevision: liveInputRevision(), library: tracks, busy: applying || undoing }),
       adopt: snapshot => {
         if (!tracks.length) return false;
-        const automatic = isAutomaticTransformPreview() || !snapshot.human_plan
-          || snapshot.human_plan.changes.every(change => !change.rename_to && !change.block_changes?.length);
-        const plan = snapshot.plan ? hydratePlan(snapshot.plan) : null;
+        setNativeStageSession(snapshot.session,snapshot.nativeDelta ? null : (snapshot.derived_fields || []),snapshot.derivedChanges || []);
+        const automatic = true; // Shared fields stay editable inside mixed artwork/rename plans.
+        const plan = snapshot.nativeDelta ? snapshot.plan : snapshot.plan ? hydratePlan(snapshot.plan) : null;
         withoutPreviewPublication(() => {
           setPreviewPlan(plan);
           adoptSharedPreview(plan, snapshot.human_plan, automatic);
@@ -4733,9 +4799,13 @@ if (TAURI) {
         // Rendering can synchronously refresh automatic inputs. Those updates
         // must still pass through the shared-stage decorator rather than
         // replacing the canonical stage with a local null/partial preview.
-        renderPreview(plan, { preserveView: true });
-        refreshSharedStagedFields();
-        refreshCustomColumnCells(); syncSelectionUI();
+        renderPreview(plan, { preserveView: true, delta: snapshot });
+        refreshSharedStagedFields(snapshot.nativeDelta ? snapshot.changedKeys : null);
+        // A staging acknowledgement changes desired fields, not saved custom
+        // columns or the selection. Their existing open/write/view handlers
+        // own refreshes; scanning the library here defeats scalar deltas.
+        if (!snapshot.nativeDelta) syncSelectionUI({refreshGrid:false});
+        if (!snapshot.nativeDelta) scheduleAutomaticTransformPreview();
       },
       error: failure => toast(String(failure), true),
     });
@@ -4765,7 +4835,7 @@ if (TAURI) {
     agentsEnabled = status.listening;
     // During source iteration the old native binary remains usable. Only a
     // backend advertising this contract receives shared-stage commands.
-    if (agentsAvailable && status.shared_staging === true) connectSharedStage();
+    if (agentsAvailable && status.shared_staging === true) connectSharedStage(status.live_fields);
     const activity = el('agent-activity');
     activity.hidden = !agentsEnabled;
     const active = [...(status.operations?.operations || []), ...(status.analysis?.jobs || [])].filter(operation => ['queued','running','preflight','writing','rolling_back'].includes(operation.status)).length;

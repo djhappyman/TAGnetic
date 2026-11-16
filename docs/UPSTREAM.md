@@ -4,6 +4,20 @@ Tagnetic builds on [tagrex/tagrex](https://github.com/tagrex/tagrex). This fork'
 
 ## Current coverage
 
+### 1.4.8 live fields and table stability
+
+Fork branch `fix/behaviour-refinements` builds on the released 1.4.7 MCP service.
+Native incremental intents/deltas and transform basis tracking are eligible for
+`tagrex/tagrex:main`; stable working-field projections, artwork isolation,
+keyboard selection and scroll containment belong on `tagrex/tagrex:next`.
+Status: **waiting** for the proposed 1.4.7 service/query foundation and the
+unmerged Next interface foundation [#729](https://github.com/tagrex/tagrex/pull/729).
+There is no compatible upstream service base for a standalone cherry-pick of
+these native changes yet. Keep the backend and UI curation separate, preserve
+upstream inline artwork journals/waveform APIs, and omit the personal 1.4.8
+version, release identity and packaging changes. No upstream acceptance or
+new upstream PR is claimed by this checkpoint.
+
 ### 1.4.7 collaborative MCP
 
 The service/transport, shared working-value command helpers and scoped operation

@@ -120,7 +120,7 @@ test('group left-click folds, right-click replaces selection and Ctrl-click remo
 });
 
 test('marquee autoscroll spans rows outside the original virtual window', async ({ page }) => {
-  await many(page, Array.from({ length: 400 }, (_, i) => `track-${String(i).padStart(3, '0')}.mp3`));
+  await many(page, Array.from({ length: 1200 }, (_, i) => `track-${String(i).padStart(3, '0')}.mp3`));
   const initialPaths = await rows(page).evaluateAll(nodes => nodes.map(node => node.dataset.path));
   const first = await rows(page).first().locator('td.file').boundingBox();
   const bounds = await page.locator('#files-view').boundingBox();
@@ -133,7 +133,7 @@ test('marquee autoscroll spans rows outside the original virtual window', async 
   expect(chosen.some(path => !initialPaths.includes(path))).toBe(true);
   expect(chosen).toContain('/dropped/track-000.mp3');
   expect(await rows(page).count()).toBeLessThan(100);
-  expect(await paths(page)).toEqual(Array.from({ length: 400 }, (_, i) => `/dropped/track-${String(i).padStart(3, '0')}.mp3`));
+  expect(await paths(page)).toEqual(Array.from({ length: 1200 }, (_, i) => `/dropped/track-${String(i).padStart(3, '0')}.mp3`));
 });
 
 test('double-click tag editing still works and its text drag does not become a row marquee', async ({ page }) => {

@@ -1,6 +1,6 @@
 /* TagScanner-style file workbench: one flat list, without card or cell frames. */
 body .files-col { border:0; border-radius:0; box-shadow:none; }
-body #files-view { border:0; border-radius:0; }
+body #files-view { border:0; border-radius:0; contain:layout paint; }
 body #tracks { border:0; border-spacing:0; }
 body #tracks thead th { padding:4px 8px; height:25px; font-family:var(--font-ui); font-weight:500; letter-spacing:normal; text-transform:none; background:var(--panel); border:0; border-bottom:1px solid var(--border); }
 body #tracks tbody td { padding:2px 8px; border:0; line-height:var(--lh-tight); }
@@ -24,8 +24,12 @@ body #tracks tbody tr[data-path] > td[contenteditable='true'] * { cursor:text; }
 body #tracks td.sheet-active, body #tracks td.file.sheet-active,
 body #tracks tbody tr:focus-visible td:not(.dirty):not(.error) { outline:none; box-shadow:none; }
 body #tracks td.sheet-active:focus-visible,
-body #tracks td.sheet-active[contenteditable="true"] { outline:none; box-shadow:inset 0 -1px 0 var(--accent); }
+body #tracks td.sheet-active[contenteditable="true"] { outline:none; box-shadow:none; }
 body #tracks td.sheet-active[contenteditable="true"] { background:var(--bg); }
+body #tracks tr.sheet-cell-row.selected td:not(.sheet-active):not(.dirty):not(.error):not(.sheet-range) { background:color-mix(in srgb,var(--row-sel) 65%,var(--bg)); }
+body #tracks tr.sheet-cell-row.selected td.sheet-active:not(.error):not([contenteditable='true']) { background:color-mix(in srgb,var(--accent) 55%,var(--bg)); }
+body #tracks tr.playing td.file,
+body #tracks.show-old tr.playing td.file { font-weight:650; }
 body.automatic-transform-preview #tracks tbody tr:not(.staged) td.sel input { pointer-events:auto; opacity:1; }
 body.automatic-transform-preview #tracks tbody tr.selected td:not(.dirty):not(.error) { background:var(--row-sel); }
 .sheet-menu-context { max-width:280px; white-space:normal; }
@@ -110,7 +114,7 @@ body #tracks tr.group-head.collapsed .group-caret > .ico { transform:rotate(-90d
 body #tracks tr.group-head:focus-visible { outline:1px solid var(--accent); outline-offset:-1px; }
 
 .group-motion-exit .cell-old { display:none; }
-.group-motion-exit.show-old .cell-old { display:block; font-size:var(--text-2xs); color:var(--muted); text-decoration:line-through; font-weight:var(--fw-regular); }
+.group-motion-exit.show-old .cell-old { display:block; margin-top:3px; font-size:var(--text-2xs); color:var(--muted); opacity:.65; font-weight:var(--fw-regular); font-style:normal; text-decoration:line-through; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .group-motion-exit .fcell { display:flex; flex-direction:column; gap:1px; min-width:0; }
 
 /* Keep unaffected files readable while a draft is staged. */

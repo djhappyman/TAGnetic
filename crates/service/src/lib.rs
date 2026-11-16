@@ -26,7 +26,11 @@ pub mod private_storage;
 mod recovery;
 mod staging;
 pub use catalog::{tool_catalog, ToolDefinition};
-pub use staging::{SharedStageSnapshot, StageFieldRef};
+pub use staging::{
+    SharedStageSnapshot, StageArtworkCover, StageArtworkDelta, StageBlockDelta, StageDelta,
+    StageFieldDelta, StageFieldRef, StageIntent, StageIntentOutcome, StageIntentRequest,
+    StageRenameDelta, StageTagDelta,
+};
 
 pub type SharedApp = Arc<Mutex<Option<App>>>;
 pub type ServiceResult<T> = Result<T, ServiceError>;
@@ -323,6 +327,10 @@ impl Service {
             }
             (record.id.clone(), Arc::new(Operation { record: Mutex::new(record), cancel: AtomicBool::new(false) }))
         }).collect();
+        let mut stage = staging::StageState::default();
+        // The stage session identifies this process' live stage to delta
+        // callers; it is never persisted and never an authorization token.
+        stage.session = opaque("stage")?;
         Ok(Self(Arc::new(Inner {
             app,
             directory: data_dir,
@@ -340,7 +348,7 @@ impl Service {
                 operations,
                 manual_plan: None,
                 manual_revision: 0,
-                stage: staging::StageState::default(),
+                stage,
                 recovery_required,
                 redo_revision: 0,
             }),

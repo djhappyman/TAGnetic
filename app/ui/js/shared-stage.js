@@ -70,44 +70,72 @@ export function optimisticSharedPlan(remainder, humanPlan, touched = []) {
   return list.length ? { ...(humanPlan || remainder), changes: list } : null;
 }
 
-export function createSharedStageSync({ read, publish, clear, context, adopt, error = () => {} }) {
+export function createSharedStageSync({ read, publish, clear, context, adopt, intents, error = () => {} }) {
   let snapshot = null, remainder = null, pending = null, running = null, refresh = false, clearRequested = false;
-  let generation = 0, started = false, lastFailure = null;
-  let adoptedRevision = -1, adoptedGeneration = -1;
+  let generation = 0, discardGeneration = 0, started = false, lastFailure = null, publishing = false;
+  let adoptedRevision = -1, adoptedGeneration = -1, adoptedSession = null;
   const touches = new Map();
-  const capture = () => ({ ...context(), generation });
+  const capture = () => ({ ...context(), generation, discardGeneration });
   const current = before => {
     const after = context();
     return before.generation === generation && before.inputRevision === after.inputRevision
       && before.library === after.library && !after.busy;
   };
   const accept = (value, before) => {
-    if (snapshot && value.revision < snapshot.revision) return;
+    if (snapshot && value.revision < snapshot.revision && (!value.session || value.session === snapshot.session)) return;
     snapshot = value; remainder = stageRemainder(value);
     if (!pending && !clearRequested && current(before)
-      && (adoptedRevision !== value.revision || adoptedGeneration !== generation)) {
-      if (adopt(value) !== false) { adoptedRevision = value.revision; adoptedGeneration = generation; }
+      && (adoptedRevision !== value.revision || adoptedGeneration !== generation || adoptedSession !== value.session)) {
+      if (adopt(value) !== false) { adoptedRevision = value.revision; adoptedGeneration = generation; adoptedSession = value.session; }
     }
   };
-  const conflict = failure => /stage_conflict|staging.*changed|stage.*changed/i.test(String(failure));
+  const hasPlan = value => value && Object.hasOwn(value,'plan');
+  const conflict = failure => /stage_conflict|staging.*changed|stage.*changed|stage revision.*different session/i.test(String(failure));
+  function restore(work) {
+    if (work.clear) { clearRequested=true; return; }
+    if (work.intents) {
+      const replaced = new Set(hasPlan(pending) ? [...stagedFields(pending.plan), ...(pending.touched || [])].map(entry=>key(entry.path,entry.field)) : []);
+      const merged = new Map([...work.intents.filter(entry=>!replaced.has(key(entry.path,entry.field))), ...(pending?.intents || [])].map(entry=>[key(entry.path,entry.field),entry]));
+      pending = {...work,...pending};
+      if (merged.size || pending.options?.recompute) pending.intents=[...merged.values()]; else delete pending.intents;
+    } else if (!hasPlan(pending)) pending = {...work,...pending};
+  }
   async function pump() {
     if (!started) return;
     while (pending || clearRequested || refresh) {
       if (!snapshot) { const before = capture(); accept(await read(), before); }
       if (pending || clearRequested) {
-        const work = clearRequested ? { clear: true } : pending;
-        if (work.clear) clearRequested = false; else pending = null;
+        let work;
+        if (clearRequested) { work={clear:true};clearRequested=false; }
+        else if (hasPlan(pending) && pending.intents && (pending.intents.length || pending.options?.recompute)) {
+          work={plan:pending.plan,touched:pending.touched};
+          pending={intents:pending.intents,options:pending.options};
+        } else { work=pending;pending=null; }
         const before = capture();
         try {
+          publishing = true;
           const value = work.clear ? await clear(snapshot.revision)
-            : await publish(work.plan, snapshot.revision, [...new Map([...touches.values(), ...(work.touched || [])].map(entry => [key(entry.path, entry.field), entry])).values()]);
+            : work.intents ? await intents(work.intents, snapshot.revision, work.options) : await publish(work.plan, snapshot.revision, [...new Map([...touches.values(), ...(work.touched || [])].map(entry => [key(entry.path, entry.field), entry])).values()]);
+          if (value?.accepted === false) throw new Error('stage_conflict: Staging changed before publication');
+          publishing = false;
           accept(value, before);
         } catch (failure) {
-          if (!conflict(failure)) throw failure;
+          publishing = false;
+          // Discard is a barrier, including for requests whose failure arrives
+          // late. Retrying their old intent after the clear would revive it.
+          if (before.discardGeneration !== discardGeneration) continue;
+          if (before.library !== context().library) { refresh = true; continue; }
+          if (/stage_session_mismatch/i.test(String(failure))) {
+            const atRead=capture();accept(await read(),atRead);
+            throw failure; // Never replay an old library's intents into a new session.
+          }
+          if (!conflict(failure)) {
+            restore(work);
+            throw failure;
+          }
           // A newer native contribution stays intact. Retry the latest local
           // human layer, never a stale merged snapshot from the browser.
-          if (work.clear) clearRequested = true;
-          else if (!pending) pending = work;
+          restore(work);
           const atRead = capture(); accept(await read(), atRead);
         }
       } else {
@@ -141,17 +169,29 @@ export function createSharedStageSync({ read, publish, clear, context, adopt, er
       if (!pending && !clearRequested && !plan?.changes?.length && !touched.length && !touches.size) return running || Promise.resolve();
       lastFailure = null;
       generation++;
-      pending = { plan, touched }; return schedule();
+      const replaced=new Set([...stagedFields(plan),...touched,...touches.values()].map(entry=>key(entry.path,entry.field)));
+      const remaining=pending?.intents?.filter(entry=>!replaced.has(key(entry.path,entry.field)));
+      const withdrawals=[...new Map([...(pending?.touched || []),...touched].map(entry=>[key(entry.path,entry.field),entry])).values()];
+      pending = { plan, touched:withdrawals, ...(remaining?.length ? {intents:remaining,options:pending.options} : {}) }; return schedule();
+    },
+    intents(entries, options = {}) {
+      if (!entries.length && !options.recompute) return running || Promise.resolve();
+      lastFailure = null; generation++;
+      const merged = new Map((pending?.intents || []).map(entry => [key(entry.path,entry.field), entry]));
+      for (const entry of entries) merged.set(key(entry.path,entry.field), entry);
+      const prior = pending?.options;
+      if (prior?.recompute || options.recompute) options = {...prior,...options,recompute:true,paths:[...new Set([...(prior?.paths || []),...(options.paths || []),...entries.map(entry=>entry.path)])]};
+      pending = {...pending,intents:[...merged.values()], options}; return schedule();
     },
     touched(entries) {
       touches.clear();
       for (const entry of entries) touches.set(key(entry.path, entry.field), entry);
     },
-    clear() { lastFailure = null; generation++; touches.clear(); pending = null; clearRequested = true; return schedule(); },
+    clear() { lastFailure = null; generation++; discardGeneration++; touches.clear(); pending = null; clearRequested = true; return schedule(); },
     completed(plan) { for (const entry of stagedFields(plan)) touches.delete(key(entry.path, entry.field)); },
     refresh() { lastFailure = null; refresh = true; return schedule(); },
     async flush() { while (running) await running; if (lastFailure) throw lastFailure; },
-    pending: () => !!pending || clearRequested || !!lastFailure,
+    pending: () => publishing || !!pending || clearRequested || !!lastFailure,
     revision: () => snapshot?.revision,
     humanPlan: () => pending ? pending.plan : (snapshot?.human_plan ?? null),
     snapshot: () => snapshot,

@@ -949,17 +949,18 @@ impl Service {
                 "Sealed draft budget is 128 MiB; discard unused drafts",
             ));
         }
-        let excluded = if publish {
-            Self::stage_agent_locked(
+        let (excluded, event) = if publish {
+            let (excluded, changed) = Self::stage_agent_locked(
                 &mut state,
                 &id,
                 parent,
                 &sealed.plan,
                 &sealed.scope,
                 &principal.id,
-            )?
+            )?;
+            (excluded, Some(super::staging::event(&state, &changed)))
         } else {
-            Vec::new()
+            (Vec::new(), None)
         };
         let mut result = if publish {
             describe_live(&state, &sealed, 0, 100)
@@ -967,18 +968,14 @@ impl Service {
             describe(&sealed, 0, 100)
         };
         result["protected_fields"] = json!(excluded);
-        let revision = state.manual_revision;
         if publish {
             sealed.plan = super::staging::filtered(&sealed.plan, |_| false);
             sealed.size_bytes = serde_json::to_vec(&sealed.plan)?.len();
         }
         state.plans.insert(id, sealed);
         drop(state);
-        if publish {
-            self.emit(
-                "shared_stage_changed",
-                json!({"revision":revision,"resync":true}),
-            );
+        if let Some(event) = event {
+            self.emit("shared_stage_changed", event);
         }
         self.emit("service_changed", json!({"drafts_changed":true}));
         Ok(result)

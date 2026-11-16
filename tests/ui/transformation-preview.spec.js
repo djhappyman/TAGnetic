@@ -243,18 +243,18 @@ test('field locks are honored and changing a lock recomputes the checked preset'
 
 test('selection preview covers virtual rows while filters keep hidden selections explicit', async ({ page }) => {
   await page.evaluate(async () => {
-    await window.tagrex.invoke('open_drop', { paths: Array.from({ length: 350 }, (_, i) => `track-${String(i).padStart(3, '0')}.mp3`) });
+    await window.tagrex.invoke('open_drop', { paths: Array.from({ length: 1200 }, (_, i) => `track-${String(i).padStart(3, '0')}.mp3`) });
     document.getElementById('root').value = '/dropped'; await window.tagrex.openLibrary();
   });
   await tick(page, 'Append title mark'); await changed(page);
   await page.locator('#tracks-body tr[data-path]').first().focus(); await page.keyboard.press('Control+a');
-  await changed(page, 350);
-  expect(await page.locator('#tracks-body tr[data-path]').count()).toBeLessThan(350);
+  await changed(page, 1200);
+  expect(await page.locator('#tracks-body tr[data-path]').count()).toBeLessThan(100);
   await page.locator('#filter').fill('track-000');
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(1);
   await expect(page.locator('#status-transform-scope')).toBeHidden();
-  await expect(page.locator('#staged-count')).toContainText('350');
-  expect((await plan(page)).changes).toHaveLength(350);
+  await expect(page.locator('#staged-count')).toContainText(/1,?200/);
+  expect((await plan(page)).changes).toHaveLength(1200);
   expect(await calls(page, 'apply_plan')).toBe(0);
 });
 

@@ -496,7 +496,8 @@ pub async fn mcp_status(
             "recovery_required":true,"operations":[],"guidance":error.message,"error_code":error.code,
         }));
         Ok(
-            json!({"listening":listening,"shared_staging":true,"clients":clients,"drafts":drafts,
+            json!({"listening":listening,"shared_staging":true,"live_fields":service.live_field_capabilities().map_err(shell_error)?,
+            "clients":clients,"drafts":drafts,
             "operations":service.operations().map_err(shell_error)?,"analysis":service.analysis_jobs().map_err(shell_error)?,
             "recovery":recovery,
             "profile":profile,"executable":std::env::current_exe().map_err(shell_error)?}),
@@ -695,6 +696,88 @@ pub async fn mcp_shared_stage(
         .map_err(shell_error)?
 }
 
+/// Bounded revisioned stage projection. The desktop holds the revision and
+/// stage session it last adopted; a gap, a new session or an overflow returns
+/// an explicit full-snapshot resync instead of an incremental change set.
+#[tauri::command]
+pub async fn mcp_shared_stage_delta(
+    window: tauri::WebviewWindow,
+    control: State<'_, AgentControl>,
+    since: Option<u64>,
+    session: Option<String>,
+) -> Result<tagrex_service::StageDelta, ErrorDto> {
+    trusted_window(&window)?;
+    let service = control.service.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        service
+            .shared_stage_delta(since, session.as_deref())
+            .map_err(shell_error)
+    })
+    .await
+    .map_err(shell_error)?
+}
+
+/// Fetch the exact pooled bytes behind a staged artwork reference a delta
+/// reported. Trusted-window only; no new image input or decoding path.
+#[tauri::command]
+pub async fn mcp_shared_stage_asset(
+    window: tauri::WebviewWindow,
+    control: State<'_, AgentControl>,
+    asset: String,
+) -> Result<Value, ErrorDto> {
+    trusted_window(&window)?;
+    let service = control.service.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        service.shared_stage_asset(&asset).map_err(shell_error)
+    })
+    .await
+    .map_err(shell_error)?
+}
+
+/// Publish narrow human field intents. Preview work and the stage patch stay
+/// limited to the named fields unless the caller explicitly supplies transform
+/// groups, whose scope is the caller's declared recompute scope.
+///
+/// `recompute: true` allows an empty intent list (explicit preset/scope
+/// refresh) and `session` binds the request to the stage lifecycle it was
+/// admitted from. Both are optional so an older UI keeps working unchanged.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn mcp_publish_shared_intents(
+    window: tauri::WebviewWindow,
+    control: State<'_, AgentControl>,
+    intents: Vec<tagrex_service::StageIntent>,
+    expected_revision: u64,
+    groups: Option<Vec<tagrex_commands::ActionGroupDto>>,
+    paths: Option<Vec<String>>,
+    recompute: Option<bool>,
+    session: Option<String>,
+) -> Result<tagrex_service::StageIntentOutcome, ErrorDto> {
+    trusted_window(&window)?;
+    let service = control.service.clone();
+    let request = tagrex_service::StageIntentRequest {
+        intents,
+        expected_revision,
+        groups: groups.unwrap_or_default(),
+        scope: paths.unwrap_or_default(),
+        recompute: recompute.unwrap_or(false),
+        session,
+    };
+    let generation = super::LIBRARY_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
+    super::SESSION_QUEUE
+        .run(move || {
+            if generation != super::LIBRARY_GENERATION.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(shell_error(
+                    "Open files changed while staging the edit; retry the field.",
+                ));
+            }
+            service
+                .publish_human_intents_request(request)
+                .map_err(shell_error)
+        })
+        .await
+}
+
 #[tauri::command]
 pub async fn mcp_publish_shared_stage(
     window: tauri::WebviewWindow,
@@ -752,6 +835,20 @@ pub fn complete_desktop_apply(
     control
         .service
         .complete_shared_apply(plan, revision)
+        .map_err(shell_error)?;
+    Ok(())
+}
+
+/// A new library/file-set session starts with an empty stage and a fresh opaque
+/// session, so a delayed intent from the previous session cannot stage stale
+/// paths. Best-effort: an unavailable agent service has no stage to reset.
+pub fn reset_shared_stage_for_library(app: &tauri::AppHandle) -> Result<(), ErrorDto> {
+    let Some(control) = app.try_state::<AgentControl>() else {
+        return Ok(());
+    };
+    control
+        .service
+        .reset_shared_stage_for_library()
         .map_err(shell_error)?;
     Ok(())
 }

@@ -34,6 +34,24 @@ async function library(page) {
   await expect(page.locator('#pl-toggle')).toBeEnabled();
 }
 
+test('only the current playing filename is bold in the file table',async({page})=>{
+  await library(page);
+  const before=await page.locator('#tracks-body tr[data-path]').first().evaluate(node=>node.getBoundingClientRect().height);
+  await page.locator('#pl-toggle').click();
+  await expect(page.locator('#tracks-body tr.playing')).toHaveCount(1);
+  const playing=page.locator('#tracks-body tr.playing td.file');
+  const other=page.locator('#tracks-body tr[data-path]:not(.playing) td.file').first();
+  expect(Number(await playing.evaluate(node=>getComputedStyle(node).fontWeight))).toBeGreaterThan(Number(await other.evaluate(node=>getComputedStyle(node).fontWeight)));
+  expect(await playing.evaluate(node=>getComputedStyle(node).fontSize)).toBe(await other.evaluate(node=>getComputedStyle(node).fontSize));
+  expect(await playing.evaluate(node=>node.closest('tr').getBoundingClientRect().height)).toBeCloseTo(before,1);
+  const title=page.locator('#tracks-body tr.playing td[data-field="title"]');
+  await title.dblclick();await title.fill('Staged playing title');await title.press('Enter');
+  await expect(page.locator('#diff-apply')).toBeEnabled();
+  await page.evaluate(()=>window.tagrex.renderTracks());
+  await expect(page.locator('#tracks-body tr.playing')).toHaveCount(1);
+  expect(Number(await playing.evaluate(node=>getComputedStyle(node).fontWeight))).toBe(650);
+});
+
 for (const width of [1280, 375]) {
   test(`player stays visible and keeps its height through idle, play, pause and stop at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 800 });

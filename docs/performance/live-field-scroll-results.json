@@ -1,0 +1,42 @@
+{
+  "date": "2026-11-16",
+  "scope": "Linux native WebKitGTK development app, existing profile; no media writes",
+  "hardware": "Intel Core i7-12700K, x86_64, devicePixelRatio 1",
+  "runtime": "WebKitGTK 2.54, existing 1.4.7 native binary with candidate frontend; new native protocol tested separately",
+  "workload": {"files":371,"mounted_track_rows":371,"table_cells":4106},
+  "manual_fast_scroll_20_seconds_before_containment": {
+    "duration_ms":20000,"scroll_events":194,"scroll_range_px":[0,6778],
+    "frames":527,"frame_ms":{"p50":16,"p95":91,"p99":96,"max":131},
+    "frames_over_25_ms":203,"frames_over_50_ms":173,
+    "table_mutations":0,"rows_added":0,"rows_removed":0,"text_mutations":0,
+    "all_original_rows_retained":true
+  },
+  "scripted_scroll_paint_comparison": {
+    "method":"2.2-second triangular native scroll per variant; wait two animation frames after changing CSS; retain stage, restore original scroll and remove all temporary styles",
+    "runs":[
+      {"variant":"baseline","frames":34,"p50_ms":63,"p95_ms":120,"max_ms":125},
+      {"variant":"contain:layout paint on scrollport","frames":134,"p50_ms":16,"p95_ms":18,"max_ms":19},
+      {"variant":"translateZ(0) on scrollport","frames":134,"p50_ms":16,"p95_ms":18,"max_ms":30},
+      {"variant":"without sticky row surfaces","frames":35,"p50_ms":62,"p95_ms":79,"max_ms":92}
+    ]
+  },
+  "alternating_confirmation": [
+    {"variant":"uncontained","frames":28,"p50_ms":74,"p95_ms":129,"max_ms":235},
+    {"variant":"contained","frames":126,"p50_ms":16,"p95_ms":18,"max_ms":105},
+    {"variant":"uncontained again","frames":35,"p50_ms":63,"p95_ms":81,"max_ms":82},
+    {"variant":"contained again","frames":133,"p50_ms":17,"p95_ms":18,"max_ms":18}
+  ],
+  "chosen_change":"Layout and paint containment on the existing rectangular native scrollport. No table mask, forced GPU transform or change to field values.",
+  "regressions": [
+    "53 and 371 loaded rows retain identity with zero table mutations during scrolling",
+    "3000-file fractional-height scroll extent remains stable",
+    "20000-file disjoint jumps retain the table body and spacers, never replaceChildren on the body, remain under 100 mounted track rows and contain visible rows",
+    "A synchronous scroll reset after a model rebuild cannot strand the viewport above a stale virtual window"
+  ],
+  "research": [
+    "https://www.ag-grid.com/javascript-data-grid/scrolling-performance/",
+    "https://www.ag-grid.com/javascript-data-grid/dom-virtualisation/",
+    "https://web.dev/articles/virtualize-long-lists-react-window"
+  ],
+  "limits":"Short controlled comparisons on one Linux machine establish this rendering improvement, not universal frame-time or native scanning-throughput guarantees. An outlier remained in the first contained confirmation run. Windows/macOS GUI and new-native-binary live editing are not claimed by these measurements."
+}

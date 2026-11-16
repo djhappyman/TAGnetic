@@ -1277,21 +1277,30 @@ body.diffing #tracks tbody tr.staged td.sel {
   cursor: default;
 }
 
-/* old→new inside a changed cell — hidden until "Show old values". */
+/* The working value leads; the saved baseline is a quiet second line. */
 #tracks .cell-old {
   display: none;
 }
 #tracks.show-old td.dirty,
 #tracks.show-old td.error,
 #tracks.show-old td.file.dirty {
-  white-space: normal;
+  white-space: nowrap;
+  padding-block: var(--sp-1);
+  font-weight: 575;
 }
 #tracks.show-old .cell-old {
   display: block;
+  margin-top: 3px;
   font-size: var(--text-2xs);
   color: var(--muted);
-  text-decoration: line-through;
+  opacity: .65;
   font-weight: var(--fw-regular);
+  font-style: normal;
+  line-height: var(--lh-tight);
+  text-decoration: line-through;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Floating Apply / Discard action bar — pinned bottom-centre of the table pane.

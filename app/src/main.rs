@@ -390,9 +390,13 @@ async fn open_library(
             let opened = App::open(root, &journal_path).map_err(ErrorDto::from)?;
             // Apply saved settings (proxy / rate-limit / ID3 version) to the new session.
             opened.apply_settings(&read_settings_quietly(&app));
-            let mut session = state.lock().map_err(shell_error)?;
-            *session = Some(opened);
+            {
+                let mut session = state.lock().map_err(shell_error)?;
+                *session = Some(opened);
+            }
             LIBRARY_GENERATION.fetch_add(1, Ordering::SeqCst);
+            // A new library session must not inherit the previous stage.
+            mcp_control::reset_shared_stage_for_library(&app)?;
             Ok(())
         })
         .await
@@ -416,9 +420,12 @@ async fn open_drop(
             let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
             let (opened, result) = App::open_drop(paths, &journal_path).map_err(ErrorDto::from)?;
             opened.apply_settings(&read_settings_quietly(&app));
-            let mut session = state.lock().map_err(shell_error)?;
-            *session = Some(opened);
+            {
+                let mut session = state.lock().map_err(shell_error)?;
+                *session = Some(opened);
+            }
             LIBRARY_GENERATION.fetch_add(1, Ordering::SeqCst);
+            mcp_control::reset_shared_stage_for_library(&app)?;
             Ok(result)
         })
         .await
@@ -2843,6 +2850,9 @@ fn main() {
             mcp_control::mcp_adopt_draft,
             mcp_control::mcp_set_manual_plan,
             mcp_control::mcp_shared_stage,
+            mcp_control::mcp_shared_stage_delta,
+            mcp_control::mcp_shared_stage_asset,
+            mcp_control::mcp_publish_shared_intents,
             mcp_control::mcp_publish_shared_stage,
             mcp_control::mcp_clear_shared_stage,
             mcp_control::mcp_rebase_manual_plan,
