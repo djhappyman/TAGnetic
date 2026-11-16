@@ -7,6 +7,7 @@ Tagnetic builds on [tagrex/tagrex](https://github.com/tagrex/tagrex). This fork'
 ### 1.4.8 live fields and table stability
 
 Fork branch `fix/behaviour-refinements` builds on the released 1.4.7 MCP service.
+Feature checkpoint: `cdc0c66` (live fields and table stability).
 Native incremental intents/deltas and transform basis tracking are eligible for
 `tagrex/tagrex:main`; stable working-field projections, artwork isolation,
 keyboard selection and scroll containment belong on `tagrex/tagrex:next`.

@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.8] - 2026-11-16
+
+**Tagnetic 1.4.8**: live field editing and smoother table scrolling.
+
+### Changed
+
+- Files, Staged and Inspector mirror edits immediately while retaining their
+  existing cells, inputs, selection and scroll position. Leaving a field keeps
+  its edit without requiring Enter; Apply remains the only file-write action.
+- Native staging accepts small field intents and returns bounded deltas, with
+  lazy artwork references, session checks and raw transformation inputs.
+- Staged shows changed files and tag columns with clear saved/new values.
+- Keyboard navigation follows the active row, with stronger cell contrast.
+  The playing filename uses heavier text at its normal size.
+
+### Fixed
+
+- Scalar edits and selection changes no longer reload identical artwork, reset
+  Inspector scrolling or pulse Apply through unnecessary preview work.
+- Table scrolling isolates layout/paint, retains modest collections in place,
+  keeps buffered virtual windows and avoids wholesale body replacement on jumps.
+  Coalesced scroll resets cannot leave an empty viewport.
+- Preset recomputation preserves raw inputs, safely retires earlier scopes and
+  refuses expired transformation bases rather than compounding their results.
+
 ## [1.4.7] - 2026-11-16
 
 **Tagnetic 1.4.7**: collaborative MCP control with live shared staging.
