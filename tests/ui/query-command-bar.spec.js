@@ -18,6 +18,16 @@ test.beforeEach(async({page})=>{
 test.afterEach(async({page})=>expect(errors.get(page)).toEqual([]));
 const rows=page=>page.locator('#tracks-body tr[data-path]');
 async function chip(page,text,label){await page.locator('#filter').fill(text);await page.getByRole('option',{name:label,exact:false}).first().click();}
+async function pauseClock(page){
+ const time=new Date('2026-01-01T00:00:00Z');
+ await page.clock.install({time});
+ await page.clock.pauseAt(new Date(time.getTime()+1000));
+}
+async function openHydratedDuplicates(page){
+ await page.evaluate(()=>{window.duplicateDetailHydrated=false;document.addEventListener('tagrex:request-duplicate-selection',()=>window.duplicateDetailHydrated=true,{once:true});});
+ await page.locator('#query-mode-toggle').click();
+ await expect.poll(()=>page.evaluate(()=>window.duplicateDetailHydrated)).toBe(true);
+}
 test('search label is inset and switching modes starts a fresh query with the keyboard',async({page})=>{
  const toggle=page.getByRole('button',{name:'Duplicates mode',exact:true});
  await expect(page.locator('#query-command-mode')).toHaveCount(0);
@@ -64,7 +74,7 @@ test('selected duplicate result shows shared tags, differences and every copy in
  await page.locator('#query-mode-toggle').click();await expect(result).toHaveCount(0);
 });
 test('large group details page copies without mounting the whole group',async({page})=>{
- await page.locator('#query-mode-toggle').click();
+ await openHydratedDuplicates(page);
  await page.evaluate(()=>document.dispatchEvent(new CustomEvent('tagrex:duplicate-selection',{detail:{group:{id:'large',title:'Many copies',reason:'Exact files',tracks:Array.from({length:45},(_,i)=>({path:`/music/copy-${i}.flac`,format:'flac',duration_secs:60,has_cover:false,tags:{title:'Many copies'}})),sharedTags:{title:'Many copies'},differingTags:[]}}})));
  const result=page.locator('#duplicate-result-details');await expect(result.locator('.duplicate-copy')).toHaveCount(20);await expect(result.locator('.duplicate-copy-pages')).toContainText('1–20 of 45');
  await result.getByRole('button',{name:'Next copies',exact:true}).click();await expect(result.locator('.duplicate-copy-pages')).toContainText('21–40 of 45');
@@ -83,6 +93,7 @@ test('committed filter is one tinted pill with matching remove ink and accessibl
 test('duplicates button remains between the field and presets at desktop and narrow widths',async({page})=>{
  for(const width of [1280,620]){
   await page.setViewportSize({width,height:800});await expect(page.locator('#query-mode-toggle')).toBeVisible();
+  await expect(page.locator('.filter-ctl')).toHaveCSS('height','32px');
   const layout=await page.locator('#query-mode-toggle').evaluate(node=>{const wrap=node.parentElement,r=node.getBoundingClientRect(),field=document.querySelector('.filter-ctl');return {previous:wrap.previousElementSibling?.classList.contains('filter-ctl'),next:wrap.nextElementSibling?.classList.contains('filter-presets'),width:r.width,height:r.height,left:r.left,right:r.right,viewport:innerWidth,fieldHeight:field.getBoundingClientRect().height};});
   expect(layout.previous).toBe(true);expect(layout.next).toBe(true);expect(layout.width).toBeGreaterThan(32);expect(layout.height).toBe(32);expect(layout.fieldHeight).toBe(32);expect(layout.left).toBeGreaterThanOrEqual(0);expect(layout.right).toBeLessThanOrEqual(layout.viewport);
  }
@@ -137,7 +148,9 @@ test('duplicate groups keep companion copies visible when a chip matches one mem
 
 test('suggestions wait for typed input and preview coloured case-insensitive chips',async({page})=>{
  const input=page.locator('#filter');await input.focus();await expect(page.locator('#query-suggestions')).toHaveCount(0);
- await page.clock.install();await input.fill('HARDCORE');
+ await pauseClock(page);await input.fill('HARDCORE');
+ // Controller/runner latency must not consume the controlled debounce interval.
+ await new Promise(resolve=>setTimeout(resolve,220));
  await page.clock.runFor(100);await expect(page.locator('#query-suggestions')).toHaveCount(0);
  await page.clock.runFor(120);await expect(page.getByRole('option',{name:'Genre: Hardcore',exact:false})).toBeVisible();
  await expect(page.locator('#query-suggestions .query-suggestion-chip').first()).toBeVisible();
@@ -155,7 +168,7 @@ test('one Artist contains rule covers variations and exact member matching remai
  await expect(rows(page)).toHaveCount(2);await expect(page.locator('.filter-condition-chip .query-committed-value')).toHaveText('HIXXY');
 });
 test('Enter before the suggestion delay keeps plain search and cancels the pending popup',async({page})=>{
- await page.clock.install();await page.locator('#filter').fill('Radio');await page.locator('#filter').press('Enter');
+ await pauseClock(page);await page.locator('#filter').fill('Radio');await page.locator('#filter').press('Enter');
  await page.clock.runFor(300);await expect(page.locator('#query-suggestions')).toHaveCount(0);
  await expect(rows(page)).toHaveCount(1);await expect(page.locator('.filter-condition-chip')).toHaveCount(0);
 });
@@ -373,7 +386,7 @@ test('query toggle reveals a closed compact inspector and moves keyboard focus i
 });
 
 test('a ready-state query error remains visible instead of showing the scan prompt',async({page})=>{
- await page.locator('#query-mode-toggle').click();
+ await openHydratedDuplicates(page);
  await page.evaluate(()=>document.dispatchEvent(new CustomEvent('tagrex:filter-state',{detail:{commandMode:'duplicates',duplicateKind:'exact',duplicateStatus:'not_scanned',duplicateScanStarted:false,pending:false,error:'Invalid numeric bounds',total:3,matched:3}})));
  await expect(page.locator('#filter-feedback')).toContainText('Invalid numeric bounds');
  await expect(page.locator('#filter-feedback')).not.toHaveClass(/duplicate-ready/);
