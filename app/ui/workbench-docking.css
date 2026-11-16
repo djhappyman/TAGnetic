@@ -12,7 +12,7 @@ body .workarea { padding-bottom:0; }
 .dock-module-body > .files-col, .dock-module-body > .mode-col { flex:1 1 0%; width:100%; height:100%; max-width:none; min-height:0; border:0; border-radius:0; background:var(--workbench-chrome); }
 body #files-view { background:var(--bg); }
 .docked-transformations { display:flex; flex:1; min-height:0; flex-direction:column; overflow:hidden; }
-.docked-transformations #transform-block { display:flex; flex:1; min-height:0; flex-direction:column; padding:0 8px 4px; overflow:hidden; }
+.docked-transformations #transform-block { display:flex; flex:1; min-height:0; flex-direction:column; padding:0; overflow:hidden; }
 .docked-transformations #groups-menu { flex:1; min-height:0; max-height:none; overflow:auto; border:0; border-radius:0; background:transparent; }
 .docked-transformations .panel-actions { flex:none; margin:3px 0 0; padding:0; }
 .docked-transformations #groups-menu[aria-disabled='true'] { opacity:.55; }

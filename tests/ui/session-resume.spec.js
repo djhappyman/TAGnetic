@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -61,7 +62,7 @@ test('successful folder open persists view and resumes without restoring an unap
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(3);
   await page.locator('#tracks-body tr[data-path] .file').nth(1).click();
   const selected = await page.evaluate(() => window.tagrex.selectedPaths());
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   await page.locator('#fields-body input[data-key="title"]').fill('DO NOT RESTORE THIS DRAFT');
   await page.locator('#filter').fill('Radio');
   await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('tagrex.session.v1') || '{}').filter)).toBe('Radio');

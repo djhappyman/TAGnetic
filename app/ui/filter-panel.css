@@ -1,19 +1,12 @@
-/* The filter dock is part of the file table's bottom edge — the same surface,
- * no shell, no divider — with a permanently visible command row.
- * Controller-owned field ids
- * (#filter, .filter-ctl, chips, presets) are unchanged.
- *
- * Geometry roles: 28px for the rail's controls (--ctl-h-sm), 24px hit boxes for
- * the in-field flags, --input-radius for the compound filter field and its
- * input (flush: the field is the focus owner), --r-compact for chips, and the
- * shared --sp scale for spacing (4 inside a chip/field, 8 between controls,
- * 12 for the builder's rows). The panel is a single instance, so its rules are
- * scoped by its own id to stay authoritative without a specificity race.
+/* The library search lives in the header. Keep controller-owned field IDs,
+ * chips, validation and presets together in one 32px compound control.
+ * The field takes the remaining row width; chips scroll within it so the
+ * header and file pane stay steady while a query is composed.
  */
-body .files-col > #filter-panel {
+body .topbar-main > #filter-panel {
   flex: none;
   min-width: 0;
-  padding: var(--sp-2) var(--sp-3);
+  padding: 0;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -67,9 +60,12 @@ body #filter-panel .filter-ctl {
 }
 body #filter-panel .filter-ctl:not(.has-error) {
   border-color: transparent;
-  background: var(--panel);
+  background: var(--bg);
 }
 body #filter-panel .filter-ctl.has-error {
+  border:1px solid transparent;
+  outline:1px solid var(--del);
+  outline-offset:-1px;
   background: var(--error-tint);
 }
 body #filter-panel .filter-ctl.has-error:has(:focus-visible) {
@@ -185,10 +181,11 @@ body .filter-builder-actions {
 
 /* Command-bar behaviour uses the existing compound-field and popup tokens. */
 body #filter-panel .filter-ctl { position: relative; height: auto; min-height: var(--ctl-h); flex-wrap: wrap; align-items: center; gap: var(--sp-1); padding-inline: var(--ctl-h) var(--sp-1); padding-block: 0; }
-body #filter-panel .query-command-chips { display: contents; }
+body #filter-panel .query-command-chips { display:flex; flex:0 1 auto; min-width:0; max-width:55%; gap:var(--sp-1); overflow-x:auto; scrollbar-width:none; }
+body #filter-panel .query-command-chips::-webkit-scrollbar { display:none; }
 body #filter-panel .filter-ctl #filter { flex: 1 1 120px; width: 120px; min-width: 80px; height: calc(var(--ctl-h) - 2px); padding-inline: var(--sp-1); }
 body #filter-panel .filter-ctl #filter::placeholder { color: var(--field-ghost); opacity: 1; font-size: var(--type-help-size); }
-body #filter-panel .query-mode-label { position: absolute; z-index: 1; inset-inline-start: 0; inset-block: 0; display: inline-flex; align-items: center; width: 40px; padding-inline-start: var(--sp-3); border-radius: var(--input-radius) 0 0 var(--input-radius); color: var(--label); background: linear-gradient(to right, var(--panel) 60%, transparent); pointer-events: none; }
+body #filter-panel .query-mode-label { position: absolute; z-index: 1; inset-inline-start: 0; inset-block: 0; display: inline-flex; align-items: center; width: 40px; padding-inline-start: var(--sp-3); border-radius: var(--input-radius) 0 0 var(--input-radius); color: var(--label); background:linear-gradient(to right,var(--bg) 60%,transparent); pointer-events: none; }
 body #filter-panel .query-mode-label .ico { width: 14px; height: 14px; }
 body #filter-panel .query-mode-control { display: flex; flex: none; align-items: center; }
 body #filter-panel #query-mode-toggle { flex: none; width: auto; height: var(--ctl-h); padding-inline: var(--sp-2); gap: var(--sp-1); color: var(--muted); font-size: var(--type-help-size); }
@@ -196,14 +193,14 @@ body #filter-panel #presets-btn { height: var(--ctl-h); min-height: var(--ctl-h)
 body #filter-panel #query-mode-toggle:hover { color: var(--text); background: var(--row-hover); }
 body #filter-panel #query-mode-toggle[aria-pressed='true'] { color: var(--accent-ink); background: var(--row-sel); }
 body #filter-panel #query-mode-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
-body #filter-panel .filter-ctl .field-tools { margin-inline-start: auto; height: calc(var(--ctl-h) - 2px); }
+body #filter-panel .filter-ctl .field-tools { margin-inline-start:auto; height:calc(var(--ctl-h) - 2px); flex:none; }
 body #filter-panel .filter-ctl :is(.app-select, .app-select-proxy, .app-select-trigger, select), body #filter-panel .filter-ctl > button, body #filter-panel .filter-condition-chip button { height: calc(var(--ctl-h-sm) - 2px); min-height: 0; max-width: 100%; border: 0; background: transparent; color: var(--text); font: inherit; padding-inline: var(--sp-1); padding-block: 0; }
 body #filter-panel .filter-condition-chip { flex: 0 1 auto; flex-wrap: nowrap; gap: 0; padding: 0; background: color-mix(in srgb, var(--query-chip-ink) 8%, transparent); color: var(--query-chip-ink); border-radius: var(--r-compact); overflow: visible; }
 body #filter-panel .filter-condition-chip > button:first-child { display: flex; align-items: center; min-width: var(--ctl-hit); padding-inline: var(--sp-2) var(--sp-1); border-radius: var(--r-compact) 0 0 var(--r-compact); text-align: left; }
 body #filter-panel .filter-condition-chip .ico { width: 12px; height: 12px; }
 body #filter-panel #filter-feedback { order: 20; flex-basis: 100%; padding: 0 var(--sp-1); }
 body #filter-panel #filter-feedback:empty { display: none; }
-.query-popup { position: fixed; z-index: 15000; overflow: auto; padding: var(--sp-2); color: var(--text); background: var(--panel); border-radius: var(--input-radius); box-shadow: 0 8px 24px rgb(0 0 0 / .25); font-size: var(--type-body-size); }
+.query-popup { border:0; position: fixed; z-index: 15000; overflow: auto; padding: var(--sp-2); color: var(--text); background: var(--panel); border-radius: var(--input-radius); box-shadow: 0 8px 24px rgb(0 0 0 / .25); font-size: var(--type-body-size); }
 .query-popup [role='option'] { display: flex; justify-content: space-between; gap: var(--sp-3); padding: var(--sp-2); cursor: pointer; border-radius: var(--r-compact); }
 .query-popup [role='option'][aria-selected='true'], .query-popup [role='option']:hover { background: var(--row-hover); }
 .query-editor-form { display: grid; gap: var(--sp-2); }
@@ -283,3 +280,13 @@ body #tracks tr.duplicate-group .group-count { margin-inline-start: var(--sp-2);
 .duplicate-copy-body { display: grid; gap: var(--sp-2); padding-bottom: var(--sp-3); }
 .duplicate-copy-path { display: block; margin-top: var(--sp-1); color: var(--muted); font-size: var(--type-help-size); line-height: var(--lh-normal); overflow-wrap: anywhere; }
 .duplicate-copy-pages { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-1); color: var(--muted); font-size: var(--type-help-size); font-variant-numeric: tabular-nums; }
+
+/* The header field grows with the window; its trailing tools stay inside. */
+body #filter-panel { position:relative; min-width:0; }
+body #filter-panel .filter-panel-content, body #filter-panel .filter-panel-inner { min-width:0; width:100%; }
+body #filter-panel .filter-ctl { width:100%; flex:1 1 0; height:var(--ctl-h); flex-wrap:nowrap; background:var(--bg); padding-inline-end:var(--sp-1); }
+body #filter-panel #filter-feedback { position:absolute; inset-inline:0; top:calc(100% + 4px); z-index:2; border-radius:var(--r-compact); background:var(--panel); }
+body #filter-panel #presets-btn { width:28px; height:28px; min-height:28px; padding:4px; }
+
+body #filter-panel .filter-condition-chip { flex:none; max-width:180px; }
+body #filter-panel .query-committed-value { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }

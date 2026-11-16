@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -50,7 +51,7 @@ for(const mode of ['light','dark']) test(`all ten theme presets retain shared UI
   for(const [id,name] of themes){
     await settings(page);await page.locator(`#set-theme [data-theme-mode="${mode}"]`).click();await choose(page,id,name);
     await expect(page.locator('#settings-save')).toBeInViewport();await page.locator('#settings-cancel').click();
-    await page.locator('.subtab[data-subtab="editor"]').click();
+    await openTagSource(page, 'editor');
     const geometry=await page.locator('#editor-field-title').evaluate(n=>({height:n.getBoundingClientRect().height,radius:getComputedStyle(n).borderRadius,ink:getComputedStyle(n).color,bg:getComputedStyle(n).backgroundColor}));
     expect(geometry.height).toBe(32);expect(geometry.radius).toBe('10px');expect(geometry.ink).not.toBe(geometry.bg);
     await page.locator('#editor-field-title').fill('Theme preview');await expect(page.locator('#diff-apply')).toBeEnabled();
@@ -58,8 +59,8 @@ for(const mode of ['light','dark']) test(`all ten theme presets retain shared UI
     await expect.poll(()=>page.evaluate(()=>getComputedStyle(document.getElementById('staged-tab')).backgroundColor===getComputedStyle(document.getElementById('root-field')).backgroundColor)).toBe(true);
     await page.screenshot({path:testInfo.outputPath(`${id}-${mode}.png`),animations:'disabled'});
     await page.locator('#diff-discard').click();await page.locator('#files-tab').click();
-    for(const panel of ['renamer','generator','deduplicator','exporter','tagger']) { await page.locator(`.mode-tab[data-mode="${panel}"]`).click(); await expect(page.locator(`#panel-${panel}`)).toBeVisible(); }
-    await page.locator('#presets-edit').click();await expect(page.locator('#pe-editor')).toBeVisible();await page.keyboard.press('Escape');
+    for(const panel of ['renamer','exporter','tagger']) { await page.locator(`.mode-tab[data-mode="${panel}"]`).click(); await expect(page.locator(`#panel-${panel}`)).toBeVisible(); }
+    await openTagSource(page,'transformations');await page.locator('#presets-edit').click();await expect(page.locator('#pe-editor')).toBeVisible();await page.keyboard.press('Escape');
   }
 });
 test('theme dropdown is keyboard reachable in a narrow settings sheet',async({page})=>{

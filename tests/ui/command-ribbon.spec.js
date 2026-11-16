@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -19,8 +20,8 @@ async function picker(page, path) {
 const paths = page => page.evaluate(() => window.tagrex.tracks.map(t => t.path));
 const selected = page => page.evaluate(() => [...window.tagrex.selection]);
 
-test('seventeen commands have eight group dividers and selection follows the filtered model', async ({ page }) => {
-  await expect(page.locator('.command-ribbon button.ribbon-command')).toHaveCount(17);
+test('eighteen commands have eight group dividers and selection follows the filtered model', async ({ page }) => {
+  await expect(page.locator('.command-ribbon button.ribbon-command')).toHaveCount(18);
   await expect(page.locator('.ribbon-divider')).toHaveCount(8);
   await expect(page.locator('#more-btn')).toBeHidden();
   await page.locator('#ribbon-clear-selection').click();
@@ -64,7 +65,7 @@ test('Add retains existing files, tags and selection while loading another folde
 });
 
 test('folder commands protect staged edits; Undo invokes the existing history flow', async ({ page }) => {
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
 
   await page.locator('#editor-field-title').fill('Ribbon test');
   await expect(page.locator('#diff-apply')).toBeEnabled();
@@ -200,7 +201,7 @@ for (const mode of ['light','dark']) test(`command dialogs have opaque themed su
 });
 
 test('quick Write keeps staged values on the same file and leaves the Apply scope intact', async ({page}) => {
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   await page.locator('#editor-field-albumartist').fill('Staged album artist');
   await expect(page.locator('#diff-apply')).toBeEnabled();
   const before = await page.evaluate(() => ({plan:structuredClone(window.tagrex.previewPlan), selected:[...window.tagrex.selection]}));
@@ -292,7 +293,7 @@ test('Write closes immediately, paints confirmed rows sequentially, and deselect
   await page.evaluate(()=>window.finishQuick());
   await expect(page.locator('#undo')).toBeEnabled();
   await expect.poll(()=>selected(page)).toEqual([]);
-  await expect(page.locator('#diff-actionbar')).toBeHidden();
+  await expect(page.locator('#diff-actionbar')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
 });
 
 test('cancelled quick Write restores the row animation and keeps pending staged edits', async ({page})=>{
@@ -320,7 +321,7 @@ test('Redo sits beside Undo and replays the last undone batch', async ({page}) =
   const before=await page.evaluate(()=>window.tagrex.tracks[0].tags.title);
   await expect(page.locator('#redo')).toBeDisabled();
   await expect(page.locator('#undo + #redo')).toHaveCount(1);
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   await page.locator('#editor-field-title').fill('Redo ribbon fixture');
   await expect(page.locator('#diff-apply')).toBeEnabled();
   await page.locator('#diff-apply').click();
@@ -336,7 +337,7 @@ test('Redo sits beside Undo and replays the last undone batch', async ({page}) =
 });
 
 test('Redo preserves a pending editor value and revalidates its preview', async ({page}) => {
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   await page.locator('#editor-field-title').fill('Saved title');
   await expect(page.locator('#diff-apply')).toBeEnabled();
   await page.locator('#diff-apply').click();
@@ -361,4 +362,29 @@ test('a manually arranged order survives re-reading the opened files',async({pag
   const arranged=await paths(page);
   await page.locator('#lib-refresh').click();
   await expect.poll(()=>paths(page)).toEqual(arranged);
+});
+
+for (const theme of ['light', 'dark']) test(`header groups the tools beside the logo and grouping toggle works by keyboard in ${theme}`, async ({page}) => {
+  await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
+  await page.setViewportSize({width:1397,height:900});
+  const tabs = await page.locator('.mode-tabs').boundingBox();
+  const brand = await page.locator('.brand').boundingBox();
+  expect(tabs.x - brand.x - brand.width).toBeGreaterThanOrEqual(12);
+  expect(tabs.x - brand.x - brand.width).toBeLessThanOrEqual(24);
+  await page.locator('#group-btn').click();
+  await page.locator('#group-menu [data-group=""]').click();
+  await expect(page.locator('#toggle-groups')).toBeHidden();
+  await page.locator('#group-btn').click();
+  await page.locator('#group-menu [data-group="album"]').click();
+  const toggle = page.locator('#toggle-groups');
+  await expect(toggle).toBeVisible();
+  expect(await toggle.evaluate(node => node.previousElementSibling.id)).toBe('group-btn');
+  await expect(toggle).toHaveAccessibleName('Collapse every group');
+  await toggle.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(0);
+  await expect(toggle).toHaveAccessibleName('Expand every group');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(3);
+  await expect(toggle).toHaveAccessibleName('Collapse every group');
 });

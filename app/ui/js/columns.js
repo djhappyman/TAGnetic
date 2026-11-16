@@ -1,3 +1,4 @@
+import { COMMON_GROUPS, groupIcon } from './group-presentation.js';
 import { reviewColumns } from './review-columns.js';
 import { createComponentElement } from "../lib/component-elements.js";
 // The table's columns and its grouping menu (#43, #143 split them out of
@@ -93,7 +94,7 @@ function columnLabel(key) {
 // unknown key falls back to Folder (never the drop grouping, which is transient).
 // Keys promoted above the fold in the group menu — the ones actually reached
 // for. Everything else stays available below a separator, in field order.
-const GROUP_COMMON = ["", "folder", "release", "artist", "album", "albumartist"];
+const GROUP_COMMON = ['', ...COMMON_GROUPS];
 
 // NB: distinct from groupLabel() below, which names a group HEADER (a folder or
 // tag value). This one names a grouping KEY for the menu/tooltip.
@@ -107,21 +108,25 @@ function groupKeyLabel(value) {
 
 function populateGroupMenu() {
   const menu = el("group-menu");
-  const rest = EXTENDED_FIELDS.filter(([key]) => !GROUP_COMMON.includes(key));
+  const rest = ['release', ...EXTENDED_FIELDS.map(([key]) => key)].filter(key => !GROUP_COMMON.includes(key));
   const row = (value) =>
-    `<button type="button" class="col-menu-row tk-menu-item group-opt" data-group="${escapeHtml(value)}">${escapeHtml(groupKeyLabel(value))}</button>`;
+    `<button type="button" class="col-menu-row tk-menu-item group-opt" data-group="${escapeHtml(value)}">${ico(groupIcon(value))}<span>${escapeHtml(groupKeyLabel(value))}</span></button>`;
   menu.innerHTML =
     GROUP_COMMON.map(row).join("") +
     `<div class="col-menu-sep"></div>` +
-    rest.map(([key]) => row(key)).join("");
+    `<button type="button" class="col-menu-row tk-menu-item group-more" aria-controls="group-more-options" aria-expanded="false">${ico('more')}<span>${escapeHtml(t('toolbar.more'))}</span>${ico('chevron-right')}</button>` +
+    `<div id="group-more-options" hidden>${rest.map(row).join('')}</div>`;
   // "drop" is set by the drag-drop flow, never picked here, so it isn't listed;
   // any other unknown persisted value falls back to Folder.
-  const selectable = new Set([...GROUP_COMMON, ...EXTENDED_FIELDS.map(([k]) => k)]);
+  const selectable = new Set([...GROUP_COMMON, ...rest]);
   if (groupBy !== "drop" && !selectable.has(groupBy)) {
     setGroupByValue("folder");
     saveGroupBy(groupBy);
   }
   syncGroupButton();
+  const expanded = rest.includes(groupBy);
+  menu.querySelector('#group-more-options').hidden = !expanded;
+  menu.querySelector('.group-more').setAttribute('aria-expanded', String(expanded));
 }
 
 // Reflect the current key onto the button + the menu's checkmarks. The button

@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -47,7 +48,7 @@ test('every workspace mode and tagging subtab remains usable after mounting', as
   await expect(page).toHaveTitle('Tagnetic');
   await expect(page.getByRole('img', { name: 'Tagnetic', exact: true })).toBeVisible();
   await expect(page.locator('.brand svg.brand-wordmark')).toBeVisible();
-  for (const mode of ['renamer', 'generator', 'deduplicator', 'exporter', 'tagger']) {
+  for (const mode of ['renamer', 'exporter', 'tagger']) {
     const tab = page.locator(`.mode-tab[data-mode="${mode}"]`);
     await tab.focus();
     await tab.press('Enter');
@@ -57,7 +58,7 @@ test('every workspace mode and tagging subtab remains usable after mounting', as
     if(mode==='deduplicator') await expect(page.locator('#files-view')).toBeVisible();
   }
   for (const subtab of ['editor', 'filename', 'fromtext', 'online']) {
-    await page.locator(`.subtab[data-subtab="${subtab}"]`).click();
+    await openTagSource(page, subtab);
     await expect(page.locator(`#subtab-${subtab}`)).toBeVisible();
     await expect(page.locator('.subtab-panel:visible')).toHaveCount(1);
   }
@@ -93,7 +94,7 @@ test('mask builder stages a rename before Apply changes the mock library', async
   await expect(page.locator('#diff-apply')).toBeEnabled();
   expect(await page.evaluate(() => window.tagrex.tracks[0].path)).toBe('/music/01 - the x factor - desert rain.mp3');
   await page.locator('#diff-apply').click();
-  await expect(page.locator('#diff-actionbar')).toBeHidden();
+  await expect(page.locator('#diff-actionbar')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
   await expect.poll(() => page.evaluate(() => window.tagrex.tracks.some((track) => track.path === '/music/The X Factor — Desert Rain.mp3'))).toBe(true);
 });
 
@@ -121,7 +122,7 @@ test('settings search, native fields, Save and Cancel retain their existing beha
 test('generated tag fields stage edits without changing files until Apply', async ({ page }) => {
   await openApp(page);
   await openLibrary(page);
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   const title = page.locator('#fields-body input[data-key="title"]');
   await expect(title).toHaveValue('Desert Rain');
   await title.fill('Restored Desert Rain');
@@ -130,7 +131,7 @@ test('generated tag fields stage edits without changing files until Apply', asyn
   await expect(page.locator('#tracks-body')).toContainText('Restored Desert Rain');
   expect(await page.evaluate(() => window.tagrex.tracks[0].tags.title)).toBe('Desert Rain');
   await page.locator('#diff-discard').click();
-  await expect(page.locator('#diff-actionbar')).toBeHidden();
+  await expect(page.locator('#diff-actionbar')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
   await expect(page.locator('#tracks-body')).toContainText('Desert Rain');
   await expect(page.locator('#tracks-body')).not.toContainText('Restored Desert Rain');
 });
@@ -238,8 +239,8 @@ test('narrow preset editor provides usable fields and separate rule actions', as
   await page.setViewportSize({ width: 375, height: 667 });
   await openApp(page);
   await openLibrary(page);
-  await page.locator('.dock-module-tab[aria-controls="dock-module-transformations"]').click();
-  await page.locator('#presets-edit').click();
+  await openTagSource(page,'transformations');
+  await openTagSource(page,'transformations');await page.locator('#presets-edit').click();
   await expect(page.locator('#pe-editor')).toBeVisible();
   await page.locator('#pe-new').click();
   await page.locator('#pe-name').fill('Mobile case change');

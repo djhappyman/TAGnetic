@@ -6,7 +6,7 @@ export const RESUME_ATTEMPT_KEY = 'tagrex.session.resume-attempt.v1';
 const MAX_BYTES = 256 * 1024;
 const MAX_PATHS = 256;
 const modes = new Set(['tagger', 'renamer', 'generator', 'exporter', 'deduplicator']);
-const tabs = new Set(['online', 'editor', 'filename', 'fromtext']);
+const tabs = new Set(['online', 'editor', 'filename', 'fromtext', 'transformations']);
 const text = (value, max) => typeof value === 'string' && value.length <= max && !value.includes('\0') ? value : '';
 const paths = (value) => Array.isArray(value) ? [...new Set(value.slice(0, MAX_PATHS).map(path => text(path, 4096)).filter(Boolean))] : [];
 const pixel = value => Number.isFinite(value) ? Math.max(0, Math.min(value, 10_000_000)) : 0;

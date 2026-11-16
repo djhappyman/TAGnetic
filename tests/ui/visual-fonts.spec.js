@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -53,7 +54,7 @@ test('a saved condensed data face stays independent while masks retain literal M
   await page.locator('#set-interface-font').evaluate(node=>{node.value='source';node.dispatchEvent(new Event('change',{bubbles:true}));});
   await page.locator('#settings-cancel').click();
   expect(await page.locator('#tracks-body td[data-field="title"]').first().evaluate(node=>getComputedStyle(node).fontFamily)).toContain('TagRex Condensed');
-  await page.locator('.subtab[data-subtab="filename"]').click();
+  await openTagSource(page, 'filename');
   expect(await page.locator('#from-name-mask').evaluate(node=>getComputedStyle(node).fontFamily)).toContain('TagRex Mono');
   await page.reload();
   await expect.poll(()=>page.evaluate(()=>!!window.tagrex)).toBe(true);
@@ -66,14 +67,14 @@ for(const font of Object.keys(families)) {
     await page.locator('#settings-open').click();
     await page.locator('#set-interface-font').evaluate((node,value)=>{node.value=value;node.dispatchEvent(new Event('change',{bubbles:true}));},font);
     await page.locator('#settings-cancel').click();
-    for(const mode of ['tagger','renamer','generator','deduplicator','exporter']) {
+    for(const mode of ['tagger','renamer','exporter']) {
       await page.locator(`.mode-tab[data-mode="${mode}"]`).click();
       await expect(page.locator(`#panel-${mode}`)).toBeVisible();
       expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBe(true);
     }
     await page.locator('.mode-tab[data-mode="tagger"]').click();
     for(const tab of ['online','editor','filename','fromtext']) {
-      await page.locator(`.subtab[data-subtab="${tab}"]`).click();
+      await openTagSource(page, tab);
       expect(await page.locator('.mode-col').evaluate(node=>node.scrollWidth<=node.clientWidth+1)).toBe(true);
     }
   });
@@ -81,7 +82,7 @@ for(const font of Object.keys(families)) {
 
 test('compact Apply rail appears without resizing the file table and does not reserve space when empty',async({page})=>{
   await page.setViewportSize({width:1024,height:800});
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   const before=await page.locator('#files-view').boundingBox();
   const idle=await page.locator('.statusbar').boundingBox();
   expect(idle.height).toBeLessThanOrEqual(52);
@@ -99,9 +100,9 @@ for(const font of ['inter','mono']) {
     await page.locator('#set-interface-font').evaluate((node,value)=>{node.value=value;node.dispatchEvent(new Event('change',{bubbles:true}));},font);
     await page.locator('#settings-cancel').click();
     await page.locator('#tracks-body tr[data-path]').first().click();
-    await page.locator('.subtab[data-subtab="editor"]').click();
+    await openTagSource(page, 'editor');
     for(const narrow of [false,true]){
-      if(narrow){const splitter=page.getByRole('separator',{name:'Resize workspace columns',exact:true});const handle=await splitter.boundingBox();const area=await page.locator('.dock-middle').boundingBox();await page.mouse.move(handle.x+2,handle.y+80);await page.mouse.down();await page.mouse.move(area.x+area.width-245,handle.y+80,{steps:4});await page.mouse.up();}
+      if(narrow)await page.evaluate(()=>document.documentElement.style.setProperty('--inspector-width','400px'));
       const inputs=page.locator('#fields-body .fe-duo .field-input');
       await expect(inputs).toHaveCount(4);
       for(let i=0;i<4;i++){
@@ -140,7 +141,7 @@ test('mask builder and custom column syntax stay Mono with either proportional o
 
 test('visible catalogue and counts honor the badge face independently from condensed data',async({page})=>{
   await page.locator('#settings-open').click();await page.locator('#settings-search').fill('Data font');await page.locator('#set-value-font [data-value-font="condensed"]').click();await page.locator('#settings-cancel').click();
-  await page.locator('.subtab[data-subtab="online"]').click();await page.locator('#discogs-token').evaluate(n=>{n.value='fixture';});await page.locator('#discogs-query').fill('Helter Skelter');await page.locator('#discogs-search').click();
+  await openTagSource(page, 'online');await page.locator('#discogs-token').evaluate(n=>{n.value='fixture';});await page.locator('#discogs-query').fill('Helter Skelter');await page.locator('#discogs-search').click();
   await expect(page.locator('.release-card')).toHaveCount(5);const facts=page.locator('.release-card').first().locator('.rb-catno, .tk-count');
   await page.locator('.release-card').first().locator('.release-head').click();
   await expect(page.locator('.release-card').first().locator('.tk-count')).toContainText('3 tracks');

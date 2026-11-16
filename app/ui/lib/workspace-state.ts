@@ -1,5 +1,5 @@
 export const WORKSPACE_MODES = ['tagger', 'renamer', 'generator', 'deduplicator', 'exporter'] as const;
-export const WORKSPACE_SUBTABS = ['online', 'editor', 'filename', 'fromtext'] as const;
+export const WORKSPACE_SUBTABS = ['online', 'editor', 'filename', 'fromtext', 'transformations'] as const;
 export type WorkspaceMode = typeof WORKSPACE_MODES[number];
 export type WorkspaceSubtab = typeof WORKSPACE_SUBTABS[number];
 export type WorkspaceState = Readonly<{ mode: WorkspaceMode; subtab: WorkspaceSubtab }>;

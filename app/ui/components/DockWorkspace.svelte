@@ -49,23 +49,15 @@
     const tabs = canvas.closest('.dock-frame')?.querySelectorAll<HTMLElement>('.dock-module-tab');
     tabs?.[next]?.focus();
   }
-  const sidebarMinimum = 400;
-  const sidebarMaximum = 560;
-  function columnPosition(value: number) {
-    if (!sidebarDrawer) return value;
-    const width = canvas.getBoundingClientRect().width;
-    const maximum = Math.min(sidebarMaximum, Math.max(sidebarMinimum, width - 480));
-    return Math.min(100 * (width - sidebarMinimum) / width, Math.max(100 * (width - maximum) / width, value));
-  }
   function resize(event: PointerEvent, area: 'left' | 'top' | 'bottom') {
-    if (event.button !== 0 || view.compact) return;
+    if (event.button !== 0 || view.compact || (drawer && area === 'left')) return;
     event.preventDefault();
     const rect = canvas.getBoundingClientRect();
     let pending: number | undefined;
     let frame = 0;
     const flush = () => {
       frame = 0;
-      if (pending !== undefined) { layout.resize(area, area === 'left' ? columnPosition(pending) : pending, false); pending = undefined; }
+      if (pending !== undefined) { layout.resize(area, pending, false); pending = undefined; }
     };
     const move = (next: PointerEvent) => {
       pending = area === 'left' ? (next.clientX - rect.left) / rect.width * 100 : area === 'top' ? next.clientY - rect.top : rect.bottom - next.clientY;
@@ -86,12 +78,13 @@
     window.addEventListener('pointercancel', stop, { once: true });
   }
   function resizeKey(event: KeyboardEvent, area: 'left' | 'top' | 'bottom') {
+    if (drawer && area === 'left') return;
     const delta = area === 'left' ? 2 : 16;
-    if (event.key === 'Home') layout.resize(area, area === 'left' ? columnPosition(72) : area === 'top' ? 138 : 190);
+    if (event.key === 'Home') layout.resize(area, area === 'left' ? 72 : area === 'top' ? 138 : 190);
     else if (['ArrowLeft', 'ArrowUp', 'ArrowRight', 'ArrowDown'].includes(event.key)) {
       const direction = ['ArrowRight', 'ArrowDown'].includes(event.key) ? 1 : -1;
       const next = view[area] + direction * delta * (area === 'bottom' ? -1 : 1);
-      layout.resize(area, area === 'left' ? columnPosition(next) : next);
+      layout.resize(area, next);
     }
     else return;
     event.preventDefault(); event.stopPropagation();
@@ -111,7 +104,9 @@
     <Button variant="ghost" class="dock-splitter dock-top-splitter" role="separator" aria-label="Resize top modules" aria-orientation="horizontal" aria-valuemin={70} aria-valuemax={600} aria-valuenow={view.top} hidden={!areaResizable('top')} onpointerdown={event => resize(event, 'top')} onkeydown={event => resizeKey(event, 'top')} />
     <div class="dock-middle">
       <div class="dock-area dock-left" role="region" aria-label="Left dock area" data-dock-host="left" {@attach leftHost}></div>
+      {#if !drawer}
       <Button variant="ghost" class="dock-splitter dock-column-splitter" role="separator" aria-label="Resize workspace columns" aria-orientation="vertical" aria-valuemin={20} aria-valuemax={82} aria-valuenow={view.left} hidden={!has('left') || !has('right')} onpointerdown={event => resize(event, 'left')} onkeydown={event => resizeKey(event, 'left')} />
+      {/if}
       <div class="dock-area dock-right" inert={sidebarDrawer && closed} aria-hidden={sidebarDrawer && closed ? true : undefined} role="region" aria-label="Right dock area" data-dock-host="right" {@attach rightHost}></div>
     </div>
     <Button variant="ghost" class="dock-splitter dock-bottom-splitter" role="separator" aria-label="Resize bottom modules" aria-orientation="horizontal" aria-valuemin={70} aria-valuemax={600} aria-valuenow={view.bottom} hidden={!areaResizable('bottom')} onpointerdown={event => resize(event, 'bottom')} onkeydown={event => resizeKey(event, 'bottom')} />

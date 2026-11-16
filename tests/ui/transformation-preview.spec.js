@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -76,20 +77,20 @@ test.beforeEach(async ({ page }) => {
   expect(await page.evaluate(() => !!window.__TAURI__)).toBe(false);
   await page.locator('#root-display').click(); await page.locator('#root').fill('/music'); await page.locator('#root').press('Enter');
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(3);
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   await expect(page.locator('#groups-menu')).toContainText('Upper titles');
 });
 test.afterEach(async ({ page }) => expect(issues.get(page)).toEqual([]));
 const calls = (page, command) => page.evaluate(command => window.transformCalls[command] || 0, command);
 const plan = page => page.evaluate(() => structuredClone(window.tagrex.previewPlan));
 async function tick(page, name, on = true) {
-  const module = page.locator('#dock-module-transformations');
-  if (!(await module.isVisible())) await page.getByRole('tab',{name:'Transformations',exact:true}).click();
-  if ((await module.getAttribute('data-dock-collapsed')) === 'true') await module.locator('.dock-module-toggle').click();
+  const previous=await page.evaluate(()=>document.querySelector('.subtab.active')?.dataset.subtab || 'online');
+  await openTagSource(page,'transformations');
   const row = page.locator('#groups-menu .preset-check').filter({ has: page.locator('.preset-apply', { hasText: name }) });
   const input = row.locator('input.group-tick');
   if (await input.isChecked() !== on) await row.locator('.preset-apply').click();
   await expect(input).toBeChecked({ checked: on });
+  if(previous!=='transformations')await openTagSource(page,previous);
 }
 async function changed(page, count = 1) {
   await expect.poll(async () => (await plan(page))?.changes.length || 0).toBe(count);
@@ -108,7 +109,7 @@ test('ticking a visible preset automatically previews the selection in Tags', as
 });
 
 test('the same active filename rules run after a chosen Online import', async ({ page }) => {
-  await page.locator('.subtab[data-subtab="online"]').click();
+  await openTagSource(page, 'online');
   await tick(page, 'Upper filenames'); await changed(page);
   expect((await plan(page)).changes[0].rename_to).toContain('THE X FACTOR');
   await page.evaluate(() => { document.getElementById('discogs-token').value = 'fixture'; });
@@ -124,7 +125,7 @@ test('the same active filename rules run after a chosen Online import', async ({
 
 test('automatic filename Apply and Undo keep paths correct without reselecting files in Online', async ({ page }) => {
   const original = await page.evaluate(() => window.tagrex.selectedPaths()[0]);
-  await page.locator('.subtab[data-subtab="online"]').click();
+  await openTagSource(page, 'online');
   await tick(page, 'Upper filenames'); await changed(page);
   const renamed = (await plan(page)).changes[0].rename_to;
   await page.locator('#diff-apply').click();
@@ -147,7 +148,7 @@ test('toggling a non-idempotent preset is A/B and selecting another diff row ret
   expect((await plan(page)).changes[0].tag_changes[0].new).toBe('Desert Rain!');
   await tick(page, 'Append title mark', false);
   await expect.poll(() => plan(page)).toBe(null);
-  await expect(page.locator('#diff-actionbar')).toBeHidden();
+  await expect(page.locator('#diff-actionbar')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
   await tick(page, 'Append title mark'); await changed(page);
   expect((await plan(page)).changes[0].tag_changes[0].new).toBe('Desert Rain!');
   await page.locator('#tracks-body tr[data-path]').nth(1).locator('td.file').click();
@@ -163,12 +164,12 @@ test('Apply and Undo each use one batch and leave saved values visible with pres
   await page.locator('#diff-apply').click();
   await expect.poll(() => page.evaluate(() => window.tagrex.tracks[0].tags.title)).toBe('Desert Rain!');
   await expect.poll(() => plan(page)).toBe(null);
-  await expect(page.locator('#diff-actionbar')).toBeHidden();
+  await expect(page.locator('#diff-actionbar')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
   expect(await calls(page, 'apply_plan')).toBe(1);
   await expect(page.locator('#undo')).toBeEnabled(); await page.locator('#undo').click();
   await expect.poll(() => page.evaluate(() => window.tagrex.tracks[0].tags.title)).toBe('Desert Rain');
   await expect.poll(() => plan(page)).toBe(null);
-  await expect(page.locator('#diff-actionbar')).toBeHidden();
+  await expect(page.locator('#diff-actionbar')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
   expect(await calls(page, 'undo')).toBe(1);
   await expect(page.locator('#groups-menu .preset-check').filter({ hasText: 'Append title mark' }).locator('input.group-tick')).toBeChecked();
   await page.locator('#tracks-body tr[data-path] td.file').first().click();

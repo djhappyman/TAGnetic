@@ -42,7 +42,7 @@ body .mode-col {
   container-name: tag-inspector;
 }
 
-/* ---- tabs: one quiet 32px navigation row for the four Tagger modes -------- */
+/* ---- tabs: one quiet 32px navigation row for the manual tagging sources and Transformations -------- */
 body .mode-col .subtabs[data-slot='tabs-list'] {
   display: grid;
   grid-template-columns: repeat(4, minmax(max-content, 1fr));
@@ -56,6 +56,7 @@ body .mode-col .subtabs[data-slot='tabs-list'] {
   border-radius: 0;
   background: transparent;
 }
+body .mode-col .subtabs[data-slot='tabs-list'][hidden] { display:none; }
 body .mode-col button[data-slot='button'].subtab {
   flex: 0 1 auto;
   height: var(--ctl-h);
@@ -1218,7 +1219,10 @@ body .mode-col :is(.online-scroll, .editor-scroll, .from-name-scroll, .mode-pane
 }
 
 /* Disclosures follow the Transformations surface; counts add no useful action. */
-body .mode-col .fe-group.collapsible { gap:var(--sp-3); }
+body .mode-col .fe-group.collapsible { gap:0; }
+body .mode-col .fe-disclosure-content { overflow:clip; }
+body .mode-col .fe-disclosure-content[hidden] { display:none; }
+body .mode-col .fe-disclosure-content > .fe-grid { padding-top:var(--sp-3); }
 /* Locks share the field footprint rather than reserving a separate gutter. */
 body .mode-col .fe-row:has(.genre-picker-host) > .fe-lock { right:34px; }
 body .mode-col .fe-row .genre-combobox .field-input { padding-right:86px; }
@@ -1255,3 +1259,23 @@ body .mode-col button.fe-clear:focus-visible { outline:2px solid var(--accent); 
 body .mode-col button.fe-clear .ico { width:14px; height:14px; }
 @media(hover:none) { body .mode-col button.fe-clear { opacity:1; pointer-events:auto; } }
 @media(prefers-reduced-motion:reduce) { body .mode-col button.fe-clear { transition:none; } }
+
+body .mode-col .transformations-scroll { display:flex; flex:1; min-height:0; padding:var(--sp-3) var(--inspector-inset) var(--sp-4); background:var(--workbench-chrome,var(--panel)); gap:var(--sp-3); }
+body .mode-col .transformations-edit { margin-inline-start:auto; color:var(--muted); }
+
+body .mode-col .source-navigation { display:flex; align-items:center; flex:none; min-width:0; }
+body .mode-col .source-navigation[hidden] { display:none; }
+body .mode-col .source-navigation .subtabs { flex:1; width:0; overflow-x:auto; scrollbar-width:none; padding-inline-end:var(--sp-1); }
+body .mode-col .source-tools { display:flex; align-items:center; flex:none; gap:var(--sp-1); padding-inline-end:var(--inspector-inset); }
+body .mode-col .source-tools button { width:24px; height:24px; min-height:24px; padding:3px; }
+body .mode-col .source-tools button[hidden] { display:none; }
+
+/* Field feedback floats over the form rather than growing a row on focus. */
+body .mode-col .fe-hint { position:absolute; top:calc(100% + 2px); inset-inline:0; z-index:4; max-height:none; padding:4px 8px; border-radius:var(--r-compact); background:var(--panel); box-shadow:0 4px 12px rgb(0 0 0 / .18); opacity:0; pointer-events:none; transform:translateY(-2px); transition:opacity 150ms ease,transform 150ms ease; }
+body .mode-col .fe-row:is(:focus-within,.error) .fe-hint { max-height:none; padding:4px 8px; opacity:1; transform:none; }
+@media(prefers-reduced-motion:reduce) { body .mode-col .fe-hint { transition:none; } }
+body .statusbar .sb-right:has(#diff-actionbar[data-has-work='false']) #ab-locked { display:none; }
+
+body .mode-col { position:relative; }
+body .mode-col .overlay-scrollport { scrollbar-width:none; scrollbar-gutter:auto; }
+body .mode-col .overlay-scrollport::-webkit-scrollbar { width:0; height:0; }

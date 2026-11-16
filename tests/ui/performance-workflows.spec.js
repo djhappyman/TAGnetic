@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -102,7 +103,7 @@ test('one explicitly applied cell refreshes its DTO without relisting the librar
   expect(await page.evaluate(() => window.perfCalls.preview_live_edits || 0)).toBeGreaterThan(0);
   expect(await page.evaluate(() => window.tagrex.tracks.slice(1))).toEqual(original);
   await expect(page.locator('#undo')).toBeEnabled();
-  await expect(page.locator('#diff-actionbar')).toBeHidden();
+  await expect(page.locator('#diff-actionbar')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
 });
 
 test('affected custom columns refresh only the edited path and preserve other cached rows', async ({ page }) => {
@@ -163,7 +164,6 @@ test('filtered selection reuses model counts, including files inside collapsed g
   expect(await page.evaluate(() => window.perfFilterReads())).toBeLessThan(20);
   await page.locator('#group-btn').click();
   await page.locator('#group-menu [data-group="album"]').click();
-  await page.locator('#view-btn').click();
   await page.locator('#toggle-groups').click();
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(0);
   await expect(page.locator('#status-sel')).toContainText('100/');
@@ -205,7 +205,7 @@ test('Apply shows a truthful preparation message until write progress is availab
       return original.call(this, value);
     };
   });
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   await page.locator('#fields-body input[data-key="title"]').fill('Prepared edit');
   await expect(page.locator('#diff-actionbar')).toBeVisible();
   await expect(page.locator('#diff-apply')).toBeEnabled();
@@ -213,7 +213,7 @@ test('Apply shows a truthful preparation message until write progress is availab
   await page.locator('#diff-apply').click();
   await expect(page.locator('#ab-file')).toHaveText('Checking files…');
   await expect(page.locator('#ab-bar-fill')).toHaveCSS('width', '0px');
-  await expect(page.locator('#diff-actionbar')).toBeHidden();
+  await expect(page.locator('#diff-actionbar')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
 });
 
 test('visible mask columns share one batch and an invalid pattern only blanks its own column', async ({ page }) => {
@@ -264,7 +264,7 @@ test('a delayed mask-column batch cannot replace values from a newer library', a
 
 test('mask builder keeps one active preview and only the latest queued expression', async ({ page }) => {
   await open(page);
-  await page.locator('.subtab[data-subtab="filename"]').click();
+  await openTagSource(page, 'filename');
   // The inspector now shares this backend batch command. Let its debounced
   // sample settle before instrumenting only the builder's request queue.
   await expect(page.locator('#from-name-probe .probe-tracks')).toBeVisible();

@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -77,37 +78,29 @@ async function copy(page) {
 test('mode and subtab arrow keys activate the existing controller panes', async ({ page }) => {
   await page.locator('.mode-tab[data-mode="tagger"]').focus();
   await page.keyboard.press('ArrowRight');
+  await expect(page.locator('#subtab-online')).toBeVisible();
+  await page.keyboard.press('ArrowRight');
   await expect(page.locator('#panel-renamer')).toBeVisible();
   await expect(page.locator('.mode-tab[data-mode="renamer"]')).toHaveAttribute('aria-selected', 'true');
   await page.keyboard.press('End');
   await expect(page.locator('#panel-exporter')).toBeVisible();
   await page.keyboard.press('Home');
   await expect(page.locator('#panel-tagger')).toBeVisible();
-  await page.locator('.subtab[data-subtab="online"]').focus();
-  await page.keyboard.press('ArrowRight');
+  await page.locator('.subtab[data-subtab="filename"]').focus();
+  await page.keyboard.press('ArrowLeft');
   await expect(page.locator('#subtab-editor')).toBeVisible();
   await page.keyboard.press('End');
-  await expect(page.locator('#subtab-fromtext')).toBeVisible();
+  await expect(page.locator('#subtab-transformations')).toBeVisible();
   await page.keyboard.press('Home');
-  await expect(page.locator('#subtab-online')).toBeVisible();
+  await expect(page.locator('#subtab-editor')).toBeVisible();
 });
 
-test('the keyboard splitter resizes the workspace and remembers the layout on reload', async ({ page }) => {
-  const splitter = page.getByRole('separator', { name: 'Resize workspace columns', exact: true });
-  const before = Number(await splitter.getAttribute('aria-valuenow'));
-  const originalWidth = (await page.locator('.mode-col').boundingBox()).width;
-  await splitter.focus();
-  // Move beyond the inspector's desktop minimum before measuring growth.
-  for (let step=0;step<6;step++) await page.keyboard.press('ArrowLeft');
-  await expect.poll(async () => Number(await splitter.getAttribute('aria-valuenow'))).toBeLessThan(before);
-  expect((await page.locator('.mode-col').boundingBox()).width).toBeGreaterThan(originalWidth);
-  const changed = Number(await splitter.getAttribute('aria-valuenow'));
-  await page.reload();
-  await expect.poll(() => page.evaluate(() => typeof window.tagrex?.setMode)).toBe('function');
-  await expect.poll(async () => Number(await splitter.getAttribute('aria-valuenow'))).toBe(changed);
-  await splitter.focus();
-  for (let step=0;step<6;step++) await page.keyboard.press('ArrowRight');
-  await expect.poll(async () => (await page.locator('.mode-col').boundingBox()).width).toBeCloseTo(originalWidth,0);
+test('the fixed sidebar restores its width after keyboard collapse and reopen', async ({page}) => {
+  await expect(page.getByRole('separator',{name:'Resize workspace columns',exact:true})).toHaveCount(0);
+  const toggle=page.locator('#panel-toggle');await toggle.focus();await page.keyboard.press('Enter');
+  await expect(toggle).toHaveAttribute('aria-expanded','false');await page.keyboard.press('Enter');
+  await expect(toggle).toHaveAttribute('aria-expanded','true');
+  await expect(page.locator('.dock-right')).toHaveCSS('width','420px');
 });
 
 test('cell keyboard navigation, live preview, cancellation and row selection remain separate', async ({ page }) => {
@@ -126,7 +119,7 @@ test('cell keyboard navigation, live preview, cancellation and row selection rem
   await expect(cell(page, 'title')).toBeFocused();
   await page.locator('#diff-apply').click();
   await expect.poll(() => page.evaluate(() => window.tagrex.tracks[0].tags.title)).toBe('Direct cell title');
-  await expect(page.locator('#diff-actionbar')).toBeHidden();
+  await expect(page.locator('#diff-actionbar')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
   expect(await calls(page, 'apply_plan')).toBe(1);
   await cell(page, 'title').click();
   await page.keyboard.press('Tab');
@@ -216,7 +209,7 @@ for (const kind of ['Paste cells', 'Fill down']) {
     await expect(page.locator('#ab-plan')).toContainText(kind);
     await expect(page.locator('#ab-plan')).toContainText('Edit tags');
     await page.locator('#diff-apply').click();
-    await expect(page.locator('#diff-actionbar')).toBeHidden();
+    await expect(page.locator('#diff-actionbar')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
     expect(await page.evaluate(async () => (await window.tagrex.invoke('history', {}))[0].description)).toBe('Edit tags');
   });
 }
@@ -267,7 +260,7 @@ test('TSV paste creates one review plan and one Apply/Undo journal batch', async
   expect(await calls(page, 'apply_plan')).toBe(0);
   expect(await page.evaluate(() => window.tagrex.tracks.slice(0, 2).map((track) => track.tags))).toEqual(original);
   await page.locator('#diff-apply').click();
-  await expect(page.locator('#diff-actionbar')).toBeHidden();
+  await expect(page.locator('#diff-actionbar')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
   expect(await calls(page, 'apply_plan')).toBe(1);
   expect(await page.evaluate(async () => (await window.tagrex.invoke('history', {})).length)).toBe(1);
   expect(await page.evaluate(() => window.tagrex.tracks.slice(0, 2).map((track) => [track.tags.artist, track.tags.title]))).toEqual([['Artist A', 'Title A'], ['Artist B', 'Title B']]);
@@ -289,7 +282,7 @@ test('manual review applies only highlighted files without row checkboxes', asyn
   await expect(page.locator('#tracks-body tr[data-path].selected')).toHaveCount(1);
   await expect(page.locator('#tracks-body input[type="checkbox"]')).toHaveCount(0);
   await page.locator('#diff-apply').click();
-  await expect(page.locator('#diff-actionbar')).toBeHidden();
+  await expect(page.locator('#diff-actionbar')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
   expect(await page.evaluate(() => window.tagrex.tracks.slice(0, 2).map(track => track.tags.artist))).toEqual([original, 'Artist B']);
   expect(await calls(page, 'apply_plan')).toBe(1);
 });
@@ -311,7 +304,7 @@ for (const [name, value, field, expected] of [
     expect(await calls(page, 'preview_tag_edits')).toBe(0);
     expect(await calls(page, 'apply_plan')).toBe(0);
     expect(await page.evaluate(() => window.tagrex.tracks.map((track) => track.tags))).toEqual(original);
-    await expect(page.locator('#diff-actionbar')).toBeHidden();
+    await expect(page.locator('#diff-actionbar')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
   });
 }
 
@@ -401,7 +394,7 @@ for (const invalidKind of ['date', 'cover']) {
     await expect(page.locator('#toast')).toContainText('Nothing was staged');
     await expect(page.locator('#toast')).toContainText('01 - the x factor - desert rain.mp3');
     await expect(page.locator('#toast')).toContainText(invalidKind === 'date' ? 'Year' : 'Artwork');
-    await expect(page.locator('#diff-actionbar')).toBeHidden();
+    await expect(page.locator('#diff-actionbar')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
     expect(await calls(page, 'preview_tag_edits')).toBe(1);
     expect(await calls(page, 'apply_plan')).toBe(0);
     expect(await page.evaluate(() => window.tagrex.tracks.map((track) => track.tags))).toEqual(original);
@@ -474,7 +467,7 @@ test('read-only and locked range reasons remain visible as lock state changes', 
   await expect(page.locator('.sheet-menu-reason')).toContainText('File is read-only');
   await page.keyboard.press('Escape');
   await cell(page, 'artist').click();
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   const lock = page.locator('#fields-body .fe-row').filter({ has: page.locator('input[data-key="artist"]') }).locator('.fe-lock');
   await lock.click();
   await expect(cell(page, 'artist')).toHaveAttribute('aria-readonly', 'true');
@@ -514,12 +507,11 @@ for (const viewport of [{ width: 375, height: 667 }, { width: 844, height: 390 }
     await page.setViewportSize(viewport);
     const actions = {
       tagger: ['presets-edit'], renamer: ['preview'],
-      generator: ['ribbon-autonumber', 'vinyl-split'],
-      deduplicator: [], exporter: ['export-run'],
+      exporter: ['export-run'],
     };
     for (const [mode, ids] of Object.entries(actions)) {
       await page.locator(`.mode-tab[data-mode="${mode}"]`).click();
-      if (mode === 'tagger') await page.locator('.subtab[data-subtab="editor"]').click();
+      if (mode === 'tagger') await openTagSource(page, 'editor');
       const panel = page.locator(`#panel-${mode}`);
       await expect(panel).toBeVisible();
       await expect(page.locator('.mode-panel:visible')).toHaveCount(1);
@@ -528,8 +520,6 @@ for (const viewport of [{ width: 375, height: 667 }, { width: 844, height: 390 }
       expect(box.x + box.width).toBeLessThanOrEqual(viewport.width + 1);
       expect(box.y + box.height).toBeLessThanOrEqual(viewport.height + 1);
       for (const id of ids) {
-        if (mode === 'generator') await page.getByRole('tab', { name: 'Inspector', exact: true }).click();
-        if (mode === 'generator' && id === 'vinyl-split') await page.locator('#gen-job-sides').click();
         if (mode === 'tagger' && id === 'presets-edit') await page.getByRole('tab', { name: 'Transformations', exact: true }).click();
         const button = page.locator(`#${id}`);
         await button.scrollIntoViewIfNeeded();

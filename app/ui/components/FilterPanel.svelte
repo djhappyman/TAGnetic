@@ -1,13 +1,11 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import '../filter-panel.css';
+  import { placeFloating } from '../js/popup-position.js';
 
   let { children }: { children: Snippet } = $props();
   function attachPanel(root: HTMLElement) {
     const focus = () => {
-      // A shortcut can be invoked while the compact Inspector pane is showing.
-      const library = document.getElementById('pane-library');
-      if (library?.getAttribute('aria-selected') === 'false') library.click();
       requestAnimationFrame(() => {
         const input = root.querySelector<HTMLInputElement>('#filter');
         input?.focus();
@@ -18,17 +16,14 @@
       const menu = root.querySelector<HTMLElement>('#presets-menu');
       const button = root.querySelector<HTMLElement>('#presets-btn');
       if (!menu || menu.hidden || !button) return;
-      const anchor = button.getBoundingClientRect();
-      if (!menu.classList.contains('floating')) menu.classList.add('floating');
-      menu.style.top = 'auto';
-      menu.style.bottom = `${window.innerHeight - anchor.top + 4}px`;
-      menu.style.maxHeight = `${Math.max(80, anchor.top - 12)}px`;
-      menu.style.width = '';
-      const width = menu.offsetWidth;
-      menu.style.left = `${Math.max(8, Math.min(anchor.left, innerWidth - width - 8))}px`;
+      menu.classList.add('floating');
+      placeFloating(menu, button, { align:'right' });
     }
     const clicked = (event: MouseEvent) => {
-      if ((event.target as Element).closest('#presets-btn')) requestAnimationFrame(placePresets);
+      if ((event.target as Element).closest('#presets-btn')) {
+        document.dispatchEvent(new Event('tagrex:query-suggest-dismiss'));
+        requestAnimationFrame(placePresets);
+      }
     };
     // Only the floating preset menu needs observation; filter changes no
     // longer rebuild a duplicate summary above the command field.

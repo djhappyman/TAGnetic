@@ -532,7 +532,7 @@ async function previewConvertTagBlock(from, to, revision) {
 }
 
 // Everyday fields live in Core; the remaining fields and existing custom
-// metadata live in Standard or Advanced.
+// metadata live together in More tags.
 const EDITOR_CORE_KEYS = ["artist", "title", "album", "albumartist", "track", "tracktotal", "disc", "disctotal", "year", "genre", "comment", "bpm", "key"];
 // Core follows the tagging workflow: compact number pairs, identity fields,
 // paired short fields, then multiline comment. Long fields keep a fixed rail.
@@ -555,9 +555,9 @@ const EDITOR_CORE_LAYOUT = [
 // error as you type instead of only being rejected at apply.
 const EDITOR_NUMERIC_KEYS = new Set(["track", "tracktotal", "disc", "disctotal", "bpm", "year"]);
 // Whether each collapsible group is folded; persists across re-renders in a
-// session. Core is open by default; More tags and Advanced start folded
+// session. Core is open by default; More tags starts folded
 // so the everyday form isn't buried under technical noise (#136).
-const editorGroupCollapsed = { standard: true, advanced: true };
+const editorGroupCollapsed = { standard: true };
 
 // A vinyl position as a track or disc number (#641), the backend's
 // is_vinyl_position: one or two letters with up to three digits ("A", "B2",
@@ -626,7 +626,7 @@ function renderFieldEditor(paths) {
 
   // Standard = the known extended fields, plus any custom keys we can name
   // (promoted, appended after the curated ones and sorted by label). The raw
-  // rest — technical frames with no friendly name — drop into Advanced (#136).
+  // rest — technical frames with no friendly name — follow inside More tags.
   const standardRows = EXTENDED_FIELDS.filter(([key]) => !EDITOR_CORE_KEYS.includes(key)).map(
     ([key]) => ({ key, label: catalogueLabel(key) })
   );
@@ -649,10 +649,9 @@ function renderFieldEditor(paths) {
     standardRows.splice(standardRows.indexOf(catalogue), 1, { inline: [catalogue, isrc] });
     standardRows.splice(standardRows.indexOf(isrc), 1);
   }
-  standardRows.push(...promoted);
+  standardRows.push(...promoted, ...advancedRows);
 
   const groups = [['core', coreRows], ['standard', standardRows]];
-  if (advancedRows.length) groups.push(['advanced', advancedRows]);
   const retained = new Set();
   for (const [index, [kind, rows]] of groups.entries()) {
     let group = body.querySelector(`.fe-group[data-group="${kind}"]`);
@@ -718,13 +717,39 @@ function fieldGroup(title, rows, paths, kind) {
   grid.id = `editor-group-${kind}`;
   grid.inert = collapsed;
   reconcileFieldRows(grid, rows, paths);
-  group.appendChild(grid);
+  if (!collapsible) { group.appendChild(grid); return group; }
+  const content = document.createElement('div');
+  content.className = 'fe-disclosure-content';
+  content.hidden = collapsed;
+  content.appendChild(grid);
+  group.appendChild(content);
+  let animation = null;
   head.addEventListener("click", () => {
     const next = !editorGroupCollapsed[kind];
     editorGroupCollapsed[kind] = next;
+    const height = content.getBoundingClientRect().height;
+    const opacity = getComputedStyle(content).opacity;
+    animation?.cancel();
     group.classList.toggle("collapsed", next);
     head.setAttribute("aria-expanded", String(!next));
     grid.inert = next;
+    content.hidden = false;
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      content.hidden = next;
+      animation = null;
+      return;
+    }
+    const current = content.animate([
+      { height: `${height}px`, opacity: height ? opacity : 0 },
+      { height: `${next ? 0 : content.scrollHeight}px`, opacity: next ? 0 : 1 },
+    ], { duration: next ? 180 : 240, easing: 'cubic-bezier(.2,.8,.2,1)', fill: 'both' });
+    animation = current;
+    current.onfinish = () => {
+      if (animation !== current) return;
+      content.hidden = next;
+      animation = null;
+      current.cancel();
+    };
   });
   return group;
 }

@@ -3,7 +3,7 @@
   import { Button } from '$lib/components/ui/button/index.js';
   import * as Context from '$lib/components/ui/context-menu/index.js';
   import { useWorkspaceLayout, DOCK_AREAS, type DockArea } from '$lib/workspace-layout';
-  let { moduleId, title, defaultArea = 'right', defaultIndex, defaultWeight = 1, chromeTarget, headerless = false, collapsible = false, visible = true, headerHelp, headerActions, children }: { moduleId: string; title: string; defaultArea?: DockArea; defaultIndex?: number; defaultWeight?: number; chromeTarget?: string; headerless?: boolean; collapsible?: boolean; visible?: boolean; headerHelp?: Snippet; headerActions?: Snippet; children: Snippet } = $props();
+  let { moduleId, title, defaultArea = 'right', defaultIndex, defaultWeight = 1, chromeTarget, headerless = false, movable = true, collapsible = false, visible = true, headerHelp, headerActions, children }: { moduleId: string; title: string; defaultArea?: DockArea; defaultIndex?: number; defaultWeight?: number; chromeTarget?: string; headerless?: boolean; movable?: boolean; collapsible?: boolean; visible?: boolean; headerHelp?: Snippet; headerActions?: Snippet; children: Snippet } = $props();
   const layout = useWorkspaceLayout();
   if (!layout) throw new Error('DockModule must be inside DockWorkspace');
   function syncVisibility() { layout.setVisible(moduleId, visible); }
@@ -21,13 +21,13 @@
     // module movement without reserving another visible title row.
     const contextSurface = (target: EventTarget | null) => target instanceof Element && !!target.closest('.subtabs, .mode-panel h2');
     const openLayoutMenu = (event: MouseEvent) => {
-      if (!headerless || !contextSurface(event.target)) return;
+      if (!movable || !headerless || !contextSurface(event.target)) return;
       event.preventDefault(); event.stopPropagation();
       layoutOpener = (event.target as Element).closest<HTMLElement>('button, [tabindex]') || document.activeElement as HTMLElement;
       chrome.dispatchEvent(new MouseEvent('contextmenu', { bubbles:true, cancelable:true, clientX:event.clientX, clientY:event.clientY }));
     };
     const layoutKey = (event: KeyboardEvent) => {
-      if (!headerless || !contextSurface(event.target) || !(event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey))) return;
+      if (!movable || !headerless || !contextSurface(event.target) || !(event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey))) return;
       event.preventDefault(); event.stopPropagation();
       layoutOpener = event.target as HTMLElement;
       const rect = (event.target as Element).getBoundingClientRect();
@@ -76,6 +76,7 @@
     target?.focus({ preventScroll:true });
   }
   function keyboardMenu(event: KeyboardEvent) {
+    if (!movable) return;
     const contextKey = event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey);
     if (!contextKey && event.target instanceof Element && event.target !== chrome && event.target.closest('button, input, select, textarea, a')) return;
     if (!['ContextMenu', 'Enter', ' '].includes(event.key) && !(event.key === 'F10' && event.shiftKey)) return;
@@ -131,7 +132,7 @@
 
 <section id={`dock-module-${moduleId}`} class="dock-module" data-dock-module={moduleId} data-collapsible={collapsible} aria-label={title} {@attach attach} {@attach syncVisibility}>
   <Context.Root bind:open={contextOpen}>
-    <Context.Trigger class="dock-module-chrome" hidden={headerless} role={collapsible ? 'presentation' : 'button'} tabindex={collapsible ? undefined : 0} aria-label={collapsible ? undefined : `${title} module layout`} title={collapsible ? undefined : 'Right-click to move this module'} onkeydown={keyboardMenu} onclick={headerClick}>
+    <Context.Trigger disabled={!movable} class="dock-module-chrome" hidden={headerless} role={collapsible || !movable ? 'presentation' : 'button'} tabindex={collapsible || !movable ? undefined : 0} aria-label={collapsible || !movable ? undefined : `${title} module layout`} title={collapsible || !movable ? undefined : 'Right-click to move this module'} onkeydown={keyboardMenu} onclick={headerClick}>
       {#if collapsible}
         <Button variant="ghost" size="sm" class="dock-module-toggle" aria-labelledby={`dock-title-${moduleId}`} aria-expanded={!position.collapsed} aria-controls={`dock-body-${moduleId}`} onclick={toggleCollapsed}>
           <svg class="ico dock-module-caret" aria-hidden="true"><use href="#i-caret-down"/></svg>
@@ -144,6 +145,7 @@
         <span class="dock-module-title">{title}</span>
       {/if}
     </Context.Trigger>
+    {#if movable}
     <Context.Content class="dock-layout-menu" aria-hidden={!contextOpen} inert={!contextOpen} data-controller-popup onCloseAutoFocus={restoreLayoutFocus}>
       <Context.Label>Move {title}</Context.Label>
       {#each DOCK_AREAS as area (area)}<Context.Item disabled={position.area === area} onSelect={() => layout.move(moduleId, area)}>Dock {area}</Context.Item>{/each}
@@ -153,6 +155,7 @@
       <Context.Separator />
       <Context.Item onSelect={() => layout.reset()}>Reset workspace layout</Context.Item>
     </Context.Content>
+    {/if}
   </Context.Root>
   <div id={`dock-body-${moduleId}`} class="dock-module-body" inert={collapsible && position.collapsed}>{@render children()}</div>
   <Button variant="ghost" class="dock-module-splitter" role="separator" aria-label={`Resize ${title} module`} aria-orientation="horizontal" aria-valuemin={10} aria-valuemax={2000} aria-valuenow={Math.round(position.weight * 100)} hidden={position.collapsed || position.nextCollapsed || position.total < 2 || position.index === position.total - 1} onpointerdown={resize} onkeydown={resizeKey} />

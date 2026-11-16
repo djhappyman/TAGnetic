@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -42,7 +43,7 @@ test.beforeEach(async({page})=>{
   await expect.poll(()=>page.evaluate(()=>typeof window.tagrex?.openLibrary)).toBe('function');
   await page.locator('#root-display').click();await page.locator('#root').fill('/music');await page.locator('#root').press('Enter');
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(3);
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
 });
 test.afterEach(async({page})=>expect(page.__liveErrors).toEqual([]));
 const field=(page,key)=>page.locator(`#fields-body [data-key="${key}"]`);
@@ -56,7 +57,7 @@ async function tick(page,on=true){
   if(await row.locator('input.group-tick').isChecked()!==on)await row.locator('.preset-apply').click();
 }
 async function releases(page){
-  await page.locator('.subtab[data-subtab="online"]').click();
+  await openTagSource(page, 'online');
   await page.evaluate(()=>document.getElementById('discogs-token').value='fixture');
   await page.locator('#discogs-query').fill('La Bush');await page.locator('#discogs-search').click();
   await expect(page.locator('.release-card')).toHaveCount(5);

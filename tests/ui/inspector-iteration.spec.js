@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile, mkdir } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -24,19 +25,13 @@ test.beforeEach(async ({page}) => {
 });
 test.afterEach(async ({page}) => { expect(page.testErrors).toEqual([]); });
 
-async function tab(page, name) { await page.locator(`.subtab[data-subtab="${name}"]`).click(); }
+async function tab(page, name) { await openTagSource(page, name); }
 async function selectAll(page) {
   await page.locator('#tracks-body tr[data-path]').first().click();
   await page.locator('#tracks-body tr[data-path]').last().click({modifiers:['Shift']});
 }
 async function sizeInspector(page, width) {
-  const area = await page.locator('.dock-middle').boundingBox();
-  const separator = page.getByRole('separator',{name:'Resize workspace columns',exact:true});
-  const handle = await separator.boundingBox();
-  await page.mouse.move(handle.x+handle.width/2, handle.y+handle.height/2);
-  await page.mouse.down();
-  await page.mouse.move(area.x+area.width-width-handle.width/2, handle.y+handle.height/2, {steps:4});
-  await page.mouse.up();
+  await page.evaluate(value=>document.documentElement.style.setProperty('--inspector-width',`${Math.max(400,value)}px`),width);
 }
 
 test('mixed and empty placeholders never become pending values; compact fields and more tags stay usable', async ({page}) => {

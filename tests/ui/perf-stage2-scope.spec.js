@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -39,7 +40,7 @@ async function open(page) {
   await page.locator('#root').fill('/music');
   await page.locator('#root').press('Enter');
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(3);
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   await expect.poll(() => page.evaluate(() => window.scopeWriteCounterInstalled)).toBe(true);
 }
 
@@ -71,7 +72,7 @@ test('mutable inline/reference artwork and block validity stays fresh through sc
     await expect(page.locator('#diff-apply')).toBeEnabled();
   }
   await page.locator('#diff-discard').click();
-  await expect(page.locator('#diff-actionbar')).toBeHidden();
+  await expect(page.locator('#diff-actionbar')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
   expect(await page.evaluate(() => window.scopeWrites)).toBe(0);
 });
 

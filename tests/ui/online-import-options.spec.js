@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import {test,expect} from '@playwright/test';
 import {readFile} from 'node:fs/promises';
 import {resolve,sep} from 'node:path';
@@ -184,7 +185,7 @@ async function importWrongYear(page,extra=[]){
   });
   await configure(page,['year',...extra],false);await search(page);await importFirst(page);await expect(page.locator('#diff-apply')).toBeEnabled();
   await page.locator('#staged-tab').click();
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   await page.locator('#fields-body [data-key="year"]').fill('2003');
   await expect.poll(()=>page.evaluate(()=>window.tagrex.previewPlan?.changes.some(change=>change.tag_changes.some(field=>field.field==='year'))||false)).toBe(false);
 }
@@ -219,7 +220,7 @@ test('reverting the last changed cell in a column keeps its editor until blur, t
     const first=window.tagrex.tracks[0];first.tags.year='2003';
     window.tagrex.selection.clear();window.tagrex.selection.add(first.path);window.tagrex.renderTracks();
   });
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   await page.locator('#fields-body [data-key="title"]').fill('Keep this title change');
   await page.locator('#fields-body [data-key="year"]').fill('2004');
   await expect(page.locator('#diff-apply')).toBeEnabled();

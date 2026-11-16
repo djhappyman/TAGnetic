@@ -70,15 +70,14 @@ async function library(page) {
 
 test('unchanged column menus retain their controls', async ({ page }) => {
   await library(page);
-  await page.locator('#view-btn').click();
-  await page.locator('#columns-btn').click();
+  await page.locator('#tracks th.sortable').first().click({button:'right'});
   const menu = page.locator('#columns-menu');
   await expect(menu.locator('input[type="checkbox"]').first()).toHaveAttribute('data-native-proxy');
   await menu.evaluate(node => { window.auditColumnControl = node.querySelector('input[type="checkbox"]'); });
   await page.keyboard.press('Escape');
   await expect(menu).toBeHidden();
-  // Escape closes the child chooser while retaining its View tray.
-  await page.locator('#columns-btn').click();
+  // Escape returns to the table header.
+  await page.locator('#tracks th.sortable').first().click({button:'right'});
   expect(await page.evaluate(() => document.querySelector('#columns-menu input[type="checkbox"]') === window.auditColumnControl)).toBe(true);
 });
 

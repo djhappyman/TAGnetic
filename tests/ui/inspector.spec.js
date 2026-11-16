@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile, mkdir } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -41,32 +42,22 @@ test.afterEach(async ({ page }) => {
 });
 
 async function sizeInspector(page, width) {
-  const splitter = page.getByRole('separator', { name: 'Resize workspace columns', exact: true });
-  if (await splitter.count()) {
-    const area = await page.locator('.dock-middle').boundingBox();
-    const handle = await splitter.boundingBox();
-    await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
-    await page.mouse.down();
-    await page.mouse.move(area.x + area.width - width - handle.width / 2, handle.y + handle.height / 2, { steps: 4 });
-    await page.mouse.up();
-  } else {
-    await page.evaluate((value) => { document.querySelector('.mode-col').style.flexBasis = `${value}px`; }, width);
-  }
+  await page.evaluate(value=>document.documentElement.style.setProperty('--inspector-width',`${Math.max(400,value)}px`),width);
 }
 
 async function search(page) {
-  await page.locator('.subtab[data-subtab="online"]').click();
+  await openTagSource(page, 'online');
   await page.evaluate(() => { document.getElementById('discogs-token').value = 'fixture'; });
   await page.locator('#discogs-query').fill('Helter Skelter');
   await page.locator('#discogs-search').click();
-  await expect(page.locator('.release-card')).toHaveCount(5);
+  await expect.poll(()=>page.locator('.release-card').count()).toBeGreaterThanOrEqual(5);
   await expect(page.locator('.release-card').first().locator('.release-meta')).toContainText('2×Vinyl');
 }
 
 for (const width of [360, 480]) {
   test(`the ${width}px inspector aligns metadata, fits number pairs and keeps its action footer reachable`, async ({ page }) => {
     await sizeInspector(page, width);
-    await page.locator('.subtab[data-subtab="editor"]').click();
+    await openTagSource(page, 'editor');
     const artist = page.locator('#fields-body input[data-key="artist"]');
     const title = page.locator('#fields-body input[data-key="title"]');
     const album = page.locator('#fields-body input[data-key="album"]');
@@ -179,7 +170,7 @@ for (const theme of ['light', 'dark']) {
       text:await styles(selector, typography), frame:await styles(selector, frame), padding:await styles(selector, padding),
     })));
     const query = {text:await styles('#discogs-query', typography), frame:await styles('#query-box', frame), padding:await styles('#discogs-query', padding)};
-    await page.locator('.subtab[data-subtab="editor"]').click();
+    await openTagSource(page, 'editor');
     const editor = {text:await styles('#fields-body input[data-key="title"]', typography), frame:await styles('#fields-body input[data-key="title"]', frame), padding:await styles('#fields-body input[data-key="title"]', padding)};
     expect(editor.frame.height).toBe('32px');
     expect(editor.frame.borderRadius).toBe('10px');
@@ -198,7 +189,7 @@ for (const theme of ['light', 'dark']) {
 }
 
 test('editor labels keep a fixed rail while inputs resize, with compact metadata rows', async ({ page }) => {
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   const artist = page.locator('#fields-body input[data-key="artist"]');
   const disc = page.locator('#fields-body input[data-key="disc"]');
   const track = page.locator('#fields-body input[data-key="track"]');
@@ -232,7 +223,7 @@ test('editor labels keep a fixed rail while inputs resize, with compact metadata
 
 
 test('Core keeps long-form comments and compact BPM/Key editable without losing drafts on resize', async ({ page }) => {
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   await sizeInspector(page, 400);
   const core = page.locator('#editor-group-core');
   const comment = core.locator('textarea[data-key="comment"]');

@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -39,7 +40,7 @@ test.beforeEach(async ({ page }) => {
 test.afterEach(async ({ page }) => { expect(errors.get(page)).toEqual([]); });
 
 async function tab(page, name) {
-  await page.locator(`.subtab[data-subtab="${name}"]`).click();
+  await openTagSource(page, name);
   await expect(page.locator(`#subtab-${name}`)).toBeVisible();
 }
 
@@ -49,14 +50,7 @@ async function mode(page, name) {
 }
 
 async function sizeInspector(page, width) {
-  const area = await page.locator('.dock-middle').boundingBox();
-  const separator = page.getByRole('separator', { name: 'Resize workspace columns', exact: true });
-  const handle = await separator.boundingBox();
-  await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(area.x + area.width - width - handle.width / 2, handle.y + handle.height / 2, { steps: 4 });
-  await page.mouse.up();
-  await expect.poll(async () => (await page.locator('.mode-col').boundingBox()).width).toBeLessThan(Math.max(width + 60, 448));
+  await page.evaluate(value=>document.documentElement.style.setProperty('--inspector-width',`${Math.max(400,value)}px`),width);
 }
 
 const box = (page, selector) => page.locator(selector).first().evaluate((node) => {
@@ -70,53 +64,6 @@ const style = (page, selector, keys) => page.locator(selector).first().evaluate(
 );
 
 const number = (value) => Number.parseFloat(value);
-
-for (const theme of ['dark', 'light']) {
-  test(`rounded Transformations header and tabs share the inspector alignment (${theme})`, async ({ page }) => {
-    await page.evaluate(value => { document.documentElement.dataset.theme = value; }, theme);
-    await tab(page, 'online');
-    const header = '#dock-module-transformations > .dock-module-chrome';
-    const toggle = page.locator(`${header} .dock-module-toggle`);
-    // The surface must fit its collapsed allocation, with reachable actions.
-    if (await toggle.getAttribute('aria-expanded') === 'true') await toggle.click();
-    const bounds = await box(page, header);
-    const module = await box(page, '#dock-module-transformations');
-    const field = await box(page, '#query-box');
-    const firstTab = await box(page, '.subtab');
-    const heading = await box(page, '#subtab-online .inspector-heading');
-    expect(bounds.height).toBe(36);
-    expect(bounds.bottom).toBeLessThanOrEqual(module.bottom + 1);
-    expect(bounds.x).toBeCloseTo(field.x, 0);
-    expect(bounds.right).toBeCloseTo(field.right, 0);
-    expect(firstTab.x - bounds.x).toBeCloseTo(8, 0);
-    const tabs = await page.locator('.subtab').evaluateAll(nodes => nodes.map(node => {
-      const rect = node.getBoundingClientRect();
-      return { width: rect.width, right: rect.right, y: rect.y };
-    }));
-    for (const tab of tabs) {
-      expect(tab.width).toBeCloseTo(firstTab.width, 0);
-      expect(tab.y).toBeCloseTo(firstTab.y, 0);
-    }
-    expect(bounds.right - tabs.at(-1).right).toBeCloseTo(8, 0);
-    expect(firstTab.y - bounds.bottom).toBeCloseTo(12, 0);
-    expect(heading.y - firstTab.bottom).toBeCloseTo(24, 0);
-    const headerStyle = await style(page, header, ['borderRadius', 'backgroundColor', 'boxShadow', 'borderTopWidth']);
-    expect(headerStyle.borderRadius).toBe('10px');
-    expect(headerStyle.backgroundColor).toBe((await style(page, '#query-box', ['backgroundColor'])).backgroundColor);
-    expect(headerStyle.boxShadow).toBe('none');
-    expect(headerStyle.borderTopWidth).toBe('0px');
-    const active = await style(page, '.subtab.active', ['borderRadius', 'backgroundColor']);
-    const inactive = await style(page, '.subtab:not(.active)', ['backgroundColor']);
-    expect(active.borderRadius).toBe('8px');
-    expect(active.backgroundColor).not.toBe(inactive.backgroundColor);
-    await toggle.focus(); await page.keyboard.press('Enter');
-    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
-    await expect(page.locator('#groups-menu')).toBeVisible();
-    await page.locator('#presets-edit').click();
-    await expect(page.locator('#pe-editor')).toBeVisible();
-    await page.locator('#pe-cancel').click();
-  });
-}
 
 for (const theme of ['dark', 'light']) {
   test(`compact metadata fills its columns and paired rows keep their spacing (${theme})`, async ({ page }, testInfo) => {
@@ -160,12 +107,13 @@ test('every mode panel and Tagger tab uses the shared heading, body and help rol
   const bodyInk = await page.evaluate(() => getComputedStyle(document.body).color);
   const headings = {
     online: '#subtab-online .inspector-heading h2',
-    editor: '#subtab-editor .inspector-heading h2',
-    filename: '#subtab-filename .inspector-heading h2',
-    fromtext: '#subtab-fromtext .inspector-heading h2',
+    editor: '.manual-inspector-heading:not([hidden]) h2',
+    filename: '.manual-inspector-heading:not([hidden]) h2',
+    fromtext: '.manual-inspector-heading:not([hidden]) h2',
   };
   for (const [name, selector] of Object.entries(headings)) {
     await tab(page, name);
+    if (name !== 'online') { await expect(page.locator('.manual-inspector-heading')).toHaveCount(0); continue; }
     const text = await style(page, selector, ['fontSize', 'fontWeight', 'color', 'textTransform']);
     expect(number(text.fontSize), `${name} heading size`).toBe(14);
     expect(Number(text.fontWeight), `${name} heading weight`).toBe(600);
@@ -173,7 +121,7 @@ test('every mode panel and Tagger tab uses the shared heading, body and help rol
     expect(text.textTransform, `${name} heading case`).toBe('none');
   }
   // The same heading role in the four non-tagger modes.
-  for (const name of ['renamer', 'generator', 'deduplicator', 'exporter']) {
+  for (const name of ['renamer', 'exporter']) {
     await mode(page, name);
     const selector = `#panel-${name} h2`;
     const text = await style(page, selector, ['fontSize', 'fontWeight', 'color']);
@@ -365,55 +313,14 @@ test('dock menus use menu geometry and compact controls keep a 24px hit box', as
   }
   expect(geometry.subtab.height).toBe(32);
   expect(geometry.lock.width).toBeGreaterThanOrEqual(24);
-  // Splitters are the documented exception to the 24px hit tier: a 4px
-  // allocation track with a 1px seam, and the keyboard separator as the
-  // accessible resize path.
-  const splitter = page.getByRole('separator', { name: 'Resize workspace columns', exact: true });
-  const handle = await splitter.evaluate((node) => {
-    const rect = node.getBoundingClientRect();
-    const seam = getComputedStyle(node, '::after');
-    return {
-      width: rect.width,
-      height: rect.height,
-      background: getComputedStyle(node).backgroundColor,
-      seamWidth: seam.width,
-      seamBackground: seam.backgroundColor,
-    };
-  });
-  expect(handle.width).toBe(4);
-  expect(handle.height).toBeGreaterThan(4);
-  expect(handle.background).toBe('rgba(0, 0, 0, 0)');
-  expect(handle.seamWidth).toBe('1px');
-  expect(handle.seamBackground).toBe('rgba(0, 0, 0, 0)');
-  await splitter.hover();
-  await expect.poll(() => splitter.evaluate(node => getComputedStyle(node, '::after').backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
+  await expect(page.getByRole('separator',{name:'Resize workspace columns',exact:true})).toHaveCount(0);
 
-  // The module layout menu: 16px shell, 8px rows, concentric 8px inset.
+  // The app keeps its established module arrangement fixed.
   await page.locator('.mode-col .subtabs').click({ button: 'right' });
-  const menu = page.locator('.dock-layout-menu');
-  await expect(menu).toBeVisible();
-  const items = menu.getByRole('menuitem');
-  const first = await items.first().boundingBox();
-  const shell = await menu.boundingBox();
-  const shellStyle = await style(page, '.dock-layout-menu', ['borderRadius', 'padding', 'borderTopWidth']);
-  const itemStyle = await style(page, '.dock-layout-menu [data-slot="context-menu-item"]', ['borderRadius']);
-  expect(shellStyle.borderRadius).toBe('16px');
-  expect(shellStyle.padding).toBe('7px');
-  expect(shellStyle.borderTopWidth).toBe('1px');
-  expect(itemStyle.borderRadius).toBe('8px');
-  expect(first.height).toBeGreaterThanOrEqual(28);
-  expect(first.x - shell.x).toBeCloseTo(8, 0);
-  // The last item is reachable and its contour stays inside the shell's inset.
-  const last = items.last();
-  await last.focus();
-  await expect(last).toBeFocused();
-  const lastBox = await last.boundingBox();
-  expect(shell.y + shell.height - (lastBox.y + lastBox.height)).toBeCloseTo(8, 0);
-  await page.keyboard.press('Escape');
-  await expect(menu).toBeHidden();
+  await expect(page.locator('.dock-layout-menu')).toHaveCount(0);
 });
 
-test('resizing the dock keeps the table rows and the active field draft intact', async ({ page }) => {
+test('collapsing the dock keeps the table rows and the active field draft intact', async ({ page }) => {
   await tab(page, 'editor');
   const title = page.locator('#fields-body input[data-key="title"]');
   await title.fill('Draft kept through a resize');
@@ -427,22 +334,17 @@ test('resizing the dock keeps the table rows and the active field draft intact',
       return save.call(this, key, value);
     };
   });
-  const area = await page.locator('.dock-middle').boundingBox();
-  const splitter = page.getByRole('separator', { name: 'Resize workspace columns', exact: true });
-  const handle = await splitter.boundingBox();
-  await page.mouse.move(handle.x + 2, handle.y + 80);
-  await page.mouse.down();
-  await page.mouse.move(handle.x - 120, handle.y + 80, { steps: 12 });
+  await page.locator('#panel-toggle').click();
   const during = await page.evaluate(() => ({
     resizing: document.body.classList.contains('resizing-dock'),
     rowKept: Boolean(window.__keptRow?.isConnected),
     writes: window.__layoutWrites,
   }));
-  expect(during.resizing).toBe(true);
+  expect(during.resizing).toBe(false);
   expect(during.rowKept).toBe(true);
-  expect(during.writes).toBe(0);
+  expect(during.writes).toBeLessThanOrEqual(1);
   expect(await title.evaluate((node) => node === window.__keptInspectorField)).toBe(true);
-  await page.mouse.up();
+  await page.locator('#panel-toggle').click();
   await expect(title).toHaveValue('Draft kept through a resize');
   await expect(page.locator('#diff-apply')).toBeEnabled();
 });

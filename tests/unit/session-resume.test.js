@@ -67,3 +67,7 @@ test('structured filters survive view restore and invalid conditions reject the 
   assert.equal(normalized.conditionMode, 'any');
   assert.equal(normalizeSession(snapshot({ conditions: [{ ...conditions[0], field: 'arbitrary' }] })), null);
 });
+
+test('the Transformations source tab survives view restore', () => {
+  assert.equal(normalizeSession(snapshot({subtab:'transformations'})).subtab,'transformations');
+});

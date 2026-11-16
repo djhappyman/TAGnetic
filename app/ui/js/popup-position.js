@@ -48,7 +48,7 @@ function remember(box, anchor, options) {
 }
 function clamp(value, max) { return Math.max(EDGE, Math.min(value, Math.max(EDGE, max))); }
 
-export function placeFloating(box, anchor, { align = 'left', gap = 4, width = null } = {}) {
+export function placeFloating(box, anchor, { align = 'left', gap = 4, width = /** @type {number | null} */ (null) } = {}) {
   const rect = anchor.getBoundingClientRect();
   const { origin, sx, sy } = measure(box, width);
   const below = Math.max(0, innerHeight - rect.bottom - gap - EDGE);

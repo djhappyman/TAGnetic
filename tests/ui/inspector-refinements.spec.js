@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -23,7 +24,7 @@ test.afterEach(async ({ page }) => { expect(errors.get(page)).toEqual([]); });
 async function selectAll(page) {
   await page.locator('#tracks-body tr[data-path]').first().click();
   await page.locator('#tracks-body tr[data-path]').last().click({ modifiers: ['Shift'] });
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
 }
 
 
@@ -36,7 +37,7 @@ test('compilation returns absent and explicit false flags to their exact saved v
   expect(await page.evaluate(()=>window.tagrex.previewPlan?.changes?.length||0)).toBe(0);
 });
 test('typing the saved value clears both staging and dirty input styling',async({page})=>{
-  await page.locator('#tracks-body tr[data-path]').first().click();await page.locator('.subtab[data-subtab="editor"]').click();
+  await page.locator('#tracks-body tr[data-path]').first().click();await openTagSource(page, 'editor');
   for(const key of ['title','year','bpm']){
     const input=page.locator(`#editor-field-${key}`),old=await input.inputValue();
     await input.fill(key==='title'?'Changed title':'2025');await expect(page.locator('#staged-edits')).toBeVisible();
@@ -61,7 +62,7 @@ test('returning compilation to true restores each saved spelling; discard restor
 });
 
 test('discard restores number and text values without leaving phantom staging',async({page})=>{
-  await page.locator('#tracks-body tr[data-path]').first().click();await page.locator('.subtab[data-subtab="editor"]').click();
+  await page.locator('#tracks-body tr[data-path]').first().click();await openTagSource(page, 'editor');
   const keys=['title','year','track','disc','bpm'],saved={};
   for(const key of keys){saved[key]=await page.locator(`#editor-field-${key}`).inputValue();await page.locator(`#editor-field-${key}`).fill(key==='title'?'Pending':'12');}
   // Discard also works before validation (the short year here is invalid).

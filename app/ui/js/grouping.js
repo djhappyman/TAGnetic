@@ -4,11 +4,12 @@
 // that bucket is called, and never touches the order of `tracks` itself. Kept
 // apart from the table renderer because GENERATOR reads the same keys when it
 // numbers tracks per group.
+import { folderDisplayLabels } from './group-presentation.js';
 import { fileName } from "./dom.js";
 import { t } from "./i18n.js";
 import { DROP_LOOSE_KEY } from "./fields.js";
 import { columnLabel } from "./columns.js";
-import { dropFolders, groupBy, sessionRoot } from "./state.js";
+import { dropFolders, groupBy, sessionRoot, tracks, contentRevision } from "./state.js";
 
 // The grouping-key value for a track under the active `groupBy`.
 function groupKeyOf(track) {
@@ -53,19 +54,31 @@ function dropGroupKey(path) {
   return best === null ? DROP_LOOSE_KEY : best;
 }
 
-// A folder-group header (#129): the group directory's path relative to the
-// session root, starting with the root's own name (e.g. "Album/CD1"), so nested
-// folders read as a tree rather than a bare leaf. Falls back to the leaf name
-// for a folder outside the root (shouldn't happen in a normal session).
+// Labels are stable across filtering/collapse/scroll and cached once per library
+// revision. Tag edits do not mutate the saved DTOs; renames invalidate the cache.
+let folderLabelsSource;
+let folderLabelsRevision = -1;
+let folderLabels = new Map();
 function folderGroupLabel(key) {
-  const root = (sessionRoot || "").replace(/[\\/]+$/, "");
-  const rootLeaf = fileName(root);
-  if (root && key === root) return rootLeaf;
-  if (root && (key.startsWith(root + "/") || key.startsWith(root + "\\"))) {
-    const rel = key.slice(root.length).replace(/^[\\/]+/, "").replace(/\\/g, "/");
-    return `${rootLeaf}/${rel}`;
+  if (folderLabelsSource !== tracks || folderLabelsRevision !== contentRevision) {
+    const directories = new Set();
+    for (const track of tracks) {
+      const index = Math.max(track.path.lastIndexOf('/'), track.path.lastIndexOf('\\'));
+      if (index >= 0) directories.add(track.path.slice(0, index));
+    }
+    folderLabels = folderDisplayLabels(directories);
+    folderLabelsSource = tracks;
+    folderLabelsRevision = contentRevision;
   }
-  return fileName(key);
+  if (folderLabels.has(key)) return folderLabels.get(key);
+  // Destination previews can name folders that do not exist in the library.
+  const root = (sessionRoot || '').replace(/[\\/]+$/, '');
+  const leaf = fileName(root);
+  if (root && key === root) return leaf;
+  if (root && (key.startsWith(root + '/') || key.startsWith(root + '\\'))) {
+    return `${leaf}/${key.slice(root.length).replace(/^[\\/]+/, '').replace(/\\/g, '/')}`;
+  }
+  return fileName(key) || key;
 }
 
 // Human label for a group header ("(no artist)" etc.; folder shows its path).

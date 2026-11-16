@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -67,18 +68,17 @@ test('settings has a real focus scope and Escape restores its opener', async ({ 
 
 test('dynamic menu rebuilding preserves popover shell and column controller actions', async ({ page }) => {
   await library(page);
-  await page.locator('#view-btn').click();
-  await page.locator('#columns-btn').click();
+  await page.locator('#tracks th.sortable').first().click({button:'right'});
   const menu = page.locator('#columns-menu');
   await expect(menu.locator('[data-slot="popover-content"]')).toBeVisible();
   await expect(menu.locator('input[type="checkbox"]')).not.toHaveCount(0);
   await page.keyboard.press('Escape');
   await expect(menu).toBeHidden();
-  // Closing the child chooser leaves View open.
-  await page.locator('#columns-btn').click();
+  // Reopening from the header reuses the column controls.
+  await page.locator('#tracks th.sortable').first().click({button:'right'});
   await expect(menu.locator('[data-slot="popover-content"]')).toHaveCount(1);
   await expect(menu.locator('input[type="checkbox"]')).not.toHaveCount(0);
-  await page.locator('#columns-btn').click();
+  await page.keyboard.press('Escape');
   await expect(menu).toBeHidden();
 });
 
@@ -173,7 +173,7 @@ test('standard and advanced field disclosures support native Enter and Space act
   await page.evaluate(() => { window.tagrex.tracks[0].tags['custom:RAW_TEST_FRAME'] = 'Raw metadata'; });
   await page.locator('#tracks-body tr[data-path]').nth(1).click();
   await page.locator('#tracks-body tr[data-path]').first().click();
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   const standard = page.locator('button[aria-controls="editor-group-standard"]');
   const advanced = page.locator('button[aria-controls="editor-group-advanced"]');
   await expect(standard).toHaveAttribute('data-slot', 'button');
