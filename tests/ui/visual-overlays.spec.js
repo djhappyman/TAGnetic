@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -61,7 +62,7 @@ test('genre compound contour preserves keyboard selection and custom entry', asy
   await page.locator('#root').fill('/music');
   await page.locator('#root').press('Enter');
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(3);
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   const input = page.locator('#fields-body input[data-key="genre"]');
   await input.fill('Ho');
   await input.press('ArrowDown');

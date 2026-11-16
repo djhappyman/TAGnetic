@@ -27,12 +27,12 @@ async function library(page) {
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(3);
 }
 
-test('filter stays open below the scroller without a duplicate heading, summary or clear action', async ({ page }) => {
+test('filter stays open in the header without a duplicate heading, summary or clear action', async ({ page }) => {
   await library(page);
   await expect(page.locator('#filter')).toBeVisible();
   await expect(page.locator('#filter-panel-toggle, #filter-panel-summary, #filter-panel-clear, .filter-panel-active')).toHaveCount(0);
   expect(await page.locator('#filter-panel-content').evaluate(node => ({ inert: node.inert, transition: getComputedStyle(node).transitionDuration }))).toEqual({ inert: false, transition: '0s' });
-  expect(await page.evaluate(() => document.getElementById('filter-panel').getBoundingClientRect().top >= document.getElementById('files-view').getBoundingClientRect().bottom - 1)).toBe(true);
+  expect(await page.evaluate(() => document.getElementById('filter-panel').getBoundingClientRect().bottom <= document.getElementById('files-view').getBoundingClientRect().top)).toBe(true);
   await expect(page.locator('.view-tabs #filter')).toHaveCount(0);
   await expect(page.locator('#filter-panel #presets-btn')).toHaveCount(1);
   await page.locator('#filter').fill('Wish Mountain');

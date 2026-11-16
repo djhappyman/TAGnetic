@@ -25,13 +25,24 @@ iterating on the personal interface; older design briefs are historical context.
   combining that surface change with a redundant separator line.
 - Build hierarchy with page headings, section headings, labels and concise help.
   Keep related help close to its setting. Avoid adding a card around every group.
+- Keep Tags, Online, Rename, Duplicates and Export beside the logo with a theme-coloured
+  active underline. Put the flexible library search after the tabs, separated by quiet dividers;
+  keep search presets inside its trailing edge.
+  Tags owns manual sources; Online opens release search without the manual subtabs.
+- Keep the file pane's outer bottom edge fixed when moving search into the header.
+  Rows fill the freed space; an 8px bottom inset and short 8px fade soften the rounded edge.
 - Keep the folder bar with the file table and common commands in the toolbar.
-  Show docking handles through View → Arrange panels rather than permanent chrome.
+  Keep the established panel arrangement fixed, with a 420px desktop overlay sidebar and collapse in place of pane resizing. Keep table geometry fixed underneath it, reserving terminal horizontal scroll space so every column remains reachable; move only small controls and feedback into the uncovered area. Retain the
+  Transformations source tab without exposing panel-movement menus.
 - Align the permanent player beneath the file pane as the docks resize. Anchor
   Preview and Apply beneath the inspector; keep the draft-clear control in the
-  pinned staged summary, visible only while edits exist. Put the affected file count
+  bottom-pinned staged summary, visible only while edits exist. Keep Preview and Apply visible and disabled while there is no work. Put the affected file count
   in the primary action's natural-language label. Keep feedback from resizing
   the table during an active edit.
+- Grouping leads with Folder, Album, Album Artist, Artist, Disc, Year, Genre and Media;
+  secondary fields live under More. Reuse each grouping icon in the menu and table.
+  Keep icons muted, counts in a themed chip immediately after the group name, and folder
+  labels relative to the shared library prefix, with full paths available on hover.
 - Use barely different row fills without divider borders; keep selection, staged
   changes, invalid values and keyboard focus distinct. Keep artwork centred.
 - Preserve visible labels, keyboard access, selection and validation feedback.

@@ -1,3 +1,4 @@
+import { toggleDuplicates } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -51,13 +52,16 @@ test('controller changes update tab state without synthesizing clicks and preser
 test('keyboard mode and source navigation keeps controller state and panels in sync', async ({ page }) => {
   await mode(page, 'tagger').focus();
   await page.keyboard.press('ArrowRight');
+  await expect(mode(page, 'online')).toBeFocused();
+  await expect(page.locator('#subtab-online')).toBeVisible();
+  await page.keyboard.press('ArrowRight');
   await expect(mode(page, 'renamer')).toBeFocused();
   await expect(mode(page, 'renamer')).toHaveAttribute('aria-selected', 'true');
   await expect(page.locator('#panel-renamer')).toBeVisible();
   await page.keyboard.press('Home');
   await expect(mode(page, 'tagger')).toHaveAttribute('aria-selected', 'true');
-  await subtab(page, 'online').focus();
-  await page.keyboard.press('ArrowRight');
+  await subtab(page, 'filename').focus();
+  await page.keyboard.press('ArrowLeft');
   await expect(subtab(page, 'editor')).toBeFocused();
   await expect(subtab(page, 'editor')).toHaveAttribute('aria-selected', 'true');
   await expect(page.locator('#subtab-editor')).toBeVisible();
@@ -68,7 +72,7 @@ test('keyboard mode and source navigation keeps controller state and panels in s
 });
 
 test('generator jobs support roving focus and numbering opens its shared wizard', async ({ page }) => {
-  await mode(page, 'generator').click();
+  await page.evaluate(() => window.tagrex.setMode('generator'));
   const transform = page.locator('#gen-job-transform');
   const number = page.locator('#gen-job-number');
   const sides = page.locator('#gen-job-sides');
@@ -94,4 +98,26 @@ test('generator jobs support roving focus and numbering opens its shared wizard'
   await page.keyboard.press('ArrowRight');
   await expect(number).toBeFocused();
   await expect(panel.getByRole('button',{name:'Open Autonumber',exact:true})).toBeVisible();
+});
+
+
+test('Tags and Online are separate segments and preserve a manual draft and selection', async ({page}) => {
+  await page.evaluate(async () => { document.getElementById('root').value = '/music'; await window.tagrex.openLibrary(); });
+  expect(await page.locator('.mode-tabs .mode-tab').evaluateAll(nodes => nodes.map(n => n.dataset.mode))).toEqual(['tagger','online','renamer','deduplicator','exporter']);
+  await mode(page, 'tagger').click();
+  await expect(page.locator('#subtab-editor')).toBeVisible();
+  await expect(page.locator('.subtab[data-subtab="online"]')).toHaveCount(0);
+  const title = page.locator('#fields-body input[data-key="title"]');
+  await title.fill('Keep my manual draft');
+  const selected = await page.evaluate(() => [...window.tagrex.selection]);
+  await mode(page, 'online').click();
+  await expect(mode(page, 'online')).toHaveAttribute('aria-selected','true');
+  await expect(page.locator('#subtab-online')).toBeVisible();
+  await expect(page.locator('.subtabs')).toBeHidden();
+  await mode(page, 'tagger').click();
+  await expect(title).toHaveValue('Keep my manual draft');
+  expect(await page.evaluate(() => [...window.tagrex.selection])).toEqual(selected);
+  await expect(page.locator('#diff-apply')).toBeEnabled();
+  await toggleDuplicates(page);
+  await expect(page.locator('#query-duplicate-scan')).toBeVisible();
 });

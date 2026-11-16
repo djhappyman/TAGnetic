@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -23,7 +24,7 @@ test.afterEach(async ({ page }) => { expect(errors.get(page)).toEqual([]); });
 async function selectAll(page) {
   await page.locator('#tracks-body tr[data-path]').first().click();
   await page.locator('#tracks-body tr[data-path]').last().click({ modifiers: ['Shift'] });
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
 }
 
 
@@ -36,7 +37,7 @@ test('compilation returns absent and explicit false flags to their exact saved v
   expect(await page.evaluate(()=>window.tagrex.previewPlan?.changes?.length||0)).toBe(0);
 });
 test('typing the saved value clears both staging and dirty input styling',async({page})=>{
-  await page.locator('#tracks-body tr[data-path]').first().click();await page.locator('.subtab[data-subtab="editor"]').click();
+  await page.locator('#tracks-body tr[data-path]').first().click();await openTagSource(page, 'editor');
   for(const key of ['title','year','bpm']){
     const input=page.locator(`#editor-field-${key}`),old=await input.inputValue();
     await input.fill(key==='title'?'Changed title':'2025');await expect(page.locator('#staged-edits')).toBeVisible();
@@ -61,7 +62,7 @@ test('returning compilation to true restores each saved spelling; discard restor
 });
 
 test('discard restores number and text values without leaving phantom staging',async({page})=>{
-  await page.locator('#tracks-body tr[data-path]').first().click();await page.locator('.subtab[data-subtab="editor"]').click();
+  await page.locator('#tracks-body tr[data-path]').first().click();await openTagSource(page, 'editor');
   const keys=['title','year','track','disc','bpm'],saved={};
   for(const key of keys){saved[key]=await page.locator(`#editor-field-${key}`).inputValue();await page.locator(`#editor-field-${key}`).fill(key==='title'?'Pending':'12');}
   // Discard also works before validation (the short year here is invalid).
@@ -75,7 +76,7 @@ test('help keeps the bottom fade and lock buttons sit inside complete field surf
   await selectAll(page);const port=page.locator('.editor-scroll');
   await port.evaluate(node=>{node.style.maxHeight='350px';node.scrollTop=0;});
   await expect(port).toHaveClass(/can-scroll-down/);
-  await page.locator('#subtab-editor .inspector-help').click();await expect(page.locator('.inspector-help-content')).toBeVisible();
+  await page.locator('.source-tools .inspector-help').click();await expect(page.locator('.inspector-help-content')).toBeVisible();
   expect(await port.evaluate(node=>getComputedStyle(node).maskImage)).toContain('linear-gradient');
   await page.keyboard.press('Escape');expect(await port.evaluate(node=>getComputedStyle(node).maskImage)).toContain('linear-gradient');
   for(const key of ['title','year','bpm','key','genre']){
@@ -94,7 +95,7 @@ for(const theme of ['light','dark'])test(`mixed values and rounded disclosure hi
   expect(colors.placeholder).toBe(colors.ghost);expect(colors.placeholder).not.toBe(colors.value);
   const group=page.locator('[data-group="standard"]'),head=group.locator('.fe-group-head');
   await expect(group.locator('.fe-group-count')).toHaveCount(0);await head.click();
-  const geometry=await group.evaluate(node=>{const h=node.querySelector('.fe-group-head'),grid=node.querySelector('.fe-grid');return {radius:getComputedStyle(h).borderRadius,background:getComputedStyle(h).backgroundColor,gap:grid.getBoundingClientRect().top-h.getBoundingClientRect().bottom};});
+  const geometry=await group.evaluate(node=>{const h=node.querySelector('.fe-group-head'),grid=node.querySelector('.fe-grid');return {radius:getComputedStyle(h).borderRadius,background:getComputedStyle(h).backgroundColor,gap:grid.firstElementChild.getBoundingClientRect().top-h.getBoundingClientRect().bottom};});
   expect(geometry.radius).toBe('10px');expect(geometry.background).not.toBe('rgba(0, 0, 0, 0)');expect(geometry.gap).toBeCloseTo(12,0);
   await page.locator('.mode-col').screenshot({path:info.outputPath(`inspector-${theme}.png`)});
 });

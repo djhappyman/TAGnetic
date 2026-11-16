@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import {test,expect} from '@playwright/test';
 import {readFile} from 'node:fs/promises';
 import {resolve,sep} from 'node:path';
@@ -13,7 +14,7 @@ test.beforeEach(async({page})=>{
 });
 test.afterEach(async({page})=>expect(page.__selectionErrors).toEqual([]));
 const rows=page=>page.locator('#tracks-body tr[data-path]');
-async function editor(page){await page.locator('.subtab[data-subtab="editor"]').click();}
+async function editor(page){await openTagSource(page, 'editor');}
 async function preview(page,text){await page.locator('#fields-body [data-key="title"]').fill(text);await expect(page.locator('#diff-apply')).toBeEnabled();}
 
 async function pack(page,count=200) {

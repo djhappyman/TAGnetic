@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -89,7 +90,7 @@ test('starting a folder open invalidates BPM before the new library arrives', as
 
 test('late BPM results preserve a title drafted while the scan was running', async ({ page }) => {
   await startScan(page);
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   await page.locator('#fields-body [data-key="title"]').fill('Keep this newer draft');
   await expect(page.locator('#diff-apply')).toBeEnabled();
   await finishScan(page);
@@ -113,7 +114,7 @@ test('late BPM results preserve a different preview created during detection', a
 test('the desktop footer keeps BPM Stop reachable alongside staged edits', async ({ page }, testInfo) => {
   await page.setViewportSize({width:1024,height:800});
   await page.locator('#tracks-body tr[data-path]').first().click();
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   await page.locator('#editor-field-title').fill('Keep this staged title');
   await expect(page.locator('#diff-apply')).toBeEnabled();
   await expect(page.locator('#staged-edits')).toBeVisible();

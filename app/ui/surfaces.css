@@ -162,3 +162,13 @@ body :is([data-slot='dropdown-menu-item'], [data-slot='context-menu-item'], [dat
 
 body .controller-context-content button.ctx-item { justify-content:flex-start; text-align:start; gap:var(--sp-2); }
 body .col-menu button.col-menu-row { justify-content:flex-start; text-align:start; min-height:32px; }
+
+/* Group choices keep icons separate from the existing selection check column. */
+body #group-menu .col-menu-row > .ico { width:16px; height:16px; flex:none; color:color-mix(in srgb,var(--text) 75%,var(--muted)); }
+body #group-menu .group-more { padding-inline-start:var(--sp-2); }
+body #group-menu .group-more > .ico:last-child { margin-inline-start:auto; transition:transform 120ms ease; }
+body #group-menu .group-more[aria-expanded='true'] > .ico:last-child { transform:rotate(90deg); }
+body #group-menu #group-more-options[hidden] { display:none; }
+@media(prefers-reduced-motion:reduce) { body #group-menu .group-more > .ico:last-child { transition:none; } }
+
+body #group-menu .group-more::before { content:''; width:12px; flex:0 0 12px; }

@@ -1,5 +1,6 @@
 import { createLiveStageTransport } from './js/live-stage-transport.js';
 import { nativeLiveFields, setNativeLiveFields } from './js/live-preview.js';
+import { groupIcon } from './js/group-presentation.js';
 import { liveIntentOptions, setNativeStageSession } from './js/generator.js';
 import { workingField, patchCellText, retireRevertedRawFields } from './js/working-values.js';
 import { captureFileOrder, restoreFileOrder } from "./js/file-order.js";
@@ -54,13 +55,6 @@ import {
   endApplyProgress,
   endUndoProgress,
 } from "./js/applyprogress.js";
-import {
-  activeHealthLabel,
-  clearHealth,
-  healthAllows,
-  initHealth,
-  retranslateHealth,
-} from "./js/health.js";
 import { initUpdateCheck } from "./js/updatecheck.js";
 import "./js/tablegestures.js";
 import { scheduleMaskExample, syncCarryToggles } from "./js/renamer.js";
@@ -169,13 +163,12 @@ Object.assign(hooks, {
     populateGroupMenu();
     // What is built from `t` at draw time stays in the old language until it is
     // drawn again (#476): the table (folder bands), the status line, the release
-    // cards and the Library health button.
+    // cards.
     syncCssLabels();
     syncFilterControls();
     renderTracks();
     updateStatus();
     retranslateOnline();
-    retranslateHealth();
     retranslateBpm();
     renderSettingsNav();
   },
@@ -319,7 +312,7 @@ function sessionSnapshot() {
   return {
     version: 1, root: resumableRoot,
     mode: currentMode,
-    subtab: document.querySelector('.subtab.active')?.dataset.subtab,
+    subtab: document.querySelector('.subtab-panel:not([hidden])')?.id.replace('subtab-', ''),
     filter: filterText, queryRoot: filterRoot, commandMode, duplicateKind, conditions: [], conditionMode: filterConditionMode,
     sortKey, sortDir, groupBy,
     collapsed: [...collapsedGroups], selection: [...selection],
@@ -521,7 +514,7 @@ function recompileFilter() {
   } catch(error) {filterMessage=error.message;setFilterError(true);}
 }
 function matchesFilter(track) {
-  return healthAllows(track.path) && (!hasLibraryQuery() || !nativeMatchPaths || nativeMatchPaths.has(track.path));
+  return !hasLibraryQuery() || !nativeMatchPaths || nativeMatchPaths.has(track.path);
 }
 
 function updateSortIndicators() {
@@ -993,7 +986,7 @@ function buildGroupHeader(key, count) {
   const duplicate=duplicateGroupLookup.get(key);
   if(commandMode==='duplicates'&&duplicate&&!stagedView){
     tr.classList.add('duplicate-group');
-    tr.innerHTML=`<td class="group-cell" colspan="${tableColumnKeys().length+2}"><span class="group-heading-content"><span class="group-caret">${ico('caret-down')}</span><span class="group-label"></span><span class="group-count muted"></span></span></td>`;
+    tr.innerHTML=`<td class="group-cell" colspan="${tableColumnKeys().length+2}"><span class="group-heading-content"><span class="group-caret">${ico('caret-down')}</span><span class="group-type-icon" aria-hidden="true">${ico('dedup')}</span><span class="group-label"></span><span class="group-count muted"></span></span></td>`;
     paintDuplicateHeader(tr,duplicate,count);
     return tr;
   }
@@ -1016,15 +1009,16 @@ function buildGroupHeader(key, count) {
       : "";
     tr.innerHTML = `<td class="group-cell" colspan="${tableColumnKeys().length + 2}"><span class="group-heading-content">
       <span class="group-caret">${ico("caret-down")}</span>
-      ${label}
-      <span class="group-count muted">· ${escapeHtml(tn("unit.file", count))}${extras}</span>
+      <span class="group-type-icon" aria-hidden="true">${ico("folder")}</span>${label}
+      ${extras}<span class="group-count">${escapeHtml(tn("unit.file", count))}</span>
     </span></td>`;
     return tr;
   }
   tr.innerHTML = `<td class="group-cell" colspan="${tableColumnKeys().length + 2}"><span class="group-heading-content">
       <span class="group-caret">${ico("caret-down")}</span>
-      <span class="group-label">${escapeHtml(groupLabel(key))}</span>
-      <span class="group-count muted">· ${tn("unit.file", count)}</span>
+      <span class="group-type-icon" aria-hidden="true">${ico(groupIcon(groupBy))}</span>
+      <span class="group-label" title="${escapeHtml(key)}">${escapeHtml(groupLabel(key))}</span>
+      <span class="group-count">${escapeHtml(tn("unit.file", count))}</span>
     </span></td>`;
   return tr;
 }
@@ -1563,10 +1557,8 @@ let lastTableLayoutWidth = 0;
 let lastTableViewportHeight = 0;
 const tableGeometryObserver = new ResizeObserver(entries => {
   const viewport = entries.find(entry => entry.target === tableWrap)?.contentRect;
-  if (viewport) {
-    const value = `${viewport.width}px`;
-    if (tableWrap.style.getPropertyValue('--table-viewport-width') !== value) tableWrap.style.setProperty('--table-viewport-width', value);
-  }
+  // Group header widths use the native scrollport container. Do not publish
+  // a per-frame inherited CSS variable through every table cell on resize.
   // Only data widths affect row heights. The trailing fill can animate with
   // the pane without remeasuring every loaded row on every drawer frame.
   const layoutWidth = tableColumnKeys().reduce((total, key) => total + columnWidth(key), 0);
@@ -1623,14 +1615,106 @@ function renderTracks({ preparedFilter = null, preserveDuplicateRows = false } =
 // through its tooltip and accessible description, without another toolbar row.
 function updateStatus(selected = selectedPaths().length, publish = true) {
   const total = tracks.length;
+  updateSelectionSummary(selected);
   el('files-total-count').textContent = total.toLocaleString();
-  el('files-selected-count').textContent = selected.toLocaleString();
-  const files = filterText || filterConditions.length || activeHealthLabel()
+  const countLabel = selected.toLocaleString();
+  if (el('files-selected-count').textContent !== countLabel) el('files-selected-count').textContent = countLabel;
+  const files = filterText || filterConditions.length
     ? `${matchingTrackCount}/${tn("unit.file", total)}` : tn("unit.file", total);
   const summary = `${files} · ${tn("count.selected", selected)}`;
   if (statusSel.textContent !== summary) statusSel.textContent = summary;
   el('files-tab').title = summary;
   if (publish) publishFilterState();
+}
+
+// Coalesce pointer/keyboard selection phases into one final update per frame.
+// Only visibility changes animate; ordinary count edits never replay entry.
+let selectionSummaryFrame = 0;
+let selectionSummaryCount = 0;
+let selectionSummaryVisible = false;
+let selectionSummaryAnimation = null;
+let selectionSummaryWidthAnimation = null;
+let selectionSummaryOldWidth = 0;
+let selectionSummarySizeSignature = '';
+let selectionSummaryEpoch = 0;
+function updateSelectionSummary(count) {
+  selectionSummaryCount = count;
+  if (selectionSummaryFrame) return;
+  selectionSummaryOldWidth = el('selection-summary').hidden ? 0 : el('selection-summary').offsetWidth;
+  selectionSummaryFrame = requestAnimationFrame(() => {
+    selectionSummaryFrame = 0;
+    paintSelectionSummary(selectionSummaryCount);
+  });
+}
+function setSelectionSummaryVisible(show) {
+  if (show === selectionSummaryVisible) return;
+  const summary = el('selection-summary');
+  const reversing = !!selectionSummaryAnimation;
+  const from = reversing ? {transform:getComputedStyle(summary).transform, opacity:getComputedStyle(summary).opacity} : null;
+  selectionSummaryVisible = show;
+  const epoch = ++selectionSummaryEpoch;
+  selectionSummaryAnimation?.cancel();
+  selectionSummaryAnimation = null;
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches || !summary.animate) {
+    summary.hidden = !show;
+    return;
+  }
+  summary.hidden = false;
+  const rest = 'translateX(-50%) translateY(0) scale(1)';
+  const frames = show
+    ? [from || {transform:'translateX(-50%) translateY(12px) scale(.9)',opacity:0,easing:'cubic-bezier(.16,.8,.24,1)'}, {transform:'translateX(-50%) translateY(-2px) scale(1.02)',opacity:1,offset:.7,easing:'ease-in-out'}, {transform:rest,opacity:1}]
+    : [from || {transform:rest,opacity:1}, {transform:'translateX(-50%) translateY(8px) scale(.96)',opacity:0}];
+  const animation = summary.animate(frames, {duration:show?260:140, easing:show?'linear':'cubic-bezier(.3,0,.8,.2)',fill:'both'});
+  selectionSummaryAnimation = animation;
+  animation.finished.then(() => {
+    if (epoch !== selectionSummaryEpoch) return;
+    summary.hidden = !show;
+    if (!show) { selectionSummaryWidthAnimation?.cancel(); selectionSummaryWidthAnimation = null; }
+    selectionSummaryAnimation = null;
+    animation.cancel();
+  }, () => {});
+}
+// Width layout is confined to this small absolute overlay, never the table.
+// Re-target from the current width on rapid updates and discard finished fills.
+function animateSelectionSummaryWidth(oldWidth) {
+  const summary = el('selection-summary');
+  selectionSummaryWidthAnimation?.cancel();
+  selectionSummaryWidthAnimation = null;
+  if (!oldWidth || summary.hidden || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const width = summary.offsetWidth;
+  if (Math.abs(width - oldWidth) < 2) return;
+  const overshoot = Math.sign(width - oldWidth) * Math.min(3, Math.abs(width - oldWidth) * .04);
+  const animation = summary.animate([{width:`${oldWidth}px`},{width:`${width + overshoot}px`,offset:.8},{width:`${width}px`}], {duration:240,easing:'cubic-bezier(.2,.8,.3,1)',fill:'both'});
+  selectionSummaryWidthAnimation = animation;
+  animation.finished.then(() => {
+    if (selectionSummaryWidthAnimation !== animation) return;
+    selectionSummaryWidthAnimation = null;
+    animation.cancel();
+  }, () => {});
+}
+function paintSelectionSummary(count) {
+  const review = usingReviewSelection();
+  let hidden = 0, staged = 0;
+  for (const path of rowSelectionSet()) {
+    if (!viewPathIndex.has(path)) hidden++;
+    if (diffByPath?.has(path)) staged++;
+  }
+  hidden = Math.min(count, hidden);
+  const details = [];
+  if (hidden) details.push(`${hidden.toLocaleString()} hidden by the current view`);
+  if (!stagedView && !filterPending && hasLibraryQuery()) details.push(`${matchingTrackCount.toLocaleString()} ${matchingTrackCount === 1 ? 'match' : 'matches'}`);
+  if (!review && staged) details.push(`${Math.min(count, staged).toLocaleString()} with staged edits`);
+  const kind = review ? 'included for Apply' : 'selected';
+  if (el('selection-summary-kind').textContent !== kind) el('selection-summary-kind').textContent = kind;
+  const detail = details.length ? ` · ${details.join(' · ')}` : '';
+  if (el('selection-summary-detail').textContent !== detail) el('selection-summary-detail').textContent = detail;
+  setSelectionSummaryVisible(count > 1 || hidden > 0);
+  el('selection-summary-clear').disabled = applying || undoing || filterPending;
+  const signature = `${count}|${kind}|${detail}`;
+  if (selectionSummarySizeSignature !== signature) {
+    selectionSummarySizeSignature = signature;
+    animateSelectionSummaryWidth(selectionSummaryOldWidth);
+  }
 }
 
 function resetEdits({ preserveEditor = false } = {}) {
@@ -1814,6 +1898,8 @@ function renderPreview(plan, { preserveView = false, delta = null } = {}) {
     // typed field. Its raw editor node is already current; no whole-map pass.
     applyBtn.disabled = true;
     el('diff-actionbar').dataset.blocked = 'true';
+    el('diff-actionbar').title = '';
+    el('ab-locked').hidden = true;
     return;
   }
   renderStaging(plan);
@@ -1913,7 +1999,7 @@ function exitDiffState() {
   applyBtn.disabled = true;
   document.body.classList.remove("diffing", 'automatic-transform-preview');
   syncFileView();
-  el("diff-actionbar").hidden = true;
+  el("diff-actionbar").hidden = false; updateDiffBar();
   closePlanReport(); // a report about this plan goes with it (#562)
   if (stagedView) renderTracks({ preserveDuplicateRows: true });
   else patchMountedFields();
@@ -1956,7 +2042,18 @@ function syncPanelCellMin() {
 // tri-state to `applySelection`. Every changed file starts ticked; unticking
 // some narrows what a single Apply writes (#81).
 function updateDiffBar(scope) {
-  if (!diffByPath) return;
+  updateSelectionSummary(rowSelectionSet().size);
+  const hasWork = !!diffByPath?.size;
+  el('diff-actionbar').dataset.hasWork = String(hasWork);
+  el('diff-preview').disabled = !hasWork || applying || undoing || filterPending || commandMode === 'duplicates';
+  if (!hasWork) {
+    applyBtn.disabled = true;
+    const label = msg('action.apply');
+    el('ab-apply-label').textContent = label;
+    applyBtn.setAttribute('aria-label',label);
+    el('diff-actionbar').dataset.blocked = 'true';
+    return;
+  }
   syncRibbonSelection();
   scope ??= automaticTransformScope();
   const staged = diffByPath.size;
@@ -1966,7 +2063,7 @@ function updateDiffBar(scope) {
   if (applyBtn.getAttribute("aria-label") !== applyLabel) applyBtn.setAttribute("aria-label", applyLabel);
   const label = el("ab-apply-label");
   if (label.textContent !== applyLabel) label.textContent = applyLabel;
-  applyBtn.disabled = commandMode==='duplicates' || filterPending || !!filterError || n === 0 || !!sharedStageSync?.pending() || !!tracksBody.querySelector('[contenteditable="true"]') || scope.planInvalid || (isAutomaticTransformPreview() && (scope.busy || scope.invalid || scope.failed));
+  applyBtn.disabled = applying || undoing || commandMode==='duplicates' || filterPending || !!filterError || n === 0 || !!sharedStageSync?.pending() || !!tracksBody.querySelector('[contenteditable="true"]') || scope.planInvalid || (isAutomaticTransformPreview() && (scope.busy || scope.invalid || scope.failed));
   const pending = filterPending || (isAutomaticTransformPreview() && scope.busy);
   const blocked = applyBtn.disabled;
   el("diff-actionbar").dataset.blocked = String(blocked);
@@ -2444,7 +2541,7 @@ async function afterOpen(label, version = openVersion, savedView = null) {
   setDiffByPath(null);
   setApplySelection(new Set());
   document.body.classList.remove("diffing", 'automatic-transform-preview');
-  el("diff-actionbar").hidden = true;
+  el("diff-actionbar").hidden = false; updateDiffBar();
   stagedView = false; stagedMembershipPending = false; excludedApplyPaths.clear();
   fileViewScroll.files = { top:0, left:0 }; fileViewScroll.staged = { top:0, left:0 };
   renderStaging(null); syncFileView();
@@ -2458,7 +2555,6 @@ async function afterOpen(label, version = openVersion, savedView = null) {
   filterConditionMode = "all";
   setFilterText("");
   el("filter").value = "";
-  clearHealth(); // a check belongs to the library it was run on (#436)
   syncFilterControls(); // clears invalid query state
   setGroupBy(dropFolders ? "drop" : groupByPref(), { persist: false, rerender: false });
   folderOrderForSort();
@@ -2671,6 +2767,8 @@ async function apply() {
   // A second Apply (the shortcut, a double click) would queue behind the first.
   if (applying || undoing) return;
   applying = true;
+  el('diff-preview').disabled = true;
+  applyBtn.disabled = true;
   spreadsheet?.refresh();
   const releaseMutationSurfaces = freezeMutationSurfaces({ scrollableFiles: true });
   const sourceTracks = tracks;
@@ -2910,9 +3008,6 @@ function setMode(name) {
   // Which also decides whether the wand is offered at all: the chain belongs to
   // some jobs and not others (#236).
   syncTransformPlacement();
-  document.querySelectorAll(".mode-tab").forEach((tab) => {
-    tab.classList.toggle("active", tab.dataset.mode === name);
-  });
   document.querySelectorAll(".mode-panel").forEach((panel) => {
     panel.hidden = panel.id !== `panel-${name}`;
   });
@@ -2936,8 +3031,8 @@ function setMode(name) {
   document.body.classList.toggle('mode-tagger',name==='tagger');
   el('duplicates-view').hidden=true;
   showView('files');
-  if(dedup)el('diff-actionbar').hidden=true;
-  else if(diffByPath)el('diff-actionbar').hidden=false;
+  el('diff-actionbar').hidden=false;
+  updateDiffBar();
   if(dedup){
     document.dispatchEvent(new CustomEvent('tagrex:reveal-module',{detail:'inspector'}));
     // A compact layout can hide the file pane containing the mode toggle.
@@ -3233,7 +3328,7 @@ document.addEventListener("keydown", (e) => {
 
 // ---- diff-state action bar (#117) ----
 el("dup-scan").addEventListener("click", runDuplicateScan);
-el('diff-preview').addEventListener('click', () => setFileView(true));
+el('diff-preview').addEventListener('click', () => { if (!el('diff-preview').disabled) setFileView(true); });
 for (const [id,staged] of [['files-tab',false],['staged-tab',true]]) {
   el(id).addEventListener('click', () => setFileView(staged));
   el(id).addEventListener('keydown', event => {
@@ -3316,6 +3411,12 @@ el('ribbon-clear-selection').addEventListener('click', () => {
   else selection.clear();
   syncSelectionUI();
 });
+el('selection-summary-clear').addEventListener('click', () => {
+  if (applying || undoing || filterPending) return;
+  el('ribbon-clear-selection').click();
+  el('tracks').focus({preventScroll:true});
+});
+
 
 // Immediate command writes have their own transaction and never consume live
 // inputs or the global Apply scope. The native result refreshes only the staged
@@ -3324,13 +3425,14 @@ async function writeQuickPlan(plan) {
   if (!plan.changes.length) { toast('No changes to write.'); return; }
   if (hasInvalidPreview(plan)) throw new Error('Correct invalid values before writing.');
   applying = true;
+  el('diff-preview').disabled = true;
+  applyBtn.disabled = true;
   pauseAutomaticTransformPreview();
   const staged = previewPlan;
   const source = previewSource;
   const included = new Set(applySelection);
   const sourceTracks = tracks;
   const remainingSelected = new Set(selection);
-  const barWasHidden = el('diff-actionbar').hidden;
   const release = freezeMutationSurfaces({scrollableFiles:true});
   const review = createApplyReview(plan.changes, {
     columns:tableColumnKeys().slice(), offset:TABLE_DATA_COLUMN_OFFSET,
@@ -3374,8 +3476,9 @@ async function writeQuickPlan(plan) {
     else throw error;
   } finally {
     feedback.cancel(); activeApplyReview = null; endApplyProgress();
-    el('diff-actionbar').hidden = barWasHidden && !previewPlan?.changes.length;
     applying = false; release();
+    el('diff-actionbar').hidden = false;
+    updateDiffBar();
     updateStatus(rowSelectionSet().size);
     syncRibbonSelection(); spreadsheet?.refresh();
     resumeAutomaticTransformPreview({dismiss:!hasLiveInputs()});
@@ -3497,6 +3600,14 @@ el("export-kind").addEventListener("click", (e) => {
 // FROM NAME (the file's own name, #139) — three ways to the same outcome.
 function setSubtab(name) {
   publishWorkspaceSubtab(name);
+  requestAnimationFrame(() => {
+    const tab = document.querySelector(`.subtab[data-subtab="${name}"]`);
+    const rail = tab?.closest('.subtabs');
+    if (!tab || !rail) return;
+    const bounds = rail.getBoundingClientRect(), active = tab.getBoundingClientRect();
+    if (active.left < bounds.left) rail.scrollLeft -= bounds.left - active.left;
+    else if (active.right > bounds.right) rail.scrollLeft += active.right - bounds.right;
+  });
   document.querySelectorAll(".subtab").forEach((t) => t.classList.toggle("active", t.dataset.subtab === name));
   document.querySelectorAll(".subtab-panel").forEach((p) => {
     p.hidden = p.id !== `subtab-${name}`;
@@ -4235,7 +4346,7 @@ function positionColumnsMenu() {
   placeFloating(menu, columnsMenuOrigin);
   menu.style.setProperty('--column-menu-height', menu.style.maxHeight);
 }
-function openColumnsMenu(point = null, anchor = el('columns-btn')) {
+function openColumnsMenu(point = null, anchor = el('tracks').tHead.querySelector('th.sortable')) {
   const menu = el('columns-menu');
   renderColumnsMenu();
   document.body.append(menu);
@@ -4253,10 +4364,6 @@ window.addEventListener('resize', () => {
   if (el('columns-menu').hidden || columnsMenuResize) return;
   columnsMenuResize = requestAnimationFrame(() => { columnsMenuResize = 0; positionColumnsMenu(); });
 }, {passive:true});
-el('columns-btn').addEventListener('click', event => {
-  event.stopPropagation();
-  if (el('columns-menu').hidden) openColumnsMenu(); else el('columns-menu').hidden = true;
-});
 el('tracks').tHead.addEventListener('keydown', event => {
   const header = event.target.closest('th.sortable');
   if (!header) return;
@@ -4270,7 +4377,7 @@ document.addEventListener("click", (e) => {
   const menu = el("columns-menu");
   // A visibility toggle rebuilds its row during this click. The original event
   // path still identifies an inside click after its target is disconnected.
-  if (!menu.hidden && !e.composedPath().includes(menu) && e.target !== el("columns-btn")) {
+  if (!menu.hidden && !e.composedPath().includes(menu)) {
     menu.hidden = true;
   }
 });
@@ -4284,6 +4391,14 @@ el("group-btn").addEventListener("click", (e) => {
   if (!menu.hidden) placeFloating(menu, el('group-btn'));
 });
 el("group-menu").addEventListener("click", (e) => {
+  const more = e.target.closest('.group-more');
+  if (more) {
+    const options = el('group-more-options');
+    options.hidden = !options.hidden;
+    more.setAttribute('aria-expanded', String(!options.hidden));
+    placeFloating(el('group-menu'), el('group-btn'));
+    return;
+  }
   const opt = e.target.closest(".group-opt");
   if (!opt) return;
   el("group-menu").hidden = true;
@@ -4950,10 +5065,6 @@ initShortcuts({
     const paths = selectedPaths();
     if (paths.length) trashFiles(paths);
   },
-});
-initHealth(() => {
-  renderTracks();
-  updateStatus();
 });
 initUpdateCheck();
 // Open whatever the OS handed the app on the way in (#51) — a folder from

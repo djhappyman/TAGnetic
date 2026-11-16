@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile, mkdir } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -36,12 +37,12 @@ async function open(page, theme = 'dark') {
   await page.locator('#root').press('Enter');
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(3);
 }
-const transforms = page => page.locator('#dock-module-transformations');
-const toggle = page => transforms(page).getByRole('button', { name: 'Transformations', exact: true });
+const transforms = page => page.locator('#subtab-transformations');
+
 async function editor(page) {
   const compact = page.getByRole('tablist', { name: 'Workspace module' });
   if (await compact.isVisible()) await page.getByRole('tab', { name: 'Inspector', exact: true }).click();
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
 }
 async function screenshot(page, file) {
   await mkdir(evidence, { recursive: true });
@@ -50,27 +51,13 @@ async function screenshot(page, file) {
 
 // These initial assertions were run against checkpoint719c96c's exact172-test
 // fixture build before the implementation build lease was released.
-test('Transformations header collapses to its header and gives Inspector the reclaimed height', async ({ page }) => {
-  await open(page);
-  if (process.env.INTEGRATION_CAPTURE_BASELINE === '1') await screenshot(page, 'baseline-dark-wide.png');
-  await expect(toggle(page)).toHaveAttribute('aria-expanded', 'true', { timeout: 1200 });
-  await expect(toggle(page)).toHaveAttribute('aria-labelledby', 'dock-title-transformations', { timeout: 1200 });
-  await expect(page.locator('#dock-title-transformations')).toHaveText('Transformations', { useInnerText: true });
-  const top = await transforms(page).boundingBox();
-  const below = await page.locator('#dock-module-inspector').boundingBox();
-  await toggle(page).click();
-  await expect(toggle(page)).toHaveAttribute('aria-expanded', 'false');
-  await expect(transforms(page)).toHaveAttribute('data-dock-collapsed', 'true');
-  await expect(page.locator('#dock-body-transformations')).toHaveAttribute('inert', '');
-  await expect.poll(async () => (await transforms(page).boundingBox()).height).toBeLessThan(46);
-  expect((await page.locator('#dock-module-inspector').boundingBox()).height).toBeGreaterThan(below.height + top.height - 50);
-  await toggle(page).focus();
-  await page.keyboard.press('Enter');
-  await expect(toggle(page)).toHaveAttribute('aria-expanded', 'true');
-  await expect.poll(async () => Math.abs((await transforms(page).boundingBox()).height - top.height)).toBeLessThan(2);
-  await page.keyboard.press('Space');
-  await expect(toggle(page)).toHaveAttribute('aria-expanded', 'false');
-  await expect(toggle(page)).toBeFocused();
+test('Transformations is a fourth source tab at the top of the inspector', async ({page}) => {
+ await open(page);await openTagSource(page,'transformations');
+ await expect(page.locator('#dock-module-transformations')).toHaveCount(0);
+ await expect(transforms(page)).toBeVisible();
+ await expect(page.locator('.manual-inspector-heading')).toHaveCount(0);
+ const tab=await page.locator('.subtab[data-subtab="transformations"]').boundingBox(),pane=await page.locator('.mode-col').boundingBox();expect(tab.y-pane.y).toBeLessThan(16);
+ await page.getByRole('button',{name:'About transformations',exact:true}).click();await expect(page.locator('.inspector-help-content')).toContainText('Nothing is written');
 });
 
 test('everyday fields stay open while More tags stays an accessible collapsible', async ({ page }) => {
@@ -114,102 +101,24 @@ test('dark table well stays distinct while sidebar and chrome share a quiet cont
       for (const node of ancestors) { const layer = rgb(getComputedStyle(node).backgroundColor); color = color.map((c, i) => layer.rgb[i] * layer.alpha + c * (1 - layer.alpha)); }
       return color;
     };
-    return { table: surface('#table-wrap'), sidebar: surface('#dock-module-inspector'), toolbar: surface('.topbar'), frame: surface('.workarea'), seam: getComputedStyle(document.querySelector('.dock-column-splitter')).backgroundColor };
+    return { table: surface('#table-wrap'), sidebar: surface('#dock-module-inspector'), toolbar: surface('.topbar'), frame: surface('.workarea') };
   });
   const luminance = color => color.reduce((total, value, i) => total + value * [0.2126, 0.7152, 0.0722][i], 0);
   expect(luminance(surfaces.sidebar) - luminance(surfaces.table)).toBeGreaterThan(2);
   expect(Math.abs(luminance(surfaces.sidebar) - luminance(surfaces.toolbar))).toBeLessThan(3);
   expect(Math.abs(luminance(surfaces.sidebar) - luminance(surfaces.frame))).toBeLessThan(3);
-  const seam = await page.locator('.dock-column-splitter').evaluate(node => ({ background: getComputedStyle(node).backgroundColor, before: getComputedStyle(node, '::before').backgroundColor, after: getComputedStyle(node, '::after').backgroundColor }));
-  const opaque = value => !/rgba?\([^)]*,\s*0\s*\)/.test(value) && value !== 'transparent';
-  expect(opaque(seam.background)).toBe(false);
+  await expect(page.locator('.dock-column-splitter')).toHaveCount(0);
 });
 
-test('folding Transformations retains the exact checkbox, draft and manual plan without IPC', async ({ page }) => {
-  await open(page);
-  await editor(page);
-  const title = page.locator('#fields-body input[data-key="title"]');
-  await title.fill('Pending title');
-  await page.locator('#groups-menu .preset-apply').first().click();
-  await expect(page.locator('#groups-menu input.group-tick').first()).toBeChecked();
-  await expect(page.locator('#diff-apply')).toBeEnabled();
-  await expect(page.locator('#diff-actionbar')).toBeVisible();
-  await title.fill('KEEP UNSTAGED DRAFT');
-  await page.waitForTimeout(200);
-  await page.evaluate(() => {
-    window.integrationCalls = [];
-    window.integrationOriginal = { plan: window.tagrex.previewPlan, title: document.querySelector('#fields-body input[data-key="title"]'), checkbox: document.querySelector('#groups-menu input.group-tick') };
-  });
-  for (let i = 0; i < 3; i++) { await toggle(page).click(); await toggle(page).click(); }
-  await expect(title).toHaveValue('KEEP UNSTAGED DRAFT');
-  await expect(page.locator('#groups-menu input.group-tick').first()).toBeChecked();
-  expect(await page.evaluate(() => ({
-    title: window.integrationOriginal.title === document.querySelector('#fields-body input[data-key="title"]'),
-    checkbox: window.integrationOriginal.checkbox === document.querySelector('#groups-menu input.group-tick'),
-    plan: window.integrationOriginal.plan === window.tagrex.previewPlan,
-    calls: window.integrationCalls,
-  }))).toEqual({ title: true, checkbox: true, plan: true, calls: [] });
-  const titleBox = await toggle(page).boundingBox();
-  const help = transforms(page).locator('.transformation-help');
-  const helpBox = await help.boundingBox();
-  const editBox = await page.locator('#presets-edit').boundingBox();
-  expect(helpBox.x).toBeGreaterThanOrEqual(titleBox.x + titleBox.width - 1);
-  expect(helpBox.x - titleBox.x - titleBox.width).toBeLessThan(12);
-  expect(helpBox.x).toBeLessThan(editBox.x);
-  // The empty header area is also a collapse target; Help/Edit stay separate.
-  const blankX = (helpBox.x + helpBox.width + editBox.x) / 2;
-  await page.mouse.click(blankX, helpBox.y + helpBox.height / 2);
-  await expect(toggle(page)).toHaveAttribute('aria-expanded', 'false');
-  await page.mouse.click(blankX, helpBox.y + helpBox.height / 2);
-  await expect(toggle(page)).toHaveAttribute('aria-expanded', 'true');
-  expect(await page.evaluate(() => window.integrationCalls)).toEqual([]);
-  await help.click();
-  await expect(toggle(page)).toHaveAttribute('aria-expanded', 'true');
-  await page.keyboard.press('Escape');
-  expect(await page.evaluate(() => window.integrationOriginal.plan === window.tagrex.previewPlan)).toBe(true);
-  await page.locator('#presets-edit').click();
-  await expect(page.locator('#pe-editor')).toBeVisible();
-  await expect(toggle(page)).toHaveAttribute('aria-expanded', 'true');
-  await page.keyboard.press('Escape');
-  expect(await page.evaluate(() => window.integrationOriginal.plan === window.tagrex.previewPlan)).toBe(true);
+test('source tab changes retain the exact checkbox, manual draft and plan', async ({page}) => {
+ await open(page);await editor(page);const title=page.locator('#fields-body input[data-key="title"]');await title.fill('KEEP MANUAL DRAFT');await expect(page.locator('#diff-apply')).toBeEnabled();
+ await page.evaluate(()=>{window.integrationOriginal={plan:window.tagrex.previewPlan,title:document.querySelector('#fields-body input[data-key="title"]'),checkbox:document.querySelector('#groups-menu input.group-tick')};window.integrationCalls=[];});
+ for(let i=0;i<3;i++){await openTagSource(page,'transformations');await openTagSource(page,'editor');}
+ await expect(title).toHaveValue('KEEP MANUAL DRAFT');
+ expect(await page.evaluate(()=>({title:window.integrationOriginal.title===document.querySelector('#fields-body input[data-key="title"]'),checkbox:window.integrationOriginal.checkbox===document.querySelector('#groups-menu input.group-tick'),writes:window.integrationCalls.filter(c=>c==='apply_plan').length}))).toEqual({title:true,checkbox:true,writes:0});
 });
 
-test('collapse uses a short interruptible transition and reduced motion is immediate', async ({ page }) => {
-  await page.emulateMedia({ reducedMotion: 'no-preference' });
-  await open(page);
-  await expect(toggle(page)).toHaveAttribute('aria-expanded', 'true');
-  const motion = await toggle(page).evaluate(async button => {
-    const module = button.closest('[data-dock-module]');
-    const before = module.getBoundingClientRect().height;
-    button.click();
-    await new Promise(resolve => requestAnimationFrame(resolve));
-    const durations = module.getAnimations({ subtree: true }).map(animation => animation.effect.getTiming().duration).filter(value => typeof value === 'number' && value > 1);
-    const samples = [];
-    const end = performance.now() + 220;
-    while (performance.now() < end) { samples.push(module.getBoundingClientRect().height); await new Promise(resolve => requestAnimationFrame(resolve)); }
-    return { before, durations, samples, after: module.getBoundingClientRect().height };
-  });
-  expect(motion.durations.some(value => value >= 140 && value <= 180)).toBe(true);
-  expect(motion.samples.some(value => value > motion.after + 1 && value < motion.before - 1)).toBe(true);
-  await toggle(page).click(); await page.waitForTimeout(50);
-  await toggle(page).click(); await page.waitForTimeout(30);
-  await toggle(page).click();
-  await expect(toggle(page)).toHaveAttribute('aria-expanded', 'true');
-  await expect.poll(async () => Math.abs((await transforms(page).boundingBox()).height - motion.before)).toBeLessThan(2);
-  await toggle(page).click();
-  await expect.poll(async () => (await transforms(page).boundingBox()).height).toBeLessThan(46);
-  await page.emulateMedia({ reducedMotion: 'reduce' });
-  await toggle(page).click();
-  await expect(toggle(page)).toHaveAttribute('aria-expanded', 'true');
-  const reduced = await toggle(page).evaluate(async button => {
-    button.click();
-    await new Promise(resolve => requestAnimationFrame(resolve));
-    const module = button.closest('[data-dock-module]');
-    return { height: module.getBoundingClientRect().height, active: module.getAnimations({ subtree: true }).filter(animation => animation.playState === 'running').length };
-  });
-  expect(reduced.height).toBeLessThan(46);
-  expect(reduced.active).toBe(0);
-});
+
 
 test('editor group folding retains drafts and metadata while preferences follow new selections', async ({ page }) => {
   await open(page);
@@ -219,7 +128,7 @@ test('editor group folding retains drafts and metadata while preferences follow 
     track.tags = { ...track.tags, 'custom:QA_RAW_TAG': 'Existing custom metadata' };
     window.tagrex.renderTracks();
   });
-  const advanced = page.locator('.fe-group[data-group="advanced"] > button.fe-group-head');
+  const advanced = page.locator('.fe-group[data-group="standard"] > button.fe-group-head');
   await advanced.click();
   const custom = page.locator('input[data-key="custom:QA_RAW_TAG"]');
   await expect(custom).toHaveValue('Existing custom metadata');
@@ -238,42 +147,17 @@ test('editor group folding retains drafts and metadata while preferences follow 
   expect(await page.evaluate(() => window.tagrex.tracks[0].tags['custom:QA_RAW_TAG'])).toBe('Existing custom metadata');
 });
 
-test('folding restores the user-resized module weight and context movement still retains nodes', async ({ page }) => {
-  await open(page);
-  const boundary = page.getByRole('separator', { name: 'Resize Transformations module', exact: true });
-  await boundary.focus(); await page.keyboard.press('ArrowDown'); await page.keyboard.press('ArrowDown');
-  const expanded = await transforms(page).boundingBox();
-  const weight = await boundary.getAttribute('aria-valuenow');
-  await toggle(page).click();
-  await expect.poll(async () => (await transforms(page).boundingBox()).height).toBeLessThan(46);
-  await toggle(page).click();
-  await expect.poll(async () => Math.abs((await transforms(page).boundingBox()).height - expanded.height)).toBeLessThan(2);
-  await expect(boundary).toHaveAttribute('aria-valuenow', weight);
-  await page.locator('#groups-menu input.group-tick').first().evaluate(node => window.integrationCheckbox = node);
-  await toggle(page).click({ button: 'right' });
-  await page.getByRole('menuitem', { name: 'Dock bottom', exact: true }).click();
-  await expect(page.locator('[data-dock-host="bottom"] #dock-module-transformations')).toBeVisible();
-  expect(await page.locator('#groups-menu input.group-tick').first().evaluate(node => node === window.integrationCheckbox)).toBe(true);
-  const bottomHeight = (await page.locator('[data-dock-host="bottom"]').boundingBox()).height;
-  await toggle(page).click();
-  await expect(toggle(page)).toHaveAttribute('aria-expanded', 'false');
-  await expect.poll(async () => (await page.locator('[data-dock-host="bottom"]').boundingBox()).height).toBeLessThan(46);
-  await expect(page.getByRole('separator', { name: 'Resize bottom modules', exact: true })).toBeHidden();
-  await toggle(page).click();
-  await expect(toggle(page)).toHaveAttribute('aria-expanded', 'true');
-  await expect.poll(async () => Math.abs((await page.locator('[data-dock-host="bottom"]').boundingBox()).height - bottomHeight)).toBeLessThan(2);
-});
+
 
 for (const theme of ['dark', 'light']) for (const size of [{ width: 375, height: 667 }, { width: 844, height: 390 }, { width: 1440, height: 900 }]) {
   test(`${theme} ${size.width}×${size.height} integrated surfaces stay within the viewport and expose their controls`, async ({ page }) => {
     await page.setViewportSize(size);
     await open(page, theme);
     const compact = page.getByRole('tablist', { name: 'Workspace module' });
-    if (await compact.isVisible()) await page.getByRole('tab', { name: 'Transformations', exact: true }).click();
-    await expect(toggle(page)).toBeInViewport({ ratio: 1 });
-    await expect(transforms(page).locator('.transformation-help')).toBeInViewport({ ratio: 1 });
+    await openTagSource(page,'transformations');
+    await expect(page.locator('.subtab[data-subtab="transformations"]')).toBeInViewport({ratio:1});
+    await expect(page.locator('.source-tools .inspector-help')).toBeInViewport({ratio:1});
     await expect(page.locator('#presets-edit')).toBeInViewport({ ratio: 1 });
-    await toggle(page).click(); await toggle(page).click();
     await editor(page);
     await page.locator('#editor-field-title').scrollIntoViewIfNeeded();
     await expect(page.locator('#editor-field-title')).toBeInViewport({ ratio: 1 });

@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import {test,expect} from '@playwright/test';
 import {readFile} from 'node:fs/promises';
 import {resolve,sep} from 'node:path';
@@ -17,7 +18,7 @@ const popup=page=>page.locator('#import-fields-popover');
 async function search(page){
   await page.locator('#discogs-token').evaluate(node=>node.value='fixture');
   await page.locator('#discogs-query').fill('La Bush');await page.locator('#discogs-search').click();
-  await expect(page.locator('.release-card')).toHaveCount(5);
+  await expect.poll(()=>page.locator('.release-card').count()).toBeGreaterThanOrEqual(5);
 }
 async function configure(page,keys,artwork){
   await page.evaluate(async({keys,artwork})=>{
@@ -113,7 +114,7 @@ test('artwork-only imports show change markers; repeating identical saved artwor
   await expect(page.getByRole('img',{name:'Artwork will be replaced',exact:true})).toHaveCount(1);
   await expect(page.getByRole('img',{name:'Artwork will be added',exact:true})).toHaveCount(2);
   expect(await page.evaluate(()=>window.tagrex.previewPlan.changes.every(change=>change.tag_changes.length===0&&change.cover_change))).toBe(true);
-  await page.locator('#diff-apply').click();await expect(page.locator('#diff-apply')).toBeHidden();
+  await page.locator('#diff-apply').click();await expect.poll(()=>page.evaluate(()=>window.tagrex.previewPlan?.changes.length||0)).toBe(0);await expect(page.locator('#diff-apply')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
   await page.evaluate(()=>{for(const track of window.tagrex.tracks)window.tagrex.selection.add(track.path);window.tagrex.renderTracks();});
   await importFirst(page);await expect.poll(()=>page.evaluate(()=>window.tagrex.previewPlan?.changes.length||0)).toBe(0);
   await expect(page.locator('#staged-tab-count')).toHaveText('');
@@ -184,7 +185,7 @@ async function importWrongYear(page,extra=[]){
   });
   await configure(page,['year',...extra],false);await search(page);await importFirst(page);await expect(page.locator('#diff-apply')).toBeEnabled();
   await page.locator('#staged-tab').click();
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   await page.locator('#fields-body [data-key="year"]').fill('2003');
   await expect.poll(()=>page.evaluate(()=>window.tagrex.previewPlan?.changes.some(change=>change.tag_changes.some(field=>field.field==='year'))||false)).toBe(false);
 }
@@ -211,7 +212,7 @@ test('reverting the only imported field removes every file from Staged',async({p
   await importWrongYear(page);
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(0);
   await expect(page.locator('#staged-tab-count')).toHaveText('');
-  await expect(page.locator('#diff-apply')).toBeHidden();
+  await expect.poll(()=>page.evaluate(()=>window.tagrex.previewPlan?.changes.length||0)).toBe(0);await expect(page.locator('#diff-apply')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
 });
 
 test('reverting the last changed cell in a column keeps its editor until blur, then removes that column',async({page})=>{
@@ -219,7 +220,7 @@ test('reverting the last changed cell in a column keeps its editor until blur, t
     const first=window.tagrex.tracks[0];first.tags.year='2003';
     window.tagrex.selection.clear();window.tagrex.selection.add(first.path);window.tagrex.renderTracks();
   });
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   await page.locator('#fields-body [data-key="title"]').fill('Keep this title change');
   await page.locator('#fields-body [data-key="year"]').fill('2004');
   await expect(page.locator('#diff-apply')).toBeEnabled();

@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -71,7 +72,7 @@ test('select-all tri-state and wrapping checkbox labels stay synchronized with n
   await page.keyboard.press('Control+a');
   await expect(page.locator('#tracks-body tr.selected')).toHaveCount(3);
   await expect(header).toHaveAttribute('aria-checked', 'true');
-  await page.locator('.mode-tab[data-mode="generator"]').click();
+  await page.evaluate(() => window.tagrex.setMode('generator'));
   await page.locator('#ribbon-autonumber').click();
   const flag = page.locator('#autonum-total-control');
   await flag.locator('xpath=ancestor::label').click();
@@ -144,7 +145,7 @@ test('mounted shadcn editor controls preserve legacy values, content and single 
   await page.locator('#root-display').click();
   await page.locator('#root').fill('/music');
   await page.locator('#root').press('Enter');
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   const title = page.locator('#fields-body input[data-key="title"]');
   await expect(title).toHaveAttribute('data-slot', 'input');
   await expect(title).toHaveAttribute('data-component-element', 'input');

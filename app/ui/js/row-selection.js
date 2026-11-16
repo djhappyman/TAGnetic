@@ -1,3 +1,4 @@
+import { tableCoveredWidth } from './table-viewport.js';
 import '../row-selection.css';
 
 // The rectangle is only a view. Model-row intersections and the shared Set
@@ -21,7 +22,7 @@ export function initRowSelection(options) {
     return {
       left: rect.left + wrap.clientLeft,
       top: Math.max(rect.top + wrap.clientTop, header?.bottom || rect.top),
-      right: rect.left + wrap.clientLeft + wrap.clientWidth,
+      right: rect.left + wrap.clientLeft + wrap.clientWidth - tableCoveredWidth(wrap),
       bottom: rect.top + wrap.clientTop + wrap.clientHeight,
       origin: rect,
     };

@@ -1,3 +1,4 @@
+import { openTagSource, toggleDuplicates } from './navigation.js';
 import {test,expect} from '@playwright/test';
 import {readFile} from 'node:fs/promises';
 import {resolve,sep} from 'node:path';
@@ -25,11 +26,11 @@ async function pauseClock(page){
 }
 async function openHydratedDuplicates(page){
  await page.evaluate(()=>{window.duplicateDetailHydrated=false;document.addEventListener('tagrex:request-duplicate-selection',()=>window.duplicateDetailHydrated=true,{once:true});});
- await page.locator('#query-mode-toggle').click();
+ await toggleDuplicates(page);
  await expect.poll(()=>page.evaluate(()=>window.duplicateDetailHydrated)).toBe(true);
 }
 test('search label is inset and switching modes starts a fresh query with the keyboard',async({page})=>{
- const toggle=page.getByRole('button',{name:'Duplicates mode',exact:true});
+ const toggle=page.getByRole('tab',{name:'Duplicates',exact:true});
  await expect(page.locator('#query-command-mode')).toHaveCount(0);
  await expect(page.locator('.query-mode-label')).toHaveText('');await expect(page.locator('.query-mode-divider')).toHaveCount(0);
  await expect(page.locator('.query-mode-label use')).toHaveAttribute('href','#i-search');
@@ -41,16 +42,16 @@ test('search label is inset and switching modes starts a fresh query with the ke
  await expect(page.locator('#filter')).toHaveValue('');await expect(page.locator('.filter-condition-chip')).toHaveCount(0);
  await expect(page.locator('#filter-panel #query-duplicate-scan, #filter-panel #query-duplicate-kind, #filter-panel #filter-feedback')).toHaveCount(0);
  await expect(page.locator('#panel-deduplicator #query-duplicate-scan')).toBeVisible();await expect(page.locator('#panel-deduplicator #filter-feedback')).toBeVisible();
- await page.locator('#filter').fill('Hardcore');await toggle.focus();
+ await page.locator('#filter').fill('Hardcore');await page.locator('.mode-tab[data-mode="tagger"]').focus();
  await page.keyboard.press('Enter');await expect(toggle).toHaveAttribute('aria-pressed','false');
  await expect(page.locator('.query-mode-label')).toHaveText('');await expect(page.locator('#query-duplicate-kind')).toHaveCount(0);
  await expect(page.locator('#filter')).toHaveValue('');await expect(page.locator('.filter-condition-chip')).toHaveCount(0);await expect(rows(page)).toHaveCount(3);
 });
 test('ready state keeps open files visible with Scan files beneath its message',async({page})=>{
  await expect(page.locator('#duplicate-actionbar')).toHaveCount(0);
- await page.locator('#query-mode-toggle').click();
+ await toggleDuplicates(page);
  const scan=page.locator('#query-duplicate-scan');await expect(scan).toHaveText('Scan files');await expect(scan).toBeEnabled();
- await expect(rows(page)).toHaveCount(3);await expect(page.locator('#panel-deduplicator #query-duplicate-scan')).toHaveCount(1);await expect(page.locator('#diff-actionbar')).toBeHidden();
+ await expect(rows(page)).toHaveCount(3);await expect(page.locator('#panel-deduplicator #query-duplicate-scan')).toHaveCount(1);await expect(page.locator('#diff-actionbar')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
  await expect(page.locator('#filter-feedback h3')).toHaveText('Find duplicate files');
  for(const width of [1280,620]){
   await page.setViewportSize({width,height:800});await expect(scan).toBeVisible();
@@ -64,14 +65,14 @@ test('ready state keeps open files visible with Scan files beneath its message',
 });
 test('selected duplicate result shows shared tags, differences and every copy in the sidebar',async({page})=>{
  await page.evaluate(()=>{const t=window.tagrex.tracks;for(const track of t.slice(0,2)){track.mockHash='matching';track.tags.artist='Hixxy';track.tags.title='Test Tune';}t[0].tags.album='First copy';t[1].tags.album='Second copy';});
- await page.locator('#query-mode-toggle').click();await expect(rows(page)).toHaveCount(3);await page.locator('#query-duplicate-scan').click();
+ await toggleDuplicates(page);await expect(rows(page)).toHaveCount(3);await page.locator('#query-duplicate-scan').click();
  await expect(page.locator('tr.duplicate-group')).toHaveCount(1);await expect(rows(page)).toHaveCount(2);await rows(page).first().click();
  await expect.poll(()=>page.evaluate(()=>window.tagrex.selection.size)).toBe(2);
  const result=page.locator('#duplicate-result-details');await expect(result).toBeVisible();await expect(result.locator('.duplicate-copy-count')).toHaveText('2 copies selected');
  await expect(result.getByRole('region',{name:'Shared tags'})).toContainText('Hixxy');await expect(result.getByRole('region',{name:'Tag differences'})).toContainText('Album');
  await expect(result.locator('.duplicate-copy')).toHaveCount(2);await result.locator('summary').first().click();await expect(result.locator('.duplicate-copy-body').first()).toContainText('First copy');
  await expect(result.locator('.duplicate-copy-path').first()).toContainText('/music/');
- await page.locator('#query-mode-toggle').click();await expect(result).toHaveCount(0);
+ await toggleDuplicates(page);await expect(result).toHaveCount(0);
 });
 test('large group details page copies without mounting the whole group',async({page})=>{
  await page.evaluate(async()=>{
@@ -85,7 +86,7 @@ test('large group details page copies without mounting the whole group',async({p
  const result=page.locator('#duplicate-result-details');await expect(result.locator('.duplicate-copy')).toHaveCount(20);await expect(result.locator('.duplicate-copy-pages')).toContainText('1–20 of 45');
  await result.getByRole('button',{name:'Next copies',exact:true}).click();await expect(result.locator('.duplicate-copy-pages')).toContainText('21–40 of 45');
  await result.getByRole('button',{name:'Next copies',exact:true}).click();await expect(result.locator('.duplicate-copy')).toHaveCount(5);await expect(result.locator('.duplicate-copy-pages')).toContainText('41–45 of 45');
- await page.locator('#query-mode-toggle').click();await expect(result).toHaveCount(0);
+ await toggleDuplicates(page);await expect(result).toHaveCount(0);
 });
 test('committed filter is one tinted pill with matching remove ink and accessible hit areas',async({page})=>{
  await chip(page,'hardcore','Genre: Hardcore');
@@ -96,12 +97,13 @@ test('committed filter is one tinted pill with matching remove ink and accessibl
  const remove=pill.getByRole('button',{name:'Remove Genre: Hardcore',exact:true});await pill.getByRole('button',{name:'Edit Genre: Hardcore',exact:true}).focus();await page.keyboard.press('Tab');await expect(remove).toBeFocused();
  expect(await remove.evaluate(node=>getComputedStyle(node).outlineStyle)).toBe('solid');await page.keyboard.press('Enter');await expect(pill).toHaveCount(0);await expect(rows(page)).toHaveCount(3);
 });
-test('duplicates button remains between the field and presets at desktop and narrow widths',async({page})=>{
- for(const width of [1280,620]){
-  await page.setViewportSize({width,height:800});await expect(page.locator('#query-mode-toggle')).toBeVisible();
-  await expect(page.locator('.filter-ctl')).toHaveCSS('height','32px');
-  const layout=await page.locator('#query-mode-toggle').evaluate(node=>{const wrap=node.parentElement,r=node.getBoundingClientRect(),field=document.querySelector('.filter-ctl');return {previous:wrap.previousElementSibling?.classList.contains('filter-ctl'),next:wrap.nextElementSibling?.classList.contains('filter-presets'),width:r.width,height:r.height,left:r.left,right:r.right,viewport:innerWidth,fieldHeight:field.getBoundingClientRect().height};});
-  expect(layout.previous).toBe(true);expect(layout.next).toBe(true);expect(layout.width).toBeGreaterThan(32);expect(layout.height).toBe(32);expect(layout.fieldHeight).toBe(32);expect(layout.left).toBeGreaterThanOrEqual(0);expect(layout.right).toBeLessThanOrEqual(layout.viewport);
+test('header owns duplicate navigation and an in-field preset button at desktop and narrow widths',async({page})=>{
+ for(const width of [1280,620,375]){
+  await page.setViewportSize({width,height:800});
+  await expect(page.locator('.mode-tabs #query-mode-toggle')).toBeInViewport();
+  await expect(page.locator('.topbar #filter-panel .field-tools #presets-btn')).toBeInViewport();
+  const layout=await page.locator('.filter-ctl').boundingBox();
+  expect(layout.x).toBeGreaterThanOrEqual(0);expect(layout.x+layout.width).toBeLessThanOrEqual(width);
  }
 });
 test('suggested chips live inside the input and plain text narrows them',async({page})=>{
@@ -140,13 +142,13 @@ test('saved presets restore chips and duplicates mode without storing file selec
  await expect(rows(page)).toHaveCount(2);
  const saved=await page.evaluate(()=>JSON.parse(localStorage.getItem('tagrex.filterPresets.conditions.v2'))[0]);
  expect(saved.root.children[0].field).toBe('genre');expect(saved.selection).toBeUndefined();
- await page.locator('#query-mode-toggle').click();await expect(page.locator('#query-mode-toggle')).toHaveAttribute('aria-pressed','true');
+ await toggleDuplicates(page);await expect(page.locator('#query-mode-toggle')).toHaveAttribute('aria-pressed','true');
  await expect(page.locator('#query-duplicate-kind')).toBeVisible();await expect(page.locator('#filter-feedback')).toContainText('Find duplicate files');
- await page.locator('#query-mode-toggle').click();await expect(page.locator('#query-mode-toggle')).toHaveAttribute('aria-pressed','false');await expect(rows(page)).toHaveCount(3);
+ await toggleDuplicates(page);await expect(page.locator('#query-mode-toggle')).toHaveAttribute('aria-pressed','false');await expect(rows(page)).toHaveCount(3);
 });
 test('duplicate groups keep companion copies visible when a chip matches one member',async({page})=>{
  await page.evaluate(()=>{const t=window.tagrex.tracks;t[0].mockHash='same';t[1].mockHash='same';t[1].tags.genre='House';});
- await page.locator('#query-mode-toggle').click();await page.locator('#query-duplicate-scan').click();
+ await toggleDuplicates(page);await page.locator('#query-duplicate-scan').click();
  await expect(page.locator('tr.duplicate-group')).toHaveCount(1);await expect(rows(page)).toHaveCount(2);
  await chip(page,'hardcore','Genre: Hardcore');await expect(rows(page)).toHaveCount(2);
  await expect(page.locator('tr.duplicate-group')).toContainText('2 copies');
@@ -196,16 +198,16 @@ test('leaving duplicates cancels a scan whose native startup finishes later',asy
    return resolve.call(this,value);
   };
  });
- await page.locator('#query-mode-toggle').click();await page.locator('#query-duplicate-scan').click();
+ await toggleDuplicates(page);await page.locator('#query-duplicate-scan').click();
  await expect(page.locator('#query-duplicate-cancel')).toBeVisible();
- await page.locator('#query-mode-toggle').click();await expect(page.locator('#query-mode-toggle')).toHaveAttribute('aria-pressed','false');
+ await toggleDuplicates(page);await expect(page.locator('#query-mode-toggle')).toHaveAttribute('aria-pressed','false');
  await page.evaluate(()=>window.releaseScan());
  await expect.poll(()=>page.evaluate(()=>window.cancelledScanCalls)).toBe(1);
  await expect(rows(page)).toHaveCount(3);await expect(page.locator('#filter-feedback')).not.toContainText(/Scanning|cancelled/i);
 });
 test('duplicates search and suggestions use only scan members',async({page})=>{
  await page.evaluate(()=>{window.tagrex.tracks[0].mockHash='copy';window.tagrex.tracks[1].mockHash='copy';});
- await page.locator('#query-mode-toggle').click();
+ await toggleDuplicates(page);
  await page.locator('#filter').fill('Jungle');
  await page.waitForTimeout(240);await expect(page.locator('#query-suggestions')).toHaveCount(0);
  await page.locator('#query-duplicate-scan').click();
@@ -234,7 +236,7 @@ async function progressiveFixture(page,size=4){
    return resolve.call(this,value);
   };
  },size);
- await page.locator('#query-mode-toggle').click();await page.locator('#query-duplicate-scan').click();
+ await toggleDuplicates(page);await page.locator('#query-duplicate-scan').click();
  await expect(page.locator('tr.duplicate-group')).toHaveCount(1);await expect(rows(page)).toHaveCount(2);
 }
 
@@ -307,7 +309,7 @@ test('duplicates keeps the normal table until explicit Scan and clears it while 
   const resolve=Promise.resolve;let first=true;
   Promise.resolve=function(value){if(first&&value?.jobId===1&&value.status==='complete'){first=false;return new Promise(done=>window.finishScanStartup=()=>done(value));}return resolve.call(this,value);};
  });
- await page.locator('#query-mode-toggle').click();await expect(rows(page)).toHaveCount(3);
+ await toggleDuplicates(page);await expect(rows(page)).toHaveCount(3);
  await page.locator('#filter').fill('unmatched text');await page.locator('#filter').press('Escape');
  expect(await rows(page).evaluateAll(nodes=>nodes.map(node=>node.dataset.path))).toEqual(before);
  await page.locator('#filter-clear').click();await page.locator('#query-duplicate-scan').click();
@@ -365,17 +367,17 @@ test('filter exclusion, Cancel, method and mode changes dismiss group detail wit
  expect(await page.evaluate(()=>window.duplicateDetail)).toBeNull();
  await page.evaluate(()=>document.dispatchEvent(new CustomEvent('tagrex:query-duplicate-kind',{detail:{kind:'same_audio'}})));
  await expect(rows(page)).toHaveCount(4);expect(await page.evaluate(()=>[...window.tagrex.selection])).toEqual(selected);
- await page.locator('#query-mode-toggle').click();await expect(rows(page)).toHaveCount(4);
+ await toggleDuplicates(page);await expect(rows(page)).toHaveCount(4);
  expect(await page.evaluate(()=>window.duplicateDetail)).toBeNull();
 });
 
 test('duplicate review preserves pending editor values and the staged plan while showing saved tags',async({page})=>{
  await captureDuplicateDetails(page);
  await page.evaluate(()=>{window.tagrex.tracks[0].mockHash='copy';window.tagrex.tracks[1].mockHash='copy';});
- await page.locator('.subtab[data-subtab="editor"]').click();
+ await openTagSource(page, 'editor');
  await page.locator('#fields-body [data-key="title"]').fill('Pending title');await expect(page.locator('#diff-apply')).toBeEnabled();
  const plan=await page.evaluate(()=>JSON.stringify(window.tagrex.previewPlan));
- await page.locator('#query-mode-toggle').click();await expect(rows(page)).toHaveCount(3);
+ await toggleDuplicates(page);await expect(rows(page)).toHaveCount(3);
  await page.locator('#query-duplicate-scan').click();await expect(rows(page)).toHaveCount(2);
  await rows(page).first().locator('td.file').click();
  expect(await page.evaluate(()=>JSON.stringify(window.tagrex.previewPlan))).toBe(plan);
@@ -401,4 +403,35 @@ test('a ready-state query error remains visible instead of showing the scan prom
  await expect(page.locator('#filter-feedback')).toContainText(message);
  await expect(page.locator('#filter-feedback')).not.toHaveClass(/duplicate-ready/);
  await expect(page.locator('#filter-feedback h3')).toHaveCount(0);
+});
+
+for (const theme of ['light','dark']) test(`header search grows with the window and keeps the file pane stable in ${theme}`, async ({page}) => {
+ await page.evaluate(theme => document.documentElement.dataset.theme=theme,theme);
+ await page.setViewportSize({width:1280,height:900});
+ const narrow=await page.locator('#filter-panel').boundingBox();
+ await page.setViewportSize({width:1600,height:900});
+ const wide=await page.locator('#filter-panel').boundingBox();
+ expect(wide.width).toBeGreaterThan(narrow.width+250);
+ await expect(page.locator('.topbar #filter-panel')).toBeVisible();
+ await expect(page.locator('.files-col #filter-panel')).toHaveCount(0);
+ const before=await page.locator('.files-col').boundingBox();
+ const selected=page.locator('.mode-tab[aria-selected="true"]');
+ expect(await selected.evaluate(n=>getComputedStyle(n,'::after').height)).toBe('2px');
+ expect(await selected.evaluate(n=>getComputedStyle(n).backgroundColor)).toBe('rgba(0, 0, 0, 0)');
+ await chip(page,'hardcore','Genre: Hardcore');
+ const after=await page.locator('.files-col').boundingBox();
+ expect(after.y).toBeCloseTo(before.y,0);expect(after.height).toBeCloseTo(before.height,0);
+ const table=await page.locator('#files-view').boundingBox();
+ expect(after.y+after.height-table.y-table.height).toBeCloseTo(8,0);
+ expect(await page.locator('#files-view').evaluate(n=>getComputedStyle(n).maskImage)).toContain('8px');
+ await page.locator('#filter').fill('artist');
+ await expect(page.locator('#query-suggestions')).toBeVisible();
+ const suggestions=await page.locator('#query-suggestions').boundingBox();
+ const field=await page.locator('.filter-ctl').boundingBox();
+ expect(suggestions.y).toBeGreaterThanOrEqual(field.y+field.height);
+ await page.locator('#presets-btn').click();
+ await expect(page.locator('#query-suggestions')).toBeHidden();
+ await expect(page.locator('#presets-menu')).toBeVisible();
+ const presets=await page.locator('#presets-menu').boundingBox();
+ expect(presets.y).toBeGreaterThanOrEqual(field.y+field.height);
 });

@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -23,7 +24,7 @@ test.afterEach(async ({ page }) => { expect(errors.get(page)).toEqual([]); });
 async function selectAll(page) {
   await page.locator('#tracks-body tr[data-path]').first().click();
   await page.locator('#tracks-body tr[data-path]').last().click({ modifiers: ['Shift'] });
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
 }
 
 test('desktop metadata keeps fixed rows, left-aligned values and vertically centred labels', async ({ page }, testInfo) => {
@@ -90,7 +91,7 @@ test('compilation respects field locks and unavailable native flag metadata', as
 test('no selection is blank, numeric controls reject text, and unaffected files keep normal ink', async ({ page }) => {
   await page.locator('#tracks-body tr[data-path]').first().click({modifiers:['Control']});
   expect(await page.evaluate(()=>window.tagrex.selection.size)).toBe(0);
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   for (const input of await page.locator('#fields-body .field-input').all()) { await expect(input).toHaveValue(''); await expect(input).toHaveAttribute('placeholder',''); await expect(input).toBeDisabled(); }
   await expect(page.locator('#subtab-editor #fields-blocks')).toHaveCount(0); await expect(page.locator('#fields-clear')).toHaveCount(0);
   await page.locator('#tracks-body tr[data-path]').first().click();
@@ -104,7 +105,7 @@ test('no selection is blank, numeric controls reject text, and unaffected files 
 
 test('Preview opens pending-only comparison, edits stay attached until commit, and clear hides the summary', async ({page},testInfo) => {
   await expect(page.locator('#staged-edits')).toBeHidden();
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   await page.locator('#editor-field-title').fill('New title');
   await expect(page.locator('#diff-apply')).toBeEnabled();
   await expect(page.locator('#staged-count')).toHaveText('1 file staged');
@@ -144,7 +145,7 @@ test('staging stays pinned and Apply writes the complete pending draft', async (
   await page.locator('.mode-col').screenshot({path:testInfo.outputPath('staged-pinned.png')});
   await page.locator('#diff-apply').click();
   await expect.poll(()=>page.evaluate(()=>window.tagrex.tracks.every(t=>t.tags.artist==='New artist'&&t.tags.genre==='Techno'))).toBe(true);
-  await expect(page.locator('#staged-edits')).toBeHidden();await expect(page.locator('#diff-actionbar')).toBeHidden();
+  await expect(page.locator('#staged-edits')).toBeHidden();await expect(page.locator('#diff-actionbar')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
 });
 
 test('right-click preserves the selected scope for format tools', async ({page}) => {
@@ -154,16 +155,9 @@ test('right-click preserves the selected scope for format tools', async ({page})
   await page.keyboard.press('Escape');await expect(page.locator('#tag-formats-modal')).toBeHidden();expect(await page.evaluate(()=>window.tagrex.selection.size)).toBe(3);
 });
 
-test('collapsing a fractional-weight module fills the inspector and leaves the full cover reachable', async ({page},testInfo) => {
-  await page.locator('.subtab[data-subtab="editor"]').click();
-  const toggle=page.locator('#dock-module-transformations .dock-module-toggle');
-  if(await toggle.getAttribute('aria-expanded')==='false') await toggle.click();
-  await page.evaluate(()=>{
-    document.getElementById('dock-module-inspector').style.setProperty('--dock-weight','.834152');
-    document.getElementById('dock-module-transformations').style.setProperty('--dock-weight','.165848');
-  });
-  await toggle.click();
-  await expect(page.locator('#dock-module-transformations')).toHaveAttribute('data-dock-collapsed','true');
+test('the full-height inspector leaves the cover reachable without a separate transformations module', async ({page},testInfo) => {
+  await openTagSource(page, 'editor');
+  await expect(page.locator('#dock-module-transformations')).toHaveCount(0);
   await expect.poll(()=>page.locator('#dock-module-inspector').evaluate(node=>Math.abs(node.getBoundingClientRect().bottom-node.parentElement.getBoundingClientRect().bottom))).toBeLessThan(1);
   const cover=page.locator('.cover-main-image');await expect(cover).toBeVisible();await cover.scrollIntoViewIfNeeded();
   const image=await cover.boundingBox(),scroll=await page.locator('.editor-scroll').boundingBox();
@@ -217,4 +211,61 @@ test('opening a library from an empty Staged view returns to Files', async ({pag
   await page.locator('#staged-tab').click();await expect(page.locator('#tracks-empty')).toBeVisible();
   await page.locator('#root-display').click();await page.locator('#root').fill('/another');await page.locator('#root').press('Enter');
   await expect(page.locator('#files-tab')).toHaveAttribute('aria-selected','true');await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(3);await expect(page.locator('#staged-edits')).toBeHidden();
+});
+
+test('one More tags disclosure uses the sidebar scroller and preserves field geometry', async ({page}) => {
+  await page.evaluate(()=>{
+    window.tagrex.tracks[0].tags={...window.tagrex.tracks[0].tags,...Object.fromEntries(Array.from({length:30},(_,i)=>[`custom:QA_EXTRA_${i}`,String(i)]))};
+    window.tagrex.renderTracks();
+  });
+  await selectAll(page);
+  const more=page.locator('.fe-group[data-group="standard"] > button.fe-group-head');
+  await expect(page.locator('#fields-body button.fe-group-head')).toHaveCount(1);
+  await expect(page.locator('.fe-group[data-group="advanced"]')).toHaveCount(0);
+  await more.click();
+  const grid=page.locator('#editor-group-standard');
+  expect(await grid.evaluate(n=>({overflow:getComputedStyle(n).overflowY,height:n.clientHeight,content:n.scrollHeight}))).toEqual(expect.objectContaining({overflow:'visible'}));
+  expect(await grid.evaluate(n=>n.clientHeight)).toBeGreaterThan(1000);
+  const scroller=page.locator('.editor-scroll');
+  expect(await scroller.evaluate(n=>n.scrollHeight>n.clientHeight)).toBe(true);
+  const field=page.locator('#editor-field-composer');await field.scrollIntoViewIfNeeded();
+  const before=await field.boundingBox();await field.hover();await field.focus();
+  const after=await field.boundingBox();expect(after).toEqual(before);
+  const cover=page.locator('#cover-well');await cover.scrollIntoViewIfNeeded();
+  const bounds=await cover.boundingBox(),scroll=await scroller.boundingBox();expect(bounds.y).toBeGreaterThanOrEqual(scroll.y-1);expect(bounds.y+bounds.height).toBeLessThanOrEqual(scroll.y+scroll.height+1);
+  await more.click();await expect(grid).toBeHidden();
+});
+
+test('More tags animates both directions and quick reversals keep fields intact', async ({page}) => {
+  await page.emulateMedia({reducedMotion:'no-preference'});await selectAll(page);
+  const more=page.locator('.fe-group[data-group="standard"] > button.fe-group-head');
+  await more.evaluate(n=>n.click());
+  expect(await page.locator('.fe-disclosure-content').evaluate(n=>n.getAnimations().length)).toBe(1);
+  await page.locator('#editor-field-composer').evaluate(n=>{window.retainedComposer=n;});
+  await more.evaluate(n=>{n.click();n.click();});
+  await expect(more).toHaveAttribute('aria-expanded','true');
+  await expect.poll(()=>page.locator('.fe-disclosure-content').evaluate(n=>n.getAnimations().length)).toBe(0);
+  expect(await page.evaluate(()=>window.retainedComposer===document.getElementById('editor-field-composer'))).toBe(true);
+  await more.evaluate(n=>n.click());
+  expect(await page.locator('.fe-disclosure-content').evaluate(n=>n.getAnimations().length)).toBe(1);
+  await expect(page.locator('#editor-group-standard')).toBeHidden();
+});
+
+test('sidebar scroll indicators overlay, fade, and support keyboard without changing field widths', async ({page}) => {
+  await page.emulateMedia({reducedMotion:'no-preference'});await selectAll(page);
+  const more=page.locator('.fe-group[data-group="standard"] > button.fe-group-head');await more.click();
+  await expect.poll(()=>page.locator('.fe-disclosure-content').evaluate(n=>n.getAnimations().length)).toBe(0);
+  const scroller=page.locator('.editor-scroll'), id=await scroller.getAttribute('id');
+  const rail=page.locator(`.inspector-scrollbar.is-vertical[aria-controls="${id}"]`);
+  await expect(rail).toBeVisible();
+  const field=page.locator('#editor-field-title'),before=await field.boundingBox();
+  expect(await scroller.evaluate(n=>n.offsetWidth-n.clientWidth)).toBe(0);
+  await scroller.evaluate(n=>n.scrollTop=100);
+  await expect.poll(()=>rail.evaluate(n=>Number(getComputedStyle(n).opacity))).toBe(1);
+  await expect.poll(()=>rail.evaluate(n=>Number(getComputedStyle(n).opacity)),{timeout:2500}).toBe(0);
+  expect((await field.boundingBox()).width).toBe(before.width);
+  await rail.focus();await page.keyboard.press('End');
+  await expect.poll(()=>scroller.evaluate(n=>n.scrollHeight-n.clientHeight-n.scrollTop)).toBeLessThan(2);
+  await page.keyboard.press('Home');await expect.poll(()=>scroller.evaluate(n=>n.scrollTop)).toBe(0);
+  expect(await field.boundingBox()).toEqual(before);
 });

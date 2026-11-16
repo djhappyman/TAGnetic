@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -67,18 +68,17 @@ test('settings has a real focus scope and Escape restores its opener', async ({ 
 
 test('dynamic menu rebuilding preserves popover shell and column controller actions', async ({ page }) => {
   await library(page);
-  await page.locator('#view-btn').click();
-  await page.locator('#columns-btn').click();
+  await page.locator('#tracks th.sortable').first().click({button:'right'});
   const menu = page.locator('#columns-menu');
   await expect(menu.locator('[data-slot="popover-content"]')).toBeVisible();
   await expect(menu.locator('input[type="checkbox"]')).not.toHaveCount(0);
   await page.keyboard.press('Escape');
   await expect(menu).toBeHidden();
-  // Closing the child chooser leaves View open.
-  await page.locator('#columns-btn').click();
+  // Reopening from the header reuses the column controls.
+  await page.locator('#tracks th.sortable').first().click({button:'right'});
   await expect(menu.locator('[data-slot="popover-content"]')).toHaveCount(1);
   await expect(menu.locator('input[type="checkbox"]')).not.toHaveCount(0);
-  await page.locator('#columns-btn').click();
+  await page.keyboard.press('Escape');
   await expect(menu).toBeHidden();
 });
 
@@ -168,12 +168,12 @@ test('cell completion uses a real popover without blurring or writing the cell o
   await expect(menu).toBeHidden();
 });
 
-test('standard and advanced field disclosures support native Enter and Space activation', async ({ page }) => {
+test('More tags includes raw fields and supports native Enter and Space activation', async ({ page }) => {
   await library(page);
   await page.evaluate(() => { window.tagrex.tracks[0].tags['custom:RAW_TEST_FRAME'] = 'Raw metadata'; });
   await page.locator('#tracks-body tr[data-path]').nth(1).click();
   await page.locator('#tracks-body tr[data-path]').first().click();
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   const standard = page.locator('button[aria-controls="editor-group-standard"]');
   const advanced = page.locator('button[aria-controls="editor-group-advanced"]');
   await expect(standard).toHaveAttribute('data-slot', 'button');
@@ -188,14 +188,8 @@ test('standard and advanced field disclosures support native Enter and Space act
   await page.keyboard.press('Enter');
   await expect(standard).toHaveAttribute('aria-expanded', 'true');
   await expect(page.locator('#editor-group-standard')).toBeVisible();
-  await expect(advanced).toHaveAttribute('aria-expanded', 'false');
-  await advanced.focus();
-  await page.keyboard.press('Enter');
-  await expect(advanced).toHaveAttribute('aria-expanded', 'true');
-  await expect(page.locator('#editor-group-advanced')).toBeVisible();
-  await page.keyboard.press('Space');
-  await expect(advanced).toHaveAttribute('aria-expanded', 'false');
-  await expect(page.locator('#editor-group-advanced')).toBeHidden();
+  await expect(advanced).toHaveCount(0);
+  await expect(page.locator('#editor-group-standard input[data-key="custom:RAW_TEST_FRAME"]')).toBeVisible();
 });
 
 test('Sonner retains report nodes and native dismiss listeners across repeated messages', async ({ page }) => {

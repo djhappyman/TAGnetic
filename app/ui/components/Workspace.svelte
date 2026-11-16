@@ -11,7 +11,6 @@
   import type { WorkspaceLayout } from '$lib/workspace-layout';
   import FilterPanel from './FilterPanel.svelte';
   import QueryChips from './QueryChips.svelte';
-  import QueryModeToggle from './QueryModeToggle.svelte';
   import QueryFeedback from './QueryFeedback.svelte';
   import DuplicateScanControls from './DuplicateScanControls.svelte';
   import DuplicateHelp from './DuplicateHelp.svelte';
@@ -19,7 +18,6 @@
   import ImportFields from './ImportFields.svelte';
   import NativeCheckbox from './controls/NativeCheckbox.svelte';
   import NativeSlider from './controls/NativeSlider.svelte';
-  import * as Popover from '$lib/components/ui/popover/index.js';
   import * as Tabs from '$lib/components/ui/tabs/index.js';
   import * as Table from '$lib/components/ui/table/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
@@ -29,6 +27,16 @@
   let dock = $state<WorkspaceLayout>();
   let mode = $state<WorkspaceMode>('tagger');
   let subtab = $state<WorkspaceSubtab>('online');
+  const primaryTab = $derived(mode === 'tagger' && subtab === 'online' ? 'online' : mode);
+  function changePrimaryTab(value: string) {
+    if (value === 'online') {
+      setWorkspaceSubtab('online');
+      changeTab('tagger');
+    } else {
+      if (value === 'tagger' && subtab === 'online') setWorkspaceSubtab('editor');
+      changeTab(value);
+    }
+  }
   // Narrow windows show one working pane at a time. Dock modules stay mounted, so
   // a cell edit, staged field or scroll position survives the switch.
   let sidebarClosed = $state(false);
@@ -46,99 +54,52 @@
     setSidebarClosed(closed);
     if (!closed) dock?.reveal('inspector');
   }
-  let viewOpen = $state(false);
   let moreOpen = $state(false);
-  let arranging = $state(false);
   let applying = $state(false);
   function openPresetLibrary() { document.getElementById('presets-edit')?.click(); }
-  function finishArranging() {
-    arranging = false;
-    requestAnimationFrame(() => document.getElementById('view-btn')?.focus());
-  }
-  function toggleArranging() {
-    arranging = !arranging;
-    viewOpen = false;
-    requestAnimationFrame(() => document.getElementById(arranging ? 'arrange-done' : 'view-btn')?.focus());
-  }
   let generatorJob = $state<'transform' | 'number' | 'sides'>('transform');
   function attachPaneRouting(node: HTMLElement) {
     const onClick = (event: MouseEvent) => {
       // Choosing a tool is a deliberate edit/search move: on a narrow window it
       // reveals that tool instead of leaving it below an unusable table slice.
       if ((event.target as Element).closest('.mode-tab')) { setSidebarClosed(false); dock?.reveal('inspector'); }
-      if ((event.target as Element).closest('#gen-job-transform')) dock?.reveal('transformations');
+      if ((event.target as Element).closest('#gen-job-transform')) showTransformations();
     };
-    const revealFiles = () => dock?.reveal('files');
     const revealModule = (event: Event) => {
       const module = (event as CustomEvent<string>).detail;
+      if (module === 'transformations') { showTransformations(); return; }
       if (module !== 'files') setSidebarClosed(false);
       dock?.reveal(module);
     };
     node.addEventListener('click', onClick);
-    document.addEventListener('tagrex:focus-filter', revealFiles, true);
     document.addEventListener('tagrex:reveal-module', revealModule);
-    return () => { node.removeEventListener('click', onClick); document.removeEventListener('tagrex:focus-filter', revealFiles, true); document.removeEventListener('tagrex:reveal-module', revealModule); };
+    return () => { node.removeEventListener('click', onClick); document.removeEventListener('tagrex:reveal-module', revealModule); };
   }
   // Keep the permanent player below the file pane without moving its native
   // controls into a dock module (which can be hidden in the compact layout).
-  function alignPlayer(footer: HTMLElement) {
-    const files = document.getElementById('dock-module-files');
-    const pane = files?.querySelector<HTMLElement>('.files-col');
-    const address = files?.querySelector<HTMLElement>('.library-header');
-    const frame = document.querySelector<HTMLElement>('.dock-frame');
-    let pending = 0;
-    const sync = () => {
-      pending = 0;
-      const bounds = footer.getBoundingClientRect();
-      const table = (frame?.dataset.sidebarDrawer === 'true' ? address : pane)?.getBoundingClientRect();
-      const compactLayout = frame?.dataset.dockCompact === 'true';
-      const visible = !compactLayout && table && table.width > 0 && table.height > 0;
-      const left = visible ? Math.max(0, table.left - bounds.left) : 9;
-      const innerWidth = Math.max(0, bounds.width - left - 12);
-      const actionbar = document.getElementById('diff-actionbar');
-      const busy = document.getElementById('busy-pill');
-      const scope = document.getElementById('status-transform-scope');
-      const controlsVisible = !!((actionbar && !actionbar.hidden) || (busy && !busy.hidden) || (scope && !scope.hidden));
-      const preview = document.getElementById('diff-preview');
-      const apply = document.getElementById('diff-apply');
-      const controlsWidth = controlsVisible ? Math.max(248, Math.min(360, (preview?.scrollWidth || 0) + (apply?.scrollWidth || 0) + 36)) : 0;
-      const stacked = bounds.width < 600 && controlsVisible;
-      const sidebarSpace = visible ? Math.max(0, innerWidth - table.width) : 0;
-      const reserve = stacked ? 0 : Math.max(sidebarSpace, controlsWidth);
-      const width = Math.max(0, innerWidth - reserve);
-      footer.style.setProperty('--player-offset', `${left}px`);
-      footer.style.setProperty('--player-width', `${width}px`);
-      if (footer.classList.contains('player-full-width') || footer.classList.contains('narrow-actions')) {
-        footer.classList.remove('player-full-width', 'narrow-actions');
-      }
-      footer.classList.toggle('stacked-actions', stacked);
-    };
-    const schedule = () => { if (!pending) pending = requestAnimationFrame(sync); };
-    const resize = new ResizeObserver(schedule);
-    for (const node of [footer, pane, address, frame]) if (node) resize.observe(node);
-    const layout = new MutationObserver(schedule);
-    if (files) layout.observe(files, { attributes:true, attributeFilter:['data-dock-area', 'hidden'] });
-    if (frame) layout.observe(frame, { attributes:true, attributeFilter:['data-dock-compact', 'data-sidebar-drawer', 'data-sidebar-closed'] });
-    const actionbar = document.getElementById('diff-actionbar');
-    if (actionbar) layout.observe(actionbar, {attributes:true, attributeFilter:['hidden','class'], childList:true, subtree:true, characterData:true});
-    for (const id of ['busy-pill','status-transform-scope']) { const node = document.getElementById(id); if (node) layout.observe(node, {attributes:true, attributeFilter:['hidden']}); }
-    window.addEventListener('resize', schedule);
-    schedule();
-    return () => { resize.disconnect(); layout.disconnect(); window.removeEventListener('resize', schedule); if (pending) cancelAnimationFrame(pending); };
+  function selectionSummarySpacing(node: HTMLElement) {
+    const pane = node.closest<HTMLElement>('.files-col');
+    let previous = 0;
+    const resize = new ResizeObserver(() => {
+      const height = node.offsetHeight;
+      if (height === previous) return;
+      previous = height;
+      pane?.style.setProperty('--selection-summary-space', `${height + 16}px`);
+    });
+    resize.observe(node);
+    return () => resize.disconnect();
   }
-  // Both trigger panels stay in the DOM so the controller-owned buttons inside
+  // The overflow panel stays in the DOM so the controller-owned buttons inside
   // keep their stable IDs. They are inert while closed rather than destroyed.
   $effect(() => {
-    if (!viewOpen && !moreOpen) return;
+    if (!moreOpen) return;
     const onPointer = (event: PointerEvent) => {
       const target = event.target as Element | null;
-      if (target?.closest('#view-panel, #view-btn, #more-panel, #more-btn, .col-menu')) return;
-      viewOpen = false;
+      if (target?.closest('#more-panel, #more-btn, .col-menu')) return;
       moreOpen = false;
     };
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
-      if (viewOpen) { viewOpen = false; requestAnimationFrame(() => document.getElementById('view-btn')?.focus()); }
       if (moreOpen) { moreOpen = false; requestAnimationFrame(() => document.getElementById('more-btn')?.focus()); }
     };
     document.addEventListener('pointerdown', onPointer, true);
@@ -148,14 +109,11 @@
       document.removeEventListener('keydown', onKey);
     };
   });
-  function openPanel(which: 'view' | 'more') {
-    moreOpen = which === 'more' ? !moreOpen : false;
-    viewOpen = which === 'view' ? !viewOpen : false;
-    const panel = which === 'view' ? viewOpen : moreOpen;
-    if (!panel) return;
+  function openPanel() {
+    moreOpen = !moreOpen;
+    if (!moreOpen) return;
     requestAnimationFrame(() => {
-      const host = document.getElementById(which === 'view' ? 'view-panel' : 'more-panel');
-      host?.querySelector<HTMLElement>('button:not([hidden]), input, select')?.focus();
+      document.getElementById('more-panel')?.querySelector<HTMLElement>('button:not([hidden]), input, select')?.focus();
     });
   }
   onMount(() => {
@@ -171,6 +129,10 @@
     mode = next.mode;
     subtab = next.subtab;
   }));
+  function showTransformations() {
+    setWorkspaceSubtab('transformations');
+    changeTab('tagger');
+  }
   function changeTab(value: string, isSubtab = false) {
     if (isSubtab) setWorkspaceSubtab(value);
     else {
@@ -181,8 +143,7 @@
   }
 
 </script>
-<svelte:window onkeydown={event => { if (event.key === 'Escape' && arranging && !event.defaultPrevented) finishArranging(); }} />
-<div class={['controller-tabs-layout', { 'arranging-workspace': arranging }]} {@attach attachPaneRouting}>
+<div class="controller-tabs-layout" {@attach attachPaneRouting}>
 <Tabs.Root bind:value={mode} class="controller-tabs-root" onValueChange={(value) => changeTab(value)}>
 
 <header class="topbar" data-tauri-drag-region>
@@ -191,60 +152,53 @@
       <BrandWordmark />
     </div>
 
+    <Tabs.Root value={primaryTab} onValueChange={changePrimaryTab} class="primary-navigation">
     <Tabs.List class="mode-tabs" aria-label="Tools">
       <Tabs.Trigger value="tagger">
 {#snippet child({ props })}
-<Button {...props} data-slot="button" variant="ghost" size="sm" class="mode-tab active" data-mode="tagger" data-i18n-title="mode.tagger.title" title="Edit tags from an online source, by hand, and manage cover art" data-i18n-aria-label="mode.tagger.label" aria-label="Tags"><svg class="ico"><use href="#i-tag"/></svg><span class="lbl" data-i18n="mode.tagger.label">Tags</span></Button>
+<Button {...props} data-slot="button" variant="ghost" size="sm" class="mode-tab" id="workspace-tags-tab" aria-controls="panel-tagger" data-mode="tagger" data-i18n-title="mode.tagger.title" title="Edit tags manually and manage cover art" data-i18n-aria-label="mode.tagger.label" aria-label="Tags"><svg class="ico"><use href="#i-tag"/></svg><span class="lbl" data-i18n="mode.tagger.label">Tags</span></Button>
+{/snippet}
+</Tabs.Trigger>
+      <Tabs.Trigger value="online">
+{#snippet child({ props })}
+<Button {...props} data-slot="button" variant="ghost" size="sm" class="mode-tab" id="workspace-online-tab" aria-controls="panel-tagger" data-mode="online" data-i18n-title="inspector.onlineHeading" title="Find a release" data-i18n-aria-label="tagger.online" aria-label="Online"><svg class="ico"><use href="#i-search"/></svg><span class="lbl" data-i18n="tagger.online">Online</span></Button>
 {/snippet}
 </Tabs.Trigger>
       <Tabs.Trigger value="renamer">
 {#snippet child({ props })}
-<Button {...props} data-slot="button" variant="ghost" size="sm" class="mode-tab" data-mode="renamer" data-i18n-title="mode.renamer.title" title="Rename files and move them into folders" data-i18n-aria-label="mode.renamer.label" aria-label="Rename"><svg class="ico"><use href="#i-rename"/></svg><span class="lbl" data-i18n="mode.renamer.label">Rename</span></Button>
-{/snippet}
-</Tabs.Trigger>
-      <Tabs.Trigger value="generator">
-{#snippet child({ props })}
-<Button {...props} data-slot="button" variant="ghost" size="sm" class="mode-tab" data-mode="generator" data-i18n-title="mode.generator.title" title="Generate and clean up tag and file name values" data-i18n-aria-label="mode.generator.label" aria-label="Generate"><svg class="ico"><use href="#i-wand"/></svg><span class="lbl" data-i18n="mode.generator.label">Generate</span></Button>
+<Button {...props} data-slot="button" variant="ghost" size="sm" class="mode-tab" id="workspace-renamer-tab" aria-controls="panel-renamer" data-mode="renamer" data-i18n-title="mode.renamer.title" title="Rename files and move them into folders" data-i18n-aria-label="mode.renamer.label" aria-label="Rename"><svg class="ico"><use href="#i-rename"/></svg><span class="lbl" data-i18n="mode.renamer.label">Rename</span></Button>
 {/snippet}
 </Tabs.Trigger>
       <Tabs.Trigger value="deduplicator">
 {#snippet child({ props })}
-<Button {...props} data-slot="button" variant="ghost" size="sm" class="mode-tab" data-mode="deduplicator" data-i18n-title="mode.deduplicator.title" title="Find likely duplicate files in the open library" data-i18n-aria-label="mode.deduplicator.label" aria-label="Duplicates"><svg class="ico"><use href="#i-dedup"/></svg><span class="lbl" data-i18n="mode.deduplicator.label">Duplicates</span></Button>
+<Button {...props} data-slot="button" variant="ghost" size="sm" class="mode-tab" id="query-mode-toggle" aria-controls="panel-deduplicator" aria-pressed={mode === 'deduplicator'} data-mode="deduplicator" data-i18n-title="mode.deduplicator.title" title="Find likely duplicate files in the open library" data-i18n-aria-label="mode.deduplicator.label" aria-label="Duplicates"><svg class="ico"><use href="#i-dedup"/></svg><span class="lbl" data-i18n="mode.deduplicator.label">Duplicates</span></Button>
 {/snippet}
 </Tabs.Trigger>
       <Tabs.Trigger value="exporter">
 {#snippet child({ props })}
-<Button {...props} data-slot="button" variant="ghost" size="sm" class="mode-tab" data-mode="exporter" data-i18n-title="mode.exporter.title" title="Export playlists, tables, and reports" data-i18n-aria-label="mode.exporter.label" aria-label="Export"><svg class="ico"><use href="#i-export"/></svg><span class="lbl" data-i18n="mode.exporter.label">Export</span></Button>
+<Button {...props} data-slot="button" variant="ghost" size="sm" class="mode-tab" id="workspace-exporter-tab" aria-controls="panel-exporter" data-mode="exporter" data-i18n-title="mode.exporter.title" title="Export playlists, tables, and reports" data-i18n-aria-label="mode.exporter.label" aria-label="Export"><svg class="ico"><use href="#i-export"/></svg><span class="lbl" data-i18n="mode.exporter.label">Export</span></Button>
 {/snippet}
 </Tabs.Trigger>
     </Tabs.List>
-    <div class="spacer" data-tauri-drag-region></div>
-    <div class="view-tabs">
-      <Button id="view-btn" variant="ghost" size="sm" class="toolbar-trigger" aria-expanded={viewOpen} aria-controls="view-panel" onclick={() => openPanel('view')}><svg class="ico"><use href="#i-sliders"/></svg><span data-i18n="toolbar.view">View</span></Button>
-      <div id="view-panel" class="toolbar-panel view-panel" class:open={viewOpen} role="group" aria-label="View options" data-i18n-aria-label="toolbar.viewPanel" aria-hidden={!viewOpen} inert={!viewOpen}>
-        <div class="tray-row">
-          <div class="col-picker group-ctl">
-          </div>
-          <Button variant="ghost" size="icon-sm" id="toggle-groups" class="icon tray-icon" hidden data-i18n-title="toolbar.collapseGroups" title="Collapse every group" data-i18n-aria-label="toolbar.collapseGroups" aria-label="Collapse every group"><svg class="ico"><use href="#i-collapse-all"/></svg></Button>
+    </Tabs.Root>
+    <FilterPanel>
+      <div class="filter-ctl field is-empty">
+        <span class="query-mode-label" aria-hidden="true"><svg class="ico"><use href="#i-search"/></svg></span>
+        <QueryChips />
+        <Input id="filter" type="search" placeholder="Start typing…" aria-label="Search files" spellcheck="false" />
+        <div class="field-tools">
+          <Button variant="ghost" size="icon-sm" id="filter-clear" class="icon field-clear" type="button" data-i18n-title="toolbar.clearFilter" title="Clear the filter" data-i18n-aria-label="toolbar.clearFilter" aria-label="Clear the filter"><svg class="ico"><use href="#i-close"/></svg></Button>
+      <div class="filter-presets">
+        <div class="col-picker">
+          <Button variant="ghost" size="icon-sm" id="presets-btn" class="tray-action" data-i18n-title="toolbar.presetsTitle" title="Save and reuse filter and sort presets" data-i18n-aria-label="toolbar.presets" aria-label="Filter and sort presets"><svg class="ico"><use href="#i-presets"/></svg></Button>
+          <div id="presets-menu" class="col-menu" hidden></div>
         </div>
-
-        <div class="tray-row">
-          <div class="col-picker">
-            <Button variant="ghost" size="sm" id="columns-btn" class="tray-action" data-i18n-title="toolbar.columnsTitle" title="Choose which columns to show" data-i18n-aria-label="toolbar.columns" aria-label="Columns"><svg class="ico"><use href="#i-columns"/></svg><span class="tray-label" data-i18n="toolbar.columns">Columns</span></Button>
-            <div id="columns-menu" class="col-menu" hidden></div>
-          </div>
-        </div>
-
-
-        <div class="tray-row">
-          <div class="col-picker">
-            <Button variant="ghost" size="sm" id="health-btn" class="tray-action" data-i18n-title="health.title" title="Library health" data-i18n-aria-label="health.title" aria-label="Library health"><svg class="ico"><use href="#i-health"/></svg><span class="tray-label" data-i18n="health.title">Library health</span><span id="health-n" class="field-count"></span></Button>
-            <div id="health-menu" class="col-menu" hidden></div>
-          </div>
-        </div>
-        <div class="tray-row"><Button variant="ghost" size="sm" id="arrange-layout" class="tray-action" aria-pressed={arranging} disabled={applying} onclick={toggleArranging}><svg class="ico"><use href="#i-sliders"/></svg><span data-i18n="toolbar.arrange">Arrange panels</span></Button></div>
       </div>
-    </div>
+        </div>
+      </div>
+      {#if mode !== 'deduplicator'}<QueryFeedback />{/if}
+    </FilterPanel>
+    <div class="topbar-actions" data-tauri-drag-region>
     <span id="update-pill" class="update-pill" hidden>
       <Button variant="outline" size="sm" id="update-open" class="update-open" type="button"></Button>
       <Button variant="ghost" size="icon-sm" id="update-notes" class="update-notes icon" type="button" hidden data-i18n-title="update.notes" title="What's new in this version" data-i18n-aria-label="update.notes" aria-label="What's new in this version"><svg class="ico"><use href="#i-doc"/></svg></Button>
@@ -254,16 +208,16 @@
     <Button variant="ghost" size="icon-sm" id="agent-activity" class="icon" hidden title="External agent connections and work" aria-label="External agent connections and work"><svg class="ico"><use href="#i-agent"/></svg></Button>
     <Button variant="ghost" size="icon-sm" id="settings-open" class="icon gear" data-i18n-title="topbar.settings" title="Settings" data-i18n-aria-label="topbar.settings" aria-label="Settings"><svg class="ico"><use href="#i-settings"/></svg></Button>
     <Button variant="ghost" size="icon-sm" id="panel-toggle" class="icon" aria-expanded={!sidebarClosed} aria-controls="mode-col" disabled={applying} onclick={toggleSidebar} data-i18n-title={sidebarClosed ? 'topbar.expandPanelTitle' : 'topbar.collapsePanelTitle'} title={t(sidebarClosed ? 'topbar.expandPanelTitle' : 'topbar.collapsePanelTitle')} data-i18n-aria-label={sidebarClosed ? 'topbar.expandPanel' : 'topbar.collapsePanel'} aria-label={t(sidebarClosed ? 'topbar.expandPanel' : 'topbar.collapsePanel')}>{#if sidebarClosed}<PanelRightOpen class="ico" size={17}/>{:else}<PanelRightClose class="ico" size={17}/>{/if}</Button>
+    </div>
   </div>
-    <Button id="arrange-done" variant="ghost" size="sm" hidden={!arranging} onclick={finishArranging} data-i18n="action.done">Done</Button>
   <!-- Legacy controller targets stay mounted during ribbon iteration. -->
   <div hidden inert aria-hidden="true">
     <Button id="preset-library" variant="ghost" size="sm" disabled={applying} onclick={openPresetLibrary} data-i18n-title="presets.title" title="Transformation presets"><svg class="ico"><use href="#i-wand"/></svg><span data-i18n="toolbar.presetsShort">Presets</span></Button>
     <Button variant="ghost" size="sm" id="detect-bpm" class="toolbar-command search-toggle" title="Detect BPM" aria-label="Detect BPM"><svg class="ico glyph-search"><use href="#i-metronome"/></svg><svg class="ico glyph-stop"><use href="#i-stop"/></svg><span class="tray-label" data-i18n="toolbar.bpmShort">BPM</span></Button>
 
     <div class="toolbar-overflow">
-      <Button id="more-btn" variant="ghost" size="icon-sm" class="toolbar-trigger" aria-expanded={moreOpen} aria-controls="more-panel" onclick={() => openPanel('more')} data-i18n-aria-label="toolbar.more" aria-label="More"><svg class="ico"><use href="#i-more"/></svg></Button>
-      <div id="more-panel" class="toolbar-panel more-panel" class:open={moreOpen} role="group" aria-label="Selection actions" data-i18n-aria-label="toolbar.morePanel" aria-hidden={!moreOpen} inert={!moreOpen}>
+      <Button id="more-btn" variant="ghost" size="icon-sm" class="toolbar-trigger" aria-expanded={moreOpen} aria-controls="more-panel" onclick={openPanel} data-i18n-aria-label="toolbar.more" aria-label="More"><svg class="ico"><use href="#i-more"/></svg></Button>
+      <div id="more-panel" class={['toolbar-panel more-panel', { open: moreOpen }]} role="group" aria-label="Selection actions" data-i18n-aria-label="toolbar.morePanel" aria-hidden={!moreOpen} inert={!moreOpen}>
         <div class="tray-row transform-row">
           <Button variant="ghost" size="sm" id="transform-btn" class="tray-action" data-i18n-title="toolbar.transformTitle" title="Rules to run on the values this panel produces" data-i18n-aria-label="toolbar.transform" aria-label="Transform values"><svg class="ico"><use href="#i-wand"/></svg><span class="tray-label" data-i18n="toolbar.transform">Transform values</span></Button>
         </div>
@@ -280,7 +234,7 @@
 <main class="workarea">
 
   <DockWorkspace bind:controller={dock} drawer closed={sidebarClosed}>
-  <DockModule moduleId="files" title="Files" defaultArea="left" headerless={!arranging}>
+  <DockModule moduleId="files" title="Files" defaultArea="left" headerless movable={false}>
   <div class="ribbon-strip">
   <div class="command-toolbar command-ribbon" role="group" aria-label="File commands">
     <div class="ribbon-group" role="group" aria-label="Folders">
@@ -306,6 +260,7 @@
     <div class="ribbon-group" role="group" aria-label="List organisation">
       <div class="col-picker group-ctl">
         <Button id="group-btn" variant="ghost" size="icon-sm" class="icon ribbon-command ribbon-menu-trigger" title="Group files" aria-label="Group files" aria-expanded="false" aria-controls="group-menu"><Group class="ico" size={17} strokeWidth={1.7} /><ChevronDown class="ribbon-chevron" size={10} /></Button>
+        <Button variant="ghost" size="icon-sm" id="toggle-groups" class="icon ribbon-command" hidden data-i18n-title="toolbar.collapseGroups" title="Collapse every group" data-i18n-aria-label="toolbar.collapseGroups" aria-label="Collapse every group"><svg class="ico"><use href="#i-collapse-all"/></svg></Button>
         <div id="group-menu" class="col-menu" hidden></div>
       </div>
 
@@ -315,7 +270,7 @@
   </div>
   <section class="files-col">
     <div class="file-view-tabs" role="tablist" aria-label="File views" data-i18n-aria-label="staging.views">
-      <Button id="files-tab" variant="ghost" size="sm" role="tab" aria-selected="true" aria-controls="files-view" aria-labelledby="files-tab-label" aria-describedby="status-sel"><span id="files-tab-label" data-i18n="staging.files">Files</span><span class="files-tab-counts" aria-hidden="true"><span id="files-selected" class="files-tab-selection"><span id="files-selected-count">0</span></span><span class="files-count-divider">/</span><span id="files-total-count">0</span></span><span id="status-sel" class="sr-only"></span></Button>
+      <Button id="files-tab" variant="ghost" size="sm" role="tab" aria-selected="true" aria-controls="files-view" aria-labelledby="files-tab-label" aria-describedby="status-sel"><span id="files-tab-label" data-i18n="staging.files">Files</span><span class="files-tab-counts" aria-hidden="true"><span id="files-total-count">0</span></span><span id="status-sel" class="sr-only"></span></Button>
       <Button id="staged-tab" variant="ghost" size="sm" role="tab" aria-selected="false" aria-controls="files-view" tabindex={-1}><span data-i18n="staging.tab">Staged</span><span id="staged-tab-count" class="staged-tab-count"></span></Button>
     </div>
     <div class="library-header">
@@ -358,24 +313,12 @@
       <p id="tracks-empty" class="empty inert-panel" data-i18n="table.empty">Open a folder to list its tracks.</p>
     </div>
 
-    <FilterPanel>
-      <div class="filter-ctl field is-empty">
-        <QueryChips />
-        <span id="filter-check" class="field-chip" hidden><span id="filter-check-name"></span><Button variant="ghost" size="icon-sm" id="filter-check-clear" class="icon" type="button" data-i18n-title="health.clear" title="Show all files" data-i18n-aria-label="health.clear" aria-label="Show all files"><svg class="ico"><use href="#i-close"/></svg></Button></span>
-        <Input id="filter" type="search" placeholder="Start typing…" aria-label="Search files" spellcheck="false" />
-        <div class="field-tools">
-          <Button variant="ghost" size="icon-sm" id="filter-clear" class="icon field-clear" type="button" data-i18n-title="toolbar.clearFilter" title="Clear the filter" data-i18n-aria-label="toolbar.clearFilter" aria-label="Clear the filter"><svg class="ico"><use href="#i-close"/></svg></Button>
-        </div>
-      </div>
-      <QueryModeToggle />
-      <div class="filter-presets">
-        <div class="col-picker">
-          <Button variant="ghost" size="sm" id="presets-btn" class="tray-action" data-i18n-title="toolbar.presetsTitle" title="Save and reuse filter and sort presets" data-i18n-aria-label="toolbar.presets" aria-label="Filter and sort presets"><svg class="ico"><use href="#i-presets"/></svg><span class="tray-label">Presets</span></Button>
-          <div id="presets-menu" class="col-menu" hidden></div>
-        </div>
-      </div>
-      {#if mode !== 'deduplicator'}<QueryFeedback />{/if}
-    </FilterPanel>
+
+
+    <div id="selection-summary" class="table-selection-summary" hidden {@attach selectionSummarySpacing}>
+      <span class="selection-summary-text" role="status" aria-live="polite" aria-atomic="true"><span class="selection-summary-primary"><span id="files-selected-count">0</span> <span id="selection-summary-kind">selected</span></span><span id="selection-summary-detail" class="selection-summary-detail"></span></span>
+      <Button id="selection-summary-clear" variant="ghost" size="icon-sm" class="icon" type="button" title="Clear selection" aria-label="Clear selection"><svg class="ico"><use href="#i-close"/></svg></Button>
+    </div>
 
     <div id="duplicates-view" hidden>
       <div class="dup-bar">
@@ -393,10 +336,11 @@
 
   <Button variant="ghost" id="col-splitter" hidden class="col-splitter" role="separator" tabindex={0} aria-valuenow={480} aria-valuemin={240} aria-valuemax={1200} aria-orientation="vertical" aria-label="Resize editor panel" aria-controls="panel-tagger panel-renamer panel-generator panel-deduplicator panel-exporter" data-i18n-title="toolbar.dragResize" title="Drag to resize" />
 
-  <DockModule moduleId="inspector" title="Inspector" defaultArea="right" defaultIndex={1} headerless={!arranging}>
+  <DockModule moduleId="inspector" title="Inspector" defaultArea="right" defaultIndex={1} headerless movable={false}>
   <aside class="mode-col" id="mode-col">
 
-    <Tabs.Content value="renamer" id="panel-renamer" class="mode-panel" hidden>
+
+    <Tabs.Content value="renamer" id="panel-renamer" aria-labelledby="workspace-renamer-tab" class="mode-panel" hidden>
       <div class="panel-block">
         <h2 data-i18n="renamer.heading">Rename files</h2>
         <div class="mask-row">
@@ -461,14 +405,10 @@
       </div>
     </Tabs.Content>
 
-    <Tabs.Content value="tagger" id="panel-tagger" class="mode-panel">
+    <Tabs.Content value="tagger" id="panel-tagger" aria-labelledby={subtab === 'online' ? 'workspace-online-tab' : 'workspace-tags-tab'} class="mode-panel">
 <Tabs.Root bind:value={subtab} class="controller-tabs-root" onValueChange={(value) => changeTab(value, true)}>
+      <div class="source-navigation" hidden={subtab === 'online'}>
       <Tabs.List class="subtabs" data-i18n-aria-label="tagger.mode" aria-label="Tagging mode">
-        <Tabs.Trigger value="online">
-{#snippet child({ props })}
-<Button {...props} data-slot="button" variant="ghost" size="sm" class="subtab active" data-subtab="online" type="button" data-i18n="tagger.online">Online</Button>
-{/snippet}
-</Tabs.Trigger>
         <Tabs.Trigger value="editor">
 {#snippet child({ props })}
 <Button {...props} data-slot="button" variant="ghost" size="sm" class="subtab" data-subtab="editor" type="button" data-i18n="tagger.editor">Editor</Button>
@@ -484,9 +424,45 @@
 <Button {...props} data-slot="button" variant="ghost" size="sm" class="subtab" data-subtab="fromtext" type="button" data-i18n="tagger.fromText">From text</Button>
 {/snippet}
 </Tabs.Trigger>
+        <Tabs.Trigger value="transformations">
+{#snippet child({ props })}
+<Button {...props} data-slot="button" variant="ghost" size="sm" class="subtab" data-subtab="transformations" type="button" data-i18n="workspace.transformations">Transformations</Button>
+{/snippet}
+</Tabs.Trigger>
       </Tabs.List>
+        <div class="source-tools">
+          {#if subtab === 'editor'}<InspectorHelp labelKey="inspector.editorInfo" helpKey="inspector.editorHelp" />
+          {:else if subtab === 'filename'}<InspectorHelp labelKey="inspector.nameInfo" helpKey="inspector.nameHelp" />
+          {:else if subtab === 'fromtext'}<InspectorHelp labelKey="inspector.textInfo" helpKey="inspector.textHelp" />
+          {:else if subtab === 'transformations'}<InspectorHelp labelKey="inspector.transformInfo" helpKey="generator.transformHint" />{/if}
+          <Button variant="ghost" size="icon-sm" id="presets-edit" hidden={subtab !== 'transformations'} class="transformations-edit icon" type="button" data-i18n-title="presets.edit" title="Edit transformation presets" data-i18n-aria-label="presets.title" aria-label="Transformation presets"><svg class="ico"><use href="#i-rename"/></svg></Button>
+        </div>
+      </div>
 
-      <Tabs.Content value="online" id="subtab-online" class="subtab-panel online">
+      <Tabs.Content value="transformations" id="subtab-transformations" class="subtab-panel transformations" hidden>
+        <div class="transformations-scroll docked-transformations">
+      <div id="transform-home"></div>
+      <div id="transform-block" class="panel-block">
+        <span id="transform-count" hidden></span>
+        <p id="transform-context-note" class="hint inert-panel" style="padding: 6px 8px" hidden></p>
+
+        <p id="transform-over-plan" class="hint inert-panel" style="padding: 6px 8px" hidden data-i18n="generator.overPlan">
+          This runs on the staged changes, not the files. The result replaces the plan, so one
+          Apply and one undo still cover everything.
+        </p>
+
+        <div id="groups-menu" class="groups-list"></div>
+        <div class="panel-actions" hidden>
+
+          <div class="spacer"></div>
+          <Button variant="default" size="sm" id="transform-preview" class="primary" hidden data-i18n="generator.previewChanges">Preview</Button>
+        </div>
+      </div>
+
+        </div>
+      </Tabs.Content>
+
+      <Tabs.Content value="online" id="subtab-online" aria-labelledby="workspace-online-tab" class="subtab-panel online">
         <div class="online-head">
           <div class="inspector-heading"><h2 data-i18n="inspector.onlineHeading">Find a release</h2><InspectorHelp labelKey="inspector.onlineInfo" helpKey="inspector.onlineHelp" /></div>
           <div class="online-head-row">
@@ -546,7 +522,6 @@
 
       <Tabs.Content value="editor" id="subtab-editor" class="subtab-panel editor" hidden>
         <div class="editor-scroll">
-          <div class="inspector-heading"><h2 data-i18n="inspector.editorHeading">Edit tags</h2><InspectorHelp labelKey="inspector.editorInfo" helpKey="inspector.editorHelp" /></div>
           <div class="panel-block">
             <span id="fields-count" hidden></span>
 
@@ -564,7 +539,6 @@
 
       <Tabs.Content value="filename" id="subtab-filename" class="subtab-panel from-name" hidden>
         <div class="from-name-scroll"><div class="panel-block">
-          <div class="inspector-heading"><h2 data-i18n="fromName.heading">Read file names</h2><InspectorHelp labelKey="inspector.nameInfo" helpKey="inspector.nameHelp" /></div>
           <div class="mask-row">
             <div class="field">
               <Input id="from-name-mask" aria-label="Pattern" data-i18n-aria-label="inspector.pattern" type="text" value="%artist% - %title%" spellcheck="false" placeholder="%artist% - %title%" />
@@ -588,7 +562,6 @@
 
       <Tabs.Content value="fromtext" id="subtab-fromtext" class="subtab-panel from-name" hidden>
         <div class="from-name-scroll"><div class="panel-block">
-          <div class="inspector-heading"><h2 data-i18n="fromText.heading">Read a text list</h2><InspectorHelp labelKey="inspector.textInfo" helpKey="inspector.textHelp" /></div>
           <div class="mask-row">
             <div class="field">
               <Input id="from-text-mask" aria-label="Pattern" data-i18n-aria-label="inspector.pattern" type="text" value="%track%. %artist% - %title%" spellcheck="false" placeholder="%track%. %artist% - %title%" />
@@ -662,7 +635,7 @@
       </div>
     </Tabs.Content>
 
-    <Tabs.Content value="exporter" id="panel-exporter" class="mode-panel" hidden>
+    <Tabs.Content value="exporter" id="panel-exporter" aria-labelledby="workspace-exporter-tab" class="mode-panel" hidden>
       <div class="panel-block">
         <h2><span data-i18n="exporter.heading">Export</span> <span id="export-count" class="muted"></span></h2>
 
@@ -714,62 +687,31 @@
       </div>
     </Tabs.Content>
 
+
     <section id="staged-edits" class="staged-edits" tabindex="-1" aria-labelledby="staged-heading" hidden>
       <div class="staged-head"><div><h3 id="staged-heading" data-i18n="staging.heading">Staged edits</h3><span id="staged-count" class="staged-count"></span></div><Button id="diff-discard" variant="ghost" size="icon-sm" class="icon staged-remove" data-i18n-aria-label="staging.clear" aria-label="Clear staged edits" data-i18n-title="staging.clear" title="Clear staged edits"><svg class="ico"><use href="#i-close"/></svg></Button></div>
     </section>
   </aside>
   </DockModule>
-  <DockModule moduleId="transformations" visible={mode === 'tagger'} title="Transformations" defaultArea="right" defaultIndex={0} defaultWeight={0.6} chromeTarget="h2" collapsible>
-  {#snippet headerHelp()}
-    <Popover.Root>
-      <Popover.Trigger>
-        {#snippet child({ props })}<Button {...props} variant="ghost" size="icon-sm" class="transformation-help" aria-label="About transformations">?</Button>{/snippet}
-      </Popover.Trigger>
-      <Popover.Content class="transformation-help-content" align="start">
-        <p data-i18n="generator.transformHint">Ticked presets run in list order. Nothing is written until you review the preview and press Apply.</p>
-      </Popover.Content>
-    </Popover.Root>
-  {/snippet}
-  {#snippet headerActions()}
-    <Button variant="outline" size="sm" id="presets-edit" class="btn" type="button" data-i18n="presets.edit">Edit</Button>
-  {/snippet}
-  <div class="docked-transformations">
-      <div id="transform-home"></div>
-      <div id="transform-block" class="panel-block">
-        <h2><span data-i18n="workspace.transformations">Transformations</span><span id="transform-count" hidden></span></h2>
-        <p id="transform-context-note" class="hint inert-panel" style="padding: 6px 8px" hidden></p>
 
-        <p id="transform-over-plan" class="hint inert-panel" style="padding: 6px 8px" hidden data-i18n="generator.overPlan">
-          This runs on the staged changes, not the files. The result replaces the plan, so one
-          Apply and one undo still cover everything.
-        </p>
-
-        <div id="groups-menu" class="groups-list"></div>
-        <div class="panel-actions" hidden>
-
-          <div class="spacer"></div>
-          <Button variant="default" size="sm" id="transform-preview" class="primary" hidden data-i18n="generator.previewChanges">Preview</Button>
-        </div>
-      </div>
-
-  </div>
-  </DockModule>
   </DockWorkspace>
 
 </main>
 
+<div id="columns-menu" class="col-menu" hidden></div>
+
 <input id="cover-file" type="file" accept="image/*" hidden />
 
-<footer class="statusbar" {@attach alignPlayer}>
+<footer class="statusbar">
 
   <div class="sb-left">
 
     <CompactPlayer />
   </div>
   <div class="sb-right">
-    <div id="diff-actionbar" class="diff-actionbar" hidden>
+    <div id="diff-actionbar" class="diff-actionbar">
       <span class="ab-summary sr-only"><span id="ab-state">files ready</span><span class="ab-plan" id="ab-plan"></span></span>
-      <Button variant="outline" size="sm" id="diff-preview" class="btn" data-i18n="staging.preview">Preview</Button>
+      <Button variant="outline" size="sm" id="diff-preview" class="btn" disabled data-i18n="staging.preview">Preview</Button>
       <span class="ab-progress" id="ab-progress"><span class="ab-bar"><span class="ab-bar-fill" id="ab-bar-fill"></span></span><span class="ab-file" id="ab-file"></span></span>
       <Button variant="outline" size="sm" id="diff-cancel-apply" class="btn" data-i18n="action.cancel">Cancel</Button>
       <Button variant="default" size="sm" id="diff-apply" class="btn primary" disabled><span id="ab-apply-label">Apply changes</span><span id="ab-count" class="sr-only">0</span></Button>

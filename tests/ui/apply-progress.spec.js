@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import {test,expect} from '@playwright/test';
 import {readFile} from 'node:fs/promises';
 import {resolve,sep} from 'node:path';
@@ -26,7 +27,7 @@ async function open(page,large=false){
   await page.evaluate(async()=>{document.getElementById('root').value='/music';await window.tagrex.openLibrary();window.tagrex.selection.clear();for(const track of window.tagrex.tracks)window.tagrex.selection.add(track.path);window.tagrex.renderTracks();});
 }
 async function stageTags(page){
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   await page.locator('#fields-body [data-key="artist"]').fill('Written artist');
   await expect(page.locator('#diff-apply')).toBeEnabled();
   await page.locator('#staged-tab').click();
@@ -59,8 +60,9 @@ async function stable(page){
 }
 async function finish(page){
   await page.evaluate(()=>{window.progressObserver.disconnect();window.finishWrite();});
-  await expect(page.locator('#diff-actionbar')).toBeHidden();
+  await expect(page.locator('#diff-actionbar')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
   await expect(page.locator('#diff-apply')).toBeDisabled();
+  await expect.poll(()=>page.evaluate(()=>window.tagrex.previewPlan?.changes?.length || 0)).toBe(0);
   expect(await page.evaluate(()=>window.tagrex.selectedPaths())).toEqual([]);
   await expect(page.locator('#tracks-body tr.selected')).toHaveCount(0);
   await expect(page.locator('#tracks-body .sheet-active,#tracks-body .sheet-range')).toHaveCount(0);
@@ -134,7 +136,7 @@ test('a combined tag and rename row completes only after both writes, without re
 test('artwork changes update the existing icon only after its write completes',async({page})=>{
   await open(page);
   await page.evaluate(()=>{window.tagrex.selection.clear();window.tagrex.selection.add(window.tagrex.tracks[0].path);window.tagrex.renderTracks();});
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   await page.locator('#cover-well .cover-edit').click();await page.getByRole('menuitem',{name:'Remove',exact:true}).click();
   await expect(page.locator('#diff-apply')).toBeEnabled();await page.locator('#staged-tab').click();
   const first=await page.evaluate(()=>window.tagrex.previewPlan.changes[0]);
@@ -184,12 +186,12 @@ test('Files owns immediate counts and grows for large numbers without clipping',
   await expect(page.locator('#files-selected-count')).toHaveText('1');
   await page.locator('#tracks-body tr[data-path]').first().click({modifiers:['Control']});
   await expect(page.locator('#files-selected-count')).toHaveText('0');
-  await expect(page.locator('#files-selected')).toBeVisible();
+  await expect(page.locator('#selection-summary')).toBeHidden();
   await page.locator('#filter').fill('Radio');
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(1);
   await expect(page.locator('#files-total-count')).toHaveText('3');
   await expect(page.locator('#files-tab')).toHaveAccessibleDescription(/1\/3/);
-  await page.evaluate(()=>{document.getElementById('files-total-count').textContent='999,999,999';document.getElementById('files-selected-count').textContent='123,456,789';document.getElementById('files-selected').hidden=false;});
+  await page.evaluate(()=>{document.getElementById('files-total-count').textContent='999,999,999';document.getElementById('files-selected-count').textContent='123,456,789';});
   const size=await page.locator('#files-tab').evaluate(node=>{const box=node.getBoundingClientRect(),counts=node.querySelector('.files-tab-counts'),content=counts.getBoundingClientRect();return {width:box.width,right:box.right,contentRight:content.right,client:counts.clientWidth,scroll:counts.scrollWidth};});
   expect(size.width).toBeGreaterThan(116);expect(size.contentRight).toBeLessThanOrEqual(size.right-12);expect(size.scroll).toBeLessThanOrEqual(size.client);
   await expect(page.getByRole('tab',{name:'Files',exact:true})).toBeVisible();
@@ -205,9 +207,11 @@ test('a same-frame rename burst visibly completes top to bottom before the previ
     for(const change of changes)window.writeProgress({path:change.path,done:changes.length*2,total:changes.length*2,completed:'transfer'});
     window.finishWrite();
   },changes);
-  await expect(page.locator('#diff-actionbar')).toBeHidden();
+  await expect(page.locator('#diff-actionbar')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
+  await expect.poll(()=>page.evaluate(()=>window.tagrex.previewPlan?.changes?.length || 0)).toBe(0);
   const frames=await page.evaluate(()=>{window.recordBurst=false;window.progressObserver.disconnect();return window.burstFrames;});
   expect(frames.some(paths=>paths.length>0&&paths.length<changes.length)).toBe(true);
   for(const paths of frames)expect(paths).toEqual(changes.slice(0,paths.length).map(change=>change.path));
+  await expect.poll(()=>page.evaluate(()=>window.tagrex.previewPlan?.changes?.length || 0)).toBe(0);
   expect(await page.evaluate(()=>window.tagrex.selectedPaths())).toEqual([]);
 });

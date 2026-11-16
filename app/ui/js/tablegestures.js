@@ -14,6 +14,7 @@ import { COLUMN_MIN_WIDTH, fitColumn, saveColumnWidths, setAutofit } from "./col
 // Mouse events (not a native splitter) for the same WKWebView reason as the row
 // reorder. The panel has a fixed flex-basis; dragging sets it in pixels.
 (function initSplitter() {
+  if (document.querySelector('.dock-frame')) return;
   const splitter = el("col-splitter");
   const modeCol = document.querySelector(".mode-col");
   const workarea = document.querySelector(".workarea");
@@ -34,14 +35,6 @@ import { COLUMN_MIN_WIDTH, fitColumn, saveColumnWidths, setAutofit } from "./col
     splitter.setAttribute("aria-valuenow", String(w));
     splitter.setAttribute("aria-valuemin", "240");
     splitter.setAttribute("aria-valuemax", String(Math.max(240, Math.round(workarea.getBoundingClientRect().width - 360))));
-  }
-
-  // The dock workspace owns sizing; keep status alignment without restoring a
-  // legacy pixel basis onto a module that can now live in any dock area.
-  if (workarea.querySelector('.dock-frame')) {
-    new ResizeObserver(syncPanelWidthVar).observe(modeCol);
-    syncPanelWidthVar();
-    return;
   }
 
   splitter.addEventListener("keydown", (e) => {

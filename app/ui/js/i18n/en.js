@@ -331,7 +331,7 @@ export const en = {
   "topbar.settings": "Settings",
   // The mode names (TAGGER, RENAMER…) are not catalogue strings: they read the
   // same in every language (#424). What each mode does is.
-  "mode.tagger.title": "Edit tags from an online source, by hand, and manage cover art",
+  "mode.tagger.title": "Edit tags manually and manage cover art",
   "mode.renamer.title": "Rename files and move them into folders",
   "mode.generator.title": "Generate and clean up tag and file name values",
   "mode.deduplicator.title": "Find likely duplicate files in the open library",
@@ -1355,6 +1355,7 @@ export const en = {
   "health.spellingMore": "+{n} more",
   "settings.general": "General",
   "settings.tagsAndCovers": "Tags and covers",
+  "inspector.transformInfo": "About transformations",
   "workspace.transformations": "Transformations",
   "session.unavailable": "Couldn’t reopen {folder}. Reconnect it, retry above, or open another folder.",
   "session.slow": "{folder} is taking too long. Retry above or open another folder. The earlier read may still finish.",

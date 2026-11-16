@@ -1,3 +1,4 @@
+import { tableViewportBounds } from './table-viewport.js';
 import { mount } from 'svelte';
 import SpreadsheetToolbar from '../components/SpreadsheetToolbar.svelte';
 import { TAURI } from './invoke.js';
@@ -186,7 +187,7 @@ export function initSpreadsheet(options) {
     if (!cell || cell.isContentEditable) return;
     cell.focus({ preventScroll: true });
     // Horizontal reveal without scrollIntoView scrolling the whole workbench.
-    const rect = cell.getBoundingClientRect(), bounds = wrap.getBoundingClientRect();
+    const rect = cell.getBoundingClientRect(), bounds = tableViewportBounds(wrap);
     const keyCell = cell.closest('tr').querySelector('.file');
     const left = active.key === 'file' ? bounds.left : Math.max(bounds.left, keyCell?.getBoundingClientRect().right || bounds.left);
     if (rect.left < left) wrap.scrollLeft -= left - rect.left;

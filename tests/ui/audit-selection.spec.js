@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -64,13 +65,13 @@ test('Online selection does no hidden Editor artwork I/O and Editor catches up o
   await row(page, 1).click();
   await row(page, 2).click();
   expect(await page.evaluate(() => window.__audit.reads.length)).toBe(0);
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   await expect.poll(() => page.evaluate(() => window.__audit.reads.length)).toBe(1);
   await expect(page.locator('#fields-body input[data-key="title"]')).toHaveValue('Feel It');
 });
 
 test('filter, sorting and regrouping preserve an unstaged draft and its input', async ({ page }) => {
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   const title = page.locator('#fields-body input[data-key="title"]');
   await title.fill('UNSTAGED DRAFT');
   await title.evaluate(node => window.__draftInput = node);
@@ -86,7 +87,7 @@ test('filter, sorting and regrouping preserve an unstaged draft and its input', 
 });
 
 test('late artwork cannot replace the current selection or stage its images', async ({ page }) => {
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   await expect(page.locator('.cover-main-image img')).toHaveAttribute('alt', 'Current artwork');
   await page.evaluate(() => window.__audit.wait = true);
   await row(page, 1).click();
@@ -105,7 +106,7 @@ test('late artwork cannot replace the current selection or stage its images', as
 
 
 test('deselection invalidates pending artwork and detached edit actions', async ({ page }) => {
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   await expect(page.locator('.cover-main-image img')).toHaveAttribute('alt', 'Current artwork');
   await page.locator('#cover-well .cover-edit').click();
   await page.locator('[data-cover="remove"]').evaluate(node => window.__oldRemove = node);
@@ -124,7 +125,7 @@ test('deselection invalidates pending artwork and detached edit actions', async 
 
 test('folder artwork responses stay bound to their source selection', async ({ page }) => {
   await page.evaluate(() => window.__audit.externalWait = true);
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   await expect.poll(() => page.evaluate(() => window.__audit.externalPending.length)).toBe(1);
   await row(page, 2).click();
   await expect.poll(() => page.evaluate(() => window.__audit.externalPending.length)).toBe(2);
@@ -137,7 +138,7 @@ test('folder artwork responses stay bound to their source selection', async ({ p
 });
 
 test('a new selected subject never inherits another files unstaged draft', async ({ page }) => {
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   await page.locator('#fields-body input[data-key="title"]').fill('A ONLY DRAFT');
   await row(page, 1).click();
   await expect(page.locator('#fields-body input[data-key="title"]')).toHaveValue('Radio');
@@ -145,7 +146,7 @@ test('a new selected subject never inherits another files unstaged draft', async
 });
 
 test('rapid Editor selection bounds native reads and keeps only the latest waiting subject', async ({ page }) => {
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   await expect(page.locator('.cover-main-image img')).toHaveAttribute('alt', 'Current artwork');
   await page.evaluate(() => window.__audit.wait = true);
   for (const at of [1, 2, 0, 1]) await row(page, at).click();
@@ -183,12 +184,12 @@ test('large native filter queries avoid frontend tag enumeration and library res
 
 
 test('Undo reuses the toolbar history head and requests summaries only after completion', async ({ page }) => {
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   await page.locator('#fields-body input[data-key="title"]').fill('New title');
   await expect(page.locator('#diff-apply')).toBeEnabled();
   await expect(page.locator('#diff-actionbar')).toBeVisible();
   await page.locator('#diff-apply').click();
-  await expect(page.locator('#diff-actionbar')).toBeHidden();
+  await expect(page.locator('#diff-actionbar')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
   await expect(page.locator('#undo')).toBeEnabled();
   const before = await page.evaluate(() => window.__audit.historyReads);
   await page.locator('#undo').click();
@@ -197,14 +198,14 @@ test('Undo reuses the toolbar history head and requests summaries only after com
 
 
 test('tag-only Apply and Undo read back only changed rows and preserve unrelated DTO identities', async ({ page }) => {
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   await page.evaluate(() => { window.__untouchedTrack = window.tagrex.tracks[1]; window.__audit.listReads = 0; window.__audit.rowReads = []; });
   await page.locator('#fields-body input[data-key="title"]').fill('Scoped new title');
   await expect(page.locator('#diff-apply')).toBeEnabled();
   await expect(page.locator('#diff-actionbar')).toBeVisible();
   expect(await page.evaluate(() => window.tagrex.tracks[0].tags.title)).toBe('Desert Rain');
   await page.locator('#diff-apply').click();
-  await expect(page.locator('#diff-actionbar')).toBeHidden();
+  await expect(page.locator('#diff-actionbar')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
   await expect.poll(() => page.evaluate(() => window.tagrex.tracks[0].tags.title)).toBe('Scoped new title');
   expect(await page.evaluate(() => window.tagrex.tracks[1] === window.__untouchedTrack)).toBe(true);
   expect(await page.evaluate(() => window.__audit.listReads)).toBe(0);

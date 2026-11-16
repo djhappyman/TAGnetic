@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import {test, expect} from '@playwright/test';
 import {readFile} from 'node:fs/promises';
 import {resolve, sep} from 'node:path';
@@ -31,7 +32,7 @@ test.beforeEach(async({page})=>{
   });
   await page.goto('http://tagrex.test/app/ui/index.html');
   await expect.poll(()=>page.evaluate(()=>typeof window.tagrex?.openLibrary)).toBe('function');
-  await page.locator('.subtab[data-subtab="online"]').click();
+  await openTagSource(page, 'online');
   await page.locator('.online-scroll').evaluate(node=>{node.style.maxHeight='160px';});
   await page.locator('#discogs-token').evaluate(node=>node.value='fixture');
 });
@@ -85,9 +86,9 @@ test('a newer search rejects the preceding slow page',async({page})=>{
 });
 
 test('hidden tabs do not page; repeated provider pages stop instead of looping',async({page})=>{
-  await search(page);await page.locator('.subtab[data-subtab="editor"]').click();
+  await search(page);await openTagSource(page, 'editor');
   await bottom(page);await settle(page);expect(await page.evaluate(()=>window.pageCalls.length)).toBe(1);
-  await page.evaluate(()=>window.pagingMode='repeat');await page.locator('.subtab[data-subtab="online"]').click();
+  await page.evaluate(()=>window.pagingMode='repeat');await openTagSource(page, 'online');
   await bottom(page);await expect.poll(()=>page.evaluate(()=>window.pageCalls.length)).toBe(2);
   await expect(page.locator('#discogs-search')).not.toHaveClass(/busy/);await bottom(page);await settle(page);
   await expect(page.locator('.release-card')).toHaveCount(5);
@@ -96,8 +97,6 @@ test('hidden tabs do not page; repeated provider pages stop instead of looping',
 
 test('short result pages fill available space without requiring an impossible scroll',async({page})=>{
   await page.setViewportSize({width:1440,height:1600});
-  const toggle=page.locator('#dock-module-transformations .dock-module-toggle');
-  if(await toggle.getAttribute('aria-expanded')==='true')await toggle.click();
   await page.locator('.online-scroll').evaluate(node=>{node.style.maxHeight='none';});
   await page.locator('#discogs-query').fill('Original search');await page.locator('#discogs-query').press('Enter');
   await expect(page.locator('.release-card')).toHaveCount(12);
@@ -127,7 +126,7 @@ test('import options remain usable and remembered after closing the popup',async
 for(const theme of ['dark','light'])test(`all four tabs fade overflow while final content stays opaque (${theme})`,async({page},info)=>{
   await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
   for(const [tab,selector] of [['online','.online-scroll'],['editor','.editor-scroll'],['filename','#subtab-filename .from-name-scroll'],['fromtext','#subtab-fromtext .from-name-scroll']]){
-    await page.locator(`.subtab[data-subtab="${tab}"]`).click();
+    await openTagSource(page, tab);
     const port=page.locator(selector);
     await port.evaluate(node=>{const filler=document.createElement('div');filler.style.cssText='height:1800px;flex:none';filler.textContent='Scrolling content';node.append(filler);node.scrollTop=0;});
     await expect(port).toHaveClass(/can-scroll-down/);
@@ -140,7 +139,7 @@ for(const theme of ['dark','light'])test(`all four tabs fade overflow while fina
       await expect.poll(()=>port.evaluate(node=>getComputedStyle(node).maskImage)).toContain('linear-gradient');
     }
   }
-  await page.locator('.subtab[data-subtab="online"]').click();await search(page);
+  await openTagSource(page, 'online');await search(page);
   await page.locator('.mode-col').screenshot({path:info.outputPath(`online-${theme}.png`)});
 });
 
@@ -154,9 +153,9 @@ test('duplicate entries within one provider page are displayed only once',async(
 
 test('hover clear cancels a slow search and removes results while keeping staged edits',async({page})=>{
   await page.locator('#root-display').click();await page.locator('#root').fill('/music');await page.locator('#root').press('Enter');
-  await page.locator('#tracks-body tr[data-path]').first().click();await page.locator('.subtab[data-subtab="editor"]').click();
+  await page.locator('#tracks-body tr[data-path]').first().click();await openTagSource(page, 'editor');
   await page.locator('#editor-field-title').fill('Keep staged title');await expect(page.locator('#staged-edits')).toBeVisible();
-  await page.locator('.subtab[data-subtab="online"]').click();await search(page);
+  await openTagSource(page, 'online');await search(page);
   await page.evaluate(()=>window.pagingMode='hold');await bottom(page);await expect.poll(()=>page.evaluate(()=>window.pendingPages.length)).toBe(1);
   await page.mouse.move(0,0);await expect(page.locator('#discogs-clear')).toHaveCSS('opacity','0');
   await page.locator('#query-box').hover();await expect(page.locator('#discogs-clear')).toHaveCSS('opacity','1');

@@ -33,6 +33,13 @@
       <symbol id="i-health" viewBox="0 0 16 16"><path d="M8 13.4 3.2 8.8a3 3 0 0 1 4.2-4.3l.6.6.6-.6a3 3 0 0 1 4.2 4.3Z"/><path d="M5 8.2h1.6l.9-1.6 1.2 2.6.7-1H11"/></symbol>
       <symbol id="i-check" viewBox="0 0 16 16"><path d="M3.4 8.4 6.4 11.4 12.6 4.6"/></symbol>
       <symbol id="i-plus" viewBox="0 0 16 16"><line x1="8" y1="3.5" x2="8" y2="12.5"/><line x1="3.5" y1="8" x2="12.5" y2="8"/></symbol>
+      <symbol id="i-group-none" viewBox="0 0 16 16"><path d="M3 4h10M3 8h10M3 12h10"/></symbol>
+      <symbol id="i-group-album" viewBox="0 0 16 16"><rect x="2" y="2" width="12" height="12" rx="1.5"/><circle cx="8" cy="8" r="3"/><circle cx="8" cy="8" r=".6" fill="currentColor" stroke="none"/></symbol>
+      <symbol id="i-group-albumartist" viewBox="0 0 16 16"><circle cx="6" cy="5" r="2.2"/><path d="M1.8 13v-1a4.2 4.2 0 0 1 8.4 0v1M10 3a2.2 2.2 0 0 1 0 4.4M12 9a4 4 0 0 1 2.2 3.5v.5"/></symbol>
+      <symbol id="i-group-artist" viewBox="0 0 16 16"><circle cx="8" cy="5" r="2.5"/><path d="M3 13v-1a5 5 0 0 1 10 0v1"/></symbol>
+      <symbol id="i-group-disc" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.8"/><circle cx="8" cy="8" r="1.5"/><path d="m4 5 1.4 1.1M10.6 9.9 12 11"/></symbol>
+      <symbol id="i-group-year" viewBox="0 0 16 16"><rect x="2.5" y="3.5" width="11" height="10" rx="1.5"/><path d="M5 2v3M11 2v3M2.5 7h11M5 10h2M9 10h2"/></symbol>
+      <symbol id="i-group-media" viewBox="0 0 16 16"><path d="m2 5 6-3 6 3-6 3Z"/><path d="m2 8 6 3 6-3M2 11l6 3 6-3"/></symbol>
       <symbol id="i-folder" viewBox="0 0 16 16"><path d="M2.5 5.3a1 1 0 0 1 1-1h2.7l1.2 1.4h5.1a1 1 0 0 1 1 1v4.6a1 1 0 0 1-1 1h-9.1a1 1 0 0 1-1-1Z"/></symbol>
       <symbol id="i-tag" viewBox="0 0 16 16"><path d="M2.8 3.3h4.4L13 9l-4 4-5.8-5.8Z"/><circle cx="5.6" cy="6.1" r="1" fill="currentColor" stroke="none"/></symbol>
       <symbol id="i-rename" viewBox="0 0 16 16"><path d="M10.4 3.3 12.7 5.6 6 12.3l-3 .7.7-3Z"/><line x1="9.3" y1="4.4" x2="11.6" y2="6.7"/></symbol>

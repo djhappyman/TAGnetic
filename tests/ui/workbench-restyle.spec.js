@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -30,31 +31,25 @@ test('table-owned folder controls retain opening and refreshing while commands o
   expect(Math.abs(location.width - bounds.width)).toBeLessThan(2);
   await page.locator('#lib-refresh').click();
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(3);
-  await page.locator('#presets-edit').click();
+  await openTagSource(page,'transformations');await page.locator('#presets-edit').click();
   await expect(page.locator('#pe-editor')).toBeVisible();
   await expect(page.locator('.pe-list-row')).not.toHaveCount(0);
   await page.keyboard.press('Escape');
   await expect(page.locator('#pe-editor')).toBeHidden();
 });
 
-test('on-demand layout controls retain staged field values and native nodes while docking', async ({ page }) => {
+test('fixed workspace keeps drafts and exposes columns from the table header', async ({ page }) => {
   await openLibrary(page);
-  await page.locator('#tracks-body tr[data-path]').first().click();
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   const title = page.locator('#fields-body input[data-key="title"]');
-  await title.fill('Draft survives arranging');
-  await page.evaluate(() => { window.restyleTitle = document.querySelector('#fields-body input[data-key="title"]'); window.restyleLibrary = document.getElementById('root-field'); });
-  await expect(page.locator('#dock-module-files > .dock-module-chrome')).toBeHidden();
-  await page.locator('#view-btn').click();
-  await page.locator('#arrange-layout').click();
-  await expect(page.locator('#dock-module-files > .dock-module-chrome')).toBeVisible();
-  await page.getByRole('button', { name:'Files module layout', exact:true }).click({button:'right'});
-  await page.getByRole('menuitem', { name:'Dock bottom', exact:true }).click();
-  await expect(page.locator('#dock-module-files')).toHaveAttribute('data-dock-area', 'bottom');
-  await page.locator('#arrange-done').click();
-  await expect(page.locator('#dock-module-files > .dock-module-chrome')).toBeHidden();
-  await expect(title).toHaveValue('Draft survives arranging');
-  expect(await page.evaluate(() => window.restyleTitle === document.querySelector('#fields-body input[data-key="title"]') && window.restyleLibrary === document.getElementById('root-field'))).toBe(true);
+  await title.fill('Draft survives header actions');
+  await expect(page.locator('#view-btn, #health-btn, #arrange-layout, #arrange-done')).toHaveCount(0);
+  await page.locator('#tracks th.sortable').first().click({button:'right'});
+  await expect(page.locator('#columns-menu')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(title).toHaveValue('Draft survives header actions');
+  await page.locator('.subtab').first().click({button:'right'});
+  await expect(page.locator('.dock-layout-menu')).toHaveCount(0);
 });
 
 test('quiet row fills keep selection distinct and contain no row divider borders', async ({ page }) => {
@@ -76,7 +71,7 @@ test('quiet row fills keep selection distinct and contain no row divider borders
   expect(await page.locator('#tracks thead tr').evaluate(row => getComputedStyle(row).borderBottomWidth)).toBe('0px');
   const footer = await page.locator('#filter-panel').evaluate(panel => {
     const style = getComputedStyle(panel);
-    const pane = getComputedStyle(panel.parentElement);
+    const pane = getComputedStyle(document.querySelector('.files-col'));
     const table = getComputedStyle(document.getElementById('files-view'));
     return { fill:style.backgroundColor, pane:pane.backgroundColor, table:table.backgroundColor, border:style.borderTopWidth };
   });
@@ -96,7 +91,7 @@ test('quiet row fills keep selection distinct and contain no row divider borders
   await page.locator('#presets-btn').focus();
   expect(await page.locator('.filter-ctl').evaluate(node => {
     const style = getComputedStyle(node);
-    return style.borderTopWidth !== '0px' && style.borderTopColor !== 'rgba(0, 0, 0, 0)';
+    return (style.borderTopWidth !== '0px' && style.borderTopColor !== 'rgba(0, 0, 0, 0)') || (style.outlineStyle === 'solid' && style.outlineColor !== 'rgba(0, 0, 0, 0)');
   })).toBe(true);
 });
 
@@ -116,15 +111,13 @@ test('icons and all tool actions remain available at narrow widths', async ({ pa
 test('permanent playback follows the table width and stays reachable in the compact inspector', async ({ page }) => {
   await page.setViewportSize({ width:1397, height:900 });
   const alignment = () => page.evaluate(() => {
-    const pane = document.querySelector('.files-col').getBoundingClientRect();
+    const pane = document.querySelector('.library-header').getBoundingClientRect();
     const player = document.getElementById('player').getBoundingClientRect();
     return Math.abs(pane.left + 3 - player.left) + Math.abs(pane.right - 3 - player.right);
   });
   await expect.poll(alignment).toBeLessThan(2);
-  const splitter = page.getByRole('separator', {name:'Resize workspace columns',exact:true});
-  await splitter.focus();
-  await splitter.press('ArrowLeft');
-  await splitter.press('ArrowLeft');
+  await expect(page.getByRole('separator', {name:'Resize workspace columns',exact:true})).toHaveCount(0);
+  await page.setViewportSize({width:1240,height:900});
   await expect.poll(alignment).toBeLessThan(2);
   expect(await page.locator('#pl-toggle svg').evaluate(node => parseFloat(getComputedStyle(node).width))).toBeGreaterThanOrEqual(16);
   await page.setViewportSize({ width:375, height:720 });
@@ -138,7 +131,7 @@ test('permanent playback follows the table width and stays reachable in the comp
 test('Apply footer keeps a stable table with Preview beside the scoped primary action', async ({ page }) => {
   await page.setViewportSize({width:1397,height:900});
   await openLibrary(page);
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
   const before = await page.locator('.statusbar').boundingBox();
   const title = page.locator('#fields-body input[data-key="title"]');
   await title.fill('Footer preview');
@@ -171,7 +164,7 @@ test('Apply footer keeps a stable table with Preview beside the scoped primary a
   expect(await page.evaluate(() => window.footerActionNode === document.getElementById('diff-actionbar'))).toBe(true);
   await page.setViewportSize({width:1280,height:800});
   await page.locator('#diff-discard').click();
-  await expect(page.locator('#diff-actionbar')).toBeHidden();
+  await expect(page.locator('#diff-actionbar')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
   await expect(page.locator('#ab-locked')).toBeHidden();
   expect(await page.evaluate(() => window.tagrex.tracks[0].tags.title)).toBe('Desert Rain');
 });

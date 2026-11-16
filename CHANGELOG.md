@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.9] - 2026-11-16
+
+**Tagnetic 1.4.9**: clearer navigation, grouping and a faster fixed sidebar.
+
+### Changed
+
+- Tags, Online, Rename, Duplicates and Export sit beside the logo, with the
+  flexible library search and search presets in the header.
+- Common grouping choices have matching table icons and count chips. Folder
+  labels omit the shared library prefix while retaining their full paths on hover.
+- Files and Staged show their file counts; a floating selection summary handles
+  multi-selection, hidden selections and the included Apply scope.
+- Transformations joins the manual source tabs. Advanced fields live inside
+  the animated More tags section, using the sidebar's existing scroll area.
+- The sidebar uses a fixed 420px desktop width with collapse. Its rounded edge,
+  address bar, selection summary and player animate while table geometry stays
+  fixed. Scrollbars and keyboard navigation account for the covered area.
+- Preview and Apply remain visible, disabled when there is no work; the staged
+  summary stays pinned at the bottom. Redundant View and layout controls are removed.
+
+### Fixed
+
+- Sidebar collapse avoids repeated table-width updates and footer measurements.
+  Overlay scrollbar geometry is read together before its styles are written.
+- Table columns remain reachable beside the open sidebar, without reserving
+  unnecessary scroll space when empty fill already covers the hidden area.
+
 ## [1.4.8] - 2026-11-16
 
 **Tagnetic 1.4.8**: live field editing and smoother table scrolling.

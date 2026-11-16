@@ -1,3 +1,4 @@
+import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -18,7 +19,7 @@ test.beforeEach(async ({ page }) => {
   await page.locator('#root-display').click();
   await page.locator('#root').fill('/music'); await page.locator('#root').press('Enter');
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(3);
-  await page.locator('.subtab[data-subtab="editor"]').click();
+  await openTagSource(page, 'editor');
 });
 test.afterEach(async ({ page }) => expect(errors.get(page)).toEqual([]));
 
@@ -44,7 +45,12 @@ async function nativeTransforms(page) {
     document.dispatchEvent(new CustomEvent('tagrex:settings-saved',{detail:{...settings,action_groups:[{name:'Append once',scope:'title',rules:[{kind:'replace',scope:'title',from:'$',to:'!',regex:true,style:''}]}]}}));
   });
   await expect.poll(()=>page.evaluate(()=>window.mcpFixture.state.calls.includes('mcp_shared_stage_delta'))).toBe(true);
-  return page.locator('#groups-menu .preset-apply').filter({hasText:'Append once'});
+  const preset=page.locator('#groups-menu .preset-apply').filter({hasText:'Append once'});
+  return {async click(){
+    const previous=await page.evaluate(()=>document.querySelector('.subtab.active')?.dataset.subtab || 'editor');
+    await openTagSource(page,'transformations');await preset.click();
+    if(previous!=='transformations')await openTagSource(page,previous);
+  }};
 }
 
 test('a human edit made during an agent write remains desired while saved bases refresh', async ({ page }) => {
@@ -377,7 +383,7 @@ test('native scalar staging also accepts online imports without losing an existi
   await expect.poll(() => page.evaluate(() => window.mcpFixture.state.calls.includes('mcp_shared_stage_delta'))).toBe(true);
   await page.locator('#editor-field-comment').fill('Keep this human comment');
   await expect.poll(() => page.evaluate(() => window.mcpFixture.state.stage?.changes[0]?.tag_changes.find(tag => tag.field==='comment')?.new)).toBe('Keep this human comment');
-  await page.locator('.subtab[data-subtab="online"]').click();
+  await openTagSource(page, 'online');
   await page.evaluate(() => { document.getElementById('discogs-token').value='fixture'; });
   await page.locator('#discogs-query').fill('La Bush');
   await page.locator('#discogs-search').click();

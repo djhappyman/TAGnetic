@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { placeFloating } from '../js/popup-position.js';
   import { QUERY_FIELDS, emptyRoot, newCondition, queryLabel, compactQueryLabel, queryTone, replaceNode, removeNode, addSuggestion, scopedText, appendQueryNodes, defaultOperator } from '../js/query-model.js';
   import QueryEditor from './QueryEditor.svelte';
   import QueryRuleLabel from './QueryRuleLabel.svelte';
@@ -14,7 +15,7 @@
   let editingId = $state<string | null>(null);
   let input = $state<HTMLInputElement | null>(null);
   let anchor: HTMLElement;
-  let popupStyle = $state('');
+  let popup: HTMLElement | undefined;
   let choices = $derived.by(() => {
     const out = suggestions.map(s => ({ ...s, label: s.nodes?s.nodes.map(queryLabel).join(' · '):queryLabel({...newCondition(s.field,s.value),operator:s.operator||defaultOperator(s.field)}), action: 'suggestion' }));
     for(const proposal of proposals){const label=proposal.nodes.map(queryLabel).join(' · ');if(!out.some(s=>s.label.toLowerCase()===label.toLowerCase()))out.unshift({...proposal,label,action:'rule'});}
@@ -29,9 +30,15 @@
   function previews(choice:any){return choice.nodes||(choice.field?[{kind:'condition',id:'preview',field:choice.field,operator:choice.action==='contains'?'contains':choice.operator||defaultOperator(choice.field),values:[choice.value],negate:false}]:[]);}
   function publish(next: any) { return document.dispatchEvent(new CustomEvent('tagrex:filter-root', { cancelable:true,detail: { root: next } })); }
   function locate() {
-    const box = anchor?.closest('.filter-ctl')?.getBoundingClientRect();
-    const ceiling=Math.min(box?.top??innerHeight,anchor?.closest('#filter-panel')?.getBoundingClientRect().top??innerHeight);
-    if (box) popupStyle = `left:${Math.max(8, Math.min(box.left, innerWidth - Math.min(560, innerWidth - 16) - 8))}px;bottom:${Math.max(8, innerHeight - ceiling + 6)}px;max-height:${Math.max(80, ceiling - 16)}px;width:${Math.min(560, innerWidth - 16)}px`;
+    const field = anchor?.closest<HTMLElement>('.filter-ctl');
+    if (field && popup) placeFloating(popup, field, { width:Math.max(field.offsetWidth, 320) });
+  }
+  function placePopup(node: HTMLElement) {
+    popup = node;
+    const resize = new ResizeObserver(locate);
+    resize.observe(node);
+    locate();
+    return () => { resize.disconnect(); if (popup === node) popup = undefined; };
   }
   function focusInput() { requestAnimationFrame(() => input?.focus()); }
   function openEditor(item: any = newCondition(), consume = false) {
@@ -65,7 +72,7 @@
     else if (event.key === 'Tab') shown = false;
     else if (event.key === 'Backspace' && !input?.value && root.children.length) { event.preventDefault(); document.querySelector<HTMLElement>('.filter-condition-chip:last-of-type button')?.focus(); }
   }
-  function outside(event: PointerEvent) { if (!(event.target as Element).closest('.filter-ctl, #query-editor, #query-suggestions')) { shown = false; editing = null; } }
+  function outside(event: PointerEvent) { if ((event.target as Element).closest('#presets-btn') || !(event.target as Element).closest('.filter-ctl, #query-editor, #query-suggestions')) { shown = false; editing = null; } }
   function receive(node: HTMLElement) {
     anchor = node;
     const changed = (event: Event) => {
@@ -89,23 +96,20 @@
 <svelte:document onkeydown={keydown} onpointerdown={outside} />
 <svelte:window onresize={locate} />
 <span class="query-command-chips" {@attach receive}>
-  <span class="query-mode-label" aria-hidden="true">
-    <svg class="ico"><use href="#i-search" /></svg>
-  </span>
   {#if root.children.length > 1}<select data-size="sm" aria-label="Combine filter conditions" value={root.mode} onchange={e => publish({ ...root, mode: e.currentTarget.value })}><option value="all">Match all</option><option value="any">Match any</option></select>{/if}
   {#each root.children as item (item.id)}
     <span class="filter-condition-chip query-rule-label" data-query-tone={queryTone(item.field)} title={queryLabel(item)}><button type="button" aria-label={`Edit ${queryLabel(item)}`} onclick={() => openEditor(item)}><span class="query-committed-value">{compactQueryLabel(item)}</span></button><button type="button" aria-label={`Remove ${queryLabel(item)}`} onclick={() => { publish(removeNode(root, item.id)); focusInput(); }}><svg class="ico" aria-hidden="true"><use href="#i-close" /></svg></button></span>
   {/each}
 </span>
 {#if shown && !editing}
-  <div id="query-suggestions" class="query-popup" role="listbox" aria-label="Search suggestions" style={popupStyle}>
+  <div id="query-suggestions" class="query-popup" role="listbox" aria-label="Search suggestions" {@attach placePopup}>
     {#each choices as choice, index (`${choice.action}:${choice.field}:${choice.value}:${index}`)}
       <div id={`query-choice-${index}`} role="option" aria-selected={active === index} aria-label={choice.label} tabindex="-1" onpointerdown={e => { e.preventDefault(); choose(choice); }} onkeydown={e => { if (e.key === 'Enter') choose(choice); }}><span class="query-proposal">{#if previews(choice).length}{#each previews(choice) as proposal, at (at)}<QueryRuleLabel node={proposal} highlight={highlightTerm} suggestion />{/each}{:else}{choice.label}{/if}</span>{#if choice.count != null}<span class="muted">{choice.count.toLocaleString()}</span>{/if}</div>
     {/each}
   </div>
 {/if}
 {#if editing}
-  <div id="query-editor" class="query-popup" role="dialog" aria-label="Edit filter" tabindex="-1" style={popupStyle}>
+  <div id="query-editor" class="query-popup" role="dialog" aria-label="Edit filter" tabindex="-1" {@attach placePopup}>
     {#key editing.id}<QueryEditor node={editing} oncancel={() => { editing = null; focusInput(); }} onsave={next => { if(!publish(editingId ? replaceNode(root, editingId, next) : { ...root, children: [...root.children, next] }))return;editing=null;if(consumeDraft&&input){input.value='';input.dispatchEvent(new Event('input',{bubbles:true}));}focusInput(); }} />{/key}
   </div>
 {/if}
