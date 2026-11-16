@@ -1,6 +1,9 @@
 use super::*;
 use tagrex_commands::{ActionGroupDto, ImportSelectionDto, TagEditDto, TransformRuleDto};
 
+#[cfg(windows)]
+mod windows_identity;
+
 /// Native progress counts preflight/write/transfer steps. The service exposes
 /// completed media files instead, and keeps UI notifications bounded independently
 /// of cancellation/authorization checks and the current operation counter.
@@ -102,10 +105,15 @@ struct Identity {
     device: u64,
     #[cfg(unix)]
     inode: u64,
+    #[cfg(windows)]
+    file_id: windows_identity::WindowsIdentity,
 }
 impl Identity {
     fn read(path: &Path) -> ServiceResult<Self> {
         let canonical = fs::canonicalize(path)?;
+        #[cfg(windows)]
+        let (metadata, file_id) = windows_identity::read(&canonical)?;
+        #[cfg(not(windows))]
         let metadata = fs::metadata(path)?;
         Ok(Self {
             canonical,
@@ -125,6 +133,8 @@ impl Identity {
                 use std::os::unix::fs::MetadataExt;
                 metadata.ino()
             },
+            #[cfg(windows)]
+            file_id,
         })
     }
 }

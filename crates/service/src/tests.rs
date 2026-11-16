@@ -518,10 +518,10 @@ fn pending_receipt_survives_restart_as_unknown_outcome_without_replay() {
     };
     write_json(&f.root.join("service/operations.json"), &vec![record]).unwrap();
     let other = f.root.join("recovery-service");
-    fs::create_dir_all(&other).unwrap();
-    fs::copy(
-        f.root.join("service/operations.json"),
-        other.join("operations.json"),
+    private_storage::ensure_private_dir(&other).unwrap();
+    private_storage::write_atomic(
+        &other.join("operations.json"),
+        &fs::read(f.root.join("service/operations.json")).unwrap(),
     )
     .unwrap();
     let reopened = Service::new(f.service.0.app.clone(), other).unwrap();
