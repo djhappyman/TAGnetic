@@ -8,6 +8,18 @@
 // variables on <body>.
 import { DEFAULT_ACCENT, PALETTE_DEFAULT, normalizePalette, paletteAccent } from "./palettes.js";
 
+let viewNotificationQueued = false;
+function notifyViewPreferences() {
+  if (typeof document === 'undefined' || typeof document.dispatchEvent !== 'function' || typeof CustomEvent !== 'function') return;
+  if (viewNotificationQueued) return;
+  const target = document;
+  viewNotificationQueued = true;
+  queueMicrotask(() => {
+    viewNotificationQueued = false;
+    if (typeof document !== 'undefined' && document === target) target.dispatchEvent(new CustomEvent('tagrex:view-preferences-changed'));
+  });
+}
+
 // Data-font preference: file names, tags and tracklists use the selected face.
 // Literal pattern/regex syntax keeps its immutable Mono role. The saved sans
 // value means "follow the interface"; old mono/condensed choices stay intact.
@@ -30,6 +42,7 @@ function valueFont() {
   return VALUE_FONT_DEFAULT;
 }
 function applyValueFont(mode) {
+  notifyViewPreferences();
   const m = VALUE_FONTS.includes(mode) ? mode : VALUE_FONT_DEFAULT;
   document.body.classList.toggle("value-font-sans", m === "sans");
   document.body.classList.toggle("value-font-condensed", m === "condensed");
@@ -88,6 +101,7 @@ function tableFontPx() {
   return TABLE_FONT_DEFAULT;
 }
 function applyTableFont(px) {
+  notifyViewPreferences();
   const v = clampTableFont(px);
   document.documentElement.style.setProperty("--table-font-size", `${v}px`);
   try {
@@ -206,6 +220,7 @@ try {
   if (presetAccent) localStorage.setItem('tagrex.themeAccent', 'preset');
 } catch { /* Still use a complete preset when storage is unavailable. */ }
 function applyThemePreset(mode) {
+  notifyViewPreferences();
   presetAccent = true;
   try { localStorage.setItem('tagrex.themeAccent', 'preset'); } catch { /* Still apply live. */ }
   applyPalette(mode);
@@ -386,6 +401,7 @@ function resolveTheme(mode) {
   return prefersDarkMq.matches ? "dark" : "light";
 }
 function applyTheme(mode) {
+  notifyViewPreferences();
   document.documentElement.dataset.theme = resolveTheme(mode);
   try {
     localStorage.setItem(THEME_STORAGE_KEY, mode);

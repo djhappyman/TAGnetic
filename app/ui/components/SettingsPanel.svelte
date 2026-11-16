@@ -1,5 +1,6 @@
 <script lang="ts">
   import NativeCheckbox from './controls/NativeCheckbox.svelte';
+  import AgentConnections from './AgentConnections.svelte';
   import NativeSlider from './controls/NativeSlider.svelte';
   import { PALETTES } from '../js/palettes.js';
   import { Button } from '$lib/components/ui/button/index.js';
@@ -302,6 +303,8 @@
               <p class="settings-hint settings-detail" data-i18n="settings.portableNamesHint">Makes new names work on Windows, USB sticks and SD cards. Replaces unsupported characters and removes trailing dots or spaces. When off, keeps characters your system allows. Windows always applies these rules.</p>
             </div>
           </div>
+
+          <AgentConnections />
 
           <div class="settings-group" data-icon="i-command">
             <h3 data-i18n="shortcuts.heading">Shortcuts</h3>

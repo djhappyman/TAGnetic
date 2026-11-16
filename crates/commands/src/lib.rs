@@ -595,6 +595,30 @@ pub struct FileChangeDto {
     pub folder_extras: Vec<String>,
 }
 
+/// Index a trusted, current working plan without cloning its artwork or values.
+fn working_changes(plan: Option<&PlanDto>) -> HashMap<&Path, &FileChangeDto> {
+    plan.into_iter()
+        .flat_map(|plan| &plan.changes)
+        .map(|change| (Path::new(&change.path), change))
+        .collect()
+}
+
+fn overlay_working_tags(tags: &mut TagMap, working: Option<&FileChangeDto>) {
+    if let Some(working) = working {
+        for change in &working.tag_changes {
+            let field = TagField::from_storage_key(&change.field);
+            match change.new.as_ref().filter(|value| !value.is_empty()) {
+                Some(value) => {
+                    tags.insert(field, value.clone());
+                }
+                None => {
+                    tags.remove(&field);
+                }
+            }
+        }
+    }
+}
+
 /// Whether the folder `target` would land in is not on disk yet (#385).
 fn creates_folder(target: &Path) -> bool {
     target.parent().is_some_and(|dir| !dir.is_dir())
@@ -1281,6 +1305,9 @@ pub struct SettingsDto {
     /// `save_settings`.
     #[serde(default)]
     pub mask_presets: Vec<MaskPresetDto>,
+    /// Native, revisioned filter/sort presets shared with paired agents.
+    #[serde(default)]
+    pub query_presets: Vec<serde_json::Value>,
     /// Whether a rename/move carries matching sidecar files along (#58).
     /// Defaults on.
     #[serde(default = "default_carry_sidecars")]
@@ -1395,6 +1422,7 @@ impl Default for SettingsDto {
             import_vinyl_position: false,
             action_groups: Vec::new(),
             mask_presets: Vec::new(),
+            query_presets: Vec::new(),
             carry_sidecars: default_carry_sidecars(),
             sidecar_extensions: default_sidecar_extensions(),
             carry_folder_extras: default_carry_folder_extras(),
@@ -1459,6 +1487,15 @@ pub struct BatchDto {
     #[serde(default)]
     pub notes: Vec<MessageDto>,
     pub applied_at: i64,
+}
+
+/// Metadata-only proof for trusted interrupted-operation recovery.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryBatchDto {
+    pub id: i64,
+    pub description: String,
+    pub interrupted: bool,
+    pub paths: Vec<PathBuf>,
 }
 
 /// What to search a provider for.
@@ -1834,6 +1871,11 @@ fn common_ancestor(paths: &[PathBuf]) -> Option<PathBuf> {
         }
     }
     Some(prefix.iter().map(|c| c.as_os_str()).collect())
+}
+
+fn next_redo_session_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The network side of the app: which proxy provider requests go through, how
@@ -2353,6 +2395,7 @@ pub struct App {
     /// Where a damaged journal was set aside when this session opened it, until
     /// the interface has said so ([`App::take_journal_notice`]).
     journal_set_aside: RefCell<Option<PathBuf>>,
+    journal_was_recovered: bool,
     /// Max cover dimension before embedding, 0 = off (#41), from settings.
     cover_max_px: Cell<u32>,
     /// JPEG quality for a resized cover (#41), from settings.
@@ -2401,9 +2444,28 @@ pub struct App {
     /// lasts. Undo of an older batch does not need this list, because the batch
     /// records the roots it was applied under.
     extra_roots: RefCell<Vec<PathBuf>>,
+    /// Temporary adapter policy, restored after a scoped executor call.
+    write_scope: std::sync::Arc<std::sync::Mutex<Option<Vec<PathBuf>>>>,
     /// Session-only plans of fully undone batches, newest undone last.
     /// A new write or an incomplete Undo clears this stack.
-    redo_plans: Vec<ChangePlan>,
+    redo_plans: Vec<(u64, ChangePlan)>,
+    redo_revision: u64,
+    redo_session_id: u64,
+}
+
+/// Restores a temporary executor policy on success, error and unwinding. It
+/// owns a cloned cell, so no borrow of App is held while the operation runs.
+struct WriteScopeRestore {
+    cell: std::sync::Arc<std::sync::Mutex<Option<Vec<PathBuf>>>>,
+    previous: Option<Vec<PathBuf>>,
+}
+impl Drop for WriteScopeRestore {
+    fn drop(&mut self) {
+        *self
+            .cell
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.previous.take();
+    }
 }
 
 impl Drop for App {
@@ -2439,6 +2501,7 @@ impl App {
             library_root,
             file_filter: None,
             journal,
+            journal_was_recovered: journal_set_aside.is_some(),
             journal_set_aside: RefCell::new(journal_set_aside),
             cover_max_px: Cell::new(0),
             cover_quality: Cell::new(85),
@@ -2453,7 +2516,10 @@ impl App {
             portable_names: Cell::new(default_portable_names()),
             locked_fields: RefCell::new(HashSet::new()),
             extra_roots: RefCell::new(Vec::new()),
+            write_scope: std::sync::Arc::new(std::sync::Mutex::new(None)),
             redo_plans: Vec::new(),
+            redo_revision: 0,
+            redo_session_id: next_redo_session_id(),
         })
     }
 
@@ -2897,6 +2963,11 @@ impl App {
             .clone()
     }
 
+    /// Root of the authoritative session; this accessor does not grant access.
+    pub fn library_root(&self) -> &Path {
+        &self.library_root
+    }
+
     /// Current query generation, without constructing a snapshot or reading files.
     pub fn query_snapshot_id(&self) -> Option<u64> {
         self.query_index.borrow().as_ref().map(|index| index.id)
@@ -3251,8 +3322,12 @@ impl App {
         mask: &Mask,
         path: &Path,
         root: &Path,
+        working: Option<&FileChangeDto>,
     ) -> Result<PathBuf, Option<String>> {
-        let track = self.read_cached(path).map_err(|_| None)?;
+        let mut track = self.read_cached(path).map_err(|_| None)?;
+        // `read_cached` returns an owned view: desired values never leak into
+        // the saved snapshot, file context, executor baseline or disk.
+        overlay_working_tags(&mut track.tags, working);
         let rendered = mask
             .render_with(&track.tags, &self.file_context(mask, &track))
             .map_err(|err| match err {
@@ -3308,8 +3383,29 @@ impl App {
         mask_pattern: &str,
         paths: &[PathBuf],
     ) -> Result<PlanDto, AppError> {
+        self.preview_rename_with_working(mask_pattern, paths, None)
+    }
+
+    /// Render rename masks from a server-owned working plan's desired tags.
+    /// Only rename intent is returned; saved values remain the write baseline.
+    pub fn preview_rename_over_plan(
+        &self,
+        mask_pattern: &str,
+        paths: &[PathBuf],
+        working: &PlanDto,
+    ) -> Result<PlanDto, AppError> {
+        self.preview_rename_with_working(mask_pattern, paths, Some(working))
+    }
+
+    fn preview_rename_with_working(
+        &self,
+        mask_pattern: &str,
+        paths: &[PathBuf],
+        working: Option<&PlanDto>,
+    ) -> Result<PlanDto, AppError> {
         let _encoding_scope = cover_encoding::Scope::new();
         let mask = Mask::parse(mask_pattern)?;
+        let working = working_changes(working);
         let mut changes = Vec::new();
         let mut unrendered = Vec::new();
         // One listing per source folder for this preview (#58); a later
@@ -3317,7 +3413,12 @@ impl App {
         let mut scan = sidecars::SidecarScan::default();
         for path in paths {
             let root = path.parent().unwrap_or(path);
-            let target = match self.render_target_under(&mask, path, root) {
+            let target = match self.render_target_under(
+                &mask,
+                path,
+                root,
+                working.get(path.as_path()).copied(),
+            ) {
                 Ok(target) => target,
                 Err(Some(field)) => {
                     tally_unrendered(&mut unrendered, field, path);
@@ -3381,7 +3482,28 @@ impl App {
         mask_pattern: &str,
         paths: &[PathBuf],
     ) -> Result<PlanDto, AppError> {
+        self.preview_tags_from_name_with_working(mask_pattern, paths, None)
+    }
+
+    /// Extract from the desired filename of a current working plan, while
+    /// reading saved tags and retaining the original path as the write baseline.
+    pub fn preview_tags_from_name_over_plan(
+        &self,
+        mask_pattern: &str,
+        paths: &[PathBuf],
+        working: &PlanDto,
+    ) -> Result<PlanDto, AppError> {
+        self.preview_tags_from_name_with_working(mask_pattern, paths, Some(working))
+    }
+
+    fn preview_tags_from_name_with_working(
+        &self,
+        mask_pattern: &str,
+        paths: &[PathBuf],
+        working: Option<&PlanDto>,
+    ) -> Result<PlanDto, AppError> {
         let _encoding_scope = cover_encoding::Scope::new();
+        let working = working_changes(working);
         // The mask engine sees one separator; the user may type either (#71).
         let normalized = mask_pattern.replace('\\', "/");
         let mask = Mask::parse(&normalized)?;
@@ -3392,7 +3514,12 @@ impl App {
             let Ok(track) = self.read_cached(path) else {
                 continue;
             };
-            let Some(subject) = name_subject(path, depth) else {
+            let subject_path = working
+                .get(path.as_path())
+                .and_then(|change| change.rename_to.as_deref())
+                .map(Path::new)
+                .unwrap_or(path);
+            let Some(subject) = name_subject(subject_path, depth) else {
                 continue; // shallower than the pattern asks for
             };
             let extracted = match mask.extract(&subject) {
@@ -4219,8 +4346,49 @@ impl App {
         copy: bool,
         prune_empty_dirs: bool,
     ) -> Result<PlanDto, AppError> {
+        self.preview_move_with_working(
+            mask_pattern,
+            paths,
+            destination,
+            copy,
+            prune_empty_dirs,
+            None,
+        )
+    }
+
+    /// Render move/copy masks from desired tags while retaining the native
+    /// destination authorization, sidecars and executor's original paths.
+    pub fn preview_move_over_plan(
+        &self,
+        mask_pattern: &str,
+        paths: &[PathBuf],
+        destination: Option<&Path>,
+        copy: bool,
+        prune_empty_dirs: bool,
+        working: &PlanDto,
+    ) -> Result<PlanDto, AppError> {
+        self.preview_move_with_working(
+            mask_pattern,
+            paths,
+            destination,
+            copy,
+            prune_empty_dirs,
+            Some(working),
+        )
+    }
+
+    fn preview_move_with_working(
+        &self,
+        mask_pattern: &str,
+        paths: &[PathBuf],
+        destination: Option<&Path>,
+        copy: bool,
+        prune_empty_dirs: bool,
+        working: Option<&PlanDto>,
+    ) -> Result<PlanDto, AppError> {
         let _encoding_scope = cover_encoding::Scope::new();
         let mask = Mask::parse(mask_pattern)?;
+        let working = working_changes(working);
         let root = match destination {
             Some(destination) => {
                 let destination = destination.to_path_buf();
@@ -4239,7 +4407,12 @@ impl App {
         // One listing per source folder for this preview (#58).
         let mut scan = sidecars::SidecarScan::default();
         for path in paths {
-            let target = match self.render_target_under(&mask, path, &root) {
+            let target = match self.render_target_under(
+                &mask,
+                path,
+                &root,
+                working.get(path.as_path()).copied(),
+            ) {
                 Ok(target) => target,
                 Err(Some(field)) => {
                     tally_unrendered(&mut unrendered, field, path);
@@ -5849,9 +6022,58 @@ impl App {
         }
     }
 
-    /// Everywhere this session is allowed to write: the open library, plus any
-    /// destination the user picked for a reorganize (#153).
+    /// Execute through the ordinary journal engine with a narrower root policy.
+    /// A trusted adapter holds the session mutex throughout this call. The
+    /// policy is intersected with, and never broadens, the desktop's roots.
+    pub fn with_write_scope<T>(
+        &mut self,
+        granted_roots: &[PathBuf],
+        operation: impl FnOnce(&mut Self) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        let existing = self.allowed_roots();
+        let mut intersection = Vec::new();
+        for granted in granted_roots {
+            let granted = std::fs::canonicalize(granted)?;
+            for own in &existing {
+                let own = std::fs::canonicalize(own)?;
+                if granted.starts_with(&own) {
+                    intersection.push(granted.clone());
+                } else if own.starts_with(&granted) {
+                    intersection.push(own);
+                }
+            }
+        }
+        intersection.sort();
+        intersection.dedup();
+        if intersection.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Agent write scope does not overlap the current session",
+            )
+            .into());
+        }
+        let previous = self
+            .write_scope
+            .lock()
+            .map_err(|_| std::io::Error::other("Write policy lock is poisoned"))?
+            .replace(intersection);
+        let _restore = WriteScopeRestore {
+            cell: self.write_scope.clone(),
+            previous,
+        };
+        operation(self)
+    }
+
+    /// The session's roots, optionally narrowed for one trusted adapter call.
     fn allowed_roots(&self) -> Vec<PathBuf> {
+        match self.write_scope.lock() {
+            Ok(scope) => {
+                if let Some(roots) = scope.as_ref() {
+                    return roots.clone();
+                }
+            }
+            Err(_) => return Vec::new(),
+        }
         let mut roots = vec![self.library_root.clone()];
         roots.extend(self.extra_roots.borrow().iter().cloned());
         roots
@@ -5915,6 +6137,7 @@ impl App {
         let change_plan = plan.to_change_plan();
         let roots = self.allowed_roots();
         self.redo_plans.clear();
+        self.redo_revision = self.redo_revision.wrapping_add(1);
         let batch = Executor::apply(&change_plan, &mut self.journal, &roots)?;
         Ok(BatchDto::from(&batch))
     }
@@ -5928,6 +6151,48 @@ impl App {
         staged: Option<&PlanDto>,
     ) -> Result<QuickWriteDto, AppError> {
         self.quick_write_with(plan, staged, &mut |_| {}, &AtomicBool::new(false))
+    }
+
+    /// Refresh only undo baselines of an existing staged proposal after a
+    /// path-stable write. Desired values, mapping and untouched rows survive.
+    /// This is read-only: no apply, journal mutation or replay takes place.
+    pub fn rebase_staged_plan(
+        &self,
+        plan: &PlanDto,
+        paths: &[PathBuf],
+    ) -> Result<PlanDto, AppError> {
+        plan.validate_cover_assets()?;
+        self.validate_track_paths(paths)?;
+        let mut staged = plan.clone();
+        // One membership index for the request: the rebase used a linear
+        // scan of every written path for every staged change.
+        let written: HashSet<&Path> = paths.iter().map(PathBuf::as_path).collect();
+        for change in &mut staged.changes {
+            let path = Path::new(&change.path);
+            if !written.contains(path) {
+                continue;
+            }
+            let track = self.read_cached(path)?;
+            for field in &mut change.tag_changes {
+                field.old = track
+                    .tags
+                    .get(&TagField::from_storage_key(&field.field))
+                    .cloned();
+            }
+            if let Some(cover) = &mut change.cover_change {
+                cover.old = cover_arts_to_dto(&TagEngine::read_covers(path)?);
+            }
+            for block in &mut change.block_changes {
+                let kind = TagBlockKind::from_storage_key(&block.kind)
+                    .ok_or_else(|| AppError::UnknownTagBlock(block.kind.clone()))?;
+                block.old = TagEngine::read_block(path, kind)?
+                    .as_ref()
+                    .map(block_content_to_dto);
+                block.old_revision = id3v2_revision_key(path, kind)?;
+                block.old_bytes_base64 = block_bytes_base64(path, kind)?;
+            }
+        }
+        Ok(staged)
     }
 
     /// Immediate writes use the same confirmed per-file progress and cancellable
@@ -5963,37 +6228,9 @@ impl App {
         self.validate_track_paths(&paths)?;
         let batch = self.apply_with(plan, progress, cancel)?;
         let refreshed = (|| -> Result<_, AppError> {
-            let mut staged = staged.cloned();
-            if let Some(staged) = staged.as_mut() {
-                // One membership index for the request: the rebase used a linear
-                // scan of every written path for every staged change.
-                let written: HashSet<&Path> = paths.iter().map(PathBuf::as_path).collect();
-                for change in &mut staged.changes {
-                    let path = Path::new(&change.path);
-                    if !written.contains(path) {
-                        continue;
-                    }
-                    let track = self.read_cached(path)?;
-                    for field in &mut change.tag_changes {
-                        field.old = track
-                            .tags
-                            .get(&TagField::from_storage_key(&field.field))
-                            .cloned();
-                    }
-                    if let Some(cover) = &mut change.cover_change {
-                        cover.old = cover_arts_to_dto(&TagEngine::read_covers(path)?);
-                    }
-                    for block in &mut change.block_changes {
-                        let kind = TagBlockKind::from_storage_key(&block.kind)
-                            .ok_or_else(|| AppError::UnknownTagBlock(block.kind.clone()))?;
-                        block.old = TagEngine::read_block(path, kind)?
-                            .as_ref()
-                            .map(block_content_to_dto);
-                        block.old_revision = id3v2_revision_key(path, kind)?;
-                        block.old_bytes_base64 = block_bytes_base64(path, kind)?;
-                    }
-                }
-            }
+            let staged = staged
+                .map(|plan| self.rebase_staged_plan(plan, &paths))
+                .transpose()?;
             Ok((staged, self.read_track_rows(&paths)?))
         })();
         match refreshed {
@@ -6009,6 +6246,7 @@ impl App {
                     return Err(std::io::Error::other(format!("Quick Write readback failed: {error}; rollback of batch {} failed: {rollback}", batch.id)).into());
                 }
                 self.redo_plans.clear();
+                self.redo_revision = self.redo_revision.wrapping_add(1);
                 Err(error)
             }
         }
@@ -6029,6 +6267,7 @@ impl App {
         let change_plan = plan.to_change_plan();
         let roots = self.allowed_roots();
         self.redo_plans.clear();
+        self.redo_revision = self.redo_revision.wrapping_add(1);
         let batch =
             Executor::apply_with(&change_plan, &mut self.journal, &roots, progress, cancel)?;
         Ok(BatchDto::from(&batch))
@@ -6082,16 +6321,50 @@ impl App {
             Err(error) => {
                 // A failed rollback may have confirmed only part of a batch.
                 self.redo_plans.clear();
+                self.redo_revision = self.redo_revision.wrapping_add(1);
                 return Err(error.into());
             }
         };
         match batch {
             Some(batch) if report.kept.is_empty() && !batch.interrupted => {
-                self.redo_plans.push(batch.plan);
+                self.redo_revision = self.redo_revision.wrapping_add(1);
+                self.redo_plans.push((self.redo_revision, batch.plan));
             }
-            _ => self.redo_plans.clear(),
+            _ => {
+                self.redo_plans.clear();
+                self.redo_revision = self.redo_revision.wrapping_add(1);
+            }
         }
         Ok(UndoReportDto::from(&report))
+    }
+
+    /// Stable identity of the top Redo entry, independent of other entries'
+    /// pushes/pops. Pair it with the stack revision for guarded automation.
+    pub fn redo_token(&self) -> Option<String> {
+        self.redo_plans
+            .last()
+            .map(|(entry, _)| format!("{}:{entry}", self.redo_session_id))
+    }
+    pub fn redo_revision(&self) -> u64 {
+        self.redo_revision
+    }
+    /// Native paths touched by the current top entry, for adapter grant checks.
+    pub fn redo_scope(&self) -> Vec<PathBuf> {
+        let Some((_, plan)) = self.redo_plans.last() else {
+            return Vec::new();
+        };
+        let mut paths = Vec::new();
+        for change in &plan.changes {
+            paths.push(change.path.clone());
+            if let Some(target) = &change.rename_to {
+                paths.push(target.clone());
+            }
+            for (from, to) in &change.sidecar_renames {
+                paths.push(from.clone());
+                paths.push(to.clone());
+            }
+        }
+        paths
     }
 
     /// Number of fully undone batches available in this session.
@@ -6107,7 +6380,7 @@ impl App {
         &mut self,
         progress: &mut dyn FnMut(&ApplyProgress),
     ) -> Result<Option<BatchDto>, AppError> {
-        let Some(plan) = self.redo_plans.last() else {
+        let Some((_, plan)) = self.redo_plans.last() else {
             return Ok(None);
         };
         self.invalidate_query();
@@ -6121,6 +6394,7 @@ impl App {
             &AtomicBool::new(false),
         )?;
         self.redo_plans.pop();
+        self.redo_revision = self.redo_revision.wrapping_add(1);
         Ok(Some(BatchDto::from(&batch)))
     }
 
@@ -6147,6 +6421,29 @@ impl App {
             .iter()
             .map(BatchDto::from)
             .collect())
+    }
+
+    /// Exact server-issued draft marker lookup in native journal metadata.
+    /// No tag/artwork snapshots are hydrated and no missing row is proof of
+    /// restoration. A replaced damaged journal is reported even after notice.
+    pub fn recovery_batches(
+        &self,
+        draft_id: &str,
+    ) -> Result<(bool, Vec<RecoveryBatchDto>), AppError> {
+        let marker = format!(" · MCP draft {draft_id}");
+        let batches = self
+            .journal
+            .headers(&self.allowed_roots())?
+            .into_iter()
+            .filter(|batch| batch.description.ends_with(&marker))
+            .map(|batch| RecoveryBatchDto {
+                id: batch.id.0,
+                description: batch.description,
+                interrupted: batch.interrupted,
+                paths: batch.paths,
+            })
+            .collect();
+        Ok((self.journal_was_recovered, batches))
     }
 
     /// Save a release's images to disk next to the selected tracks (#102).
@@ -6407,13 +6704,35 @@ impl App {
     /// yields an empty string for that row rather than failing the batch — a
     /// half-typed pattern is a normal state while someone is typing one.
     pub fn render_column(&self, pattern: &str, paths: &[PathBuf]) -> Result<Vec<String>, AppError> {
+        self.render_column_with_working(pattern, paths, None)
+    }
+
+    /// Render desired staged tags with the same lenient column grammar, order
+    /// and real-file technical context; saved snapshots remain unchanged.
+    pub fn render_column_over_plan(
+        &self,
+        pattern: &str,
+        paths: &[PathBuf],
+        working: &PlanDto,
+    ) -> Result<Vec<String>, AppError> {
+        self.render_column_with_working(pattern, paths, Some(working))
+    }
+
+    fn render_column_with_working(
+        &self,
+        pattern: &str,
+        paths: &[PathBuf],
+        working: Option<&PlanDto>,
+    ) -> Result<Vec<String>, AppError> {
         let mask = Mask::parse(pattern)?;
+        let working = working_changes(working);
         Ok(paths
             .iter()
             .map(|path| {
-                let Ok(track) = self.read_cached(path) else {
+                let Ok(mut track) = self.read_cached(path) else {
                     return String::new();
                 };
+                overlay_working_tags(&mut track.tags, working.get(path.as_path()).copied());
                 let file = self.file_context(&mask, &track);
                 mask.render_with(&export::lenient_tags(&track.tags), &file)
                     .unwrap_or_default()
@@ -7071,6 +7390,15 @@ fn read_cover_image_art(path: &Path) -> Result<CoverArt, AppError> {
         kind: CoverKind::Front,
         description: String::new(),
     })
+}
+
+/// Publish already-authorized outputs using the core confined native writer.
+pub fn publish_confined_outputs(
+    root: &Path,
+    outputs: &[(PathBuf, Vec<u8>)],
+    overwrite: bool,
+) -> std::io::Result<()> {
+    output::write_batch(root, outputs, overwrite)
 }
 
 /// Read an image file into a [`CoverArtDto`] (#133), ready to feed
@@ -11053,6 +11381,7 @@ mod tests {
             import_vinyl_position: true,
             action_groups: Vec::new(),
             mask_presets: Vec::new(),
+            query_presets: Vec::new(),
             carry_sidecars: true,
             sidecar_extensions: Vec::new(),
             carry_folder_extras: true,
@@ -11721,6 +12050,246 @@ mod tests {
             assert_eq!(row.duration_secs, Some(0), "{api}");
             assert_eq!(std::fs::read(&path).unwrap(), MINIMAL_FLAC);
         }
+    }
+
+    #[test]
+    fn working_plan_rename_uses_desired_tags_without_mutating_saved_views() {
+        let dir = TempDir::new("working-rename");
+        let path = dir.tagged_flac_at("Música/original.flac", "Björk", "Title A");
+        let other = dir.tagged_flac("other.flac", "Other", "Unchanged");
+        let sidecar = path.parent().unwrap().join("original.lrc");
+        std::fs::write(&sidecar, b"lyrics").unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let app = open_app(&dir);
+        let saved = app.read_track(&path).unwrap();
+        let working = app
+            .preview_tag_edits(&[TagEditDto {
+                path: path.to_string_lossy().into_owned(),
+                field: "title".into(),
+                value: Some("Título B".into()),
+            }])
+            .unwrap();
+        let original_working = working.clone();
+        let mask = "%foldername% - %artist% - %title% (%_codec% %_samplerate%)";
+        let paths = [path.clone(), other.clone()];
+        let normal = app.preview_rename(mask, &paths).unwrap();
+        let over = app
+            .preview_rename_over_plan(mask, &paths, &working)
+            .unwrap();
+        let expected = path.with_file_name("Música - Björk - Título B (FLAC 44100).flac");
+        assert_eq!(over.changes[0].rename_to.as_deref(), expected.to_str());
+        assert_eq!(over.changes[0].path, path.to_string_lossy());
+        assert!(over.changes[0].tag_changes.is_empty());
+        assert_eq!(
+            over.changes[0].sidecar_renames,
+            vec![(
+                sidecar.to_string_lossy().into_owned(),
+                expected
+                    .with_extension("lrc")
+                    .to_string_lossy()
+                    .into_owned()
+            )]
+        );
+        assert_eq!(
+            over.changes[1], normal.changes[1],
+            "working scope leaked to another file"
+        );
+        assert!(normal.changes[0]
+            .rename_to
+            .as_ref()
+            .unwrap()
+            .contains("Title A"));
+        assert_eq!(app.preview_rename(mask, &paths).unwrap(), normal);
+        assert_eq!(app.read_track(&path).unwrap(), saved);
+        assert_eq!(working, original_working);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(std::fs::read(sidecar).unwrap(), b"lyrics");
+        assert!(app.history().unwrap().is_empty());
+    }
+
+    #[test]
+    fn working_plan_clears_required_mask_fields_and_keeps_optional_semantics() {
+        let dir = TempDir::new("working-clear");
+        let path = dir.tagged_flac("original.flac", "Artist", "Title A");
+        let app = open_app(&dir);
+        let paths = std::slice::from_ref(&path);
+        for value in [None, Some(String::new())] {
+            let working = app
+                .preview_tag_edits(&[TagEditDto {
+                    path: path.to_string_lossy().into_owned(),
+                    field: "title".into(),
+                    value,
+                }])
+                .unwrap();
+            let rename = app
+                .preview_rename_over_plan("%title%", paths, &working)
+                .unwrap();
+            let moved = app
+                .preview_move_over_plan("%title%", paths, None, false, false, &working)
+                .unwrap();
+            for plan in [rename, moved] {
+                assert!(plan.changes.is_empty());
+                assert_eq!(plan.unrendered.len(), 1);
+                assert_eq!(plan.unrendered[0].field, "title");
+                assert_eq!(
+                    plan.unrendered[0].paths,
+                    vec![path.to_string_lossy().into_owned()]
+                );
+            }
+            let optional = app
+                .preview_rename_over_plan("%artist%[ - %title%]", paths, &working)
+                .unwrap();
+            assert_eq!(
+                optional.changes[0].rename_to.as_deref(),
+                path.with_file_name("Artist.flac").to_str()
+            );
+        }
+        assert!(app
+            .preview_rename("%title%", paths)
+            .unwrap()
+            .unrendered
+            .is_empty());
+    }
+
+    #[test]
+    fn working_plan_move_retains_destination_sidecars_copy_prune_and_sanitization() {
+        let dir = TempDir::new("working-move");
+        let library = dir.0.join("incoming");
+        let destination = dir.0.join("Library");
+        std::fs::create_dir_all(&destination).unwrap();
+        let path = dir.tagged_flac_at("incoming/original.flac", "Artist", "Title A");
+        let sidecar = path.parent().unwrap().join("original.lrc");
+        std::fs::write(&sidecar, b"lyrics").unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let app = App::open(&library, &dir.0.join("journal.sqlite")).unwrap();
+        let paths = std::slice::from_ref(&path);
+        let working = app
+            .preview_tag_edits(&[TagEditDto {
+                path: path.to_string_lossy().into_owned(),
+                field: "title".into(),
+                value: Some("Título/B\\C".into()),
+            }])
+            .unwrap();
+        assert!(!app.allowed_roots().iter().any(|root| root == &destination));
+        for (copy, prune) in [(false, true), (true, true)] {
+            let over = app
+                .preview_move_over_plan(
+                    "%artist%\\%title%",
+                    paths,
+                    Some(&destination),
+                    copy,
+                    prune,
+                    &working,
+                )
+                .unwrap();
+            let expected = destination.join("Artist").join("Título_B_C.flac");
+            assert_eq!(over.changes[0].rename_to.as_deref(), expected.to_str());
+            assert_eq!(over.changes[0].rename_root.as_deref(), destination.to_str());
+            assert_eq!(over.changes[0].copy, copy);
+            assert_eq!(over.prune_empty_dirs, !copy);
+            assert!(over.changes[0].creates_folder);
+            assert_eq!(
+                over.changes[0].sidecar_renames,
+                vec![(
+                    sidecar.to_string_lossy().into_owned(),
+                    expected
+                        .with_extension("lrc")
+                        .to_string_lossy()
+                        .into_owned()
+                )]
+            );
+        }
+        assert!(app.allowed_roots().iter().any(|root| root == &destination));
+        assert!(matches!(
+            app.preview_move_over_plan(
+                "%title%",
+                paths,
+                Some(&dir.0.join("missing")),
+                false,
+                false,
+                &working
+            ),
+            Err(AppError::MissingDestination(_))
+        ));
+        assert!(app
+            .preview_move_over_plan("../%title%", paths, None, false, false, &working)
+            .unwrap()
+            .changes
+            .is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(app.read_track(&path).unwrap().tags["title"], "Title A");
+        assert!(app.history().unwrap().is_empty());
+    }
+
+    #[test]
+    fn working_plan_rename_collision_is_refused_without_modifying_saved_files() {
+        let dir = TempDir::new("working-collision");
+        let path = dir.tagged_flac("original.flac", "Artist", "Title A");
+        let occupied = dir.tagged_flac("Title B.flac", "Other", "Other");
+        let before = std::fs::read(&path).unwrap();
+        let occupied_before = std::fs::read(&occupied).unwrap();
+        let mut app = open_app(&dir);
+        let working = app
+            .preview_tag_edits(&[TagEditDto {
+                path: path.to_string_lossy().into_owned(),
+                field: "title".into(),
+                value: Some("Title B".into()),
+            }])
+            .unwrap();
+        let plan = app
+            .preview_rename_over_plan("%title%", std::slice::from_ref(&path), &working)
+            .unwrap();
+        assert!(matches!(
+            app.apply(&plan),
+            Err(AppError::Plan(
+                tagrex_core::plan::PlanError::RenameCollision(_)
+            ))
+        ));
+        assert_eq!(std::fs::read(path).unwrap(), before);
+        assert_eq!(std::fs::read(occupied).unwrap(), occupied_before);
+        assert!(app.history().unwrap().is_empty());
+    }
+
+    #[test]
+    fn working_plan_from_name_uses_desired_name_and_original_saved_tag_baseline() {
+        let dir = TempDir::new("working-from-name");
+        let path = dir.tagged_flac(
+            "Saved Artist - Filename A.flac",
+            "Saved Artist",
+            "Saved Title",
+        );
+        let app = open_app(&dir);
+        let paths = std::slice::from_ref(&path);
+        let mut working = app
+            .preview_rename("New Artist - Filename B", paths)
+            .unwrap();
+        working.changes[0].tag_changes.push(FieldChangeDto::new(
+            "title".into(),
+            Some("Wrong baseline".into()),
+            Some("Human Title B".into()),
+        ));
+        let before = std::fs::read(&path).unwrap();
+        let plan = app
+            .preview_tags_from_name_over_plan("%artist% - %title%", paths, &working)
+            .unwrap();
+        assert_eq!(plan.changes[0].path, path.to_string_lossy());
+        let title = plan.changes[0]
+            .tag_changes
+            .iter()
+            .find(|field| field.field == "title")
+            .unwrap();
+        assert_eq!(title.old.as_deref(), Some("Saved Title"));
+        assert_eq!(title.new.as_deref(), Some("Filename B"));
+        let normal = app
+            .preview_tags_from_name("%artist% - %title%", paths)
+            .unwrap();
+        assert_eq!(
+            normal.changes[0].tag_changes[0].new.as_deref(),
+            Some("Filename A")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!Path::new(working.changes[0].rename_to.as_ref().unwrap()).exists());
+        assert!(app.history().unwrap().is_empty());
     }
 
     /// The file placeholders (#147) reach the rename path with a real file
@@ -14793,6 +15362,46 @@ mod tests {
     /// A column must show something for every row. A placeholder with nothing
     /// behind it renders empty instead of dropping the file -- otherwise the
     /// column would silently disagree with the table about how many rows exist.
+    #[test]
+    fn render_column_over_plan_reads_desired_values_and_clears_without_cache_mutation() {
+        let dir = TempDir::new("working-render-column");
+        let a = dir.tagged_flac("a.flac", "Artist", "Saved A");
+        let b = dir.tagged_flac("b.flac", "Other", "Saved B");
+        let app = open_app(&dir);
+        let paths = [b.clone(), a.clone()];
+        let before = std::fs::read(&a).unwrap();
+        let working = app
+            .preview_tag_edits(&[
+                TagEditDto {
+                    path: a.to_string_lossy().into_owned(),
+                    field: "title".into(),
+                    value: Some("Human B".into()),
+                },
+                TagEditDto {
+                    path: a.to_string_lossy().into_owned(),
+                    field: "artist".into(),
+                    value: None,
+                },
+            ])
+            .unwrap();
+        let pattern = "%artist% - %title% (%_codec% %_samplerate%)";
+        assert_eq!(
+            app.render_column_over_plan(pattern, &paths, &working)
+                .unwrap(),
+            vec!["Other - Saved B (FLAC 44100)", " - Human B (FLAC 44100)"]
+        );
+        assert_eq!(
+            app.render_column(pattern, &paths).unwrap(),
+            vec![
+                "Other - Saved B (FLAC 44100)",
+                "Artist - Saved A (FLAC 44100)"
+            ]
+        );
+        assert_eq!(app.read_track(&a).unwrap().tags["title"], "Saved A");
+        assert_eq!(std::fs::read(&a).unwrap(), before);
+        assert!(app.history().unwrap().is_empty());
+    }
+
     #[test]
     fn render_column_is_lenient_about_missing_tags() {
         let dir = TempDir::new("render-column-lenient");

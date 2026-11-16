@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.7] - 2026-11-16
+
+**Tagnetic 1.4.7**: collaborative MCP control with live shared staging.
+
+### Added
+
+- Production MCP access for local agents through the installed executable, with
+  separately paired clients, folder/action grants, revocation and Stop controls.
+- Agent tools for files, online sources, artwork, tagging, numbering, renaming,
+  moves, masks, transformations, presets, exports, analysis and history.
+- One native shared stage reflected live in Files, Staged and the Inspector.
+  Human field edits remain current while agents continue editing other fields.
+- Scoped Apply resolves current working values and retains stable operation
+  receipts, idempotent retries and guarded recovery. Provider credentials stay
+  inside the desktop.
+
+### Fixed
+
+- Selecting tracks with staged edits retains the existing table rows instead
+  of rebuilding the entire table and flashing.
+- Automatic preview refreshes preserve the shared stage and its Inspector
+  values after an agent finishes.
+- Release imports use per-disc track totals; composed edits and artwork retain
+  explicit desired values and image roles.
+
 ## [1.4.6] - 2026-11-15
 
 **Tagnetic 1.4.6**: safer imports, native matching and ribbon Redo.

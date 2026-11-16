@@ -10,10 +10,13 @@ import { normalizeConditions, coverState } from "./js/filter-query.js";
 import { emptyRoot, normalizeRoot, legacyRoot, normalizeQuery, queryLabel, registerQueryFields, scopedText, newCondition, defaultOperator } from "./js/query-model.js";
 import { createLibraryQueryClient } from "./js/library-query-client.js";
 import { createGroupMotion } from "./js/group-motion.js";
-import { clearLiveInputs, hasLiveInputs, liveInputChanged, recordLiveField, recordLiveFields, hasInvalidLiveFields, hasInvalidPreview, removeAppliedLiveInputs, undoLiveImport, adoptLiveCoverPlan } from "./js/live-preview.js";
+import { clearLiveInputs, hasLiveInputs, liveInputs, liveInputChanged, liveInputRevision, recordLiveField, recordLiveFields, hasInvalidLiveFields, hasInvalidPreview, removeAppliedLiveInputs, undoLiveImport, adoptLiveCoverPlan } from "./js/live-preview.js";
+import { desiredPlanFingerprint, canAdoptAgentRebase } from './js/agent-write-guard.js';
+import { createSharedStageSync } from './js/shared-stage.js';
 "use strict";
 
 import { TAURI, invoke } from "./js/invoke.js";
+import { hydratePlan } from "./js/plan-codec.js";
 import { createApplyReview } from './js/apply-review.js';
 import {
   el,
@@ -101,12 +104,12 @@ import {
   stopLoading,
 } from "./js/online.js";
 import {
-  numberTracks, numberingEdits, refreshGenerator, syncTransformPlacement, adoptTagOnlyPreview, isAutomaticTransformPreview, isAutomaticTransformRefresh,
+  numberTracks, numberingEdits, refreshGenerator, syncTransformPlacement, adoptTagOnlyPreview, adoptSharedPreview, isAutomaticTransformPreview, isAutomaticTransformRefresh,
   automaticTransformScope, scheduleAutomaticTransformPreview,
   dismissAutomaticTransformPreview, pauseAutomaticTransformPreview,
   resumeAutomaticTransformPreview, invalidateAutomaticTransformPreview,
 } from "./js/generator.js";
-import { initActionGroups, initBuiltinGroups } from "./js/chain.js";
+import { initActionGroups, initBuiltinGroups, renderAllGroupsMenus } from "./js/chain.js";
 import { migrateChains } from "./js/chains.js";
 import { EXTENDED_FIELDS, KNOWN_CUSTOM_LABELS, VIRTUAL_COLUMNS, fieldLabel } from "./js/fields.js";
 import { initPlaceholderReference } from "./js/placeholders.js";
@@ -125,6 +128,7 @@ import {
   currentFieldValue,
   previewRemoveTagBlock,
   refreshFieldEditor,
+  refreshSharedStagedFields,
   refreshTagFormats,
   resetFieldEditor,
   validateFieldValue,
@@ -176,6 +180,10 @@ import { selectSettingsGroup, renderSettingsNav } from "./js/settingsui.js";
 import {
   valueFont,
   applyValueFont,
+  applyTheme,
+  applyThemePreset,
+  themeMode,
+  paletteMode,
   checkboxColEnabled,
   applyCheckboxCol,
   tableFontPx,
@@ -196,7 +204,7 @@ import {
 import {
   selectionVersion, captureSelection, isSelectionCurrent,
   tracks, setTracks, reindexTracks, invalidateTrackContent, contentRevision,
-  previewPlan, setPreviewPlan,
+  previewPlan, setPreviewPlan, resolvedPreviewPlan, setPreviewDecorator, withoutPreviewPublication, setSharedStagingEnabled,
   previewSource, setPreviewSource,
   pendingImportCover, setPendingImportCover,
   diffByPath, setDiffByPath,
@@ -216,6 +224,7 @@ import {
   activeRowPath, setActiveRowPath,
   savedSettings, setSavedSettings,
   actionGroups, setActionGroups,
+  setMaskPresets,
   builtinGroups, setBuiltinGroups,
 } from "./js/state.js";
 
@@ -549,7 +558,10 @@ function syncFilterControls() {
 const PRESETS_STORAGE_KEY = "tagrex.filterPresets";
 const legacyConditionPresetsKey = `${PRESETS_STORAGE_KEY}.conditions.v1`;
 const conditionPresetsKey = `${PRESETS_STORAGE_KEY}.conditions.v2`;
+let nativeQueryPresets = null;
+let queryPresetSave = Promise.resolve();
 function loadPresets() {
+  if (nativeQueryPresets) return nativeQueryPresets.slice();
   const byName = new Map();
   const stores=localStorage.getItem(conditionPresetsKey)!==null?[conditionPresetsKey]:[PRESETS_STORAGE_KEY,legacyConditionPresetsKey];
   for (const key of stores) {
@@ -563,11 +575,37 @@ function loadPresets() {
   return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 function savePresets(list) {
+  const before = loadPresets();
   try {
     const converted=list.map(p=>({...p,queryVersion:2,root:p.root?normalizeRoot(p.root):legacyRoot(normalizeConditions(p.conditions),p.conditionMode||'all'),conditions:[]}));
     localStorage.setItem(conditionPresetsKey,JSON.stringify(converted));
+    if (TAURI) {
+      nativeQueryPresets = converted;
+      const upsert = converted.filter(preset => JSON.stringify(preset) !== JSON.stringify(before.find(old => old.name === preset.name)));
+      const remove = before.filter(old => !converted.some(preset => preset.name === old.name)).map(preset => preset.name);
+      queryPresetSave = queryPresetSave.then(async () => {
+        const settings = await invoke('mcp_patch_query_presets', { upsert, remove });
+        acceptSharedSettings(settings);
+      }).catch(async error => {
+        toast(String(error), true);
+        try { acceptSharedSettings(await invoke('load_settings', {})); } catch { /* Keep the recoverable local copy. */ }
+      });
+    }
   } catch { /* Keep the original stores recoverable when validation/storage fails. */ }
 }
+
+function acceptSharedSettings(settings) {
+  setSavedSettings(settings);
+  setActionGroups(Array.isArray(settings.action_groups) ? settings.action_groups : []);
+  setMaskPresets(Array.isArray(settings.mask_presets) ? settings.mask_presets : []);
+  nativeQueryPresets = Array.isArray(settings.query_presets) ? settings.query_presets : [];
+  try { localStorage.setItem(conditionPresetsKey, JSON.stringify(nativeQueryPresets)); } catch { /* Optional view cache. */ }
+  renderPresetsMenu();
+  renderAllGroupsMenus();
+  document.dispatchEvent(new CustomEvent('tagrex:shared-presets-changed'));
+}
+
+document.addEventListener('tagrex:settings-saved', event => acceptSharedSettings(event.detail));
 
 // Store the current view under `name` (replacing a same-named one).
 function saveCurrentPreset(name) {
@@ -1654,10 +1692,18 @@ function showView(which) {
 // ---- duplicate finder (#40): a read-only library scan, grouped ----
 function discardPreview() {
   if (applying || undoing) return;
-  resetEdits();
-  dismissAutomaticTransformPreview();
-  exitDiffState();
-  refreshFieldEditor({force:true,resetDraft:true});
+  const discard = () => {
+    resetEdits();
+    dismissAutomaticTransformPreview();
+    exitDiffState();
+    refreshFieldEditor({force:true,resetDraft:true});
+  };
+  if (sharedStageSync) {
+    clearingSharedStage = true;
+    try { withoutPreviewPublication(discard); }
+    finally { clearingSharedStage = false; }
+    void sharedStageSync.clear();
+  } else discard();
 }
 
 // Path -> track lookup, so the diff can show the current value of a file's
@@ -1667,7 +1713,16 @@ function discardPreview() {
 // still because every mutating mode funnels its plan here; there is no separate
 // Preview view any more — the same #tracks table shows the change in place with a
 // persistent Apply/Discard footer. An empty plan just leaves the table untouched.
-function renderPreview(plan) {
+function renderPreview(plan, { preserveView = false } = {}) {
+  const inputPlan = plan;
+  plan = resolvedPreviewPlan(plan);
+  if (sharedStageSync && inputPlan !== plan && plan?.changes.length > 2048 && isAutomaticTransformRefresh()) {
+    // Keep a library-sized stage stable while native validation patches the
+    // typed field. Its raw editor node is already current; no whole-map pass.
+    applyBtn.disabled = true;
+    el('diff-actionbar').dataset.blocked = 'true';
+    return;
+  }
   renderStaging(plan);
   // Reverting the last cell can empty the plan before the editor loses focus.
   // Keep that DOM node attached until commit/blur, then remove its pending row.
@@ -1723,7 +1778,7 @@ function renderPreview(plan) {
     exitDiffState();
     return;
   }
-  enterDiffState();
+  enterDiffState({ preserveView });
 }
 
 // Entering and leaving the diff-state is a re-render of the WINDOW (#189), not
@@ -1746,14 +1801,14 @@ function shortPlanDescription(description) {
   return [head, ...marks].join(" · ");
 }
 
-function enterDiffState() {
+function enterDiffState({ preserveView = false } = {}) {
   setDiffByPath(new Map(previewPlan.changes.map((c) => [c.path, c])));
-  if (!isAutomaticTransformPreview()) excludedApplyPaths.clear();
+  if (!isAutomaticTransformPreview() && !preserveView) excludedApplyPaths.clear();
   setApplySelection(new Set([...diffByPath.keys()].filter(path => !excludedApplyPaths.has(path))));
   document.body.classList.add("diffing");
   document.body.classList.toggle('automatic-transform-preview', isAutomaticTransformPreview());
   syncFileView();
-  showView("files"); // never diff over the dedup view
+  if (!preserveView) showView("files"); // background staging never changes the person's view
   if (isAutomaticTransformPreview() && currentMode === 'deduplicator') {
     el('duplicates-view').hidden = true;
     document.body.classList.remove('mode-deduplicator');
@@ -2422,6 +2477,7 @@ async function afterOpen(label, version = openVersion, savedView = null) {
   } else {
     toast(opened);
   }
+  void sharedStageSync?.refresh();
 }
 
 // Open a drag-and-drop of `paths` (#127). The backend resolves a lone folder to
@@ -2468,6 +2524,8 @@ async function previewEdits() {
 // True while an Apply is running (#437), or an Undo (#448).
 let applying = false;
 let undoing = false;
+let sharedStageSync = null;
+let clearingSharedStage = false;
 // This session's automatic rename batches retain the inverse path map needed
 // to keep selection/keyboard anchors on the same files after a later Undo.
 const automaticRenameBatches = new Map();
@@ -2590,7 +2648,9 @@ async function apply() {
       if (!progress.completed && progress.done < appliedPlan.changes.length) return;
       feedback.progress(progress);
     });
-    const batch = await invoke("apply_plan", { plan: appliedPlan });
+    if (sharedStageSync) await sharedStageSync.flush();
+    const batch = await invoke("apply_plan", { plan: appliedPlan, ...(sharedStageSync ? { stageRevision: sharedStageSync.revision() } : {}) });
+    sharedStageSync?.completed(appliedPlan);
     el("diff-cancel-apply").disabled = true;
     await feedback.finish();
     review.completeAll();
@@ -2630,7 +2690,8 @@ async function apply() {
     reviewAnchor = null; reviewBase.clear();
     spreadsheet?.clearRange({ refresh:false });
     activeApplyReview = null;
-    exitDiffState();
+    if (sharedStageSync) withoutPreviewPublication(exitDiffState);
+    else exitDiffState();
     refreshCustomColumnCells();
     await refreshHistory();
   } catch (e) {
@@ -2647,6 +2708,7 @@ async function apply() {
     activeApplyReview = null;
     endApplyProgress();
     applying = false;
+    void sharedStageSync?.refresh();
     updateStatus(rowSelectionSet().size);
     releaseMutationSurfaces();
     spreadsheet?.refresh();
@@ -4606,6 +4668,201 @@ syncFilterControls();
 // already drawn by then, so it is redrawn once the names are available.
 initPlaceholderReference().then(renderTableHead);
 initMaskPresets();
+// Native settings own reusable workflows shared with agents; localStorage is
+// retained as a recoverable migration source and a browser-fixture fallback.
+if (TAURI) {
+  let agentsAvailable = false;
+  const publishViewPreferences = () => !agentsAvailable ? Promise.resolve() : invoke('mcp_set_view_preferences', { preferences: {
+    theme: themeMode(), palette: paletteMode(), value_font: valueFont(), table_font_px: tableFontPx(),
+  } }).catch(error => toast(String(error), true));
+  document.addEventListener('tagrex:view-preferences-changed', publishViewPreferences);
+  const localPresets = loadPresets();
+  invoke('load_settings', {}).then(settings => {
+    const migrate = !settings.query_presets?.length && localPresets.length;
+    acceptSharedSettings(settings);
+    if (migrate) savePresets(localPresets);
+  }).catch(error => toast(String(error), true));
+  let agentsEnabled = false;
+  let manualPlanSync = Promise.resolve();
+  let manualGeneration = 0;
+  const manualPublications = new Map();
+  function mirrorManualPlan(plan) {
+    if (!agentsEnabled || sharedStageSync) return;
+    const publication = { generation: manualGeneration, inputRevision: liveInputRevision(), desired: desiredPlanFingerprint(plan) };
+    manualPlanSync = manualPlanSync.then(async () => {
+      const revision = await invoke('mcp_set_manual_plan', { plan });
+      manualPublications.set(revision, publication);
+      while (manualPublications.size > 4) manualPublications.delete(manualPublications.keys().next().value);
+    }).catch(error => toast(String(error), true));
+  }
+  const touchedFields = () => liveInputs().edits.map(({ path, field }) => ({ path, field }));
+  document.addEventListener('tagrex:manual-plan-changed', event => {
+    manualGeneration++;
+    if (clearingSharedStage) return;
+    if (sharedStageSync) {
+      sharedStageSync.touched(touchedFields());
+      void sharedStageSync.changed(event.detail, event.stageTouched || []);
+    }
+    else mirrorManualPlan(event.detail);
+  });
+  document.addEventListener('tagrex:live-input', () => {
+    if (!sharedStageSync || clearingSharedStage) return;
+    const touched = touchedFields();
+    sharedStageSync.touched(touched);
+    // Claim a directly typed field before an older native/agent response can
+    // refresh that cell. The validated automatic preview follows normally.
+    if (touched.length) void sharedStageSync.changed(sharedStageSync.humanPlan(), touched);
+  });
+  function connectSharedStage() {
+    if (sharedStageSync) return;
+    sharedStageSync = createSharedStageSync({
+      read: () => invoke('mcp_shared_stage', {}),
+      publish: (plan, expectedRevision, touched) => invoke('mcp_publish_shared_stage', { plan, expectedRevision, touched }),
+      clear: expectedRevision => invoke('mcp_clear_shared_stage', { expectedRevision }),
+      context: () => ({ inputRevision: liveInputRevision(), library: tracks, busy: applying || undoing }),
+      adopt: snapshot => {
+        if (!tracks.length) return false;
+        const automatic = isAutomaticTransformPreview() || !snapshot.human_plan
+          || snapshot.human_plan.changes.every(change => !change.rename_to && !change.block_changes?.length);
+        const plan = snapshot.plan ? hydratePlan(snapshot.plan) : null;
+        withoutPreviewPublication(() => {
+          setPreviewPlan(plan);
+          adoptSharedPreview(plan, snapshot.human_plan, automatic);
+          if (!previewSource && plan) setPreviewSource(plan.changes.some(change => change.rename_to) ? 'rename' : 'edits');
+        });
+        // Rendering can synchronously refresh automatic inputs. Those updates
+        // must still pass through the shared-stage decorator rather than
+        // replacing the canonical stage with a local null/partial preview.
+        renderPreview(plan, { preserveView: true });
+        refreshSharedStagedFields();
+        refreshCustomColumnCells(); syncSelectionUI();
+      },
+      error: failure => toast(String(failure), true),
+    });
+    setSharedStagingEnabled(true);
+    setPreviewDecorator((plan, touched) => {
+      const shared = sharedStageSync.decorate(plan, touched);
+      adoptSharedPreview(shared, plan, true);
+      return shared;
+    });
+    void sharedStageSync.start(previewPlan);
+  }
+  async function refreshCurrentManualPlan(paths) {
+    if (hasLiveInputs() || isAutomaticTransformPreview()) { liveInputChanged(); return; }
+    if (!previewPlan) { renderTracks(); return; }
+    const current = previewPlan, generation = manualGeneration, source = tracks;
+    const included = new Set(applySelection);
+    const rebased = await invoke('mcp_rebase_manual_plan', { plan: current, paths });
+    if (generation !== manualGeneration || source !== tracks || current !== previewPlan) return;
+    setPreviewPlan(rebased); renderPreview(rebased); setApplySelection(included);
+  }
+  async function refreshAgentState() {
+    const status = await invoke('mcp_status', {});
+    const wasAvailable = agentsAvailable;
+    agentsAvailable = status.available !== false;
+    if (agentsAvailable && !wasAvailable) void publishViewPreferences();
+    const wasEnabled = agentsEnabled;
+    agentsEnabled = status.listening;
+    // During source iteration the old native binary remains usable. Only a
+    // backend advertising this contract receives shared-stage commands.
+    if (agentsAvailable && status.shared_staging === true) connectSharedStage();
+    const activity = el('agent-activity');
+    activity.hidden = !agentsEnabled;
+    const active = [...(status.operations?.operations || []), ...(status.analysis?.jobs || [])].filter(operation => ['queued','running','preflight','writing','rolling_back'].includes(operation.status)).length;
+    activity.setAttribute('aria-label', active ? `External agents · ${active} active operations` : 'External agent connections and work');
+    activity.classList.toggle('has-active-work', active > 0);
+    if (agentsEnabled && !wasEnabled) mirrorManualPlan(previewPlan);
+  }
+  el('agent-activity').addEventListener('click', async () => {
+    await openSettings();
+    const groups = [...document.querySelectorAll('.settings-body .settings-group')];
+    selectSettingsGroup(groups.findIndex(group => group.classList.contains('agent-connections')));
+  });
+  document.addEventListener('tagrex:show-shared-stage', () => {
+    el('settings').hidden = true;
+    setFileView(true);
+    el('staged-tab').focus({ preventScroll: true });
+  });
+  document.addEventListener('tagrex:adopt-agent-draft', async event => {
+    if (applying || undoing || previewPlan?.changes.length || edits.size) {
+      toast('Finish or discard your current edits before adopting an agent draft.', true);
+      return;
+    }
+    try {
+      const plan = await invoke('mcp_adopt_draft', event.detail);
+      if (previewPlan?.changes.length || edits.size) throw new Error('Your edits changed while the agent draft was loading. Try again when they are complete.');
+      setPreviewSource('agent'); setPreviewPlan(plan); renderPreview(plan);
+      el('settings').hidden = true;
+    } catch (error) { toast(String(error), true); }
+  });
+  void refreshAgentState().catch(error => toast(String(error), true));
+  const events = window.__TAURI__?.event;
+  events?.listen('tagrex://agent-settings-changed', async () => {
+    try { acceptSharedSettings(await invoke('load_settings', {})); }
+    catch (error) { toast(String(error), true); }
+  });
+  events?.listen('tagrex://agent-event', async event => {
+    const { kind, data } = event.payload || {};
+    try {
+      if (kind === 'service_changed') await refreshAgentState();
+      if (kind === 'shared_stage_changed') await sharedStageSync?.refresh();
+      if (kind === 'shared_stage_refresh_failed') {
+        toast('Files were saved, but the remaining staged edits could not refresh. Review the staging area before applying again.', true);
+        await sharedStageSync?.refresh();
+      }
+      if (kind === 'write_completed') {
+        const updated = new Map((data.tracks || []).map(track => [track.path, track]));
+        const included = new Set(applySelection);
+        setTracks(tracks.map(track => updated.get(track.path) || track));
+        invalidateCustomColumns([...updated.keys()]);
+        if (sharedStageSync) {
+          if (hasLiveInputs()) liveInputChanged();
+          await sharedStageSync.refresh();
+          refreshCustomColumnCells(); refreshFieldEditor(); refreshSharedStagedFields(); syncSelectionUI();
+          await refreshHistory();
+          return;
+        }
+        // A newer local edit can precede its native preview/publication. The
+        // server revision, raw-input revision and desired values must all match
+        // before an older operation may replace the person's current plan.
+        const adopt = canAdoptAgentRebase(manualPublications.get(data.manual_revision), {
+          plan: previewPlan, generation: manualGeneration, inputRevision: liveInputRevision(), event: data,
+        });
+        manualPublications.delete(data.manual_revision);
+        if (adopt) {
+          const plan = data.plan ? hydratePlan(data.plan) : null;
+          setPreviewPlan(plan);
+          if (plan) { renderPreview(plan); setApplySelection(included); }
+          else renderTracks();
+        } else await refreshCurrentManualPlan([...updated.keys()]);
+        refreshCustomColumnCells(); refreshFieldEditor(); syncSelectionUI();
+        await refreshHistory();
+      } else if (kind === 'session_changed' && data?.root) {
+        if (!edits.size && !previewPlan) await afterOpen(data.root, ++openVersion);
+      } else if (kind === 'session_changed' && !diffByPath) {
+        const fresh = await invoke('list_tracks', {});
+        const order = handOrder();
+        setTracks(fresh); sortKeepingHandOrder(order); renderTracks();
+        refreshCustomColumnCells(); refreshFieldEditor(); syncSelectionUI(); await refreshHistory();
+      } else if (kind === 'ui_present') {
+        if (data?.module) setMode(data.module);
+        if (data?.path) hooks.revealPath(data.path);
+        if (data?.draft) {
+          await openSettings();
+          const groups = [...document.querySelectorAll('.settings-body .settings-group')];
+          selectSettingsGroup(groups.findIndex(group => group.classList.contains('agent-connections')));
+          document.dispatchEvent(new CustomEvent('tagrex:review-agent-draft', { detail: data }));
+        }
+      } else if (kind === 'ui_preferences') {
+        if (data?.theme) applyTheme(data.theme);
+        if (data?.palette) applyThemePreset(data.palette);
+        if (data?.value_font) applyValueFont(data.value_font);
+        if (data?.table_font_px) applyTableFont(data.table_font_px);
+        await publishViewPreferences();
+      }
+    } catch (error) { toast(String(error), true); }
+  });
+}
 // Put the interface into the chosen language before anything else paints (#50).
 // Early, because the panels below read their own labels back out of the DOM.
 applyStaticText();

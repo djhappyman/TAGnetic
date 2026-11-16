@@ -1,5 +1,5 @@
 // Raw pending inputs. Transformed output is never fed back into this layer.
-import { edits, tracks, trackAt, setPendingImportCover } from './state.js';
+import { edits, tracks, trackAt, setPendingImportCover, diffByPath, sharedStagingEnabled } from './state.js';
 let imported = new Map();
 let cover = null;
 let coverPaths = [];
@@ -21,7 +21,8 @@ function setLiveField(path, field, value, valid) {
   const track = trackAt(path);
   if (!track) return;
   const base = imported.get(path)?.get(field) ?? track.tags?.[field] ?? '';
-  if (value === base && valid) {
+  const staged = diffByPath?.get(path)?.tag_changes?.find(change => change.field === field);
+  if (value === base && valid && !(sharedStagingEnabled && staged)) {
     edits.get(path)?.delete(field);
     if (!edits.get(path)?.size) edits.delete(path);
   } else {

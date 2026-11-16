@@ -35,6 +35,7 @@
 | **Manage artwork** | Browse, import, rotate, embed and export cover images. |
 | **Check BPM and keys** | Detect tempo from the audio and convert between musical and Camelot key notation. |
 | **Preview and undo** | Review before-and-after values in Staged. Applied batches stay available for Undo, even after restarting the app. |
+| **Work with an agent** | Connect Codex or another [MCP client](docs/mcp/README.md). Watch edits appear in your shared stage and keep editing alongside it. |
 | **Export and listen** | Create playlists and reports, or check a track with the built-in player and waveform. |
 | **Make it yours** | Choose light or dark themes, adjust the panels, save layouts and use keyboard shortcuts. |
 

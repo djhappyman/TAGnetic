@@ -56,6 +56,7 @@
       <symbol id="i-doc" viewBox="0 0 16 16"><path d="M4 2.5h5l3 3v7.5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-9.5a1 1 0 0 1 1-1Z"/><path d="M9 2.5v3h3"/></symbol>
       <symbol id="i-sliders" viewBox="0 0 16 16"><line x1="2.5" y1="4.5" x2="13.5" y2="4.5"/><line x1="2.5" y1="8" x2="13.5" y2="8"/><line x1="2.5" y1="11.5" x2="13.5" y2="11.5"/><circle cx="6" cy="4.5" r="1.7" fill="currentColor" stroke="none"/><circle cx="10.5" cy="8" r="1.7" fill="currentColor" stroke="none"/><circle cx="5" cy="11.5" r="1.7" fill="currentColor" stroke="none"/></symbol>
       <symbol id="i-more" viewBox="0 0 16 16"><circle cx="3.4" cy="8" r="1.35" fill="currentColor" stroke="none"/><circle cx="8" cy="8" r="1.35" fill="currentColor" stroke="none"/><circle cx="12.6" cy="8" r="1.35" fill="currentColor" stroke="none"/></symbol>
+      <symbol id="i-agent" viewBox="0 0 16 16"><rect x="3" y="5" width="10" height="8" rx="2"/><path d="M8 2v3M1 8v3m14-3v3M6 9h.01M10 9h.01M6 11h4"/></symbol>
       <symbol id="i-command" viewBox="0 0 16 16"><path d="M6 6V4.3A1.7 1.7 0 1 0 4.3 6H6Zm0 0h4m-4 0v4m4-4V4.3A1.7 1.7 0 1 1 11.7 6H10Zm0 0v4m0 0h1.7a1.7 1.7 0 1 1-1.7 1.7V10Zm0 0H6m0 0v1.7A1.7 1.7 0 1 1 4.3 10H6Z"/></symbol>
       <symbol id="i-flask" viewBox="0 0 16 16"><path d="M6.5 2.5h3"/><path d="M7 2.5v4L3.7 12a1 1 0 0 0 .9 1.5h6.8a1 1 0 0 0 .9-1.5L9 6.5v-4"/><path d="M5.2 10h5.6"/></symbol>
     </svg>

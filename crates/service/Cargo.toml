@@ -1,0 +1,28 @@
+[package]
+name = "tagrex-service"
+description = "Shared, authorized application service for TAGnetic desktop and external agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+tagrex-commands = { path = "../commands" }
+tagrex-core.workspace = true
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+sha2 = "0.10.9"
+getrandom = "0.3"
+base64 = "0.23.1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+
+[dev-dependencies]
+tempfile = "3"
