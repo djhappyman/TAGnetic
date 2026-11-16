@@ -31,7 +31,12 @@ pub fn ensure_private_dir(path: &Path) -> io::Result<()> {
                 }
             }
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir_all(path)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            #[cfg(windows)]
+            windows_security::create_private_dir_all(path)?;
+            #[cfg(not(windows))]
+            fs::create_dir_all(path)?;
+        }
         Err(error) => return Err(error),
     }
     #[cfg(unix)]
@@ -106,13 +111,14 @@ fn verify_opened(file: &File) -> io::Result<()> {
 
 pub fn create_private_file(path: &Path) -> io::Result<File> {
     verify_private(path.parent().ok_or_else(denied)?, true)?;
+    #[cfg(windows)]
+    let file = windows_security::create_private_file(path)?;
+    #[cfg(not(windows))]
     let file = options()
         .read(true)
         .write(true)
         .create_new(true)
         .open(path)?;
-    #[cfg(windows)]
-    windows_security::set_private(path)?;
     verify_opened(&file)?;
     Ok(file)
 }
@@ -194,22 +200,27 @@ pub fn current_user_sid() -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn private_dir() -> (tempfile::TempDir, std::path::PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let private = root.path().join("private");
+        ensure_private_dir(&private).unwrap();
+        (root, private)
+    }
+
     #[test]
     fn atomic_roundtrip_replaces_only_the_destination() {
-        let dir = tempfile::tempdir().unwrap();
-        ensure_private_dir(dir.path()).unwrap();
-        let file = dir.path().join("state.json");
+        let (_root, dir) = private_dir();
+        let file = dir.join("state.json");
         write_atomic(&file, b"first").unwrap();
         write_atomic(&file, b"second").unwrap();
         assert_eq!(read_bounded(&file, 6).unwrap(), b"second");
         assert!(read_bounded(&file, 5).is_err());
-        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
     }
     #[test]
     fn stable_lock_file_is_not_truncated_on_reopen() {
-        let dir = tempfile::tempdir().unwrap();
-        ensure_private_dir(dir.path()).unwrap();
-        let path = dir.path().join("owner.lock");
+        let (_root, dir) = private_dir();
+        let path = dir.join("owner.lock");
         open_private_lock(&path)
             .unwrap()
             .write_all(b"owner")
@@ -221,14 +232,13 @@ mod tests {
     #[test]
     fn symlinks_and_broad_files_are_refused() {
         use std::os::unix::fs::{symlink, PermissionsExt};
-        let dir = tempfile::tempdir().unwrap();
-        ensure_private_dir(dir.path()).unwrap();
-        let actual = dir.path().join("actual");
+        let (_root, dir) = private_dir();
+        let actual = dir.join("actual");
         create_private_file(&actual)
             .unwrap()
             .write_all(b"untouched")
             .unwrap();
-        let link = dir.path().join("link");
+        let link = dir.join("link");
         symlink(&actual, &link).unwrap();
         assert!(open_private_read(&link).is_err());
         assert!(write_atomic(&link, b"bad").is_err());

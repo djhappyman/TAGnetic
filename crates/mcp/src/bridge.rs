@@ -456,18 +456,20 @@ mod tests {
 
     #[test]
     fn cli_accepts_paths_containing_spaces_without_shell_splitting() {
+        let profile = std::env::temp_dir().join("profile with spaces");
+        let credential = std::env::temp_dir().join("client token");
         let parsed = StdioOptions::from_args(&[
             "tagnetic".into(),
             "--mcp-stdio".into(),
             "--mcp-profile".into(),
-            "/tmp/profile with spaces".into(),
+            profile.to_string_lossy().into_owned(),
             "--mcp-credential".into(),
-            "/tmp/client token".into(),
+            credential.to_string_lossy().into_owned(),
         ])
         .unwrap()
         .unwrap();
-        assert_eq!(parsed.profile, PathBuf::from("/tmp/profile with spaces"));
-        assert_eq!(parsed.credential_file, PathBuf::from("/tmp/client token"));
+        assert_eq!(parsed.profile, profile);
+        assert_eq!(parsed.credential_file, credential);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -481,7 +483,7 @@ mod tests {
             .join("deep profile ".repeat(8))
             .join("nested profile ".repeat(8));
         #[cfg(not(unix))]
-        let profile = directory.path().to_path_buf();
+        let profile = directory.path().join("profile with spaces");
         let service = Arc::new(
             Service::new(
                 Arc::new(std::sync::Mutex::new(None)),

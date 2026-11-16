@@ -6,9 +6,16 @@ fn permission_denied() -> std::io::Error {
         "Service state must be private to the current user",
     )
 }
-use std::{ffi::c_void, os::windows::ffi::OsStrExt, path::Path, ptr};
+use std::{
+    ffi::c_void,
+    fs::{self, File},
+    io,
+    os::windows::{ffi::OsStrExt, io::FromRawHandle},
+    path::Path,
+    ptr,
+};
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, LocalFree},
+    Foundation::{CloseHandle, LocalFree, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE},
     Security::{
         Authorization::{
             ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -16,7 +23,11 @@ use windows_sys::Win32::{
         },
         GetAce, GetSecurityDescriptorDacl, GetTokenInformation, TokenUser, ACCESS_ALLOWED_ACE, ACL,
         DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-        TOKEN_QUERY, TOKEN_USER,
+        SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+    },
+    Storage::FileSystem::{
+        CreateDirectoryW, CreateFileW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     },
     System::Threading::{GetCurrentProcess, OpenProcessToken},
 };
@@ -28,6 +39,103 @@ impl Drop for LocalAllocation {
         // API documented to release with LocalFree (or a null pointer).
         unsafe { LocalFree(self.0) };
     }
+}
+
+// TokenOwner may be an administrative group even when TokenUser is a user
+// account. Specify both owner and DACL at creation instead of creating with
+// that default owner and then trying to take ownership of an existing object.
+struct PrivateSecurity {
+    _allocation: LocalAllocation,
+    attributes: SECURITY_ATTRIBUTES,
+}
+
+impl PrivateSecurity {
+    fn new() -> io::Result<Self> {
+        let current = current_sid()?;
+        let sddl: Vec<u16> = format!("O:{current}D:P(A;OICI;GA;;;{current})(A;OICI;GA;;;SY)")
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        let mut descriptor = ptr::null_mut();
+        // SAFETY: input is NUL-terminated; the returned descriptor is retained
+        // with its SECURITY_ATTRIBUTES for the complete creation call.
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                1,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            _allocation: LocalAllocation(descriptor),
+            attributes: SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: descriptor,
+                bInheritHandle: 0,
+            },
+        })
+    }
+}
+
+pub(crate) fn create_private_dir_all(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            return if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                Ok(())
+            } else {
+                Err(permission_denied())
+            };
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        create_private_dir_all(parent)?;
+    }
+    let security = PrivateSecurity::new()?;
+    let encoded = wide_path(path)?;
+    // SAFETY: path is NUL-terminated and the owned descriptor/attributes stay
+    // alive through CreateDirectoryW. No inherited/default owner is used.
+    if unsafe { CreateDirectoryW(encoded.as_ptr(), &security.attributes) } == 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::AlreadyExists {
+            return Err(error);
+        }
+        // An object that raced creation must already have the required
+        // identity/permissions; never take over a replacement's ownership.
+        return super::verify_private(path, true);
+    }
+    super::verify_private(path, true)
+}
+
+pub(crate) fn create_private_file(path: &Path) -> io::Result<File> {
+    let security = PrivateSecurity::new()?;
+    let encoded = wide_path(path)?;
+    // SAFETY: the initialized descriptor remains alive, CREATE_NEW never opens
+    // an existing object, and the returned valid handle is owned exactly once.
+    let handle = unsafe {
+        CreateFileW(
+            encoded.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            &security.attributes,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: CreateFileW transferred a valid, uniquely owned file handle.
+    Ok(unsafe { File::from_raw_handle(handle) })
 }
 
 fn wide_path(path: &Path) -> Result<Vec<u16>, std::io::Error> {
@@ -261,14 +369,49 @@ pub(crate) fn set_private(path: &Path) -> Result<(), std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
     #[test]
-    fn owner_only_acl_roundtrips_on_file_and_directory() {
+    fn explicit_owner_and_private_acl_roundtrip_on_new_nested_directory_and_file() {
+        let root = tempfile::tempdir().unwrap();
+        let private = root.path().join("private").join("nested");
+        super::super::ensure_private_dir(&private).unwrap();
+        for path in [private.parent().unwrap(), &private] {
+            let security = file_security(path).unwrap();
+            assert_eq!(
+                unsafe { sid_string(security.owner).unwrap() },
+                current_sid().unwrap()
+            );
+            verify_private(path).unwrap();
+            set_private(path).unwrap();
+        }
+        let path = private.join("credential");
+        let mut file = super::super::create_private_file(&path).unwrap();
+        // Verify the opened empty file before any credential bytes are written.
+        verify_opened(&file).unwrap();
+        assert_eq!(file.metadata().unwrap().len(), 0);
+        let security = file_security(&path).unwrap();
+        assert_eq!(
+            unsafe { sid_string(security.owner).unwrap() },
+            current_sid().unwrap()
+        );
+        file.write_all(b"disposable-test-value").unwrap();
+        verify_private(&path).unwrap();
+    }
+
+    #[test]
+    fn protecting_an_existing_directory_never_reassigns_its_owner() {
         let dir = tempfile::tempdir().unwrap();
-        set_private(dir.path()).unwrap();
-        verify_private(dir.path()).unwrap();
-        let file = dir.path().join("credential");
-        std::fs::write(&file, b"disposable-test-value").unwrap();
-        set_private(&file).unwrap();
-        verify_private(&file).unwrap();
+        let before = file_security(dir.path()).unwrap();
+        let owner = unsafe { sid_string(before.owner).unwrap() };
+        let result = set_private(dir.path());
+        if owner == current_sid().unwrap() {
+            result.unwrap();
+            verify_private(dir.path()).unwrap();
+        } else {
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        }
+        let after = file_security(dir.path()).unwrap();
+        assert_eq!(unsafe { sid_string(after.owner).unwrap() }, owner);
     }
 }
