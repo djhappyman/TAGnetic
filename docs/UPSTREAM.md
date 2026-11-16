@@ -4,6 +4,16 @@ Tagnetic builds on [tagrex/tagrex](https://github.com/tagrex/tagrex). This fork'
 
 ## Current coverage
 
+### 1.4.7 collaborative MCP
+
+The service/transport, shared working-value command helpers and scoped operation
+protections are **proposed** for upstream `main`. Shared staging, Inspector and
+consent interface behavior belongs on upstream `next`, after its interface
+foundation. The current integration depends on the fork's library-query and
+journal interfaces; curation must preserve upstream's inline artwork storage
+and waveform API. No upstream acceptance is claimed by the personal release.
+Personal versioning, application identity and release automation remain fork-only.
+
 The 1.4.4 backend audit candidates are being integrated in the personal release.
 Their upstream status remains **proposed**, with no additional upstream PR
 submitted by this release task. Preserve upstream's inline artwork journal and

@@ -19,6 +19,7 @@ import { createPresetChecklist, renderAllGroupsMenus } from "./chain.js";
 import { onPresetsChanged, openPresetEditor } from "./presets.js";
 import { currentFieldValue } from "./editor.js";
 import { groupKeyOf } from "./grouping.js";
+import { automaticStageScope } from './shared-stage.js';
 import { parseVinylPosition } from "./vinyl.js";
 import { lockedFieldKeys } from "./locks.js";
 import {
@@ -26,6 +27,8 @@ import {
   groupBy,
   edits,
   previewPlan,
+  previewInputPlan,
+  sharedStagingEnabled,
   selectedPaths,
   setPreviewPlan,
   setPreviewSource,
@@ -54,6 +57,8 @@ import {
 // never replace that newer work. Each run reads the files, not its last output,
 // so toggling a non-idempotent preset is a true A/B comparison.
 let automaticPlan = null;
+let sharedRenderedPlan = null;
+let automaticFieldScope = [];
 let automaticTimer = null;
 let automaticVersion = 0;
 let automaticPaused = false;
@@ -69,7 +74,14 @@ let automaticInFlight = false;
 let automaticQueuedRun = null;
 
 function isAutomaticTransformPreview(plan = previewPlan) {
-  return !!plan && plan === automaticPlan;
+  return !!plan && (plan === sharedRenderedPlan || (!!automaticPlan && (plan === automaticPlan || (plan === previewPlan && previewInputPlan === automaticPlan))));
+}
+
+// A native shared-stage refresh changes only the rendered plan object. Keep
+// the existing automatic human-input pipeline attached to that actual stage.
+function adoptSharedPreview(plan, humanPlan, automatic = false) {
+  sharedRenderedPlan = automatic ? plan : null;
+  if (automatic || !plan) automaticPlan = humanPlan;
 }
 
 function isAutomaticTransformRefresh() {
@@ -122,13 +134,18 @@ function cancelAutomaticRequest() {
   automaticBusy = false;
 }
 
-function clearAutomaticPlan() {
+function clearAutomaticPlan(paths = []) {
   if (!isAutomaticTransformPreview()) {
     automaticPlan = null;
     return;
   }
   automaticPlan = null;
-  setPreviewPlan(null);
+  const scope = sharedStagingEnabled ? automaticStageScope(automaticFieldScope, null, paths) : { touched: [], fields: [] };
+  automaticFieldScope = scope.fields;
+  // Selection alone cannot withdraw shared work. With no automatic fields to
+  // remove there is no preview change, publication or table paint to perform.
+  if (sharedStagingEnabled && !scope.touched.length) return;
+  setPreviewPlan(null, { touched: scope.touched });
   setPreviewSource(null);
   paintAutomaticPlan(null);
 }
@@ -151,7 +168,7 @@ function scheduleAutomaticTransformPreview({ modelChanged = false } = {}) {
   cancelAutomaticRequest();
   automaticFailed = false;
   if ((!snapshot.groups.length && !hasLiveInputs()) || !snapshot.paths.length) {
-    clearAutomaticPlan(); announceAutomaticScope(); return;
+    clearAutomaticPlan(snapshot.paths); announceAutomaticScope(); return;
   }
   if (snapshot.key === dismissedKey) { announceAutomaticScope(); return; }
   const version = automaticVersion;
@@ -173,10 +190,12 @@ function scheduleAutomaticTransformPreview({ modelChanged = false } = {}) {
       const plan = await invoke('preview_live_edits', { ...snapshot.input, paths:snapshot.paths, groups:snapshot.groups });
       if (version !== automaticVersion || automaticPaused || automaticSnapshot().key !== snapshot.key || (previewPlan && !isAutomaticTransformPreview())) return;
       automaticPlan = plan;
-      setPreviewPlan(plan); setPreviewSource(hasLiveInputs() ? 'edits' : 'transform');
+      const scope = sharedStagingEnabled ? automaticStageScope(automaticFieldScope, plan, snapshot.paths) : { touched: [], fields: [] };
+      automaticFieldScope = scope.fields;
+      setPreviewPlan(plan, { touched: scope.touched }); setPreviewSource(hasLiveInputs() ? 'edits' : 'transform');
       automaticBusy = false;
       paintAutomaticPlan(plan);
-      if (previewPlan !== plan) automaticPlan = null;
+      if (!isAutomaticTransformPreview()) automaticPlan = null;
     } catch (error) {
       if (version !== automaticVersion) return;
       automaticBusy = false;
@@ -216,7 +235,7 @@ function resumeAutomaticTransformPreview({ dismiss = false } = {}) {
   automaticPaused = false;
   automaticBlocked = true;
   if (dismiss) dismissedKey = automaticSnapshot().key;
-  if (previewPlan !== automaticPlan) automaticPlan = null;
+  if (!isAutomaticTransformPreview()) automaticPlan = null;
   scheduleAutomaticTransformPreview();
 }
 
@@ -603,6 +622,7 @@ new MutationObserver(() => scheduleAutomaticTransformPreview()).observe(el('grou
 // Transfer a tag-only staged plan before recording its next edit, so reverting
 // a cell to the disk value cannot resurrect the previous proposal.
 function adoptTagOnlyPreview() {
+  if (sharedStagingEnabled) return;
   if (!previewPlan || isAutomaticTransformPreview() || !previewPlan.changes.every(change => !change.rename_to && !change.cover_change && !change.block_changes?.length)) return;
   for (const change of previewPlan.changes) {
     if (!edits.has(change.path)) edits.set(change.path, new Map());
@@ -644,6 +664,7 @@ el("vinyl-split").addEventListener("click", splitVinylSides);
 // (grip drag), with ↑/↓ as the fallback — no container-level HTML5 DnD (#88).
 
 export {
+  adoptSharedPreview,
   adoptTagOnlyPreview,
   isAutomaticTransformPreview,
   isAutomaticTransformRefresh,

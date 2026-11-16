@@ -38,6 +38,7 @@ const chain = createRuleChain({
 let current = null;
 let draftGroups = [];
 let originalGroups = [];
+let originalSettingsRevision;
 let saving = false;
 let closing = false;
 const renamedGroups = new Map();
@@ -103,7 +104,9 @@ async function saveLibrary(closeAfter = false) {
   saving = true; refreshSaveState();
   const groups = structuredClone(draftGroups);
   try {
-    await invoke("save_settings", { settings: { ...savedSettings, action_groups: groups } });
+    const settings = { ...savedSettings, action_groups: groups, _revision: originalSettingsRevision };
+    await invoke("save_settings", { settings });
+    originalSettingsRevision = settings._revision;
     setSavedSettings({ ...savedSettings, action_groups: groups });
     setActionGroups(groups);
     const changes = originalGroups.flatMap(group => {
@@ -458,6 +461,7 @@ function editorOpen() {
 // Open the editor, on `name` when given (the preset a row was showing), else on
 // your first preset, else on the first built-in.
 function openPresetEditor(name) {
+  originalSettingsRevision = savedSettings._revision;
   if (editorOpen()) return;
   draftGroups = structuredClone(actionGroups);
   originalGroups = structuredClone(actionGroups);

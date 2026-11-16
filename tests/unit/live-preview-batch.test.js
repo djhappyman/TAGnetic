@@ -31,6 +31,7 @@ function harness(tracks, values = []) {
     applying: false, undoing: false, captureSelection: () => subject,
     current: true, isSelectionCurrent: () => c.current,
     previewPlan: null, isAutomaticTransformPreview: () => false,
+    sharedStagingEnabled: false, diffByPath: null,
     setPreviewPlan: plan => { c.previewPlan = plan; }, setPreviewSource() {},
     CustomEvent: class { constructor(type) { this.type = type; } },
     document: { dispatchEvent(event) {

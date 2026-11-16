@@ -30,6 +30,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
+/// Serializes read/check/replace transactions shared by desktop settings and
+/// external agents. Callers hold this only on blocking workers, never while
+/// waiting for an asynchronous queue or network work.
+pub(crate) static DOCUMENT_LOCK: Mutex<()> = Mutex::new(());
+
 /// Why the settings could not be read.
 #[derive(Debug)]
 pub enum ReadError {
@@ -129,10 +134,20 @@ pub fn read<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, ReadError> {
 /// Write `settings` to `path`, replacing whatever is there without ever leaving
 /// a truncated file. See the module documentation for the guarantee and the
 /// recovery copy taken from a file that does not parse.
+#[cfg(test)]
 pub fn save<T>(path: &Path, settings: &T) -> Result<(), SaveError>
 where
     T: Serialize + DeserializeOwned,
 {
+    save_with_schema::<T, T>(path, settings)
+}
+
+/// Preserve unknown document slices while validating existing bytes against
+/// the actual settings schema for corruption recovery.
+pub(crate) fn save_with_schema<T: DeserializeOwned, S: Serialize>(
+    path: &Path,
+    settings: &S,
+) -> Result<(), SaveError> {
     if let Some(detail) = unresolved_read_failure() {
         return Err(SaveError::UnresolvedRead {
             path: path.to_path_buf(),

@@ -33,15 +33,25 @@ function paintSave() {
   button.title = update ? t("preset.updateTitle", { name }) : "";
 }
 
-async function persist() {
+async function persist(next) {
   // Save the whole settings back, carrying every other slice (action groups,
   // sidecars, …) untouched — the same rewrite-the-file model the settings use.
-  setSavedSettings({ ...savedSettings, mask_presets: maskPresets });
+  const settings = { ...savedSettings, mask_presets: next };
+  await invoke("save_settings", { settings });
+  setSavedSettings(settings);
+  setMaskPresets(next);
+}
+
+async function savedFailed(error) {
+  // Preserve the typed name and pattern for retry. A concurrent agent's saved
+  // masks replace the stale pool, never the unsaved field the person is editing.
   try {
-    await invoke("save_settings", { settings: savedSettings });
-  } catch (e) {
-    toast(String(e), true);
-  }
+    const fresh = await invoke("load_settings", {});
+    setSavedSettings(fresh);
+    setMaskPresets(Array.isArray(fresh.mask_presets) ? fresh.mask_presets : []);
+  } catch { /* Keep the last confirmed pool when storage is unavailable. */ }
+  render();
+  toast(String(error), true);
 }
 
 function render() {
@@ -101,8 +111,9 @@ function openPresets(button, input) {
 // stays sorted so it reads the same wherever it opens.
 async function saveCurrent() {
   if (!target) return;
+  const input = target;
   const name = el("preset-name").value.trim();
-  const mask = target.value.trim();
+  const mask = input.value.trim();
   if (!name) {
     el("preset-name").focus();
     return;
@@ -115,12 +126,11 @@ async function saveCurrent() {
   const rest = maskPresets.filter((preset) => preset.name !== name);
   rest.push({ name, mask });
   rest.sort((a, b) => a.name.localeCompare(b.name));
-  setMaskPresets(rest);
-  await persist();
+  try { await persist(rest); }
+  catch (error) { await savedFailed(error); return; }
   // The field's mask now is that preset's (#599).
-  origin.set(target, name);
-  el("preset-name").value = "";
-  paintSave();
+  origin.set(input, name);
+  if (target === input) { el("preset-name").value = ""; paintSave(); }
   render();
   toast(t(replaced && replaced.mask !== mask ? "preset.updated" : "preset.saved", { name }));
 }
@@ -136,8 +146,8 @@ function applyPreset(mask, name) {
 }
 
 async function deletePreset(name) {
-  setMaskPresets(maskPresets.filter((preset) => preset.name !== name));
-  await persist();
+  try { await persist(maskPresets.filter((preset) => preset.name !== name)); }
+  catch (error) { await savedFailed(error); return; }
   render();
 }
 

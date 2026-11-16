@@ -16,6 +16,8 @@ import {
   captureSelection,
   isSelectionCurrent,
   previewPlan,
+  diffByPath,
+  sharedStagingEnabled,
   savedSettings,
   selectedPaths,
   setPreviewPlan,
@@ -37,6 +39,10 @@ function currentFieldValue(path, key) {
   if (pending && pending.has(key)) return pending.get(key);
   const imported = importedValue(path, key);
   if (imported !== undefined) return imported;
+  if (sharedStagingEnabled) {
+    const staged = diffByPath?.get(path)?.tag_changes?.find(change => change.field === key);
+    if (staged) return staged.new ?? '';
+  }
   const track = trackAt(path);
   return (track && track.tags[key]) || "";
 }
@@ -86,6 +92,36 @@ function refreshFieldEditor({ force = false, resetDraft = false } = {}) {
   el("fields-count").textContent = paths.length ? `· ${tn("unit.file", paths.length)}` : "";
   renderTagBlocks(paths);
   renderFieldEditor(paths);
+  hooks.refreshCoverWell();
+}
+
+// Agent staging changes desired values, not the saved-track identity. Patch
+// existing inputs so a title draft/caret survives a simultaneous album update.
+function refreshSharedStagedFields() {
+  if (!sharedStagingEnabled || el('panel-tagger').hidden || el('subtab-editor').hidden) return;
+  const paths = selectedPaths();
+  if (paths.length !== editorPaths.size || paths.some(path => !editorPaths.has(path))) { refreshFieldEditor(); return; }
+  for (const input of el('fields-body').querySelectorAll('.field-input')) {
+    const field = input.dataset.key, row = input.closest('.fe-row');
+    if (!field || !row || stagedFields.has(field)) continue;
+    const value = sharedFieldValue(paths, field);
+    const focused = document.activeElement === input;
+    const caret = focused ? [input.selectionStart, input.selectionEnd] : null;
+    if (input.value !== (value ?? '')) input.value = value ?? '';
+    input.classList.toggle('multiple', value === null);
+    input.placeholder = value === null ? (EDITOR_NUMERIC_KEYS.has(field) ? '—' : tr('editor.mixedValue')) : '';
+    if (value === null && EDITOR_NUMERIC_KEYS.has(field)) input.title = tr('editor.multipleValues');
+    else input.removeAttribute('title');
+    if (caret && caret[0] !== null) input.setSelectionRange(caret[0], caret[1]);
+    input.classList.toggle('dirty', fieldHasChanges(paths, field));
+    const valid = validateFieldValue(field, input.value, paths).ok;
+    input.classList.toggle('error', !valid);
+    if (valid) input.removeAttribute('aria-invalid'); else input.setAttribute('aria-invalid', 'true');
+    row.classList.toggle('dirty', [...row.querySelectorAll('.field-input')].some(node => node.classList.contains('dirty')));
+    row.classList.toggle('multiple', [...row.querySelectorAll('.field-input')].some(node => node.classList.contains('multiple')));
+    row.classList.toggle('error', [...row.querySelectorAll('.field-input')].some(node => node.classList.contains('error')));
+    reflectFieldClear(input);
+  }
   hooks.refreshCoverWell();
 }
 
@@ -970,6 +1006,7 @@ export {
   hasEditorDraft,
   resetFieldEditor,
   refreshFieldEditor,
+  refreshSharedStagedFields,
   refreshTagFormats,
   validateFieldValue,
   applyFieldEditor,

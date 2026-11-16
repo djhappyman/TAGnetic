@@ -31,8 +31,17 @@ class BackendError extends Error {
 
 export async function invoke(cmd, args) {
   try {
-    const request = TAURI ? plans.prepare(args) : args;
-    return plans.accept(await (TAURI ? TAURI.invoke(cmd, request) : mockInvoke(cmd, request)));
+    let request = TAURI ? plans.prepare(args) : args;
+    if (TAURI && cmd === 'save_settings' && args?.settings?._revision) {
+      const { _revision, recovery_notice, ...settings } = args.settings;
+      request = { ...request, settings, expectedRevision: _revision };
+    }
+    const result = plans.accept(await (TAURI ? TAURI.invoke(cmd, request) : mockInvoke(cmd, request)));
+    if (TAURI && cmd === 'save_settings' && typeof result === 'string') {
+      args.settings._revision = result;
+      document.dispatchEvent(new CustomEvent('tagrex:settings-saved', { detail: { ...args.settings } }));
+    }
+    return result;
   } catch (failure) {
     // The mock rejects the same shapes the backend does — including the plain
     // strings it still uses for the failures it invents itself — so the browser

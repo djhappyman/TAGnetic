@@ -12,16 +12,18 @@ use std::sync::{Arc, Mutex};
 
 mod beatport_session_control;
 mod blocking;
+mod mcp_control;
 mod media_session;
 mod navigation;
 mod operation_control;
+mod secure_provider_image;
 mod settings_store;
 mod update;
 #[cfg(target_os = "linux")]
 mod webkit_compositor;
 mod window_controls;
 
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 use tagrex_commands::{
     ActionGroupDto, AlignMatchDto, App, AppError, BatchDto, BlockTargetsDto, CandidateDto,
@@ -1537,16 +1539,35 @@ async fn apply_plan(
     state: State<'_, AppState>,
     control: State<'_, ApplyControl>,
     plan: PlanDto,
+    stage_revision: Option<u64>,
 ) -> Result<BatchDto, ErrorDto> {
     let state = state.inner().clone();
     let operation = control.0.admit("Apply")?;
     SESSION_QUEUE
         .run(move || {
-            let mut report = progress_reporter(app_handle, plan.changes.len());
-            with_app_mut(&state, |app| {
-                app.apply_with(&plan, &mut report, operation.cancelled())
-                    .map_err(ErrorDto::from)
-            })
+            let (batch, plan, admitted_revision) = with_app_mut(&state, |app| {
+                let (plan, revision) =
+                    mcp_control::resolve_desktop_apply(&app_handle, plan, stage_revision)?;
+                let mut report = progress_reporter(app_handle.clone(), plan.changes.len());
+                let batch = app
+                    .apply_with(&plan, &mut report, operation.cancelled())
+                    .map_err(ErrorDto::from)?;
+                Ok((batch, plan, revision))
+            })?;
+            if let Err(error) =
+                mcp_control::complete_desktop_apply(&app_handle, &plan, admitted_revision)
+            {
+                // The journaled write already succeeded. A staging refresh
+                // failure must never turn it into a failed/automatically
+                // retryable write in the desktop.
+                let _ = app_handle.emit(
+                    "tagrex://agent-event",
+                    serde_json::json!({
+                        "kind":"shared_stage_refresh_failed", "data":{"message":error.text},
+                    }),
+                );
+            }
+            Ok(batch)
         })
         .await
 }
@@ -2514,17 +2535,24 @@ struct LoadedSettings {
     settings: SettingsDto,
     #[serde(skip_serializing_if = "Option::is_none")]
     recovery_notice: Option<String>,
+    #[serde(rename = "_revision")]
+    revision: String,
 }
 
 #[tauri::command]
 async fn load_settings(app: tauri::AppHandle) -> Result<LoadedSettings, ErrorDto> {
     SETTINGS_QUEUE
         .run(move || {
+            let _document = settings_store::DOCUMENT_LOCK.lock().map_err(shell_error)?;
             let settings = read_settings(&app);
             let recovery_notice = SETTINGS_NOTICE.lock().map_err(shell_error)?.take();
+            let document = mcp_control::settings_document(&settings_path(&app)?)
+                .unwrap_or(serde_json::to_value(&settings).map_err(shell_error)?);
+            let revision = tagrex_service::settings_revision(&document);
             Ok(LoadedSettings {
                 settings,
                 recovery_notice,
+                revision,
             })
         })
         .await
@@ -2649,12 +2677,14 @@ async fn save_settings(
     state: State<'_, AppState>,
     providers: State<'_, ProviderState>,
     settings: SettingsDto,
-) -> Result<(), ErrorDto> {
+    expected_revision: Option<String>,
+) -> Result<String, ErrorDto> {
     save_settings_at(
         settings_path(&app)?,
         state.inner().clone(),
         providers.inner().clone(),
         settings,
+        expected_revision,
     )
     .await
 }
@@ -2664,21 +2694,42 @@ async fn save_settings_at(
     state: AppState,
     providers: ProviderState,
     settings: SettingsDto,
-) -> Result<(), ErrorDto> {
-    let (settings, revision) = SETTINGS_QUEUE
+    expected_revision: Option<String>,
+) -> Result<String, ErrorDto> {
+    let (settings, revision, document_revision) = SETTINGS_QUEUE
         .run(move || {
+            let _document = settings_store::DOCUMENT_LOCK.lock().map_err(shell_error)?;
+            if let Some(expected) = expected_revision {
+                let current = match mcp_control::settings_document(&path) {
+                    Ok(document) => document,
+                    Err(error) => match settings_store::read::<SettingsDto>(&path) {
+                        Err(settings_store::ReadError::Malformed(_)) => serde_json::to_value(SettingsDto::default()).map_err(shell_error)?,
+                        _ => return Err(error),
+                    },
+                };
+                if tagrex_service::settings_revision(&current) != expected {
+                    return Err(shell_error("Settings changed elsewhere. Reopen Settings before saving so those changes are preserved."));
+                }
+            }
             // Durable replace: a truncated or half-written settings.json would
             // lose every saved chain and preset, so the file is only ever
             // swapped in whole (see [`settings_store`]). A save is refused
             // rather than performed over a file that could not be read.
-            settings_store::save(&path, &settings)
+            let mut document = mcp_control::settings_document(&path)
+                .unwrap_or_else(|_| serde_json::json!({}));
+            let values = serde_json::to_value(&settings).map_err(shell_error)?;
+            if let (Some(document), Some(values)) = (document.as_object_mut(), values.as_object()) {
+                document.extend(values.clone());
+            }
+            settings_store::save_with_schema::<SettingsDto, _>(&path, &document)
                 .map_err(|error| ErrorDto::plain(error.to_string()))?;
             // Apply immediately: the network half always (the hub is always there), the
             // library half only when a library is open — so a change takes effect
             // without reopening either way.
             providers.apply_settings(&settings)?;
             let revision = SETTINGS_REVISION.fetch_add(1, Ordering::SeqCst) + 1;
-            Ok((settings, revision))
+            let document_revision = tagrex_service::settings_revision(&document);
+            Ok((settings, revision, document_revision))
         })
         .await?;
     // Opening a library and adopting parser/write preferences must have one
@@ -2693,10 +2744,23 @@ async fn save_settings_at(
             }
             Ok(())
         })
-        .await
+        .await?;
+    Ok(document_revision)
 }
 
 fn main() {
+    // MCP stdio is a connector to the desktop owner. It must exit before a
+    // WebView, single-instance handover or GUI logging can touch stdout.
+    let arguments: Vec<String> = std::env::args_os()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect();
+    if let Some(result) = tagrex_mcp::handle_cli(&arguments) {
+        if let Err(error) = result {
+            eprintln!("TAGnetic MCP: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let builder = tauri::Builder::default();
 
     #[cfg(all(debug_assertions, feature = "dev-mcp"))]
@@ -2762,10 +2826,30 @@ fn main() {
                 .apply_settings(&settings)
                 .map_err(|error| std::io::Error::other(error.text))?;
             media_session::install(app.handle());
+            if let Err(error) = mcp_control::install(app.handle()) {
+                eprintln!("TAGnetic MCP is unavailable: {error}");
+                app.manage(mcp_control::AgentUnavailable("Saved agent connections could not be opened safely. Agent access is disabled; your files and the rest of the app remain available.".into()));
+            }
             Ok(())
         })
         .manage(Player::new())
         .invoke_handler(tauri::generate_handler![
+            mcp_control::mcp_status,
+            mcp_control::mcp_set_enabled,
+            mcp_control::mcp_pair_client,
+            mcp_control::mcp_revoke_client,
+            mcp_control::mcp_stop_all,
+            mcp_control::mcp_review_draft,
+            mcp_control::mcp_adopt_draft,
+            mcp_control::mcp_set_manual_plan,
+            mcp_control::mcp_shared_stage,
+            mcp_control::mcp_publish_shared_stage,
+            mcp_control::mcp_clear_shared_stage,
+            mcp_control::mcp_rebase_manual_plan,
+            mcp_control::mcp_set_view_preferences,
+            mcp_control::mcp_patch_query_presets,
+            mcp_control::mcp_cancel_operation,
+            mcp_control::mcp_reconcile_operation,
             open_library,
             open_drop,
             list_tracks,
@@ -3108,6 +3192,7 @@ mod tests {
                 bpm_max_minutes: 7,
                 ..Default::default()
             },
+            None,
         ));
         let deadline = Instant::now() + Duration::from_secs(5);
         while providers.settings.lock().unwrap().bpm_max_minutes != 7 && Instant::now() < deadline {
@@ -3158,6 +3243,7 @@ mod tests {
                 bpm_max_minutes: 9,
                 ..Default::default()
             },
+            None,
         ));
         super::settings_store::note_read_success();
         let error = result.expect_err("the save went ahead after a failed read");
@@ -3173,6 +3259,106 @@ mod tests {
             untouched,
             "the refused settings were applied anyway"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_desktop_settings_do_not_overwrite_agent_presets() {
+        let _serial = super::settings_store::serialise_save_tests();
+        let root =
+            std::env::temp_dir().join(format!("tagrex-settings-agent-cas-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("settings.json");
+        let initial = super::SettingsDto::default();
+        super::settings_store::save(&path, &initial).unwrap();
+        let revision = tagrex_service::settings_revision(
+            &super::mcp_control::settings_document(&path).unwrap(),
+        );
+        let mut changed = serde_json::to_value(&initial).unwrap();
+        changed["query_presets"] = serde_json::json!([{"name":"Missing covers","queryVersion":2}]);
+        super::settings_store::save(&path, &changed).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let result = tauri::async_runtime::block_on(super::save_settings_at(
+            path.clone(),
+            super::AppState::default(),
+            super::ProviderState::default(),
+            initial,
+            Some(revision),
+        ));
+        assert!(result.unwrap_err().text.contains("changed elsewhere"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn desktop_save_preserves_unknown_settings_slices_and_returns_actual_revision() {
+        let _serial = super::settings_store::serialise_save_tests();
+        let root = std::env::temp_dir().join(format!(
+            "tagrex-settings-agent-merge-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("settings.json");
+        let mut original = serde_json::to_value(super::SettingsDto::default()).unwrap();
+        original["future_native_slice"] = serde_json::json!({"keep":"untouched"});
+        original["query_presets"] = serde_json::json!([{"name":"My filter","queryVersion":2}]);
+        super::settings_store::save(&path, &original).unwrap();
+        let revision = tagrex_service::settings_revision(
+            &super::mcp_control::settings_document(&path).unwrap(),
+        );
+        let mut edited: super::SettingsDto = serde_json::from_value(original).unwrap();
+        edited.bpm_max_minutes = 7;
+        let actual_revision = tauri::async_runtime::block_on(super::save_settings_at(
+            path.clone(),
+            super::AppState::default(),
+            super::ProviderState::default(),
+            edited,
+            Some(revision),
+        ))
+        .unwrap();
+        let after = super::mcp_control::settings_document(&path).unwrap();
+        assert_eq!(after["future_native_slice"]["keep"], "untouched");
+        assert_eq!(after["query_presets"][0]["name"], "My filter");
+        assert_eq!(after["bpm_max_minutes"], 7);
+        assert_eq!(actual_revision, tagrex_service::settings_revision(&after));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn schema_invalid_settings_keep_recovery_bytes_when_desktop_saves_defaults() {
+        let _serial = super::settings_store::serialise_save_tests();
+        let root = std::env::temp_dir().join(format!(
+            "tagrex-settings-agent-corrupt-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("settings.json");
+        let before = br#"{"bpm_max_minutes":"invalid","query_presets":[{"name":"recover me"}]}"#;
+        std::fs::write(&path, before).unwrap();
+        let defaults = super::SettingsDto::default();
+        let revision = tagrex_service::settings_revision(&serde_json::to_value(&defaults).unwrap());
+        tauri::async_runtime::block_on(super::save_settings_at(
+            path.clone(),
+            super::AppState::default(),
+            super::ProviderState::default(),
+            defaults,
+            Some(revision),
+        ))
+        .unwrap();
+        let recovered = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.json.corrupt-")
+            })
+            .unwrap();
+        assert_eq!(std::fs::read(recovered.path()).unwrap(), before);
+        assert!(super::settings_store::read::<super::SettingsDto>(&path)
+            .unwrap()
+            .is_some());
         std::fs::remove_dir_all(root).unwrap();
     }
 

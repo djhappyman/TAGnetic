@@ -42,8 +42,25 @@ export function reindexTracks() {
 // decide whether to clear pending tag edits ("edits") or remap them across a
 // rename ("rename").
 export let previewPlan = null;
-export function setPreviewPlan(value) {
-  previewPlan = value;
+export let previewInputPlan = null;
+export let sharedStagingEnabled = false;
+export function setSharedStagingEnabled(value) { sharedStagingEnabled = value; }
+let previewDecorator = null;
+let previewPublicationPaused = 0;
+export function setPreviewDecorator(decorator) { previewDecorator = decorator; }
+export function withoutPreviewPublication(work) {
+  previewPublicationPaused++;
+  try { return work(); } finally { previewPublicationPaused--; }
+}
+export function resolvedPreviewPlan(plan) { return plan === previewInputPlan ? previewPlan : plan; }
+export function setPreviewPlan(value, { touched = [] } = {}) {
+  previewInputPlan = value;
+  previewPlan = !previewPublicationPaused && previewDecorator ? previewDecorator(value, touched) : value;
+  if (!previewPublicationPaused && typeof document !== 'undefined') {
+    const event = new CustomEvent('tagrex:manual-plan-changed', { detail: value });
+    event.stageTouched = touched;
+    document.dispatchEvent(event);
+  }
 }
 // The release cover an import wants written alongside its tags (#207), waiting
 // for the staging call that turns the pending edits into a plan. One plan means

@@ -6,6 +6,6 @@ export default mergeConfig(appConfig, {
   root: '.',
   build: {
     outDir: '.test-dist',
-    rolldownOptions: { input: ['tests/ui/fixture/index.html', 'tests/ui/dock-fixture/index.html', 'app/ui/index.html'] },
+    rolldownOptions: { input: ['tests/ui/fixture/index.html', 'tests/ui/dock-fixture/index.html', 'tests/ui/mcp-native-fixture/index.html', 'app/ui/index.html'] },
   },
 });

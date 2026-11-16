@@ -19,6 +19,7 @@ function harness(overrides = {}) {
   const c = vm.createContext({
     filterPending: false, filterError: false, commandMode: 'search', stagedView: true, syncRibbonSelection: () => {}, publishDuplicateSelection: () => {},
     calls, previewPlan: { changes: [{ path: 'a', tag_changes: [] }] }, automaticPlan: null,
+    sharedRenderedPlan: null, previewInputPlan: null, sharedStageSync: null,
     automaticVersion: 0, automaticTimer: null, automaticQueuedRun: null, clearTimeout() {},
     automaticBusy: false, automaticBlocked: false, automaticFailed: false,
     automaticKey: null, dismissedKey: null, liveBusy: false, live: false,

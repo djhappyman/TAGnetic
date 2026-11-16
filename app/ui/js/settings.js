@@ -74,6 +74,9 @@ let importCoverChoice = "always";
 // How an import writes a vinyl position as the track number (#642): "number"
 // (the default, the numeric track number the standards define) | "position".
 let importTrackChoice = "number";
+// A form keeps the revision it actually displayed. Agent updates to the shared
+// cache must not make stale controls appear to have read newer values.
+let settingsFormRevision;
 
 function updateSettingsDot() {
   el("settings-open").classList.toggle("has-token", !!el("discogs-token").value.trim());
@@ -365,6 +368,7 @@ async function openSettings() {
   // Populate from saved values (the token is already in #discogs-token).
   try {
     const s = await invoke("load_settings", {});
+    settingsFormRevision = s._revision;
     if (s.recovery_notice) toast(s.recovery_notice, true);
     el("set-proxy").value = s.proxy || "";
     el("set-rate").value = s.rate_limit_per_min || 0;
@@ -415,6 +419,7 @@ async function openSettings() {
   clearSettingsSearch();
   el("settings").hidden = false;
   refreshGroupResets();
+  document.dispatchEvent(new CustomEvent('tagrex:settings-opened'));
 }
 
 // Populate (once) and select the current value of the LAB media-glyph picker.
@@ -550,6 +555,7 @@ async function saveSettings() {
     const codePageChanged = (savedSettings.legacy_code_page || "") !== el("set-code-page").value;
     const settings = {
       ...savedSettings,
+      _revision: settingsFormRevision,
       proxy: el("set-proxy").value.trim(),
       rate_limit_per_min: Math.max(0, parseInt(el("set-rate").value, 10) || 0),
       check_updates: el("set-check-updates").checked,
