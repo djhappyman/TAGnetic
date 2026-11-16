@@ -12057,7 +12057,7 @@ mod tests {
         let dir = TempDir::new("working-rename");
         let path = dir.tagged_flac_at("Música/original.flac", "Björk", "Title A");
         let other = dir.tagged_flac("other.flac", "Other", "Unchanged");
-        let sidecar = path.with_extension("lrc");
+        let sidecar = path.parent().unwrap().join("original.lrc");
         std::fs::write(&sidecar, b"lyrics").unwrap();
         let before = std::fs::read(&path).unwrap();
         let app = open_app(&dir);
@@ -12158,7 +12158,7 @@ mod tests {
         let destination = dir.0.join("Library");
         std::fs::create_dir_all(&destination).unwrap();
         let path = dir.tagged_flac_at("incoming/original.flac", "Artist", "Title A");
-        let sidecar = path.with_extension("lrc");
+        let sidecar = path.parent().unwrap().join("original.lrc");
         std::fs::write(&sidecar, b"lyrics").unwrap();
         let before = std::fs::read(&path).unwrap();
         let app = App::open(&library, &dir.0.join("journal.sqlite")).unwrap();
@@ -12182,7 +12182,7 @@ mod tests {
                     &working,
                 )
                 .unwrap();
-            let expected = destination.join("Artist/Título_B_C.flac");
+            let expected = destination.join("Artist").join("Título_B_C.flac");
             assert_eq!(over.changes[0].rename_to.as_deref(), expected.to_str());
             assert_eq!(over.changes[0].rename_root.as_deref(), destination.to_str());
             assert_eq!(over.changes[0].copy, copy);
