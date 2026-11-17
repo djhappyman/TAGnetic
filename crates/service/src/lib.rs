@@ -20,6 +20,7 @@ use tagrex_commands::{
 mod artwork_policy;
 mod catalog;
 mod domains;
+mod json_accounting;
 mod outputs;
 mod plans;
 pub mod private_storage;
@@ -113,7 +114,7 @@ impl From<tagrex_commands::AppError> for ServiceError {
 
 /// Issued only by a trusted desktop action. Empty field/provider sets mean no
 /// field/provider restriction; an empty root set never grants filesystem access.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Grant {
     pub roots: Vec<PathBuf>,
@@ -544,6 +545,14 @@ impl Service {
     }
     fn grant(&self, principal: &Principal, action: &str) -> ServiceResult<Grant> {
         let state = lock(&self.0.state)?;
+        Ok(self.grant_in_state(&state, principal, action)?.clone())
+    }
+    fn grant_in_state<'a>(
+        &self,
+        state: &'a State,
+        principal: &Principal,
+        action: &str,
+    ) -> ServiceResult<&'a Grant> {
         let client = state
             .security
             .clients
@@ -558,7 +567,7 @@ impl Service {
         if !state.security.enabled || !client.grant.actions.contains(action) {
             return Err(denied());
         }
-        Ok(client.grant.clone())
+        Ok(&client.grant)
     }
     pub fn stop_all(&self) -> ServiceResult<()> {
         self.stop_analysis()?;

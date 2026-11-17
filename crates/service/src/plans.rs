@@ -295,7 +295,7 @@ impl Service {
                 // A retry of the same direct intent is resolved before creating a
                 // new snapshot/plan (which would otherwise change its digest).
                 let key = required(args, "idempotency_key")?;
-                let intent_digest = hash(&serde_json::to_vec(&intent)?);
+                let intent_digest = super::json_accounting::digest(&intent)?;
                 if let Some(existing) = self.find_operation(principal, key, &intent_digest)? {
                     return Ok(existing);
                 }
@@ -999,16 +999,28 @@ impl Service {
             .iter()
             .map(|key| json!({"path":key.path,"field":key.field}))
             .collect::<Vec<_>>();
+        let size_bytes = super::json_accounting::size(&plan)?;
         let digest = if publish {
-            hash(&serde_json::to_vec(
+            super::json_accounting::digest(
                 &json!({"intent":"apply_current_shared_stage","scope":scope_fields,"root":library_root,"principal":principal.id,"epoch":self.0.epoch}),
-            )?)
+            )?
         } else {
-            hash(&serde_json::to_vec(
-                &json!({"plan":plan,"identities":identities,"principal":principal.id,"epoch":self.0.epoch}),
-            )?)
+            // Borrow every authorization input instead of constructing a second
+            // owned JSON tree. Digests are opaque, server-created handles.
+            #[derive(Serialize)]
+            struct DraftDigest<'a> {
+                epoch: &'a str,
+                identities: &'a BTreeMap<String, Identity>,
+                plan: &'a PlanDto,
+                principal: &'a str,
+            }
+            super::json_accounting::digest(&DraftDigest {
+                epoch: &self.0.epoch,
+                identities: &identities,
+                plan: &plan,
+                principal: &principal.id,
+            })?
         };
-        let size_bytes = serde_json::to_vec(&plan)?.len();
         let mut sealed = SealedPlan {
             owner: principal.id.clone(),
             id: id.clone(),
@@ -1025,7 +1037,7 @@ impl Service {
         quota(state.plans.len())?;
         let retained_bytes: usize = state.plans.values().map(|p| p.size_bytes).sum();
         let new_bytes = sealed.size_bytes;
-        if retained_bytes.saturating_add(new_bytes) > 128 * 1024 * 1024 {
+        if retained_bytes.saturating_add(new_bytes) > super::json_accounting::MAX_DRAFT_BYTES {
             return Err(ServiceError::new(
                 "quota",
                 "Sealed draft budget is 128 MiB; discard unused drafts",
@@ -1056,7 +1068,7 @@ impl Service {
             sealed.plan = super::staging::filtered(&sealed.plan, |_| false);
             sealed.plan.locked_skipped = locked_skipped;
             sealed.plan.unrendered = unrendered;
-            sealed.size_bytes = serde_json::to_vec(&sealed.plan)?.len();
+            sealed.size_bytes = super::json_accounting::size(&sealed.plan)?;
         }
         state.plans.insert(id, sealed);
         drop(state);
@@ -1397,15 +1409,18 @@ impl Service {
                     return Err(ServiceError::conflict("This move would orphan other pending fields on the same file; include those fields in the shared scope or apply them first"));
                 }
             }
-            let (accepted_digest, accepted_id) = {
-                let record = lock(&operation.record)?;
-                (
-                    hash(&serde_json::to_vec(
-                        &json!({"scope_digest":descriptor.digest,"plan":accepted,"identities":descriptor.identities}),
-                    )?),
-                    record.plan_id.clone(),
-                )
-            };
+            #[derive(Serialize)]
+            struct AcceptedDigest<'a> {
+                identities: &'a BTreeMap<String, Identity>,
+                plan: &'a PlanDto,
+                scope_digest: &'a str,
+            }
+            let accepted_digest = super::json_accounting::digest(&AcceptedDigest {
+                identities: &descriptor.identities,
+                plan: &accepted,
+                scope_digest: &descriptor.digest,
+            })?;
+            let accepted_id = lock(&operation.record)?.plan_id.clone();
             accepted.description = format!(
                 "{} · MCP draft {}",
                 accepted

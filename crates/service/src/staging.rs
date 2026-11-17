@@ -571,42 +571,62 @@ pub(super) fn filtered(plan: &PlanDto, keep: impl Fn(&StageKey) -> bool) -> Plan
         unrendered: Vec::new(),
     };
     for source in &plan.changes {
-        let any = source
+        let tags = source
             .tag_changes
             .iter()
-            .any(|field| keep(&StageKey::tag(&source.path, &field.field)))
-            || source.cover_change.is_some() && keep(&StageKey::special(&source.path, "artwork"))
-            || source.rename_to.is_some() && keep(&StageKey::special(&source.path, "filename"))
-            || source.block_changes.iter().any(|block| {
+            .filter(|field| keep(&StageKey::tag(&source.path, &field.field)))
+            .cloned()
+            .collect::<Vec<_>>();
+        let artwork =
+            source.cover_change.is_some() && keep(&StageKey::special(&source.path, "artwork"));
+        let filename = (source.rename_to.is_some() || !source.sidecar_renames.is_empty())
+            && keep(&StageKey::special(&source.path, "filename"));
+        let blocks = source
+            .block_changes
+            .iter()
+            .filter(|block| {
                 keep(&StageKey::special(
                     &source.path,
                     &format!("block:{}", block.kind),
                 ))
-            });
-        if !any {
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if tags.is_empty() && !artwork && !filename && blocks.is_empty() {
             continue;
         }
-        let mut change = source.clone();
-        change
-            .tag_changes
-            .retain(|field| keep(&StageKey::tag(&change.path, &field.field)));
-        if !keep(&StageKey::special(&change.path, "artwork")) {
-            change.cover_change = None;
-        }
-        if !keep(&StageKey::special(&change.path, "filename")) {
-            change.rename_to = None;
-            change.copy = false;
-            change.rename_root = None;
-            change.creates_folder = false;
-            change.sidecar_renames.clear();
-            change.folder_extras.clear();
-        }
-        change.block_changes.retain(|block| {
-            keep(&StageKey::special(
-                &change.path,
-                &format!("block:{}", block.kind),
-            ))
-        });
+        let change = tagrex_commands::FileChangeDto {
+            path: source.path.clone(),
+            tag_changes: tags,
+            cover_change: if artwork {
+                source.cover_change.clone()
+            } else {
+                None
+            },
+            block_changes: blocks,
+            rename_to: if filename {
+                source.rename_to.clone()
+            } else {
+                None
+            },
+            copy: filename && source.copy,
+            rename_root: if filename {
+                source.rename_root.clone()
+            } else {
+                None
+            },
+            creates_folder: filename && source.creates_folder,
+            sidecar_renames: if filename {
+                source.sidecar_renames.clone()
+            } else {
+                Vec::new()
+            },
+            folder_extras: if filename {
+                source.folder_extras.clone()
+            } else {
+                Vec::new()
+            },
+        };
         result.changes.push(change);
     }
     let mut pool = Vec::new();
@@ -2338,20 +2358,63 @@ impl Service {
     }
 
     pub(super) fn stage_get(&self, principal: &Principal, args: &Value) -> ServiceResult<Value> {
-        let grant = self.grant(principal, "read")?;
-        let state = lock(&self.0.state)?;
-        let revision = state.manual_revision;
+        self.stage_get_with_path_check(principal, args, |grant, path| {
+            destination(grant, path).is_ok()
+        })
+    }
+
+    pub(super) fn stage_get_with_path_check(
+        &self,
+        principal: &Principal,
+        args: &Value,
+        path_allowed: impl Fn(&Grant, &Path) -> bool,
+    ) -> ServiceResult<Value> {
         let offset = number(args, "offset", 0);
         let limit = number(args, "limit", 100).clamp(1, MAX_PAGE);
+        // Copy only paths under the lock. Canonicalization may block on remote
+        // disks; perform it once per path outside shared state ownership.
+        let (grant, revision, paths) = {
+            let state = lock(&self.0.state)?;
+            let grant = self.grant_in_state(&state, principal, "read")?.clone();
+            let paths = state
+                .manual_plan
+                .as_ref()
+                .into_iter()
+                .flat_map(|plan| &plan.changes)
+                .filter(|change| {
+                    change
+                        .tag_changes
+                        .iter()
+                        .any(|field| visible_field(&grant, &field.field))
+                        || change.cover_change.is_some() && visible_field(&grant, "artwork")
+                        || change.rename_to.is_some() && visible_field(&grant, "filename")
+                        || change
+                            .block_changes
+                            .iter()
+                            .any(|block| visible_field(&grant, &format!("block:{}", block.kind)))
+                })
+                .map(|change| change.path.clone())
+                .collect::<BTreeSet<_>>();
+            (grant, state.manual_revision, paths)
+        };
+        let paths = paths
+            .into_iter()
+            .filter(|path| path_allowed(&grant, Path::new(path)))
+            .collect::<BTreeSet<_>>();
+        let state = lock(&self.0.state)?;
+        if self.grant_in_state(&state, principal, "read")? != &grant
+            || state.manual_revision != revision
+        {
+            return Err(ServiceError::conflict(
+                "The shared stage or access scope changed; request the view again",
+            ));
+        }
         let Some(plan) = state.manual_plan.as_ref() else {
             return Ok(json!({"revision":revision,"files":0,"changes":[]}));
         };
         let allowed = |key: &StageKey| {
-            destination(&grant, Path::new(key.path.as_ref())).is_ok()
-                && (grant.fields.is_empty()
-                    || grant
-                        .fields
-                        .contains(key.field.strip_prefix("tag:").unwrap_or(&key.field)))
+            visible_field(&grant, key.field.strip_prefix("tag:").unwrap_or(&key.field))
+                && paths.contains(key.path.as_ref())
         };
         let mut total = 0;
         let mut page_paths = BTreeSet::new();
@@ -2386,4 +2449,9 @@ impl Service {
             json!({"revision":revision,"files":total,"offset":offset,"next_offset":(offset+rows.len()<total).then_some(offset+rows.len()),"changes":rows}),
         )
     }
+}
+
+/// Pure field visibility; path admission is evaluated once per request.
+fn visible_field(grant: &Grant, field: &str) -> bool {
+    grant.fields.is_empty() || grant.fields.contains(field)
 }
