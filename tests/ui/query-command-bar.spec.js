@@ -58,9 +58,7 @@ test('ready state keeps open files visible with Scan files beneath its message',
   const geometry=await scan.evaluate(node=>{const box=node.getBoundingClientRect(),message=document.getElementById('filter-feedback').getBoundingClientRect();return {left:box.left,right:box.right,height:box.height,top:box.top,messageBottom:message.bottom,viewport:innerWidth};});
   expect(geometry.height).toBeCloseTo(32,1);expect(geometry.top).toBeGreaterThanOrEqual(geometry.messageBottom-0.5);expect(geometry.left).toBeGreaterThanOrEqual(0);expect(geometry.right).toBeLessThanOrEqual(geometry.viewport);
  }
- await page.getByRole('button',{name:'About duplicate scanning',exact:true}).click();
- await expect(page.locator('.duplicate-help-panel')).toContainText('Matching methods');await expect(page.locator('.duplicate-help-panel')).toContainText('Only the open files are scanned');
- await page.keyboard.press('Escape');await expect(page.locator('.duplicate-help-panel')).toHaveCount(0);
+ await expect(page.locator('.mode-col .inspector-help')).toHaveCount(0);
  await page.getByRole('tab',{name:'Tags',exact:true}).click();await expect(scan).toHaveCount(0);
 });
 test('selected duplicate result shows shared tags, differences and every copy in the sidebar',async({page})=>{
@@ -416,8 +414,8 @@ for (const theme of ['light','dark']) test(`header search grows with the window 
  await expect(page.locator('.files-col #filter-panel')).toHaveCount(0);
  const before=await page.locator('.files-col').boundingBox();
  const selected=page.locator('.mode-tab[aria-selected="true"]');
- expect(await selected.evaluate(n=>getComputedStyle(n,'::after').height)).toBe('2px');
- expect(await selected.evaluate(n=>getComputedStyle(n).backgroundColor)).toBe('rgba(0, 0, 0, 0)');
+ expect(await selected.evaluate(n=>getComputedStyle(n,'::after').content)).toBe('none');
+ expect(await selected.evaluate(n=>getComputedStyle(n).backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
  await chip(page,'hardcore','Genre: Hardcore');
  const after=await page.locator('.files-col').boundingBox();
  expect(after.y).toBeCloseTo(before.y,0);expect(after.height).toBeCloseTo(before.height,0);

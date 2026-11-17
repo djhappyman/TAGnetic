@@ -281,18 +281,10 @@ test('a narrow dock preserves the desktop editor structure in its own scrollport
   await expect(page.locator('#fields-body input[data-key="title"]')).toBeDisabled();
   await page.keyboard.press('Enter');
   await expect(page.locator('#fields-body input[data-key="title"]')).toBeEnabled();
-  // The inspector's own help popover stays inside the window at this width.
+  // Sidebar tabs have no info controls; pattern tools remain available.
   await tab(page, 'filename');
-  const info = page.getByRole('button', { name: 'About reading file names', exact: true });
-  await info.click();
-  const help = page.locator('.inspector-help-content');
-  await expect(help).toBeVisible();
-  const helpBox = await help.boundingBox();
-  expect(helpBox.x).toBeGreaterThanOrEqual(0);
-  expect(helpBox.x + helpBox.width).toBeLessThanOrEqual(1440 + 1);
-  expect(number((await style(page, '.inspector-help-content p', ['fontSize'])).fontSize)).toBe(12);
-  await page.keyboard.press('Escape');
-  await expect(info).toBeFocused();
+  await expect(page.locator('.mode-col .inspector-help')).toHaveCount(0);
+  await expect(page.locator('#from-name-builder-open')).toBeVisible();
 });
 
 test('dock menus use menu geometry and compact controls keep a 24px hit box', async ({ page }) => {
@@ -303,7 +295,6 @@ test('dock menus use menu geometry and compact controls keep a 24px hit box', as
     return {
       lock: size(pick('#fields-body .fe-lock')),
       subtab: size(pick('.subtab')),
-      help: size(pick('.source-tools .inspector-help')),
     };
   });
   for (const [name, control] of Object.entries(geometry)) {

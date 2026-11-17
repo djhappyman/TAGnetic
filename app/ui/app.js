@@ -1694,23 +1694,12 @@ function animateSelectionSummaryWidth(oldWidth) {
 }
 function paintSelectionSummary(count) {
   const review = usingReviewSelection();
-  let hidden = 0, staged = 0;
-  for (const path of rowSelectionSet()) {
-    if (!viewPathIndex.has(path)) hidden++;
-    if (diffByPath?.has(path)) staged++;
-  }
-  hidden = Math.min(count, hidden);
-  const details = [];
-  if (hidden) details.push(`${hidden.toLocaleString()} hidden by the current view`);
-  if (!stagedView && !filterPending && hasLibraryQuery()) details.push(`${matchingTrackCount.toLocaleString()} ${matchingTrackCount === 1 ? 'match' : 'matches'}`);
-  if (!review && staged) details.push(`${Math.min(count, staged).toLocaleString()} with staged edits`);
   const kind = review ? 'included for Apply' : 'selected';
   if (el('selection-summary-kind').textContent !== kind) el('selection-summary-kind').textContent = kind;
-  const detail = details.length ? ` · ${details.join(' · ')}` : '';
-  if (el('selection-summary-detail').textContent !== detail) el('selection-summary-detail').textContent = detail;
-  setSelectionSummaryVisible(count > 1 || hidden > 0);
+  if (el('selection-summary-detail').textContent) el('selection-summary-detail').textContent = '';
+  setSelectionSummaryVisible(count > 1);
   el('selection-summary-clear').disabled = applying || undoing || filterPending;
-  const signature = `${count}|${kind}|${detail}`;
+  const signature = `${count}|${kind}`;
   if (selectionSummarySizeSignature !== signature) {
     selectionSummarySizeSignature = signature;
     animateSelectionSummaryWidth(selectionSummaryOldWidth);
@@ -4958,10 +4947,8 @@ if (TAURI) {
     activity.classList.toggle('has-active-work', active > 0);
     if (agentsEnabled && !wasEnabled) mirrorManualPlan(previewPlan);
   }
-  el('agent-activity').addEventListener('click', async () => {
-    await openSettings();
-    const groups = [...document.querySelectorAll('.settings-body .settings-group')];
-    selectSettingsGroup(groups.findIndex(group => group.classList.contains('agent-connections')));
+  el('agent-activity').addEventListener('click', () => {
+    document.dispatchEvent(new CustomEvent('tagrex:show-agent-activity'));
   });
   document.addEventListener('tagrex:show-shared-stage', () => {
     el('settings').hidden = true;
@@ -5033,9 +5020,6 @@ if (TAURI) {
         if (data?.module) setMode(data.module);
         if (data?.path) hooks.revealPath(data.path);
         if (data?.draft) {
-          await openSettings();
-          const groups = [...document.querySelectorAll('.settings-body .settings-group')];
-          selectSettingsGroup(groups.findIndex(group => group.classList.contains('agent-connections')));
           document.dispatchEvent(new CustomEvent('tagrex:review-agent-draft', { detail: data }));
         }
       } else if (kind === 'ui_preferences') {

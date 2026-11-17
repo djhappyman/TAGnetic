@@ -26,7 +26,7 @@ iterating on the personal interface; older design briefs are historical context.
 - Build hierarchy with page headings, section headings, labels and concise help.
   Keep related help close to its setting. Avoid adding a card around every group.
 - Keep Tags, Online, Rename, Duplicates and Export beside the logo with a theme-coloured
-  active underline. Put the flexible library search after the tabs, separated by quiet dividers;
+  rounded fill on the selected tab, matching the sidebar tabs without underline rules. Put the flexible library search after the tabs, separated by quiet dividers;
   keep search presets inside its trailing edge.
   Tags owns manual sources; Online opens release search without the manual subtabs.
 - Keep the file pane's outer bottom edge fixed when moving search into the header.
