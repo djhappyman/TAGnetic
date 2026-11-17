@@ -390,6 +390,19 @@ impl Mask {
         collect_fields(&self.segments, &mut fields);
         fields
     }
+
+    /// Fields needed to render, including the implicit inputs of side/position.
+    /// Consumers can prepare a small tag view without copying unrelated lyrics.
+    pub fn render_fields(&self) -> Vec<TagField> {
+        let mut fields = self.fields();
+        if has_side(&self.segments) {
+            fields.extend([TagField::MediaType, TagField::DiscNumber]);
+        }
+        if has_position(&self.segments) {
+            fields.push(TagField::Custom(POSITION_CUSTOM_FIELD.into()));
+        }
+        fields
+    }
 }
 
 fn collect_fields(segments: &[Segment], fields: &mut Vec<TagField>) {
@@ -748,7 +761,7 @@ fn render_segments(
     let mut produced = false;
     for segment in segments {
         match segment {
-            Segment::Literal(text) => out.push_str(text),
+            Segment::Literal(text) => push_pattern(out, text)?,
             Segment::Placeholder(field, width, stated) => match tags.get(field).or_else(|| {
                 matches!(field, TagField::Custom(_))
                     .then(|| {
@@ -759,6 +772,7 @@ fn render_segments(
                     .flatten()
             }) {
                 Some(value) => {
+                    check_pattern_size(value.len())?;
                     let clean = if filename {
                         sanitize_for_filename(value)
                     } else {
@@ -767,10 +781,10 @@ fn render_segments(
                     if !clean.is_empty() {
                         produced = true;
                     }
-                    out.push_str(&pad_numeric(
-                        &clean,
-                        if filename || *stated { *width } else { 0 },
-                    ));
+                    push_pattern(
+                        out,
+                        &pad_numeric(&clean, if filename || *stated { *width } else { 0 }),
+                    )?;
                 }
                 None if optional => {}
                 None => {
@@ -783,7 +797,7 @@ fn render_segments(
             Segment::Section(inner) => {
                 let mut buffer = String::new();
                 if render_segments(inner, tags, file, true, filename, &mut buffer)? {
-                    out.push_str(&buffer);
+                    push_pattern(out, &buffer)?;
                     produced = true;
                 }
             }
@@ -791,6 +805,7 @@ fn render_segments(
             // nothing otherwise -- never an error (empty is a valid outcome).
             Segment::Side => {
                 if let Some(letter) = side_letter_for(tags) {
+                    check_pattern_size(out.len().saturating_add(letter.len_utf8()))?;
                     out.push(letter);
                     produced = true;
                 }
@@ -801,6 +816,7 @@ fn render_segments(
             Segment::Position => {
                 if let Some(value) = tags.get(&TagField::Custom(POSITION_CUSTOM_FIELD.to_string()))
                 {
+                    check_pattern_size(value.len())?;
                     let clean = if filename {
                         sanitize_for_filename(value)
                     } else {
@@ -809,7 +825,7 @@ fn render_segments(
                     if !clean.is_empty() {
                         produced = true;
                     }
-                    out.push_str(&clean);
+                    push_pattern(out, &clean)?;
                 }
             }
             // `%skip%` has no render value; render() refuses the mask before we
@@ -828,7 +844,7 @@ fn render_segments(
                 if !clean.is_empty() {
                     produced = true;
                 }
-                out.push_str(&clean);
+                push_pattern(out, &clean)?;
             }
             // A function call (#73). Each argument is a pattern in its own
             // right, rendered into a string first — which is what makes the
@@ -862,16 +878,25 @@ fn render_segments(
                 if !value.is_empty() {
                     produced = true;
                 }
-                out.push_str(&value);
+                push_pattern(out, &value)?;
             }
-        }
-        if out.len() > MAX_PATTERN_OUTPUT {
-            return Err(MaskError::BadArgument(
-                "A pattern result exceeds 1 MiB.".into(),
-            ));
         }
     }
     Ok(produced)
+}
+
+fn check_pattern_size(size: usize) -> Result<(), MaskError> {
+    if size > MAX_PATTERN_OUTPUT {
+        return Err(MaskError::BadArgument(
+            "A pattern result exceeds 1 MiB.".into(),
+        ));
+    }
+    Ok(())
+}
+fn push_pattern(out: &mut String, value: &str) -> Result<(), MaskError> {
+    check_pattern_size(out.len().saturating_add(value.len()))?;
+    out.push_str(value);
+    Ok(())
 }
 
 /// One file placeholder's value, or empty when the context doesn't carry it.

@@ -188,7 +188,7 @@ impl Service {
                 let target = root.join(safe_name(&name)?);
                 destination(&grant, &target)?;
                 let members = indices.iter().map(|i| &rows[*i]).collect::<Vec<_>>();
-                let text = playlist(&root, members.into_iter());
+                let text = playlist(&root, members.into_iter(), MAX_OUTPUT_BYTES - budget)?;
                 budget = budget.saturating_add(text.len());
                 if budget > MAX_OUTPUT_BYTES {
                     return Err(ServiceError::new(
@@ -208,16 +208,24 @@ impl Service {
         let target = root.join(safe_name(name)?);
         destination(&grant, &target)?;
         let text = match kind {
-            "csv" => export::csv(&tracks),
-            "html" => export::html(&tracks),
-            "xml" => export::xml(&tracks),
+            "csv" => export::Format::Csv(&tracks)
+                .render_bounded(MAX_OUTPUT_BYTES)
+                .map_err(export_limit)?,
+            "html" => export::Format::Html(&tracks)
+                .render_bounded(MAX_OUTPUT_BYTES)
+                .map_err(export_limit)?,
+            "xml" => export::Format::Xml(&tracks)
+                .render_bounded(MAX_OUTPUT_BYTES)
+                .map_err(export_limit)?,
             "report" => {
                 let mask = Mask::parse(required(args, "mask")?)
                     .map_err(|_| ServiceError::invalid("Invalid report mask"))?;
-                export::report(&tracks, &mask)
+                export::Format::Report(&tracks, &mask)
+                    .render_bounded(MAX_OUTPUT_BYTES)
+                    .map_err(export_limit)?
             }
-            "playlist" | "m3u" => playlist(&root, rows.iter()),
-            "cue" => export::cue(
+            "playlist" | "m3u" => playlist(&root, rows.iter(), MAX_OUTPUT_BYTES)?,
+            "cue" => export::Format::Cue(
                 &tracks
                     .iter()
                     .map(|track| CueTrack {
@@ -225,7 +233,9 @@ impl Service {
                         tags: track.tags.clone(),
                     })
                     .collect::<Vec<_>>(),
-            ),
+            )
+            .render_bounded(MAX_OUTPUT_BYTES)
+            .map_err(export_limit)?,
             _ => {
                 return Err(ServiceError::invalid(
                     "Choose csv, html, xml, report, m3u or cue",
@@ -623,8 +633,12 @@ fn output_root(grant: &Grant, args: &Value, default: &Path) -> ServiceResult<Pat
     Ok(root)
 }
 
-fn playlist<'a>(root: &Path, rows: impl Iterator<Item = &'a TrackDto>) -> String {
-    export::m3u(
+fn playlist<'a>(
+    root: &Path,
+    rows: impl Iterator<Item = &'a TrackDto>,
+    limit: usize,
+) -> ServiceResult<String> {
+    export::Format::M3u(
         &rows
             .map(|row| PlaylistTrack {
                 path: portable_path(root, Path::new(&row.path)),
@@ -643,6 +657,8 @@ fn playlist<'a>(root: &Path, rows: impl Iterator<Item = &'a TrackDto>) -> String
             })
             .collect::<Vec<_>>(),
     )
+    .render_bounded(limit)
+    .map_err(export_limit)
 }
 
 fn scan_page(id: &str, job: &ScanJob, args: &Value) -> ServiceResult<Value> {
@@ -720,6 +736,13 @@ fn portable_path(root: &Path, path: &Path) -> String {
 fn output_error(error: std::io::Error) -> ServiceError {
     ServiceError::new(if error.kind()==std::io::ErrorKind::AlreadyExists {"output_exists"} else {"output_failed"},
         "Output publication failed; existing outputs were retained or restored where supported. Inspect the output manifest before retrying.")
+}
+
+fn export_limit(_: export::OutputLimit) -> ServiceError {
+    ServiceError::new(
+        "quota",
+        "Export exceeds the 64 MiB output budget or available memory",
+    )
 }
 
 #[cfg(test)]

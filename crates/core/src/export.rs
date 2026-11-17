@@ -5,6 +5,9 @@
 //! is read-only with respect to the audio files: nothing here goes through the
 //! [`Executor`](crate::plan::Executor) pipeline, because nothing is modified.
 
+mod writer;
+pub use writer::{Format, OutputLimit};
+
 use crate::mask::{FileContext, Mask};
 use crate::model::{TagField, TagMap, TrackFile};
 
@@ -21,18 +24,8 @@ pub struct PlaylistTrack {
 /// Extended M3U (`#EXTM3U` + `#EXTINF` per entry), the format every player
 /// understands.
 pub fn m3u(tracks: &[PlaylistTrack]) -> String {
-    let mut out = String::from("#EXTM3U\n");
-    for track in tracks {
-        let label = if track.artist.is_empty() {
-            track.title.clone()
-        } else {
-            format!("{} - {}", track.artist, track.title)
-        };
-        out.push_str(&format!(
-            "#EXTINF:{},{}\n{}\n",
-            track.duration_secs, label, track.path
-        ));
-    }
+    let mut out = String::new();
+    writer::write_m3u(&mut out, tracks).expect("writing to String is infallible");
     out
 }
 
@@ -62,56 +55,7 @@ pub struct CueTrack {
 /// tracks from an export is worse than a sheet a strict reader may refuse.
 pub fn cue(tracks: &[CueTrack]) -> String {
     let mut out = String::new();
-
-    // The disc-level statements come off the first track: a CUE sheet describes
-    // one release, and that is the only place the album's own fields are.
-    if let Some(first) = tracks.first() {
-        for (command, field) in [("REM GENRE", TagField::Genre), ("REM DATE", TagField::Year)] {
-            if let Some(value) = first.tags.get(&field).filter(|value| !value.is_empty()) {
-                out.push_str(&format!("{command} {}\n", cue_quoted(value)));
-            }
-        }
-        // The album artist where there is one; a compilation's per-track
-        // performers still say who is on each track below.
-        let performer = first
-            .tags
-            .get(&TagField::AlbumArtist)
-            .or_else(|| first.tags.get(&TagField::Artist));
-        if let Some(value) = performer.filter(|value| !value.is_empty()) {
-            out.push_str(&format!("PERFORMER {}\n", cue_quoted(value)));
-        }
-        if let Some(value) = first.tags.get(&TagField::Album).filter(|v| !v.is_empty()) {
-            out.push_str(&format!("TITLE {}\n", cue_quoted(value)));
-        }
-    }
-
-    for (index, track) in tracks.iter().enumerate() {
-        out.push_str(&format!(
-            "FILE {} {}\n",
-            cue_quoted(&track.path),
-            cue_file_type(&track.path)
-        ));
-        out.push_str(&format!("  TRACK {:02} AUDIO\n", index + 1));
-        // Fall back to the file name so an untagged track is still identifiable
-        // in a player, the way the playlist exporter does.
-        let title = track
-            .tags
-            .get(&TagField::Title)
-            .filter(|value| !value.is_empty())
-            .cloned()
-            .unwrap_or_else(|| cue_file_stem(&track.path));
-        out.push_str(&format!("    TITLE {}\n", cue_quoted(&title)));
-        if let Some(value) = track.tags.get(&TagField::Artist).filter(|v| !v.is_empty()) {
-            out.push_str(&format!("    PERFORMER {}\n", cue_quoted(value)));
-        }
-        // `ISRC` is a command of its own in the format, not a `REM` — and it
-        // takes a bare code, so a field holding something else would spill
-        // across the line as extra tokens. Only a real one is written.
-        if let Some(code) = track.tags.get(&TagField::Isrc).and_then(|v| cue_isrc(v)) {
-            out.push_str(&format!("    ISRC {code}\n"));
-        }
-        out.push_str("    INDEX 01 00:00:00\n");
-    }
+    writer::write_cue(&mut out, tracks).expect("writing to String is infallible");
     out
 }
 
@@ -125,20 +69,19 @@ pub fn cue(tracks: &[CueTrack]) -> String {
 /// five-digit designation. The customary dashes between those parts are not
 /// part of the code and come out.
 fn cue_isrc(value: &str) -> Option<String> {
-    let code: String = value.replace('-', "").to_ascii_uppercase();
+    let mut code = String::with_capacity(12);
+    for byte in value.bytes().filter(|b| *b != b'-') {
+        if !byte.is_ascii() || code.len() == 12 {
+            return None;
+        }
+        code.push(byte.to_ascii_uppercase() as char);
+    }
     let bytes = code.as_bytes();
     let shaped = bytes.len() == 12
         && bytes[..2].iter().all(u8::is_ascii_alphabetic)
         && bytes[2..5].iter().all(u8::is_ascii_alphanumeric)
         && bytes[5..].iter().all(u8::is_ascii_digit);
     shaped.then_some(code)
-}
-
-/// A CUE string: quoted, because a value with a space in it is otherwise two
-/// tokens. The format gives no way to escape a quote inside one, so an embedded
-/// `"` becomes `'` rather than ending the string early.
-fn cue_quoted(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "'"))
 }
 
 /// The `FILE` type token. The format names only `BINARY`, `MOTOROLA`, `AIFF`,
@@ -182,54 +125,8 @@ const CSV_COLUMNS: [(&str, Option<TagField>); 11] = [
 /// RFC 4180 CSV of the tag columns, with a header row.
 pub fn csv(tracks: &[TrackFile]) -> String {
     let mut out = String::new();
-    let header: Vec<String> = CSV_COLUMNS
-        .iter()
-        .map(|(name, _)| csv_field(name))
-        .collect();
-    out.push_str(&header.join(","));
-    out.push_str("\r\n");
-
-    for track in tracks {
-        let row: Vec<String> = CSV_COLUMNS
-            .iter()
-            .map(|(name, field)| csv_field(&column_value(track, name, field)))
-            .collect();
-        out.push_str(&row.join(","));
-        out.push_str("\r\n");
-    }
+    writer::write_csv(&mut out, tracks).expect("writing to String is infallible");
     out
-}
-
-/// The value for one export column of one track: a tag value, or — for the two
-/// positional path columns — the file name / full path. Shared by every
-/// column-based exporter (CSV, HTML, XML).
-fn column_value(track: &TrackFile, name: &str, field: &Option<TagField>) -> String {
-    match field {
-        Some(field) => track.tags.get(field).cloned().unwrap_or_default(),
-        None if name == "File" => track
-            .path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        None => track.path.to_string_lossy().into_owned(),
-    }
-}
-
-/// Quote a CSV field when it contains a separator, quote or newline, doubling
-/// any embedded quotes.
-///
-/// A value a spreadsheet would run as a formula (#661) gets a leading `'`,
-/// which makes it read the cell as text, and is quoted: tags come from files
-/// anyone can make.
-fn csv_field(value: &str) -> String {
-    if value.starts_with(['=', '+', '-', '@', '\t', '\r']) {
-        return format!("\"'{}\"", value.replace('"', "\"\""));
-    }
-    if value.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", value.replace('"', "\"\""))
-    } else {
-        value.to_string()
-    }
 }
 
 /// A self-contained HTML document (#42): a styled table of the tag columns, one
@@ -237,41 +134,7 @@ fn csv_field(value: &str) -> String {
 /// and reads in any browser. Every value is HTML-escaped.
 pub fn html(tracks: &[TrackFile]) -> String {
     let mut out = String::new();
-    out.push_str("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
-    out.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
-    out.push_str("<title>Tagnetic export</title>\n<style>\n");
-    out.push_str(
-        "body{font:14px/1.5 system-ui,sans-serif;margin:2rem;color:#1a1a1a}\
-         h1{font-size:1.2rem;margin:0 0 .25rem}\
-         p.count{color:#666;margin:0 0 1rem}\
-         table{border-collapse:collapse;width:100%;font-size:13px}\
-         th,td{border:1px solid #ddd;padding:4px 8px;text-align:left;vertical-align:top}\
-         th{background:#f4f4f5;position:sticky;top:0}\
-         tr:nth-child(even) td{background:#fafafa}\n",
-    );
-    out.push_str("</style>\n</head>\n<body>\n");
-    out.push_str("<h1>Tagnetic export</h1>\n");
-    out.push_str(&format!(
-        "<p class=\"count\">{} track{}</p>\n",
-        tracks.len(),
-        if tracks.len() == 1 { "" } else { "s" }
-    ));
-    out.push_str("<table>\n<thead>\n<tr>");
-    for (name, _) in CSV_COLUMNS {
-        out.push_str(&format!("<th>{}</th>", html_escape(name)));
-    }
-    out.push_str("</tr>\n</thead>\n<tbody>\n");
-    for track in tracks {
-        out.push_str("<tr>");
-        for (name, field) in &CSV_COLUMNS {
-            out.push_str(&format!(
-                "<td>{}</td>",
-                html_escape(&column_value(track, name, field))
-            ));
-        }
-        out.push_str("</tr>\n");
-    }
-    out.push_str("</tbody>\n</table>\n</body>\n</html>\n");
+    writer::write_html(&mut out, tracks).expect("writing to String is infallible");
     out
 }
 
@@ -280,55 +143,9 @@ pub fn html(tracks: &[TrackFile]) -> String {
 /// names are the lower-cased column names with spaces as underscores; every
 /// value is XML-escaped.
 pub fn xml(tracks: &[TrackFile]) -> String {
-    let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-    out.push_str(&format!("<library count=\"{}\">\n", tracks.len()));
-    for track in tracks {
-        out.push_str("  <track>\n");
-        for (name, field) in &CSV_COLUMNS {
-            let value = column_value(track, name, field);
-            // Skip empty *tag* columns, but always emit the positional File/Path.
-            if value.is_empty() && field.is_some() {
-                continue;
-            }
-            let element = xml_element_name(name);
-            out.push_str(&format!(
-                "    <{element}>{}</{element}>\n",
-                xml_escape(&value)
-            ));
-        }
-        out.push_str("  </track>\n");
-    }
-    out.push_str("</library>\n");
+    let mut out = String::new();
+    writer::write_xml(&mut out, tracks).expect("writing to String is infallible");
     out
-}
-
-/// Escape the five XML/HTML-significant characters for element/text content.
-fn html_escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
-/// Escape XML text content (`&`, `<`, `>` are the ones that matter there).
-///
-/// A character XML 1.0 cannot hold at all, escaped or not (most control
-/// characters, U+FFFE, U+FFFF), is left out (#662): one of them made the whole
-/// export a document no parser accepts.
-fn xml_escape(value: &str) -> String {
-    value
-        .chars()
-        .filter(|c| match *c {
-            '\t' | '\n' | '\r' => true,
-            '\u{FFFE}' | '\u{FFFF}' => false,
-            c => c >= ' ',
-        })
-        .collect::<String>()
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }
 
 /// A column name as an XML element name: lower-cased, spaces to underscores
@@ -347,13 +164,7 @@ fn xml_element_name(name: &str) -> String {
 /// report is the obvious place to want `%_length%` or `%_bitrate%`.
 pub fn report(tracks: &[TrackFile], mask: &Mask) -> String {
     let mut out = String::new();
-    for track in tracks {
-        let file = FileContext::read(mask, track);
-        if let Ok(line) = mask.render_with(&lenient_tags(&track.tags), &file) {
-            out.push_str(&line);
-            out.push('\n');
-        }
-    }
+    writer::write_report(&mut out, tracks, mask).expect("writing to String is infallible");
     out
 }
 
@@ -398,6 +209,32 @@ pub fn lenient_tags(tags: &TagMap) -> TagMap {
         lenient.insert(field.clone(), value.clone());
     }
     lenient
+}
+
+/// Prepare only the fields a mask reads. Oversized referenced input is refused
+/// before cloning; unrelated large fields do not affect report/query rendering.
+pub fn lenient_mask_tags(tags: &TagMap, mask: &Mask) -> Result<TagMap, crate::mask::MaskError> {
+    let mut result = lenient_tags(&TagMap::new());
+    for field in mask.render_fields() {
+        let value = tags.get(&field).or_else(|| {
+            matches!(field, TagField::Custom(_))
+                .then(|| {
+                    tags.iter()
+                        .find(|(key, _)| key.same_name(&field))
+                        .map(|(_, value)| value)
+                })
+                .flatten()
+        });
+        if let Some(value) = value {
+            if value.len() > crate::mask::MAX_PATTERN_OUTPUT {
+                return Err(crate::mask::MaskError::BadArgument(
+                    "A pattern input exceeds 1 MiB.".into(),
+                ));
+            }
+            result.insert(field, value.clone());
+        }
+    }
+    Ok(result)
 }
 
 #[cfg(test)]

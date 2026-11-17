@@ -1000,6 +1000,7 @@ fn error_message(error: &AppError) -> MessageDto {
     use tagrex_core::transform::TransformError;
 
     match error {
+        AppError::ExportLimit(_) => coded("error.exportLimit", BTreeMap::new()),
         AppError::TagIo(inner) => match inner {
             TagIoError::UnsupportedFormat(what) => {
                 coded("error.tag.unsupportedFormat", arg("format", what))
@@ -5802,7 +5803,12 @@ impl App {
         let target = self.export_target(file_name)?;
         let root = std::fs::canonicalize(&self.library_root)?;
         let entries = self.playlist_entries(&root, paths);
-        self.write_output(&target, export::m3u(&entries).as_bytes())?;
+        self.write_output(
+            &target,
+            export::Format::M3u(&entries)
+                .render_bounded(64 * 1024 * 1024)?
+                .as_bytes(),
+        )?;
         Ok(target.to_string_lossy().into_owned())
     }
 
@@ -5902,12 +5908,15 @@ impl App {
         let mut outputs: Vec<(PathBuf, Vec<u8>)> = Vec::with_capacity(order.len());
         let mut written = Vec::with_capacity(order.len());
         let mut taken: HashSet<String> = HashSet::new();
+        let mut remaining = 64 * 1024 * 1024;
         for key in order {
             let members = &groups[&key];
             let name = self.playlist_name(&mask, &members[0], &mut taken)?;
             let target = self.export_target(&name)?;
             let entries = self.playlist_entries(&root, members);
-            outputs.push((target.clone(), export::m3u(&entries).into_bytes()));
+            let text = export::Format::M3u(&entries).render_bounded(remaining)?;
+            remaining -= text.len();
+            outputs.push((target.clone(), text.into_bytes()));
             written.push(target.to_string_lossy().into_owned());
         }
         output::write_batch(&self.library_root, &outputs, true)?;
@@ -6011,7 +6020,12 @@ impl App {
                 })
             })
             .collect();
-        self.write_output(&target, export::cue(&entries).as_bytes())?;
+        self.write_output(
+            &target,
+            export::Format::Cue(&entries)
+                .render_bounded(64 * 1024 * 1024)?
+                .as_bytes(),
+        )?;
         Ok(target.to_string_lossy().into_owned())
     }
 
@@ -6019,7 +6033,12 @@ impl App {
     pub fn export_csv(&self, paths: &[PathBuf], file_name: &str) -> Result<String, AppError> {
         let target = self.export_target(file_name)?;
         let tracks = read_tracks(paths);
-        self.write_output(&target, export::csv(&tracks).as_bytes())?;
+        self.write_output(
+            &target,
+            export::Format::Csv(&tracks)
+                .render_bounded(64 * 1024 * 1024)?
+                .as_bytes(),
+        )?;
         Ok(target.to_string_lossy().into_owned())
     }
 
@@ -6027,7 +6046,12 @@ impl App {
     pub fn export_html(&self, paths: &[PathBuf], file_name: &str) -> Result<String, AppError> {
         let target = self.export_target(file_name)?;
         let tracks = read_tracks(paths);
-        self.write_output(&target, export::html(&tracks).as_bytes())?;
+        self.write_output(
+            &target,
+            export::Format::Html(&tracks)
+                .render_bounded(64 * 1024 * 1024)?
+                .as_bytes(),
+        )?;
         Ok(target.to_string_lossy().into_owned())
     }
 
@@ -6035,7 +6059,12 @@ impl App {
     pub fn export_xml(&self, paths: &[PathBuf], file_name: &str) -> Result<String, AppError> {
         let target = self.export_target(file_name)?;
         let tracks = read_tracks(paths);
-        self.write_output(&target, export::xml(&tracks).as_bytes())?;
+        self.write_output(
+            &target,
+            export::Format::Xml(&tracks)
+                .render_bounded(64 * 1024 * 1024)?
+                .as_bytes(),
+        )?;
         Ok(target.to_string_lossy().into_owned())
     }
 
@@ -6050,7 +6079,12 @@ impl App {
         let target = self.export_target(file_name)?;
         let mask = Mask::parse(mask_pattern)?;
         let tracks = read_tracks(paths);
-        self.write_output(&target, export::report(&tracks, &mask).as_bytes())?;
+        self.write_output(
+            &target,
+            export::Format::Report(&tracks, &mask)
+                .render_bounded(64 * 1024 * 1024)?
+                .as_bytes(),
+        )?;
         Ok(target.to_string_lossy().into_owned())
     }
 
@@ -8868,6 +8902,8 @@ impl From<&tagrex_core::provider::Release> for ReleaseDto {
 
 #[derive(Debug, Error)]
 pub enum AppError {
+    #[error(transparent)]
+    ExportLimit(#[from] tagrex_core::export::OutputLimit),
     #[error(transparent)]
     TagIo(#[from] tagrex_core::model::TagIoError),
     #[error(transparent)]
