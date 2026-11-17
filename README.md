@@ -281,10 +281,15 @@ A completed basic feature does not mean every advanced option is finished. The l
 - [x] **CUE export.** Describe a selection of separate audio files in a cue sheet.
 - [x] **Protected export destinations.** Check output names and collisions before publishing supported export batches.
 - [ ] **Playlist loading.** Open an existing playlist and retain its track order.
+  - [x] **Backend.** Resolve bounded local M3U/M3U8 files in order, with explicit encoding, approved roots and duplicate/missing-file diagnostics.
+  - [ ] **UI completion.** Add playlist selection and review, then retain the proposed order in the existing file workflow.
 - [ ] **Custom playlist grouping.** Generate playlists by genre, disc or another chosen combination of values.
 - [ ] **Reusable export templates.** Save complete report layouts with headings, grouped sections and totals.
 - [ ] **Grouped report output.** Create separate reports for albums, artists or other chosen groups.
 - [ ] **Export encoding choices.** Choose compatible text encodings and byte-order markers for other software.
+  - [x] **Backend foundation.** Strictly decode and encode UTF-8, UTF-16LE/BE and supported explicit codepages with byte limits and cancellation.
+  - [ ] **Backend integration.** Apply encoding choices through guarded report publication and append behavior.
+  - [ ] **UI completion.** Add encoding and BOM choices to the export workflow.
 - [ ] **Append to reports.** Add new entries to an existing output instead of replacing it.
 - [ ] **Exports in recipes.** Run chosen reports or playlist generation as part of a saved workflow.
 

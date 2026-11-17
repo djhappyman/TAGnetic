@@ -70,6 +70,8 @@ Every relevant checkpoint must demonstrate:
   The local checkpoint is documented in [cache verification](../performance/metadata-cache-hardening.md).
 - **Requirements matrix, reviewed:** [official-source requirements](backend-parity-requirements.md) now cover all remaining families, test gates and dependency limits. Exact resolved versions were verified against Cargo.lock. The matrix is requirements evidence, not implemented parity.
 
+- **Native playlist preview and text codec, verified:** local M3U/M3U8 resolution and shared strict conversion now have tests and [checkpoint evidence](../performance/playlist-loading.md). Playlist UI, expression grouping and export publication integration remain pending.
+
 ## Ownership and upstream route
 
 Continue in the existing dependent `feat/native-field-foundations` checkout and

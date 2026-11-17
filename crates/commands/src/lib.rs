@@ -16,9 +16,13 @@ mod cover_encoding;
 mod field_operations;
 pub use field_operations::{has_field_rules, validate_field_groups, FieldOperation};
 mod native_batch;
+mod playlist_load;
 pub use native_batch::{
     NumberBoundary, NumberingOptions, TextImportMode, TextImportOptions, TextImportPreview,
     TextImportRow, TextImportStatus, TextSidecarOptions,
+};
+pub use playlist_load::{
+    PlaylistIssue, PlaylistIssueKind, PlaylistLoadOptions, PlaylistLoadPreview,
 };
 pub mod duplicates;
 mod import_matching;
@@ -7858,26 +7862,13 @@ fn decode_text_file(file: std::fs::File, path: &Path) -> Result<String, AppError
         return Err(not_text());
     }
     let bytes = read_text_list_bytes(file, path)?;
-    let utf16 = |rest: &[u8], unit: fn([u8; 2]) -> u16| -> Result<String, AppError> {
-        if !rest.len().is_multiple_of(2) {
-            return Err(not_text());
-        }
-        let units: Vec<u16> = rest
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| unit(*pair))
-            .collect();
-        String::from_utf16(&units).map_err(|_| not_text())
+    let encoding = match bytes.as_slice() {
+        [0xff, 0xfe, ..] => tagrex_core::text_codec::TextEncoding::Utf16Le,
+        [0xfe, 0xff, ..] => tagrex_core::text_codec::TextEncoding::Utf16Be,
+        _ => tagrex_core::text_codec::TextEncoding::Utf8,
     };
-    let text = match bytes.as_slice() {
-        [0xFF, 0xFE, rest @ ..] => utf16(rest, u16::from_le_bytes)?,
-        [0xFE, 0xFF, rest @ ..] => utf16(rest, u16::from_be_bytes)?,
-        [0xEF, 0xBB, 0xBF, rest @ ..] => {
-            String::from_utf8(rest.to_vec()).map_err(|_| not_text())?
-        }
-        rest => String::from_utf8(rest.to_vec()).map_err(|_| not_text())?,
-    };
+    let text = tagrex_core::text_codec::decode(&bytes, encoding, 2 * TEXT_LIST_MAX_BYTES as usize)
+        .map_err(|_| not_text())?;
     if text.contains('\0') {
         return Err(not_text());
     }
@@ -18080,4 +18071,5 @@ mod tests {
     }
     include!("field_operations_tests.rs");
     include!("native_batch_tests.rs");
+    include!("playlist_load_tests.rs");
 }
