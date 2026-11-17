@@ -24,6 +24,7 @@ pub use native_batch::{
 pub use playlist_load::{
     PlaylistIssue, PlaylistIssueKind, PlaylistLoadOptions, PlaylistLoadPreview,
 };
+mod bounded_cache;
 pub mod duplicates;
 mod import_matching;
 mod output;
