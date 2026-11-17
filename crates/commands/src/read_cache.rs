@@ -4,6 +4,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
+    sync::Arc,
     time::SystemTime,
 };
 
@@ -36,7 +37,7 @@ impl Fingerprint {
 
 struct Entry {
     stamp: Fingerprint,
-    read: TrackRead,
+    read: Arc<TrackRead>,
     bytes: usize,
     used_at: u64,
 }
@@ -80,7 +81,7 @@ impl ReadCache {
 
     /// Reuse a snapshot only while its filesystem fingerprint still matches.
     /// Failed or visibly concurrent reads are never added to the cache.
-    pub fn read(&mut self, path: &Path) -> Result<TrackRead, TagIoError> {
+    pub fn read(&mut self, path: &Path) -> Result<Arc<TrackRead>, TagIoError> {
         // Rebase exceptionally long-lived sessions without wrapping usage keys.
         if self.clock == u64::MAX {
             self.clear();
@@ -100,7 +101,7 @@ impl ReadCache {
             self.bytes -= old.bytes;
             self.order.remove(&old.used_at);
         }
-        let read = TagEngine::read_with_props(path)?;
+        let read = Arc::new(TagEngine::read_with_props(path)?);
         // Cache only when the observed fingerprint is unchanged across the read.
         // This does not detect every concurrent or same-size external edit: on
         // Windows, length + mtime can collide on coarse timestamp filesystems.
@@ -219,6 +220,22 @@ mod tests {
         }
     }
     #[test]
+    fn hits_share_snapshots_and_caller_mutation_cannot_change_the_cached_read() {
+        let dir = Fixture::new();
+        let path = dir.track("shared.wav", "Original");
+        let mut cache = ReadCache::default();
+        let mut first = cache.read(&path).unwrap();
+        let second = cache.read(&path).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        Arc::make_mut(&mut first)
+            .file
+            .tags
+            .insert(TagField::Title, "Local only".into());
+        assert_eq!(second.file.tags[&TagField::Title], "Original");
+        assert!(Arc::ptr_eq(&second, &cache.read(&path).unwrap()));
+        consistent(&cache);
+    }
+    #[test]
     fn lru_capacity_retains_recently_used_entries_instead_of_clearing_everything() {
         let dir = Fixture::new();
         let a = dir.track("a.wav", "A");
@@ -267,7 +284,7 @@ mod tests {
         let path = dir.track("one.wav", "Old");
         let mut cache = ReadCache::default();
         let mut snapshot = cache.read(&path).unwrap();
-        snapshot
+        Arc::make_mut(&mut snapshot)
             .file
             .tags
             .insert(TagField::Title, "Local only".into());

@@ -2544,7 +2544,7 @@ impl App {
     fn read_snapshot(
         &self,
         path: &Path,
-    ) -> Result<tagrex_core::model::TrackRead, tagrex_core::model::TagIoError> {
+    ) -> Result<std::sync::Arc<tagrex_core::model::TrackRead>, tagrex_core::model::TagIoError> {
         self.read_cache.borrow_mut().read(path)
     }
 
@@ -2553,7 +2553,7 @@ impl App {
         &self,
         path: &Path,
     ) -> Result<tagrex_core::model::TrackFile, tagrex_core::model::TagIoError> {
-        self.read_snapshot(path).map(|read| read.file)
+        self.read_snapshot(path).map(|read| read.file.clone())
     }
 
     /// Build a table row from one probe: tags, playing time (#172) and tag
@@ -2566,7 +2566,7 @@ impl App {
                 tag_blocks: read.blocks.iter().map(TagBlockDto::from).collect(),
                 compilation_field: read.compilation_field().map(|field| field.to_storage_key()),
                 has_cover: read.has_cover,
-                ..TrackDto::from(read.file)
+                ..TrackDto::from(read.file.clone())
             },
             Err(error) => TrackDto::unreadable(path, ErrorDto::from(AppError::TagIo(error))),
         }
@@ -3104,7 +3104,7 @@ impl App {
             let Ok(read) = self.read_snapshot(&path) else {
                 continue;
             };
-            let track = read.file;
+            let track = &read.file;
             let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
             let props = Some(read.props);
             let duration = props.map(|p| p.duration_secs).unwrap_or(0);

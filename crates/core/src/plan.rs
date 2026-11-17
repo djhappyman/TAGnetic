@@ -472,15 +472,19 @@ impl Executor {
         // recorded so undo can put them back.
         // Observe only after all tag writes and transfers, before pruning can
         // remove a directory needed by error rollback.
-        for fingerprint in block_fingerprints {
-            let change = plan
-                .changes
-                .iter()
-                .find(|change| change.path == fingerprint.path)
-                .expect("fingerprint belongs to this plan");
-            fingerprint.after = Some(file_fingerprint(
-                effective_rename(change).unwrap_or(&change.path),
-            )?);
+        if !block_fingerprints.is_empty() {
+            let mut by_path = HashMap::new();
+            for change in &plan.changes {
+                by_path.entry(change.path.as_path()).or_insert(change);
+            }
+            for fingerprint in block_fingerprints {
+                let change = by_path
+                    .get(fingerprint.path.as_path())
+                    .expect("fingerprint belongs to this plan");
+                fingerprint.after = Some(file_fingerprint(
+                    effective_rename(change).unwrap_or(&change.path),
+                )?);
+            }
         }
         Ok(if plan.prune_empty_dirs {
             prune_emptied_dirs(pruning_intent, roots, &written.created_dirs)
@@ -1245,13 +1249,15 @@ fn capture_block_fingerprints(plan: &ChangePlan) -> Result<Vec<BlockFingerprint>
 /// whole blocks. Already-restored files need no metadata rewrite on retry.
 fn ensure_block_undo_safe(batch: &AppliedBatch) -> Result<HashSet<PathBuf>, PlanError> {
     let mut restored = HashSet::new();
+    if batch.block_fingerprints.is_empty() {
+        return Ok(restored);
+    }
+    let mut by_path = HashMap::new();
+    for change in &batch.plan.changes {
+        by_path.entry(change.path.as_path()).or_insert(change);
+    }
     for fingerprint in &batch.block_fingerprints {
-        let Some(change) = batch
-            .plan
-            .changes
-            .iter()
-            .find(|change| change.path == fingerprint.path)
-        else {
+        let Some(change) = by_path.get(fingerprint.path.as_path()) else {
             return Err(PlanError::ChangedSinceApplied(fingerprint.path.clone()));
         };
         let current_path = match effective_rename(change) {
@@ -1274,17 +1280,18 @@ fn ensure_block_undo_safe(batch: &AppliedBatch) -> Result<HashSet<PathBuf>, Plan
 /// provide both possible safe states; interrupted intent alone proves only the
 /// already-restored state.
 fn ensure_covers_undo_safe(batch: &AppliedBatch) -> Result<(), PlanError> {
+    let block_paths = batch
+        .block_fingerprints
+        .iter()
+        .map(|fingerprint| fingerprint.path.as_path())
+        .collect::<HashSet<_>>();
     for change in &batch.plan.changes {
         if change.copy {
             continue;
         }
         // A successful whole-file fingerprint check already includes covers,
         // including normalized/combined block writes.
-        if batch
-            .block_fingerprints
-            .iter()
-            .any(|fingerprint| fingerprint.path == change.path)
-        {
+        if block_paths.contains(change.path.as_path()) {
             continue;
         }
         let Some(covers) = &change.cover_change else {
