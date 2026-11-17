@@ -3216,3 +3216,36 @@ fn incremental_intents_refuse_filename_rules_instead_of_dropping_their_output() 
     assert_eq!(result.unwrap_err().code, "full_plan_required");
     assert!(f.service.shared_stage().unwrap().plan.is_none());
 }
+
+#[test]
+fn native_field_recipes_save_and_read_protected_human_sources() {
+    let f = Fixture::new();
+    f.service
+        .set_settings_backend(Arc::new(MemorySettings(Mutex::new(
+            json!({"action_groups":[]}),
+        ))))
+        .unwrap();
+    let loaded = f.call("settings.get", json!({})).unwrap();
+    let group = json!({"scope":"comment","rules":[{"kind":"format","to":"%title%"},{"kind":"remove_fields","from":"ENCODEDBY"}]});
+    f.call("presets.put",json!({"kind":"transform","name":"Copy title","revision":loaded["revision"],"preset":group})).unwrap();
+    let initial = f.service.shared_stage_delta(None, None).unwrap();
+    human_intents(
+        &f,
+        &[(0, "title", Some("Human / 日本語"))],
+        initial.revision,
+    );
+    let result=f.call("draft.transform",json!({"paths":[f.paths[0]],"groups":[{"name":"Copy title","scope":"comment","rules":[{"kind":"format","to":"%title%"}]}]})).unwrap();
+    assert!(result["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|change| change["tags"].as_array().unwrap())
+        .any(|field| field["field"] == "comment" && field["new"] == "Human / 日本語"));
+    let shared = f.call("staging.get", json!({})).unwrap();
+    assert!(shared["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|change| change["tags"].as_array().unwrap())
+        .any(|field| field["field"] == "title" && field["new"] == "Human / 日本語"));
+}

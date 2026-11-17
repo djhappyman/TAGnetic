@@ -13,6 +13,8 @@
 //! keys use [`TagField`]'s lossless storage-key codec.
 
 mod cover_encoding;
+mod field_operations;
+pub use field_operations::{has_field_rules, validate_field_groups, FieldOperation};
 pub mod duplicates;
 mod import_matching;
 mod output;
@@ -1708,7 +1710,8 @@ pub struct ImportSelectionDto {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TransformRuleDto {
     /// `replace`, `case`, `diacritics`, `transliterate`, `untransliterate` or
-    /// `key`.
+    /// `key`. Native field recipes also accept `format`, `remove_fields` and
+    /// `keep_fields`; see `docs/guide/field-recipes.md` for their parameter contract.
     pub kind: String,
     #[serde(default)]
     pub from: String,
@@ -3970,6 +3973,9 @@ impl App {
         groups: &[ActionGroupDto],
     ) -> Result<PlanDto, AppError> {
         let _encoding_scope = cover_encoding::Scope::new();
+        if field_operations::has_field_rules(groups) {
+            return self.preview_field_groups(paths, groups, None);
+        }
         // Build every chain up front: a malformed rule should be an error before
         // anything is previewed, not halfway through the file list.
         let chains = groups
@@ -4107,6 +4113,14 @@ impl App {
         groups: &[ActionGroupDto],
     ) -> Result<PlanDto, AppError> {
         let _encoding_scope = cover_encoding::Scope::new();
+        if field_operations::has_field_rules(groups) {
+            let paths = plan
+                .changes
+                .iter()
+                .map(|change| PathBuf::from(&change.path))
+                .collect::<Vec<_>>();
+            return self.preview_field_groups(&paths, groups, Some(plan));
+        }
         plan.validate_cover_assets()?;
         // Same as the on-disk runner: build every chain up front so a malformed
         // rule is an error before anything is revised.
@@ -8128,6 +8142,13 @@ pub fn transform_sample(
     text: &str,
     target: &str,
 ) -> Result<String, AppError> {
+    if field_operations::has_field_rules(std::slice::from_ref(group)) {
+        validate_field_groups(std::slice::from_ref(group))?;
+        return Err(MaskError::BadArgument(
+            "Field recipes require a file selection preview, not a single text sample.".into(),
+        )
+        .into());
+    }
     let file_target = target == "filename";
     let mut out = text.to_string();
     for (scope, chain) in build_segments(group)? {
@@ -8206,6 +8227,9 @@ impl LiveSeed<'_> {
 
 /// The scopes the given groups run as, asked without building their chains.
 fn live_seed(groups: &[ActionGroupDto]) -> LiveSeed<'_> {
+    if field_operations::has_field_rules(groups) {
+        return LiveSeed::All;
+    }
     let mut fields = HashSet::new();
     for group in groups {
         for rule in &group.rules {
@@ -18035,4 +18059,5 @@ mod tests {
             "Windows refuses the raw name"
         );
     }
+    include!("field_operations_tests.rs");
 }

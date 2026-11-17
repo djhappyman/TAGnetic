@@ -592,7 +592,7 @@ impl Service {
                             "A transform preset supports at most 64 steps",
                         ));
                     }
-                    tagrex_commands::transform_sample(&dto, "Example Feat. Artist", &dto.scope)
+                    tagrex_commands::validate_field_groups(std::slice::from_ref(&dto))
                         .map_err(ServiceError::from)?;
                 }
                 "filter" => {

@@ -989,6 +989,26 @@ async fn preview_move(
         .await
 }
 
+/// Preview native tag recipes against the current working plan.
+#[tauri::command]
+async fn preview_field_operations(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    operations: Vec<tagrex_commands::FieldOperation>,
+    working: Option<PlanDto>,
+) -> Result<PlanDto, ErrorDto> {
+    let state = state.inner().clone();
+    SESSION_QUEUE
+        .run(move || {
+            let paths = paths.into_iter().map(PathBuf::from).collect::<Vec<_>>();
+            with_app(&state, |app| {
+                app.preview_field_operations(&paths, &operations, working.as_ref())
+                    .map_err(ErrorDto::from)
+            })
+        })
+        .await
+}
+
 #[tauri::command]
 async fn preview_tag_edits(
     state: State<'_, AppState>,
@@ -2897,6 +2917,7 @@ fn main() {
             preview_move,
             preview_transform,
             preview_tag_edits,
+            preview_field_operations,
             preview_live_edits,
             preview_cover_embed,
             preview_cover_embed_path,

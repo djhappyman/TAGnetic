@@ -25,7 +25,7 @@ pub fn tool_catalog() -> Vec<ToolDefinition> {
         ("draft.create","Stage desired tags immediately into the same live Staged area as the desktop, without writing disk. Require top-level paths or selection. edits items are {path,field,value}; values is a field-to-string/null map applied to that scope. Explicit values replace prior draft intent even when equal to saved tags. Returned files counts changed files, not evaluated files.","selection paths edits values draft"),
         ("draft.get","Read the sanitized, paged diff of an owned draft; files is the number with actual changes, not the number evaluated. Artwork bytes use separate handles.","draft offset limit"),
         ("draft.discard","Discard an owned draft without writing files.","draft"),
-        ("draft.transform","Preview transformation rules/groups over selected saved values, or over an existing draft.","selection paths rules groups scope draft"),
+        ("draft.transform","Preview ordered tag rules against current shared working values. Native kinds: format (scope destination, to pattern), remove_fields and keep_fields (from semicolon-separated names). Keep-only preserves artwork. Existing text transformations remain supported.","selection paths rules groups scope draft"),
         ("draft.rename","Preview renaming with the application's mask grammar, including sidecars.","selection paths mask draft"),
         ("draft.move","Preview move/copy under an already-authorized destination. Directory pruning is disabled.","selection paths mask destination copy draft"),
         ("draft.from_name","Extract tags from selected filenames using a reusable mask.","selection paths mask draft"),

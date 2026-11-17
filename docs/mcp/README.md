@@ -191,3 +191,14 @@ remaining platform-testing boundaries.
 
 Client configuration references: [Codex MCP](https://developers.openai.com/codex/mcp),
 [OpenCode MCP](https://opencode.ai/docs/mcp-servers/).
+
+## Native field recipes
+
+`draft.transform` accepts the backend `format`, `remove_fields` and `keep_fields`
+rule kinds in addition to ordinary text transformations. These read the current
+shared working values, retain protected human edits and produce the existing
+shared stage. The same groups can be saved through `presets.put`.
+
+See [Native field recipes](../guide/field-recipes.md) for the JSON contract,
+artwork policy, custom-field names and limits. These operations edit text tags;
+use the existing rename tools for paths and filenames.

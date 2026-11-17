@@ -31,6 +31,9 @@ describes Tagnetic’s current workflow and development status.
 8. [DEDUPLICATOR and EXPORTER](duplicates-and-export.md) — find duplicates, write playlists and reports
 9. [Settings](settings.md) — every preference, keyboard shortcuts, and where they are stored
 
+See also [Native field recipes](field-recipes.md) for the Rust field-operation
+contract used by formatting and connected clients.
+
 ## Conventions in this guide
 
 - **⌘** means Command on macOS and **Ctrl** on Windows and Linux. Where a

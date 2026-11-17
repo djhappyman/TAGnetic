@@ -479,7 +479,13 @@ impl Service {
                         note: String::new(),
                     }]
                 };
-                let mut plan = if let Some(previous) = &previous {
+                let mut plan = if tagrex_commands::has_field_rules(&groups) {
+                    app.preview_field_groups(
+                        &paths,
+                        &groups,
+                        previous.as_ref().map(|p| &p.plan).or(working.as_ref()),
+                    )?
+                } else if let Some(previous) = &previous {
                     app.preview_transform_over_plan(&previous.plan, &groups)?
                 } else {
                     let saved = app.preview_transform_groups(&paths, &groups)?;
@@ -2616,5 +2622,19 @@ mod composition_tests {
             .unwrap();
         assert!(preset.description.contains("preset={query:"));
         assert!(preset.description.contains("SHARED"));
+    }
+    #[test]
+    fn native_field_recipe_uses_shared_working_values_across_different_scopes() {
+        let f = Fixture::new();
+        f.draft(json!({"title":"Current / 日本語"}));
+        let result=f.call("draft.transform",json!({"paths":[f.paths[0]],"groups":[{"name":"Copy current title","scope":"comment","rules":[{"kind":"format","to":"%title%"}]}]}));
+        assert_eq!(
+            field(&result, &f.paths[0], "comment").unwrap()["new"],
+            "Current / 日本語"
+        );
+        assert_eq!(
+            field(&result, &f.paths[0], "title").unwrap()["new"],
+            "Current / 日本語"
+        );
     }
 }

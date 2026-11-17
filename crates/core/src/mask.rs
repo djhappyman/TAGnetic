@@ -243,9 +243,16 @@ pub struct Mask {
     extract_only: bool,
 }
 
+pub(super) const MAX_PATTERN_OUTPUT: usize = 1024 * 1024;
+
 impl Mask {
     /// Parse and validate a pattern string.
     pub fn parse(pattern: &str) -> Result<Self, MaskError> {
+        if pattern.len() > 8192 {
+            return Err(MaskError::BadArgument(
+                "Patterns are limited to 8192 bytes.".into(),
+            ));
+        }
         let segments = parse_segments(pattern)?;
         let mut previous = None;
         let adjacent_placeholders = has_ambiguous_adjacency(&segments, &mut previous);
@@ -256,7 +263,7 @@ impl Mask {
         let extract_only = has_skip(&segments);
         let needs_audio_props = has_file(&segments, FileValue::needs_audio_props);
         let needs_metadata = has_file(&segments, FileValue::needs_metadata);
-        let regex = build_regex(&segments);
+        let regex = build_regex(&segments)?;
         Ok(Self {
             pattern: pattern.to_string(),
             segments,
@@ -284,8 +291,28 @@ impl Mask {
             return Err(MaskError::ExtractOnly);
         }
         let mut out = String::new();
-        render_segments(&self.segments, tags, file, false, &mut out)?;
+        render_segments(&self.segments, tags, file, false, true, &mut out)?;
         Ok(out)
+    }
+
+    /// Render field contents without filename sanitisation or implicit track
+    /// padding. Missing fields are empty, allowing conditional assignments.
+    pub fn render_value_with(
+        &self,
+        tags: &TagMap,
+        file: &FileContext<'_>,
+    ) -> Result<String, MaskError> {
+        if self.extract_only {
+            return Err(MaskError::ExtractOnly);
+        }
+        let mut out = String::new();
+        render_segments(&self.segments, tags, file, true, false, &mut out)?;
+        Ok(out)
+    }
+
+    /// Whether the pattern discards input and therefore cannot generate a value.
+    pub fn is_extract_only(&self) -> bool {
+        self.extract_only
     }
 
     /// Whether rendering this pattern needs [`FileContext::props`], which costs
@@ -359,7 +386,7 @@ fn collect_fields(segments: &[Segment], fields: &mut Vec<TagField>) {
 fn parse_segments(pattern: &str) -> Result<Vec<Segment>, MaskError> {
     let chars: Vec<char> = pattern.chars().collect();
     let mut position = 0;
-    let (segments, _) = parse_until(&chars, &mut position, &[])?;
+    let (segments, _) = parse_until(&chars, &mut position, &[], 0)?;
     debug_assert_eq!(position, chars.len());
     Ok(segments)
 }
@@ -376,7 +403,13 @@ fn parse_until(
     chars: &[char],
     position: &mut usize,
     terminators: &[char],
+    depth: usize,
 ) -> Result<(Vec<Segment>, Option<char>), MaskError> {
+    if depth > 32 {
+        return Err(MaskError::BadArgument(
+            "Patterns support at most 32 nested sections or calls.".into(),
+        ));
+    }
     let mut segments = Vec::new();
     let mut literal = String::new();
 
@@ -391,7 +424,7 @@ fn parse_until(
             '[' => {
                 *position += 1;
                 flush_literal(&mut literal, &mut segments);
-                let (inner, closed) = parse_until(chars, position, &[']'])?;
+                let (inner, closed) = parse_until(chars, position, &[']'], depth + 1)?;
                 if closed.is_none() {
                     return Err(MaskError::UnbalancedSection);
                 }
@@ -400,7 +433,7 @@ fn parse_until(
             // A call, but only when a name and a `(` really follow: a lone `$`
             // is an ordinary character, so a pattern written before functions
             // existed still means what it meant (#73).
-            '$' => match parse_call(chars, position)? {
+            '$' => match parse_call(chars, position, depth)? {
                 Some(call) => {
                     flush_literal(&mut literal, &mut segments);
                     segments.push(call);
@@ -472,7 +505,11 @@ fn parse_until(
 /// followed by `(` but isn't a function is an error rather than literal text —
 /// `$upprer(%title%)` is a typo, and silently writing it into a filename would
 /// be the worse answer.
-fn parse_call(chars: &[char], position: &mut usize) -> Result<Option<Segment>, MaskError> {
+fn parse_call(
+    chars: &[char],
+    position: &mut usize,
+    depth: usize,
+) -> Result<Option<Segment>, MaskError> {
     let mut cursor = *position + 1;
     while cursor < chars.len() && (chars[cursor].is_ascii_alphanumeric() || chars[cursor] == '_') {
         cursor += 1;
@@ -486,7 +523,7 @@ fn parse_call(chars: &[char], position: &mut usize) -> Result<Option<Segment>, M
     *position = cursor + 1;
     let mut arguments = Vec::new();
     loop {
-        let (argument, closed) = parse_until(chars, position, &[',', ')'])?;
+        let (argument, closed) = parse_until(chars, position, &[',', ')'], depth + 1)?;
         match closed {
             Some(')') => {
                 arguments.push(argument);
@@ -539,7 +576,18 @@ fn parse_placeholder(spec: &str) -> Result<Segment, MaskError> {
     if let Some(value) = file_value_from_name(spec) {
         return Ok(Segment::File(value));
     }
-    let (name, width) = match spec.split_once(':') {
+    let padding = if spec
+        .get(..7)
+        .is_some_and(|s| s.eq_ignore_ascii_case("custom:"))
+    {
+        spec[7..]
+            .rsplit_once(':')
+            .filter(|(_, width)| width.bytes().all(|c| c.is_ascii_digit()) && !width.is_empty())
+            .map(|(name, width)| (&spec[..7 + name.len()], width))
+    } else {
+        spec.rsplit_once(':')
+    };
+    let (name, width) = match padding {
         Some((name, width)) => (
             name,
             width
@@ -548,9 +596,17 @@ fn parse_placeholder(spec: &str) -> Result<Segment, MaskError> {
         ),
         None => (spec, 0),
     };
+    if file_value_from_name(name).is_some() {
+        return Err(MaskError::UnknownPlaceholder(name.to_string()));
+    }
     let field = field_from_name(name)?;
     // `%track:0%` states nothing useful, so it counts as unstated and falls back
     // to the default like a bare `%track%`.
+    if width > 255 {
+        return Err(MaskError::BadArgument(
+            "Padding is limited to 255 characters.".into(),
+        ));
+    }
     let stated = width > 0;
     let width = if stated { width } else { default_width(&field) };
     Ok(Segment::Placeholder(field, width, stated))
@@ -559,17 +615,19 @@ fn parse_placeholder(spec: &str) -> Result<Segment, MaskError> {
 /// Every placeholder becomes a named, non-greedy, non-empty capture group;
 /// every literal is escaped so its regex-special characters (common in
 /// filenames: `.`, `(`, `)`, `[`, `]`) are matched literally. Building
-/// always succeeds: literals are escaped and group names (`f0`, `f1`, ...)
-/// are index-derived, so there's no way to produce invalid regex syntax or
-/// a duplicate group name here.
-fn build_regex(segments: &[Segment]) -> Regex {
+/// uses escaped literals and index-derived group names. The regex engine
+/// can still reject a pattern that exceeds its compilation budget; report that
+/// as a pattern error rather than panicking.
+fn build_regex(segments: &[Segment]) -> Result<Regex, MaskError> {
     let mut pattern = String::from("^");
     let mut index = 0;
     build_regex_into(segments, &mut index, &mut pattern);
     pattern.push('$');
-    Regex::new(&pattern).expect(
-        "mask regex is built from escaped literals and indexed group names, so it always compiles",
-    )
+    Regex::new(&pattern).map_err(|error| {
+        MaskError::BadArgument(format!(
+            "Pattern matching exceeds the regex budget: {error}"
+        ))
+    })
 }
 
 /// Group indices are assigned in pre-order, and [`collect_captures`] walks the
@@ -656,26 +714,47 @@ fn render_segments(
     tags: &TagMap,
     file: &FileContext<'_>,
     optional: bool,
+    filename: bool,
     out: &mut String,
 ) -> Result<bool, MaskError> {
     let mut produced = false;
     for segment in segments {
         match segment {
             Segment::Literal(text) => out.push_str(text),
-            Segment::Placeholder(field, width, _) => match tags.get(field) {
+            Segment::Placeholder(field, width, stated) => match tags.get(field).or_else(|| {
+                matches!(field, TagField::Custom(_))
+                    .then(|| {
+                        tags.iter()
+                            .find(|(key, _)| key.same_name(field))
+                            .map(|(_, value)| value)
+                    })
+                    .flatten()
+            }) {
                 Some(value) => {
-                    let clean = sanitize_for_filename(value);
+                    let clean = if filename {
+                        sanitize_for_filename(value)
+                    } else {
+                        Cow::Borrowed(value.as_str())
+                    };
                     if !clean.is_empty() {
                         produced = true;
                     }
-                    out.push_str(&pad_numeric(&clean, *width));
+                    out.push_str(&pad_numeric(
+                        &clean,
+                        if filename || *stated { *width } else { 0 },
+                    ));
                 }
                 None if optional => {}
-                None => return Err(MaskError::MissingTag(field_name(field).to_string())),
+                None => {
+                    return Err(MaskError::MissingTag(match field {
+                        TagField::Custom(name) => name.clone(),
+                        _ => field_name(field).to_string(),
+                    }))
+                }
             },
             Segment::Section(inner) => {
                 let mut buffer = String::new();
-                if render_segments(inner, tags, file, true, &mut buffer)? {
+                if render_segments(inner, tags, file, true, filename, &mut buffer)? {
                     out.push_str(&buffer);
                     produced = true;
                 }
@@ -694,7 +773,11 @@ fn render_segments(
             Segment::Position => {
                 if let Some(value) = tags.get(&TagField::Custom(POSITION_CUSTOM_FIELD.to_string()))
                 {
-                    let clean = sanitize_for_filename(value);
+                    let clean = if filename {
+                        sanitize_for_filename(value)
+                    } else {
+                        Cow::Borrowed(value.as_str())
+                    };
                     if !clean.is_empty() {
                         produced = true;
                     }
@@ -709,7 +792,11 @@ fn render_segments(
             // (no path, no probe) — never an error, same as `%side%` on a CD.
             Segment::File(value) => {
                 let rendered = render_file_value(*value, file);
-                let clean = sanitize_for_filename(&rendered);
+                let clean = if filename {
+                    sanitize_for_filename(&rendered)
+                } else {
+                    Cow::Borrowed(rendered.as_str())
+                };
                 if !clean.is_empty() {
                     produced = true;
                 }
@@ -740,7 +827,7 @@ fn render_segments(
                 let mut values = Vec::with_capacity(arguments.len());
                 for argument in arguments {
                     let mut buffer = String::new();
-                    render_segments(argument, tags, file, tolerant, &mut buffer)?;
+                    render_segments(argument, tags, file, tolerant, filename, &mut buffer)?;
                     values.push(buffer);
                 }
                 let value = function.apply(&values)?;
@@ -749,6 +836,11 @@ fn render_segments(
                 }
                 out.push_str(&value);
             }
+        }
+        if out.len() > MAX_PATTERN_OUTPUT {
+            return Err(MaskError::BadArgument(
+                "A pattern result exceeds 1 MiB.".into(),
+            ));
         }
     }
     Ok(produced)
@@ -1061,28 +1153,18 @@ fn file_value_from_name(name: &str) -> Option<FileValue> {
 }
 
 fn field_from_name(name: &str) -> Result<TagField, MaskError> {
-    match name.to_ascii_lowercase().as_str() {
-        "artist" => Ok(TagField::Artist),
-        "title" => Ok(TagField::Title),
-        "album" => Ok(TagField::Album),
-        "albumartist" => Ok(TagField::AlbumArtist),
-        "track" => Ok(TagField::TrackNumber),
-        "tracktotal" => Ok(TagField::TrackTotal),
-        "disc" => Ok(TagField::DiscNumber),
-        "disctotal" => Ok(TagField::DiscTotal),
-        "year" => Ok(TagField::Year),
-        "genre" => Ok(TagField::Genre),
-        "comment" => Ok(TagField::Comment),
-        "composer" => Ok(TagField::Composer),
-        "publisher" => Ok(TagField::Publisher),
-        "bpm" => Ok(TagField::Bpm),
-        "isrc" => Ok(TagField::Isrc),
-        "key" => Ok(TagField::InitialKey),
-        "catalognumber" => Ok(TagField::CatalogNumber),
-        "url" => Ok(TagField::Url),
-        "media" => Ok(TagField::MediaType),
-        _ => Err(MaskError::UnknownPlaceholder(name.to_string())),
+    let field =
+        TagField::from_name(name).ok_or_else(|| MaskError::UnknownPlaceholder(name.to_string()))?;
+    // Custom fields have an explicit namespace: existing typo detection and
+    // reserved file/technical placeholders keep their established meaning.
+    if matches!(field, TagField::Custom(_))
+        && !name
+            .get(..7)
+            .is_some_and(|s| s.eq_ignore_ascii_case("custom:"))
+    {
+        return Err(MaskError::UnknownPlaceholder(name.to_string()));
     }
+    Ok(field)
 }
 
 fn field_name(field: &TagField) -> &'static str {
@@ -1118,7 +1200,7 @@ fn tag_placeholder_doc(field: &TagField) -> (&'static str, &'static str) {
         TagField::CatalogNumber => ("catalognumber", "Label catalogue number"),
         TagField::Url => ("url", "Release webpage"),
         TagField::MediaType => ("media", "Media type — Vinyl, CD, Cassette, File"),
-        TagField::Custom(_) => ("custom", "Custom field — not addressable from a mask"),
+        TagField::Custom(_) => ("custom", "Custom text field, addressed as %custom:NAME%"),
     }
 }
 
@@ -1225,7 +1307,8 @@ impl PlaceholderGroup {
 ///
 /// This is what the in-app reference renders, and it comes off the same tables
 /// the parser reads — a name shown here is by construction a name that parses.
-/// `Custom` is excluded because it isn't addressable from a mask.
+/// The custom-field template documents the explicit namespace without guessing
+/// which fields a particular library contains.
 pub fn placeholder_reference() -> Vec<PlaceholderDoc> {
     let tag_order = [
         TagField::Artist,
@@ -1281,6 +1364,14 @@ pub fn placeholder_reference() -> Vec<PlaceholderDoc> {
             }
         })
         .collect();
+    docs.push(PlaceholderDoc {
+        token: "%custom:FIELD%".into(),
+        name: "custom",
+        description: "Custom text field. Replace FIELD with the stored field name.",
+        group: PlaceholderGroup::Tag,
+        render: true,
+        extract: true,
+    });
     docs.extend(file_order.into_iter().map(|value| {
         let (name, description) = file_placeholder_doc(value);
         PlaceholderDoc {
@@ -2595,5 +2686,73 @@ mod tests {
         let folder = format!("{}. {}", "y".repeat(253), "z".repeat(50));
         let out = portable_file_name(&folder, true);
         assert_eq!(out, "y".repeat(253));
+    }
+}
+
+#[cfg(test)]
+mod field_pattern_tests {
+    use super::*;
+    #[test]
+    fn custom_patterns_render_extract_and_preserve_raw_values() {
+        let tags = TagMap::from([
+            (
+                TagField::Custom("Venue".into()),
+                "AC/DC / 日本語\nHall".into(),
+            ),
+            (TagField::TrackNumber, "3".into()),
+            (TagField::Custom("ARTIST".into()), "Custom credit".into()),
+            (TagField::Artist, "Standard credit".into()),
+        ]);
+        let pattern = Mask::parse("%custom:venue% - %track%").unwrap();
+        assert_eq!(
+            pattern
+                .render_value_with(&tags, &FileContext::default())
+                .unwrap(),
+            "AC/DC / 日本語\nHall - 3"
+        );
+        assert!(!pattern.render(&tags).unwrap().contains('/'));
+        assert!(pattern.render(&tags).unwrap().ends_with("03"));
+        assert_eq!(
+            Mask::parse("%artist% / %custom:ARTIST%")
+                .unwrap()
+                .render_value_with(&tags, &FileContext::default())
+                .unwrap(),
+            "Standard credit / Custom credit"
+        );
+        let extracted = Mask::parse("%custom:Promoter% - %title%")
+            .unwrap()
+            .extract("Dreamscape - Tape One")
+            .unwrap();
+        assert_eq!(
+            extracted.get(&TagField::Custom("Promoter".into())).unwrap(),
+            "Dreamscape"
+        );
+        assert_eq!(
+            Mask::parse("[%custom:Missing%]")
+                .unwrap()
+                .render(&tags)
+                .unwrap(),
+            ""
+        );
+        assert!(
+            matches!(Mask::parse("%custom:Missing%").unwrap().render(&tags),Err(MaskError::MissingTag(name)) if name=="Missing")
+        );
+    }
+    #[test]
+    fn patterns_bound_work_before_compiling_regex_or_recursing() {
+        assert!(Mask::parse(&"[".repeat(1000)).is_err());
+        assert!(Mask::parse("%custom:X:9999999%").is_err());
+        assert!(Mask::parse(&"x".repeat(8193)).is_err());
+        assert!(Mask::parse("%custom:%").is_err());
+        assert!(Mask::parse("%_not_a_technical_field%").is_err());
+        assert!(Mask::parse("$padleft(x,9999999)")
+            .unwrap()
+            .render(&TagMap::new())
+            .is_err());
+        let large = TagMap::from([(TagField::Title, "X".repeat(600_000))]);
+        assert!(Mask::parse("$replace(%title%,X,XX)")
+            .unwrap()
+            .render_value_with(&large, &FileContext::default())
+            .is_err());
     }
 }
