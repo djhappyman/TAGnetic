@@ -101,16 +101,12 @@ test('text previews group tracks, preserve skipped-line mapping, escape metadata
   await expect.poll(() => page.evaluate(async () => (await window.tagrex.invoke('history',{})).length)).toBe(0);
 });
 
-test('name preview and pattern tools retain keyboard access; help closes back to its heading', async ({page}) => {
+test('name preview and pattern tools retain keyboard access without sidebar info buttons', async ({page}) => {
   await selectAll(page); await tab(page,'filename');
   await page.locator('#from-name-mask').fill('%track% - %artist% - %title%');
   await expect(page.locator('#from-name-probe .probe-track')).toHaveCount(3);
   await expect(page.locator('#from-name-probe .probe-source').first()).toContainText('File name');
-  const info = page.getByRole('button',{name:'About reading file names',exact:true});
-  await info.click();
-  await expect(page.locator('.inspector-help-content')).toContainText('File names stay unchanged');
-  await page.keyboard.press('Escape');
-  await expect(info).toBeFocused();
+  await expect(page.locator('.mode-col .inspector-help')).toHaveCount(0);
   await page.locator('#from-name-builder-open').click();
   await expect(page.locator('#mask-builder')).toBeVisible();
 });

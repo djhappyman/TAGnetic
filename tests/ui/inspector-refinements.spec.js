@@ -72,13 +72,12 @@ test('discard restores number and text values without leaving phantom staging',a
   await expect(page.locator('#staged-edits')).toBeHidden();await expect(page.locator('.field-input.dirty')).toHaveCount(0);
 });
 
-test('help keeps the bottom fade and lock buttons sit inside complete field surfaces',async({page})=>{
+test('the editor keeps its bottom fade and lock buttons sit inside complete field surfaces',async({page})=>{
   await selectAll(page);const port=page.locator('.editor-scroll');
   await port.evaluate(node=>{node.style.maxHeight='350px';node.scrollTop=0;});
   await expect(port).toHaveClass(/can-scroll-down/);
-  await page.locator('.source-tools .inspector-help').click();await expect(page.locator('.inspector-help-content')).toBeVisible();
+  await expect(page.locator('.mode-col .inspector-help')).toHaveCount(0);
   expect(await port.evaluate(node=>getComputedStyle(node).maskImage)).toContain('linear-gradient');
-  await page.keyboard.press('Escape');expect(await port.evaluate(node=>getComputedStyle(node).maskImage)).toContain('linear-gradient');
   for(const key of ['title','year','bpm','key','genre']){
     const input=page.locator(`#editor-field-${key}`),row=input.locator('xpath=ancestor::div[contains(@class,"fe-row")]');
     await input.scrollIntoViewIfNeeded();await row.hover();

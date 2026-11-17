@@ -44,6 +44,7 @@ body .mode-col {
 
 /* ---- tabs: one quiet 32px navigation row for the manual tagging sources and Transformations -------- */
 body .mode-col .subtabs[data-slot='tabs-list'] {
+  position: relative;
   display: grid;
   grid-template-columns: repeat(4, minmax(max-content, 1fr));
   flex: 0 0 auto;
@@ -57,6 +58,16 @@ body .mode-col .subtabs[data-slot='tabs-list'] {
   background: transparent;
 }
 body .mode-col .subtabs[data-slot='tabs-list'][hidden] { display:none; }
+body .mode-col .subtabs::before {
+  content: '';
+  position: absolute;
+  inset-inline: calc(var(--inspector-inset) + var(--sp-2)) var(--sp-1);
+  bottom: var(--sp-3);
+  height: 2px;
+  border-radius: var(--r-pill);
+  background: var(--workbench-seam);
+  pointer-events: none;
+}
 body .mode-col button[data-slot='button'].subtab {
   position: relative;
   justify-self: center;
@@ -85,11 +96,12 @@ body .mode-col button[data-slot='button'].subtab.active {
 body .mode-col .subtab::after {
   content: '';
   position: absolute;
+  z-index: 1;
   inset-inline: 2px;
   bottom: 0;
   height: 2px;
   border-radius: var(--r-pill);
-  background: var(--workbench-seam);
+  background: transparent;
   pointer-events: none;
 }
 body .mode-col .subtab.active::after { background: var(--accent); }
@@ -1294,10 +1306,6 @@ body .mode-col .transformations-edit { flex:none; width:24px; height:24px; min-h
 body .mode-col .source-navigation { display:flex; align-items:center; flex:none; min-width:0; }
 body .mode-col .source-navigation[hidden] { display:none; }
 body .mode-col .source-navigation .subtabs { flex:1; width:0; overflow-x:auto; scrollbar-width:none; padding-inline-end:var(--sp-1); }
-body .mode-col .source-tools { display:flex; align-items:center; flex:none; gap:var(--sp-1); padding-inline-end:var(--inspector-inset); }
-body .mode-col .source-tools[hidden] { display:none; }
-body .mode-col .source-tools button { width:24px; height:24px; min-height:24px; padding:3px; }
-body .mode-col .source-tools button[hidden] { display:none; }
 
 /* Field feedback floats over the form rather than growing a row on focus. */
 body .mode-col .fe-hint { position:absolute; top:calc(100% + 2px); inset-inline:0; z-index:4; max-height:none; padding:4px 8px; border-radius:var(--r-compact); background:var(--panel); box-shadow:0 4px 12px rgb(0 0 0 / .18); opacity:0; pointer-events:none; transform:translateY(-2px); transition:opacity 150ms ease,transform 150ms ease; }
