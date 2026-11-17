@@ -72,6 +72,12 @@ Every relevant checkpoint must demonstrate:
 
 - **Native playlist preview and text codec, verified:** local M3U/M3U8 resolution and shared strict conversion now have tests and [checkpoint evidence](../performance/playlist-loading.md). Playlist UI, expression grouping and export publication integration remain pending.
 
+- **App-wide hardening checkpoints, verified locally:** unchanged query reuse,
+  staged-view lock/copy reduction, streaming plan accounting, bounded exports and
+  derived query memory are implemented. See the [audit](../performance/rust-hardening-audit.md)
+  and linked evidence. Preview queue supersession and additional profiling work
+  remain open. Feature/UI completion is unchanged.
+
 ## Ownership and upstream route
 
 Continue in the existing dependent `feat/native-field-foundations` checkout and

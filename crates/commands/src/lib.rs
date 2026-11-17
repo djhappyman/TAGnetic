@@ -1001,7 +1001,9 @@ fn error_message(error: &AppError) -> MessageDto {
     use tagrex_core::transform::TransformError;
 
     match error {
-        AppError::ExportLimit(_) => coded("error.exportLimit", BTreeMap::new()),
+        // Backend-only additions use the existing English fallback until their
+        // interface catalogue entries are delivered together.
+        AppError::ExportLimit(_) => MessageDto::default(),
         AppError::TagIo(inner) => match inner {
             TagIoError::UnsupportedFormat(what) => {
                 coded("error.tag.unsupportedFormat", arg("format", what))
@@ -8067,6 +8069,9 @@ pub struct PlaceholderDto {
 pub fn mask_placeholders() -> Vec<PlaceholderDto> {
     tagrex_core::mask::placeholder_reference()
         .into_iter()
+        // The explicit custom namespace is implemented by the native parser.
+        // Its reference control/catalogues belong to the pending UI delivery.
+        .filter(|doc| doc.name != "custom")
         .map(|doc| PlaceholderDto {
             token: doc.token,
             name: doc.name.to_string(),

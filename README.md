@@ -341,6 +341,11 @@ A completed basic feature does not mean every advanced option is finished. The l
 - [ ] **Deeper file-manager integration.** Add supported operating-system shortcuts for opening and adding files to the current session.
 - [ ] **Large-library performance.** Continue measuring and improving loading, scrolling, search and bulk operations on larger collections.
   - [x] **Backend cache eviction.** Retain recently used metadata within bounded cache budgets, with file-change checks and invalidation after writes and settings changes.
+  - [x] **Backend query reuse.** Keep search results and useful caches when a background read finds no changes; explicit Refresh still replaces them.
+  - [x] **Backend staged views.** Check recursive folder scope once per path outside the shared state lock and copy only the fields requested.
+  - [x] **Backend plan accounting.** Measure and hash plans without allocating full JSON copies, with explicit size budgets.
+  - [x] **Backend export limits.** Stop oversized reports and playlists while building them, including escaped text and grouped outputs.
+  - [x] **Backend search memory.** Share saved metadata with calculated fields and evict older derived caches within memory budgets.
 - [ ] **Accessibility and platform refinement.** Complete wider keyboard, screen-reader, contrast, input-method and native-platform checks.
 - [ ] **Complete localisation.** Translate newer controls and feedback consistently across supported interface languages.
 
