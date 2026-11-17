@@ -47,6 +47,7 @@ static IMAGE_ADMISSION: std::sync::LazyLock<operation_control::ImageAdmission> =
 static BROWSER_QUEUE: blocking::Queue = blocking::Queue::new();
 static SETTINGS_QUEUE: blocking::Queue = blocking::Queue::new();
 static SESSION_QUEUE: blocking::Queue = blocking::Queue::new();
+static FIELD_PREVIEW_LANE: blocking::Latest = blocking::Latest::new();
 static LIBRARY_QUERY_QUEUE: blocking::Queue = blocking::Queue::new();
 static LIBRARY_SUGGEST_QUEUE: blocking::Queue = blocking::Queue::new();
 static QUERY_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -999,11 +1000,16 @@ async fn preview_field_operations(
 ) -> Result<PlanDto, ErrorDto> {
     let state = state.inner().clone();
     SESSION_QUEUE
-        .run(move || {
+        .run_latest(&FIELD_PREVIEW_LANE, move |cancel| {
             let paths = paths.into_iter().map(PathBuf::from).collect::<Vec<_>>();
             with_app(&state, |app| {
-                app.preview_field_operations(&paths, &operations, working.as_ref())
-                    .map_err(ErrorDto::from)
+                app.preview_field_operations_with_cancel(
+                    &paths,
+                    &operations,
+                    working.as_ref(),
+                    || cancel.cancelled(),
+                )
+                .map_err(ErrorDto::from)
             })
         })
         .await
