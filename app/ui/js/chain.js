@@ -744,7 +744,19 @@ function createRuleChain({ ids }) {
 //
 // Presets are not edited here; Edit presets… opens the window where they are
 // (#391). The callbacks keep this component free of the set's storage.
-function createPresetChecklist({ menu, context, isActive, setActive, appliesTo, ruleCount, onOpen }) {
+function createPresetChecklist({ menu, context, isActive, setActive, appliesTo, ruleCount, onOpen, onEdit }) {
+  // Keep the header action mounted across checklist refreshes, like the rows'
+  // existing component buttons. Reparenting in one render preserves its owner.
+  const edit = onEdit ? createComponentElement("button", { variant: "ghost", size: "icon-sm" }) : null;
+  if (edit) {
+    edit.id = "presets-edit";
+    edit.type = "button";
+    edit.className = "transformations-edit icon";
+    edit.innerHTML = ico("rename");
+    edit.dataset.i18nTitle = "presets.edit";
+    edit.dataset.i18nAriaLabel = "presets.title";
+    edit.addEventListener("click", onEdit);
+  }
   // What a preset acts on, from its rules: tags, the file name, or both.
   function targetLabel(group) {
     const scopes = (group.rules || []).map((r) => r.scope || group.scope || "tags");
@@ -801,9 +813,16 @@ function createPresetChecklist({ menu, context, isActive, setActive, appliesTo, 
     const box = el(menu);
     box.innerHTML = "";
     const head = (key) => {
-      const h = document.createElement("div");
-      h.className = "col-menu-sep";
-      h.textContent = t(key);
+      const h = document.createElement("h2");
+      h.className = "col-menu-sep preset-section-heading";
+      const label = document.createElement("span");
+      label.textContent = t(key);
+      h.appendChild(label);
+      if (key === "presets.yours" && edit) {
+        edit.title = t("presets.edit");
+        edit.setAttribute("aria-label", t("presets.title"));
+        h.appendChild(edit);
+      }
       box.appendChild(h);
     };
     head("presets.yours");

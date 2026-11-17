@@ -430,12 +430,10 @@
 {/snippet}
 </Tabs.Trigger>
       </Tabs.List>
-        <div class="source-tools">
+        <div class="source-tools" hidden={subtab === 'transformations'}>
           {#if subtab === 'editor'}<InspectorHelp labelKey="inspector.editorInfo" helpKey="inspector.editorHelp" />
           {:else if subtab === 'filename'}<InspectorHelp labelKey="inspector.nameInfo" helpKey="inspector.nameHelp" />
-          {:else if subtab === 'fromtext'}<InspectorHelp labelKey="inspector.textInfo" helpKey="inspector.textHelp" />
-          {:else if subtab === 'transformations'}<InspectorHelp labelKey="inspector.transformInfo" helpKey="generator.transformHint" />{/if}
-          <Button variant="ghost" size="icon-sm" id="presets-edit" hidden={subtab !== 'transformations'} class="transformations-edit icon" type="button" data-i18n-title="presets.edit" title="Edit transformation presets" data-i18n-aria-label="presets.title" aria-label="Transformation presets"><svg class="ico"><use href="#i-rename"/></svg></Button>
+          {:else if subtab === 'fromtext'}<InspectorHelp labelKey="inspector.textInfo" helpKey="inspector.textHelp" />{/if}
         </div>
       </div>
 

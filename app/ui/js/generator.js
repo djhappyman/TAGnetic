@@ -658,6 +658,7 @@ const presetChecklist = createPresetChecklist({
   ruleCount: group => presetRuleCount(group, 'generator'),
   // › on a row opens that preset in the editor, over this window (#556).
   onOpen: (group) => openPresetEditor(group.name),
+  onEdit: () => openPresetEditor(),
 });
 for (const context of ['generator', 'online', 'fromname', 'renamer']) {
   onChainChanged(context, scheduleAutomaticTransformPreview);
@@ -693,7 +694,6 @@ onPresetsChanged((renamed) => {
   notifyChainChanged();
 });
 el("transform-preview").addEventListener("click", previewTransform);
-el("presets-edit").addEventListener("click", () => openPresetEditor());
 el("transform-btn").addEventListener("click", () =>
   transformModalOpen() ? closeTransformModal() : openTransformModal()
 );

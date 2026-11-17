@@ -32,7 +32,7 @@ body button[data-slot='button'].mode-tab { min-height:32px; position:relative; p
 body button[data-slot='button'].mode-tab .ico { display:inline-block; width:17px; height:17px; }
 body .topbar .ico { width:17px; height:17px; }
 body button[data-slot='button'].mode-tab[aria-selected='true'] { background:transparent; color:var(--accent-ink); }
-body .mode-tab::after { content:''; position:absolute; inset-inline:10px; bottom:0; height:2px; border-radius:var(--r-pill); background:transparent; }
+body .mode-tab::after { content:''; position:absolute; inset-inline:4px; bottom:0; height:2px; border-radius:var(--r-pill); background:var(--workbench-seam); pointer-events:none; }
 body .mode-tab[aria-selected='true']::after { background:var(--accent); }
 body button[data-slot='button'].mode-tab:hover { background:var(--row-hover); }
 body .mode-tab[aria-selected='true'] > .ico { opacity:1; }

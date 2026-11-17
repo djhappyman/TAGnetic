@@ -58,10 +58,13 @@ body .mode-col .subtabs[data-slot='tabs-list'] {
 }
 body .mode-col .subtabs[data-slot='tabs-list'][hidden] { display:none; }
 body .mode-col button[data-slot='button'].subtab {
+  position: relative;
+  justify-self: center;
+  width: max-content;
   flex: 0 1 auto;
   height: var(--ctl-h);
   min-height: var(--ctl-h);
-  padding: 0 var(--sp-1);
+  padding: 0 var(--sp-2);
   border: 0;
   border-radius: var(--r-compact);
   background: transparent;
@@ -76,9 +79,20 @@ body .mode-col button[data-slot='button'].subtab:hover:not(.active) {
   color: var(--text);
 }
 body .mode-col button[data-slot='button'].subtab.active {
-  background: var(--sel-tint);
+  background: transparent;
   color: var(--accent-ink);
 }
+body .mode-col .subtab::after {
+  content: '';
+  position: absolute;
+  inset-inline: 2px;
+  bottom: 0;
+  height: 2px;
+  border-radius: var(--r-pill);
+  background: var(--workbench-seam);
+  pointer-events: none;
+}
+body .mode-col .subtab.active::after { background: var(--accent); }
 
 /* ---- headings: panel title is the loudest text in its own panel ---------- */
 body .mode-col :is(.inspector-heading h2, .panel-block h2, .mode-panel > h2) {
@@ -1261,12 +1275,27 @@ body .mode-col button.fe-clear .ico { width:14px; height:14px; }
 @media(prefers-reduced-motion:reduce) { body .mode-col button.fe-clear { transition:none; } }
 
 body .mode-col .transformations-scroll { display:flex; flex:1; min-height:0; padding:var(--sp-3) var(--inspector-inset) var(--sp-4); background:var(--workbench-chrome,var(--panel)); gap:var(--sp-3); }
-body .mode-col .transformations-edit { margin-inline-start:auto; color:var(--muted); }
+body .mode-col #groups-menu .preset-section-heading {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:var(--sp-2);
+  margin:0;
+  padding:var(--sp-2);
+  color:var(--text);
+  font-size:var(--type-heading-size);
+  font-weight:var(--fw-strong);
+  line-height:var(--lh-tight);
+  letter-spacing:0;
+  text-transform:none;
+}
+body .mode-col .transformations-edit { flex:none; width:24px; height:24px; min-height:24px; padding:3px; color:var(--muted); }
 
 body .mode-col .source-navigation { display:flex; align-items:center; flex:none; min-width:0; }
 body .mode-col .source-navigation[hidden] { display:none; }
 body .mode-col .source-navigation .subtabs { flex:1; width:0; overflow-x:auto; scrollbar-width:none; padding-inline-end:var(--sp-1); }
 body .mode-col .source-tools { display:flex; align-items:center; flex:none; gap:var(--sp-1); padding-inline-end:var(--inspector-inset); }
+body .mode-col .source-tools[hidden] { display:none; }
 body .mode-col .source-tools button { width:24px; height:24px; min-height:24px; padding:3px; }
 body .mode-col .source-tools button[hidden] { display:none; }
 
