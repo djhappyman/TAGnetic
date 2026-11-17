@@ -234,7 +234,7 @@ pub enum QueryError {
     Cancelled,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Value {
     raw: String,
     folded: String,
@@ -249,7 +249,7 @@ impl Value {
 }
 
 /// A single row's searchable saved metadata. Technical properties are optional.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryRow {
     pub path: String,
     values: BTreeMap<String, Value>,
@@ -257,6 +257,7 @@ pub struct QueryRow {
     format: Option<tagrex_core::model::AudioFormat>,
     props: Option<tagrex_core::model::AudioProps>,
     modified: Option<SystemTime>,
+    source_fingerprint: Option<crate::read_cache::Fingerprint>,
 }
 
 impl QueryRow {
@@ -341,7 +342,12 @@ impl QueryRow {
             format: None,
             props: None,
             modified: None,
+            source_fingerprint: None,
         }
+    }
+
+    pub(crate) fn set_source_metadata(&mut self, metadata: Option<&std::fs::Metadata>) {
+        self.source_fingerprint = metadata.and_then(crate::read_cache::Fingerprint::from_metadata);
     }
 
     pub fn set_technical(
@@ -458,6 +464,18 @@ impl QueryIndex {
             .map(|row| updates.remove(&row.path).unwrap_or_else(|| row.clone()))
             .collect();
         Self::from_shared_rows(rows)
+    }
+    /// Read-only refreshes must not invalidate facets, ongoing queries or
+    /// duplicate evidence unless the rows or their source identity changed.
+    pub fn with_updates_if_changed(&self, rows: Vec<QueryRow>) -> Option<Self> {
+        let updates: HashMap<_, _> = rows.iter().map(|row| (row.path.as_str(), row)).collect();
+        let changed = !self.is_current()
+            || self.rows.iter().any(|row| {
+                updates
+                    .get(row.path.as_str())
+                    .is_some_and(|new| new.source_fingerprint.is_none() || row.as_ref() != *new)
+            });
+        changed.then(|| self.with_updates(rows))
     }
     pub fn invalidate(&self) {
         self.valid.store(false, Ordering::Release);

@@ -9,8 +9,8 @@ use std::{
 
 use tagrex_core::model::{TagEngine, TagIoError, TrackRead};
 
-#[derive(Clone, PartialEq, Eq)]
-struct Fingerprint {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Fingerprint {
     len: u64,
     modified: SystemTime,
     #[cfg(unix)]
@@ -20,6 +20,9 @@ struct Fingerprint {
 impl Fingerprint {
     fn of(path: &Path) -> Option<Self> {
         let m = std::fs::metadata(path).ok()?;
+        Self::from_metadata(&m)
+    }
+    pub(crate) fn from_metadata(m: &std::fs::Metadata) -> Option<Self> {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
         Some(Self {

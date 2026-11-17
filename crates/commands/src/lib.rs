@@ -2903,6 +2903,7 @@ impl App {
         let read = self.read_snapshot(Path::new(&track.path)).ok();
         let props = read.as_ref().map(|read| read.props);
         let metadata = std::fs::metadata(&track.path).ok();
+        row.set_source_metadata(metadata.as_ref());
         row.set_technical(
             metadata.as_ref().map(|m| m.len()),
             props.as_ref().and_then(|p| p.bitrate_kbps),
@@ -2990,7 +2991,7 @@ impl App {
     /// require exact membership; directory sessions use the scanner's supported
     /// regular-file boundary, with no symlink traversal below the chosen root.
     pub fn read_track(&self, path: &Path) -> Result<TrackDto, AppError> {
-        self.read_track_rows(std::slice::from_ref(&path.to_path_buf()))
+        self.read_track_rows_inner(std::slice::from_ref(&path.to_path_buf()), true)
             .map(|mut rows| rows.remove(0))
     }
 
@@ -3036,6 +3037,14 @@ impl App {
     /// The whole request is validated before any snapshot is taken, so a path
     /// outside the library fails before a partial batch is returned.
     pub fn read_track_rows(&self, paths: &[PathBuf]) -> Result<Vec<TrackDto>, AppError> {
+        self.read_track_rows_inner(paths, false)
+    }
+
+    fn read_track_rows_inner(
+        &self,
+        paths: &[PathBuf],
+        force_refresh: bool,
+    ) -> Result<Vec<TrackDto>, AppError> {
         self.validate_track_paths(paths)?;
         let mut rows = Vec::with_capacity(paths.len());
         let tracks = paths
@@ -3049,12 +3058,21 @@ impl App {
         let previous = self.query_index.borrow().clone();
         let pending = self.query_pending.borrow_mut().take();
         if let Some(previous) = previous {
-            *self.query_index.borrow_mut() = Some(std::sync::Arc::new(previous.with_updates(rows)));
+            let updated = if force_refresh {
+                Some(previous.with_updates(rows))
+            } else {
+                previous.with_updates_if_changed(rows)
+            };
+            if let Some(updated) = updated {
+                *self.query_index.borrow_mut() = Some(std::sync::Arc::new(updated));
+            }
         } else if let Some(mut pending) = pending {
             for path in paths {
                 pending.paths.remove(path);
             }
-            pending.index = std::sync::Arc::new(pending.index.with_updates(rows));
+            if let Some(updated) = pending.index.with_updates_if_changed(rows) {
+                pending.index = std::sync::Arc::new(updated);
+            }
             if pending.paths.is_empty() {
                 *self.query_index.borrow_mut() = Some(pending.index);
             } else {
