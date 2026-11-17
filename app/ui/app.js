@@ -4958,10 +4958,8 @@ if (TAURI) {
     activity.classList.toggle('has-active-work', active > 0);
     if (agentsEnabled && !wasEnabled) mirrorManualPlan(previewPlan);
   }
-  el('agent-activity').addEventListener('click', async () => {
-    await openSettings();
-    const groups = [...document.querySelectorAll('.settings-body .settings-group')];
-    selectSettingsGroup(groups.findIndex(group => group.classList.contains('agent-connections')));
+  el('agent-activity').addEventListener('click', () => {
+    document.dispatchEvent(new CustomEvent('tagrex:show-agent-activity'));
   });
   document.addEventListener('tagrex:show-shared-stage', () => {
     el('settings').hidden = true;
@@ -5033,9 +5031,6 @@ if (TAURI) {
         if (data?.module) setMode(data.module);
         if (data?.path) hooks.revealPath(data.path);
         if (data?.draft) {
-          await openSettings();
-          const groups = [...document.querySelectorAll('.settings-body .settings-group')];
-          selectSettingsGroup(groups.findIndex(group => group.classList.contains('agent-connections')));
           document.dispatchEvent(new CustomEvent('tagrex:review-agent-draft', { detail: data }));
         }
       } else if (kind === 'ui_preferences') {

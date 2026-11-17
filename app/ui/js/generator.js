@@ -190,8 +190,22 @@ function clearAutomaticPlan(paths = []) {
 }
 
 function scheduleAutomaticTransformPreview({ modelChanged = false, nativeStructural = false } = {}) {
-  if (nativeRecompute && !nativeStructural && scheduleNativeRecompute()) return;
-  if (nativeLiveFields && !hasStructuralLiveInputs() && !automaticPlan && !automaticFieldScope.length && !presetsFor(chainContext(), {allScopes:true}).length) return;
+  if (nativeRecompute && !nativeStructural && scheduleNativeRecompute()) {
+    // Native publication owns the pending/validation gate. A selection change
+    // must not leave the retired JS preview's busy flag latched after its ack.
+    const gateChanged = automaticBusy || automaticBlocked || automaticFailed;
+    cancelAutomaticRequest();
+    automaticBlocked = automaticFailed = false;
+    if (gateChanged) announceAutomaticScope();
+    return;
+  }
+  if (nativeLiveFields && !hasStructuralLiveInputs() && !automaticPlan && !automaticFieldScope.length && !presetsFor(chainContext(), {allScopes:true}).length) {
+    const gateChanged = automaticBusy || automaticBlocked || automaticFailed;
+    cancelAutomaticRequest();
+    automaticBlocked = automaticFailed = false;
+    if (gateChanged) announceAutomaticScope();
+    return;
+  }
   if (modelChanged) modelRevision++;
   const snapshot = automaticSnapshot();
   if (isLiveImportBusy()) { cancelAutomaticRequest(); automaticBusy = true; announceAutomaticScope(); return; }

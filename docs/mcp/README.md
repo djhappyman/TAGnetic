@@ -7,16 +7,23 @@ second library or journal.
 
 ## Connect a local client
 
-1. In the desktop's external-agent settings, enable access and pair a client.
-   Choose the approved folders, operations, file budget and optional expiry.
-   Use separate pairings for Codex and OpenCode so each can be revoked separately.
-2. Save the generated credential file in a private local directory. The file
-   contains a secret; the setup snippets contain only its path. Never paste its
-   contents into a prompt or repository.
-3. Configure the client to run the installed TAGnetic executable with
-   `--mcp-stdio`, its application-data profile and that credential-file path.
+1. Open a music folder, then go to **Settings → MCP connection** and choose
+   **Pair Codex** or **Pair OpenCode**. Tagnetic enables the connection and saves
+   the private credential file automatically. Each pairing grants the complete
+   workflow within that folder: reading, shared staging, writing, exports,
+   providers, presets, history, playback and UI access. Trash is not granted.
+2. Click **Copy install command**, paste it into your terminal and run it.
+   This registers the connector with the chosen client. Pairing alone does not
+   install it, and no hand-edited JSON or TOML is needed. The generated command
+   includes only the credential file's path, never its secret contents.
+3. Run `codex mcp list` or `opencode mcp list` and check that `tagnetic` is listed.
+   Start a new agent session and ask it to show the music folder open in Tagnetic.
 4. Keep the desktop open. The connector reports unavailable when no desktop
    owns that profile; it does not silently launch another session.
+
+Pair Codex and OpenCode separately. Pairings remain valid until revoked through
+the **Agent activity** button in the app header; work history, draft review and
+interrupted-operation recovery also live there, separate from connection setup.
 
 Example Codex configuration (substitute the absolute installed paths):
 

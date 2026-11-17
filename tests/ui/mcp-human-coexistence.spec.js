@@ -104,28 +104,42 @@ test('a stale recovery proof refreshes the scope before a person retries', async
   await expect.poll(() => page.evaluate(() => window.mcpFixture.state.recovered)).toBe(true);
 });
 
-test('trusted pairing uses the opened folder and exposes only a credential file path', async ({ page }) => {
-  await page.locator('#agent-activity').click();
-  await expect(page.locator('#mcp-agent-roots')).toHaveValue('/music');
-  await page.locator('#mcp-agent-label').fill('Codex fixture');
-  await page.locator('#mcp-pair').click();
-  await expect(page.locator('#mcp-connection-config')).toHaveValue(/--mcp-stdio/);
+test('pairing generates an install command; pairing alone never claims installation', async ({ page }) => {
+  await page.locator('#settings-open').click();
+  await page.getByRole('tab', { name: 'MCP connection', exact: true }).click();
+  await page.locator('#mcp-pair-codex').click();
+  await expect(page.locator('#mcp-connection-config')).toHaveValue(/^codex mcp add tagnetic -- /);
   await expect(page.locator('#mcp-connection-config')).toHaveValue(/client_fixture\.token/);
-  expect(await page.evaluate(() => window.mcpFixture.state.clients[0].grant)).toMatchObject({ roots: ['/music'], actions: ['read', 'stage', 'providers'] });
-  await page.getByRole('button', { name: 'Revoke', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Revoke', exact: true })).toBeDisabled();
+  await expect(page.getByText('Codex is paired. Run this command in your terminal to install the connection.', { exact: true })).toBeVisible();
+  const grant = await page.evaluate(() => window.mcpFixture.state.clients[0].grant);
+  expect(grant).toMatchObject({ roots: ['/music'], expires_at: null });
+  expect(grant.actions).toEqual(expect.arrayContaining(['read', 'stage', 'write', 'outputs', 'providers', 'settings', 'history', 'open', 'playback', 'ui']));
+  expect(grant.actions).not.toContain('trash');
+  await expect(page.locator('.agent-connections').getByRole('button', { name: 'Revoke', exact: true })).toHaveCount(0);
+  await page.locator('#mcp-copy-install').click();
+  await expect(page.getByRole('status').filter({ hasText: /Copied|Command selected/ })).toBeVisible();
+  await page.locator('#mcp-pair-opencode').click();
+  await expect(page.locator('#mcp-connection-config')).toHaveValue(/^opencode mcp add tagnetic --global -- /);
+  await expect(page.locator('.agent-connections')).toContainText('opencode mcp list');
+  await page.locator('#settings-close').click();
+  await page.locator('#agent-activity').click();
+  await page.getByRole('button', { name: 'Revoke', exact: true }).first().click();
+  await expect(page.getByRole('button', { name: 'Revoke', exact: true }).first()).toBeDisabled();
 });
 
-test('unavailable recovery evidence keeps connection controls and guidance available', async ({ page }) => {
+test('unavailable recovery evidence stays in activity, away from connection setup', async ({ page }) => {
   await page.evaluate(() => {
     window.mcpFixture.state.recovery = { recovery_required: true, operations: [], guidance: 'Open the original folder to inspect this interrupted operation.' };
     window.mcpFixture.emit('service_changed', {});
   });
   await page.locator('#agent-activity').click();
-  await expect(page.locator('#mcp-enable')).toBeEnabled();
-  await expect(page.locator('#mcp-agent-label')).toBeVisible();
   await expect(page.getByText('Open the original folder to inspect this interrupted operation.', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Keep completed changes', exact: true })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await page.locator('#settings-open').click();
+  await page.getByRole('tab', { name: 'MCP connection', exact: true }).click();
+  await expect(page.locator('#mcp-pair-codex')).toBeEnabled();
+  await expect(page.locator('.agent-connections')).not.toContainText('Interrupted work');
 });
 
 test('a mask save conflict preserves the typed draft and shows success only after a real retry', async ({ page }) => {
@@ -321,6 +335,30 @@ test('native preset composition retains earlier raw fields and the final toggle-
   expect(requests.some(request=>request.recompute && request.groups.length===0)).toBe(true);
   expect(requests.every(request=>request.session==='fixture')).toBe(true);
   expect(await page.evaluate(()=>window.mcpFixture.state.mediaWrites)).toBe(0);
+});
+
+test('settled native recompute releases Apply after a selection change', async ({ page }) => {
+  const preset = await nativeTransforms(page);
+  await staged(page, 'Ready to apply');
+  await preset.click();
+  await expect.poll(() => page.evaluate(() => window.tagrex.previewPlan?.changes[0]?.tag_changes.find(field => field.field === 'title')?.new)).toBe('Ready to apply!');
+  await page.evaluate(() => {
+    const invoke = window.__TAURI__.core.invoke;
+    window.__TAURI__.core.invoke = (command, args) => {
+      if (command === 'mcp_publish_shared_intents' && args.recompute) {
+        return new Promise((resolve, reject) => {
+          window.releaseNativeRecompute = () => Promise.resolve(invoke(command, args)).then(resolve, reject);
+        });
+      }
+      return invoke(command, args);
+    };
+  });
+  await page.locator('#tracks-body tr[data-path]').nth(1).click();
+  await expect.poll(() => page.evaluate(() => typeof window.releaseNativeRecompute)).toBe('function');
+  await expect(page.locator('#diff-apply')).toBeDisabled();
+  await page.evaluate(() => { window.releaseNativeRecompute(); });
+  await expect.poll(() => page.evaluate(() => window.mcpFixture.state.intentRequests?.some(request => request.recompute && request.paths?.includes(window.tagrex.tracks[1].path)))).toBe(true);
+  await expect(page.locator('#diff-apply')).toBeEnabled();
 });
 
 test('native preset toggle-off retires derived changes from earlier selected scopes',async({page})=>{
