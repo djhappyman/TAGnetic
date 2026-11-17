@@ -44,7 +44,6 @@ body .mode-col {
 
 /* ---- tabs: one quiet 32px navigation row for the manual tagging sources and Transformations -------- */
 body .mode-col .subtabs[data-slot='tabs-list'] {
-  position: relative;
   display: grid;
   grid-template-columns: repeat(4, minmax(max-content, 1fr));
   flex: 0 0 auto;
@@ -58,20 +57,7 @@ body .mode-col .subtabs[data-slot='tabs-list'] {
   background: transparent;
 }
 body .mode-col .subtabs[data-slot='tabs-list'][hidden] { display:none; }
-body .mode-col .subtabs::before {
-  content: '';
-  position: absolute;
-  inset-inline: calc(var(--inspector-inset) + var(--sp-2)) var(--sp-1);
-  bottom: var(--sp-3);
-  height: 2px;
-  border-radius: var(--r-pill);
-  background: var(--workbench-seam);
-  pointer-events: none;
-}
 body .mode-col button[data-slot='button'].subtab {
-  position: relative;
-  justify-self: center;
-  width: max-content;
   flex: 0 1 auto;
   height: var(--ctl-h);
   min-height: var(--ctl-h);
@@ -90,21 +76,9 @@ body .mode-col button[data-slot='button'].subtab:hover:not(.active) {
   color: var(--text);
 }
 body .mode-col button[data-slot='button'].subtab.active {
-  background: transparent;
+  background: var(--sel-tint);
   color: var(--accent-ink);
 }
-body .mode-col .subtab::after {
-  content: '';
-  position: absolute;
-  z-index: 1;
-  inset-inline: 2px;
-  bottom: 0;
-  height: 2px;
-  border-radius: var(--r-pill);
-  background: transparent;
-  pointer-events: none;
-}
-body .mode-col .subtab.active::after { background: var(--accent); }
 
 /* ---- headings: panel title is the loudest text in its own panel ---------- */
 body .mode-col :is(.inspector-heading h2, .panel-block h2, .mode-panel > h2) {
