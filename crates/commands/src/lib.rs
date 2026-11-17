@@ -15,6 +15,11 @@
 mod cover_encoding;
 mod field_operations;
 pub use field_operations::{has_field_rules, validate_field_groups, FieldOperation};
+mod native_batch;
+pub use native_batch::{
+    NumberBoundary, NumberingOptions, TextImportMode, TextImportOptions, TextImportPreview,
+    TextImportRow, TextImportStatus, TextSidecarOptions,
+};
 pub mod duplicates;
 mod import_matching;
 mod output;
@@ -7843,21 +7848,35 @@ pub fn read_text_list(path: &Path) -> Result<String, AppError> {
     if !metadata.is_file() || metadata.len() > TEXT_LIST_MAX_BYTES {
         return Err(not_text());
     }
+    decode_text_file(file, path)
+}
+
+fn decode_text_file(file: std::fs::File, path: &Path) -> Result<String, AppError> {
+    let not_text = || AppError::NotATextList(path.display().to_string());
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > TEXT_LIST_MAX_BYTES {
+        return Err(not_text());
+    }
     let bytes = read_text_list_bytes(file, path)?;
-    let utf16 = |rest: &[u8], unit: fn([u8; 2]) -> u16| {
+    let utf16 = |rest: &[u8], unit: fn([u8; 2]) -> u16| -> Result<String, AppError> {
+        if !rest.len().is_multiple_of(2) {
+            return Err(not_text());
+        }
         let units: Vec<u16> = rest
             .as_chunks::<2>()
             .0
             .iter()
             .map(|pair| unit(*pair))
             .collect();
-        String::from_utf16_lossy(&units)
+        String::from_utf16(&units).map_err(|_| not_text())
     };
     let text = match bytes.as_slice() {
-        [0xFF, 0xFE, rest @ ..] => utf16(rest, u16::from_le_bytes),
-        [0xFE, 0xFF, rest @ ..] => utf16(rest, u16::from_be_bytes),
-        [0xEF, 0xBB, 0xBF, rest @ ..] => String::from_utf8_lossy(rest).into_owned(),
-        rest => String::from_utf8_lossy(rest).into_owned(),
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, u16::from_le_bytes)?,
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, u16::from_be_bytes)?,
+        [0xEF, 0xBB, 0xBF, rest @ ..] => {
+            String::from_utf8(rest.to_vec()).map_err(|_| not_text())?
+        }
+        rest => String::from_utf8(rest.to_vec()).map_err(|_| not_text())?,
     };
     if text.contains('\0') {
         return Err(not_text());
@@ -18060,4 +18079,5 @@ mod tests {
         );
     }
     include!("field_operations_tests.rs");
+    include!("native_batch_tests.rs");
 }

@@ -331,6 +331,17 @@ impl Mask {
 
     /// Filename -> tags (the import direction).
     pub fn extract(&self, filename: &str) -> Result<TagMap, MaskError> {
+        self.validate_extraction()?;
+        let captures = self.regex.captures(filename).ok_or(MaskError::NoMatch)?;
+
+        let mut tags = TagMap::new();
+        let mut index = 0;
+        collect_captures(&self.segments, &captures, &mut index, &mut tags);
+        Ok(tags)
+    }
+
+    /// Check the extraction direction before reading any selected files.
+    pub fn validate_extraction(&self) -> Result<(), MaskError> {
         // Rendering adjacent placeholders is fine; splitting the result back
         // apart is guesswork, so refuse rather than invent a boundary.
         if self.adjacent_placeholders {
@@ -341,12 +352,29 @@ impl Mask {
         if self.render_only {
             return Err(MaskError::RenderOnly);
         }
-        let captures = self.regex.captures(filename).ok_or(MaskError::NoMatch)?;
+        Ok(())
+    }
 
-        let mut tags = TagMap::new();
-        let mut index = 0;
-        collect_captures(&self.segments, &captures, &mut index, &mut tags);
-        Ok(tags)
+    /// Extracting several captures into the same scalar field loses all but
+    /// one. New batch APIs refuse it until a list-valued destination is explicit.
+    pub fn validate_unique_extraction(&self) -> Result<(), MaskError> {
+        self.validate_extraction()?;
+        fn visit(segments: &[Segment], fields: &mut Vec<TagField>) -> Result<(), MaskError> {
+            for segment in segments {
+                match segment {
+                    Segment::Placeholder(field, ..) => {
+                        if fields.iter().any(|seen| seen.same_name(field)) {
+                            return Err(MaskError::BadArgument("Extraction destinations must be unique; use a separate value operation for lists.".into()));
+                        }
+                        fields.push(field.clone());
+                    }
+                    Segment::Section(inner) => visit(inner, fields)?,
+                    _ => (),
+                }
+            }
+            Ok(())
+        }
+        visit(&self.segments, &mut Vec::new())
     }
 
     pub fn pattern(&self) -> &str {

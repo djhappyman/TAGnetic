@@ -7,13 +7,42 @@ use super::*;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FieldOperation {
-    Format { field: String, pattern: String },
-    Remove { fields: Vec<String> },
-    Keep { fields: Vec<String> },
+    Format {
+        field: String,
+        pattern: String,
+    },
+    /// Render the source using current staged tags, then extract named fields.
+    Extract {
+        source: String,
+        pattern: String,
+    },
+    /// Split an explicitly chosen list field; punctuation in other fields stays literal.
+    SplitValues {
+        field: String,
+        separator: String,
+    },
+    /// Join a supported list into one value; refuse an unrepresentable result.
+    MergeValues {
+        field: String,
+        separator: String,
+    },
+    /// Keep the first occurrence of each exact value, in its original order.
+    DeduplicateValues {
+        field: String,
+    },
+    Remove {
+        fields: Vec<String>,
+    },
+    Keep {
+        fields: Vec<String>,
+    },
 }
 
 pub(crate) enum Step {
     Format(TagField, Mask),
+    Extract(Mask, Mask),
+    Assign(HashMap<PathBuf, TagMap>),
+    Values(TagField, ValueStep),
     Select {
         fields: HashSet<String>,
         keep: bool,
@@ -21,8 +50,38 @@ pub(crate) enum Step {
     },
     Transform(String, TransformChain),
 }
-fn invalid(message: impl Into<String>) -> AppError {
+pub(crate) fn invalid(message: impl Into<String>) -> AppError {
     MaskError::BadArgument(message.into()).into()
+}
+pub(crate) enum ValueStep {
+    Split(String),
+    Merge(String),
+    Deduplicate,
+}
+
+fn assign_value(
+    tags: &mut TagMap,
+    field: &TagField,
+    value: Option<String>,
+    locked: &HashSet<String>,
+    blocked: &mut BTreeMap<TagField, Option<String>>,
+) -> Result<(), AppError> {
+    let mut matches = tags.keys().filter(|key| key.same_name(field));
+    let key = matches.next().cloned().unwrap_or_else(|| field.clone());
+    if matches.next().is_some() {
+        return Err(invalid(
+            "Multiple stored fields differ only in letter case; resolve them before editing.",
+        ));
+    }
+    let value = value.filter(|value| !value.is_empty());
+    if locked.contains(&key.to_storage_key()) {
+        blocked.insert(key, value);
+    } else if let Some(value) = value {
+        tags.insert(key, value);
+    } else {
+        tags.remove(&key);
+    }
+    Ok(())
 }
 impl FieldOperation {
     fn compile(&self) -> Result<Step, AppError> {
@@ -44,6 +103,41 @@ impl FieldOperation {
                     return Err(MaskError::ExtractOnly.into());
                 }
                 Ok(Step::Format(field, mask))
+            }
+            Self::Extract { source, pattern } => {
+                let source = Mask::parse(source)?;
+                if source.is_extract_only() {
+                    return Err(MaskError::ExtractOnly.into());
+                }
+                let pattern = Mask::parse(pattern)?;
+                pattern.validate_unique_extraction()?;
+                if pattern.fields().is_empty() {
+                    return Err(invalid(
+                        "An extraction pattern must name at least one destination field.",
+                    ));
+                }
+                Ok(Step::Extract(source, pattern))
+            }
+            Self::SplitValues { field, separator } | Self::MergeValues { field, separator } => {
+                if (matches!(self, Self::SplitValues { .. }) && separator.is_empty())
+                    || separator.len() > 1024
+                    || separator.contains('\0')
+                {
+                    return Err(invalid(
+                        "Value separators are limited to 1024 bytes without NUL; a split separator cannot be empty.",
+                    ));
+                }
+                let field = list_field(field)?;
+                Ok(Step::Values(
+                    field,
+                    match self {
+                        Self::SplitValues { .. } => ValueStep::Split(separator.clone()),
+                        _ => ValueStep::Merge(separator.clone()),
+                    },
+                ))
+            }
+            Self::DeduplicateValues { field } => {
+                Ok(Step::Values(list_field(field)?, ValueStep::Deduplicate))
             }
             Self::Remove { fields } | Self::Keep { fields } => {
                 if fields.len() > 256 {
@@ -71,12 +165,26 @@ impl FieldOperation {
     }
 }
 
+fn list_field(name: &str) -> Result<TagField, AppError> {
+    let field = TagField::from_name(name).ok_or_else(|| invalid("Expected a tag field."))?;
+    if !field.is_multi_value() {
+        return Err(invalid("This field does not yet support lossless multiple-value editing. Choose artist, albumartist, genre or composer."));
+    }
+    Ok(field)
+}
+
 pub fn has_field_rules(groups: &[ActionGroupDto]) -> bool {
     groups.iter().flat_map(|group| &group.rules).any(|rule| {
         rule.enabled
             && matches!(
                 rule.kind.as_str(),
-                "format" | "remove_fields" | "keep_fields"
+                "format"
+                    | "extract"
+                    | "split_values"
+                    | "merge_values"
+                    | "deduplicate_values"
+                    | "remove_fields"
+                    | "keep_fields"
             )
     })
 }
@@ -122,6 +230,25 @@ fn compile_groups(groups: &[ActionGroupDto]) -> Result<Vec<Step>, AppError> {
                 .compile()?,
                 "remove_fields" => FieldOperation::Remove { fields: fields() }.compile()?,
                 "keep_fields" => FieldOperation::Keep { fields: fields() }.compile()?,
+                "extract" => FieldOperation::Extract {
+                    source: rule.from.clone(),
+                    pattern: rule.to.clone(),
+                }
+                .compile()?,
+                "split_values" => FieldOperation::SplitValues {
+                    field: rule.scope.clone().unwrap_or_else(|| group.scope.clone()),
+                    separator: rule.from.clone(),
+                }
+                .compile()?,
+                "merge_values" => FieldOperation::MergeValues {
+                    field: rule.scope.clone().unwrap_or_else(|| group.scope.clone()),
+                    separator: rule.to.clone(),
+                }
+                .compile()?,
+                "deduplicate_values" => FieldOperation::DeduplicateValues {
+                    field: rule.scope.clone().unwrap_or_else(|| group.scope.clone()),
+                }
+                .compile()?,
                 _ => Step::Transform(
                     rule.scope.clone().unwrap_or_else(|| group.scope.clone()),
                     build_chain(std::slice::from_ref(rule))?,
@@ -173,7 +300,7 @@ impl App {
         }
         self.run_field_steps(paths, &compile_groups(groups)?, working, || false)
     }
-    fn run_field_steps(
+    pub(crate) fn run_field_steps(
         &self,
         paths: &[PathBuf],
         steps: &[Step],
@@ -181,6 +308,16 @@ impl App {
         cancelled: impl Fn() -> bool,
     ) -> Result<PlanDto, AppError> {
         let _encoding_scope = cover_encoding::Scope::new();
+        if paths.len() > 100_000 {
+            return Err(invalid(
+                "Field batches are limited to 100000 selected files.",
+            ));
+        }
+        if paths.iter().any(|path| path.to_str().is_none()) {
+            return Err(invalid(
+                "Field batches require Unicode paths so preview and Apply address the same files.",
+            ));
+        }
         if let Some(plan) = working {
             plan.validate_cover_assets()?;
         }
@@ -194,6 +331,8 @@ impl App {
             .cloned()
             .collect();
         let mut seen = HashSet::new();
+        let mut unmatched = Vec::new();
+        let mut batch_bytes = 0usize;
         for path in paths {
             if cancelled() {
                 return Err(tagrex_core::plan::PlanError::Cancelled.into());
@@ -252,26 +391,60 @@ impl App {
                     Step::Format(field, mask) => {
                         let file = self.file_context(mask, &track);
                         let value = mask.render_value_with(&tags, &file)?;
-                        let matches = tags
-                            .keys()
-                            .filter(|key| key.same_name(field))
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        // Refuse ambiguous aliases rather than overwriting one at random.
-                        if matches.len() > 1 {
-                            return Err(invalid("Multiple stored fields differ only in letter case; resolve them before formatting."));
+                        assign_value(&mut tags, field, Some(value), &locked, &mut blocked)?;
+                    }
+                    Step::Extract(source, pattern) => {
+                        let file = self.file_context(source, &track);
+                        let value = source.render_value_with(&tags, &file)?;
+                        match pattern.extract(&value) {
+                            Ok(extracted) => {
+                                // Extract before assigning: source and destinations may overlap.
+                                for (field, value) in extracted {
+                                    let value = normalize_extracted(&field, &value);
+                                    if !value.is_empty() {
+                                        assign_value(
+                                            &mut tags,
+                                            &field,
+                                            Some(value),
+                                            &locked,
+                                            &mut blocked,
+                                        )?;
+                                    }
+                                }
+                            }
+                            Err(MaskError::NoMatch) => {
+                                tally_unrendered(&mut unmatched, "extraction pattern".into(), path)
+                            }
+                            Err(err) => return Err(err.into()),
                         }
-                        let key = matches.into_iter().next().unwrap_or_else(|| field.clone());
-                        if locked.contains(&key.to_storage_key()) {
-                            blocked.insert(key, (!value.is_empty()).then_some(value));
+                    }
+                    Step::Assign(assignments) => {
+                        if let Some(values) = assignments.get(path) {
+                            for (field, value) in values {
+                                assign_value(
+                                    &mut tags,
+                                    field,
+                                    Some(value.clone()),
+                                    &locked,
+                                    &mut blocked,
+                                )?;
+                            }
+                        }
+                    }
+                    Step::Values(field, operation) => {
+                        let Some(value) = tags.get(field) else {
                             continue;
-                        }
-
-                        if value.is_empty() {
-                            tags.remove(&key);
-                        } else {
-                            tags.insert(key, value);
-                        }
+                        };
+                        let separator = tagrex_core::model::multi_value_separator();
+                        let values =
+                            tagrex_core::values::FieldValues::from_legacy_list(value, &separator)?;
+                        let next = match operation {
+                            ValueStep::Split(delimiter) => values.split(delimiter)?,
+                            ValueStep::Merge(delimiter) => values.merge(delimiter)?,
+                            ValueStep::Deduplicate => values.deduplicated(),
+                        };
+                        let value = next.to_legacy_list(&separator)?;
+                        assign_value(&mut tags, field, Some(value), &locked, &mut blocked)?;
                     }
                     Step::Select {
                         fields,
@@ -306,6 +479,11 @@ impl App {
                         }
                     }
                 }
+                if tags.values().map(String::len).sum::<usize>() > 8 * 1024 * 1024 {
+                    return Err(invalid(
+                        "A field recipe is limited to 8 MiB of text per file.",
+                    ));
+                }
             }
             let original_fields: HashMap<_, _> = previous
                 .into_iter()
@@ -334,6 +512,16 @@ impl App {
                     let old = track.tags.get(&field).cloned();
                     (old != new).then(|| FieldChangeDto::new(field.to_storage_key(), old, new))
                 }));
+            for edit in &change.tag_changes {
+                batch_bytes = batch_bytes
+                    .saturating_add(edit.old.as_ref().map_or(0, String::len))
+                    .saturating_add(edit.new.as_ref().map_or(0, String::len));
+            }
+            if batch_bytes > 64 * 1024 * 1024 {
+                return Err(invalid(
+                    "A field batch is limited to 64 MiB of changed text, including Undo values.",
+                ));
+            }
             if remove_covers {
                 let old = match &change.cover_change {
                     Some(cover) => cover.old.clone(),
@@ -349,7 +537,7 @@ impl App {
         if cancelled() {
             return Err(tagrex_core::plan::PlanError::Cancelled.into());
         }
-        Ok(match working {
+        let mut plan = match working {
             Some(plan) => self.cleaned_up_plan(plan, changes),
             None => self.plan(
                 PlanMessage::Transform {
@@ -359,6 +547,8 @@ impl App {
                 changes,
                 false,
             ),
-        })
+        };
+        plan.unrendered.extend(unmatched);
+        Ok(plan)
     }
 }

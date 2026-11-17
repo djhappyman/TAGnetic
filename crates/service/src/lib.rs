@@ -646,6 +646,7 @@ impl Service {
             | "draft.move"
             | "draft.from_name"
             | "draft.from_text"
+            | "draft.from_sidecars"
             | "draft.number"
             | "draft.import"
             | "draft.artwork"

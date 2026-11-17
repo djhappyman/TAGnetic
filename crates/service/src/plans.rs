@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashSet;
 use tagrex_commands::{ActionGroupDto, ImportSelectionDto, TagEditDto, TransformRuleDto};
 
 #[cfg(windows)]
@@ -579,19 +580,86 @@ impl Service {
                 )?
             }
             "draft.from_text" => {
-                let mask = required(args, "mask")?;
-                let text = required(args, "text")?;
-                let probe = app.probe_text_lines(mask, text, &paths)?;
-                for line in probe.lines {
-                    if let Some(path) = line.path {
-                        for (field, value) in line.fields {
-                            if !value.is_empty() {
-                                intent.tag(&path, &field);
-                            }
+                let mode = args
+                    .get("mode")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()?
+                    .unwrap_or_default();
+                let result = app.preview_text_import(
+                    &paths,
+                    required(args, "text")?,
+                    &tagrex_commands::TextImportOptions {
+                        pattern: required(args, "mask")?.into(),
+                        mode,
+                    },
+                    previous.as_ref().map(|p| &p.plan).or(working.as_ref()),
+                )?;
+                for row in &result.rows {
+                    if let Some(path) = &row.path {
+                        for field in &row.fields {
+                            intent.tag(path, field);
                         }
                     }
                 }
-                app.preview_tags_from_text(mask, text, &paths)?
+                // Native row diagnostics remain visible to clients in the plan.
+                let mut plan = result.plan;
+                if !result.unmatched_files.is_empty() {
+                    plan.unrendered.push(tagrex_commands::UnrenderedDto {
+                        field: "text import: no matching row".into(),
+                        files: result.unmatched_files.len(),
+                        paths: result.unmatched_files,
+                    });
+                }
+                for row in result
+                    .rows
+                    .iter()
+                    .filter(|row| row.status != tagrex_commands::TextImportStatus::Matched)
+                {
+                    plan.unrendered.push(tagrex_commands::UnrenderedDto {
+                        field: format!("text row {}: {:?}", row.line, row.status),
+                        files: 0,
+                        paths: Vec::new(),
+                    });
+                }
+                plan
+            }
+            "draft.from_sidecars" => {
+                let read_grant = self.grant(principal, "read")?;
+                for path in &paths {
+                    permitted(
+                        &read_grant,
+                        path.parent().ok_or_else(|| {
+                            ServiceError::invalid("Audio file has no parent folder")
+                        })?,
+                        false,
+                    )?;
+                }
+                let field = required(args, "field")?;
+                let plan = app.preview_text_sidecars(
+                    &paths,
+                    &tagrex_commands::TextSidecarOptions {
+                        field: field.into(),
+                        filename: required(args, "pattern")?.into(),
+                        skip_missing: flag(args, "skip_missing"),
+                    },
+                    previous.as_ref().map(|p| &p.plan).or(working.as_ref()),
+                )?;
+                let missing: HashSet<&str> = plan
+                    .unrendered
+                    .iter()
+                    .filter(|row| row.field == "text sidecar")
+                    .flat_map(|row| row.paths.iter().map(String::as_str))
+                    .collect();
+                let target = tagrex_core::model::TagField::from_name(field)
+                    .ok_or_else(|| ServiceError::invalid("Expected a tag field"))?
+                    .to_storage_key();
+                for path in &paths {
+                    if !missing.contains(path.to_string_lossy().as_ref()) {
+                        intent.tag(&path.to_string_lossy(), &target);
+                    }
+                }
+                plan
             }
             "draft.clear_tags" => {
                 intent
@@ -626,55 +694,59 @@ impl Service {
             }
             "draft.fix_encoding" => app.preview_fix_encoding(&paths)?,
             "draft.number" => {
-                let start = number(args, "start", 1);
-                let step = number(args, "step", 1);
-                let total = number(args, "total", paths.len());
-                let width = number(args, "width", 0).min(12);
-                if start > u32::MAX as usize || step > u32::MAX as usize {
-                    return Err(ServiceError::invalid(
-                        "Numbering values exceed supported range",
-                    ));
-                }
-                let mut edits = Vec::new();
-                for (index, path) in paths.iter().enumerate() {
-                    let number = start
-                        .checked_add(
-                            index
-                                .checked_mul(step)
-                                .ok_or_else(|| ServiceError::invalid("Numbering overflow"))?,
-                        )
-                        .ok_or_else(|| ServiceError::invalid("Numbering overflow"))?;
-                    edits.push(TagEditDto {
-                        path: path.to_string_lossy().into_owned(),
-                        field: "track".into(),
-                        value: Some(format!("{number:0width$}")),
-                    });
-                    if flag(args, "write_total") {
-                        edits.push(TagEditDto {
-                            path: path.to_string_lossy().into_owned(),
-                            field: "tracktotal".into(),
-                            value: Some(total.to_string()),
-                        });
+                let names = [
+                    "start",
+                    "step",
+                    "total",
+                    "width",
+                    "write_total",
+                    "disc",
+                    "disc_width",
+                    "disc_total",
+                    "write_disc_total",
+                    "next_disc_on",
+                    "reset_disc_on",
+                    "reset_track_on",
+                    "reset_track_on_disc",
+                    "keep_vinyl",
+                ];
+                let values = names
+                    .into_iter()
+                    .filter_map(|name| {
+                        args.get(name)
+                            .map(|value| (name.to_string(), value.clone()))
+                    })
+                    .collect::<serde_json::Map<_, _>>();
+                let options: tagrex_commands::NumberingOptions =
+                    serde_json::from_value(Value::Object(values))?;
+                let plan = app.preview_numbering(
+                    &paths,
+                    &options,
+                    previous.as_ref().map(|p| &p.plan).or(working.as_ref()),
+                )?;
+                let skipped: HashSet<&str> = plan
+                    .unrendered
+                    .iter()
+                    .filter(|row| row.field == "preserved vinyl position")
+                    .flat_map(|row| row.paths.iter().map(String::as_str))
+                    .collect();
+                for path in &paths {
+                    if skipped.contains(path.to_string_lossy().as_ref()) {
+                        continue;
                     }
-                    if let Some(disc) = args.get("disc").and_then(Value::as_u64) {
-                        edits.push(TagEditDto {
-                            path: path.to_string_lossy().into_owned(),
-                            field: "disc".into(),
-                            value: Some(disc.to_string()),
-                        });
+                    let path = path.to_string_lossy();
+                    intent.tag(&path, "track");
+                    if options.write_total {
+                        intent.tag(&path, "tracktotal");
                     }
-                    if let Some(total) = args.get("disc_total").and_then(Value::as_u64) {
-                        edits.push(TagEditDto {
-                            path: path.to_string_lossy().into_owned(),
-                            field: "disctotal".into(),
-                            value: Some(total.to_string()),
-                        });
+                    if options.disc.is_some() {
+                        intent.tag(&path, "disc");
+                        if options.write_disc_total || options.disc_total.is_some() {
+                            intent.tag(&path, "disctotal");
+                        }
                     }
                 }
-                for edit in &edits {
-                    intent.tag(&edit.path, &edit.field);
-                }
-                app.preview_tag_edits(&edits)?
+                plan
             }
             "draft.import" => {
                 let mut per_file_totals = None;
@@ -871,7 +943,11 @@ impl Service {
                 );
             }
         }
-        let plan = if tool == "draft.transform" && previous.is_some() {
+        let plan = if matches!(
+            tool,
+            "draft.transform" | "draft.from_text" | "draft.from_sidecars" | "draft.number"
+        ) && previous.is_some()
+        {
             plan
         } else if let Some(mut previous) = previous {
             intent.clear_previous(&mut previous.plan);
@@ -975,7 +1051,11 @@ impl Service {
         };
         result["protected_fields"] = json!(excluded);
         if publish {
+            let locked_skipped = std::mem::take(&mut sealed.plan.locked_skipped);
+            let unrendered = std::mem::take(&mut sealed.plan.unrendered);
             sealed.plan = super::staging::filtered(&sealed.plan, |_| false);
+            sealed.plan.locked_skipped = locked_skipped;
+            sealed.plan.unrendered = unrendered;
             sealed.size_bytes = serde_json::to_vec(&sealed.plan)?.len();
         }
         state.plans.insert(id, sealed);
@@ -1729,6 +1809,8 @@ pub(super) fn describe_live(
         .map(|plan| super::staging::filtered(plan, |key| scope.scope.contains(key)))
         .unwrap_or_else(|| super::staging::filtered(&scope.plan, |_| false));
     current.plan.description = scope.plan.description.clone();
+    current.plan.locked_skipped = scope.plan.locked_skipped.clone();
+    current.plan.unrendered = scope.plan.unrendered.clone();
     let mut result = describe(&current, offset, limit);
     result["scope_digest"] = json!(scope.digest);
     result["live_revision"] = json!(state.manual_revision);
@@ -2635,6 +2717,96 @@ mod composition_tests {
         assert_eq!(
             field(&result, &f.paths[0], "title").unwrap()["new"],
             "Current / 日本語"
+        );
+    }
+    #[test]
+    fn native_text_import_and_numbering_can_restore_saved_values_without_losing_other_intent() {
+        let f = Fixture::new();
+        let draft = f.draft(json!({"title":"Pending", "comment":"Keep", "track":"9"}));
+        let imported = f.call("draft.from_text", json!({"paths":[f.paths[0]],"draft":draft["draft"],"mask":"%_filename_ext%|%title%","mode":"filename","text":"0.wav|Saved"}));
+        assert!(field(&imported, &f.paths[0], "title").is_none());
+        assert_eq!(
+            field(&imported, &f.paths[0], "comment").unwrap()["new"],
+            "Keep"
+        );
+        let numbered = f.call(
+            "draft.number",
+            json!({"paths":[f.paths[0]],"draft":imported["draft"],"start":1}),
+        );
+        assert!(field(&numbered, &f.paths[0], "track").is_none());
+        assert_eq!(
+            field(&numbered, &f.paths[0], "comment").unwrap()["new"],
+            "Keep"
+        );
+    }
+    #[test]
+    fn native_import_diagnostics_and_invalid_number_arguments_are_visible() {
+        let f = Fixture::new();
+        let imported = f.call("draft.from_text",json!({"paths":f.paths,"mode":"filename","mask":"%_filename_ext%|%title%","text":"missing.wav|Skip\n1.wav|Matched\nBad row"}));
+        assert_eq!(
+            field(&imported, &f.paths[1], "title").unwrap()["new"],
+            "Matched"
+        );
+        assert!(field(&imported, &f.paths[0], "title").is_none());
+        assert!(imported["unrendered"].as_array().unwrap().len() >= 3);
+        for value in [json!(-1), json!(1.5), json!(4294967296u64), json!("2")] {
+            assert!(f
+                .service
+                .call(
+                    &f.principal,
+                    "draft.number",
+                    json!({"paths":[f.paths[0]],"start":value})
+                )
+                .is_err());
+        }
+    }
+    #[test]
+    fn native_sidecar_import_requires_a_folder_read_grant_and_preserves_other_staging() {
+        let f = Fixture::new();
+        fs::write(f.paths[0].parent().unwrap().join("0.txt"), "日本語\nNotes").unwrap();
+        let draft = f.draft(json!({"comment":"Keep"}));
+        let imported=f.call("draft.from_sidecars",json!({"paths":[f.paths[0]],"draft":draft["draft"],"field":"custom:LYRICS","pattern":"%filename%.txt"}));
+        assert_eq!(
+            field(&imported, &f.paths[0], "custom:LYRICS").unwrap()["new"],
+            "日本語\nNotes"
+        );
+        assert_eq!(
+            field(&imported, &f.paths[0], "comment").unwrap()["new"],
+            "Keep"
+        );
+        let pair = f
+            .service
+            .pair_client(
+                "Stage only".into(),
+                Grant {
+                    roots: vec![f.paths[0].parent().unwrap().to_path_buf()],
+                    actions: ["stage"].into_iter().map(String::from).collect(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let principal = f.service.authenticate(&pair.credential).unwrap();
+        assert!(f
+            .service
+            .call(
+                &principal,
+                "draft.from_sidecars",
+                json!({"paths":[f.paths[0]],"field":"comment","pattern":"0.txt"})
+            )
+            .is_err());
+    }
+    #[test]
+    fn native_extract_and_list_rules_run_through_the_shared_service() {
+        let f = Fixture::new();
+        f.draft(json!({"title":"Björk / 日本語 - Track"}));
+        let result=f.call("draft.transform",json!({"paths":[f.paths[0]],"groups":[{"name":"Extract credits","scope":"tags","rules":[{"kind":"extract","from":"%title%","to":"%artist% - %title%"},{"kind":"split_values","scope":"artist","from":" / "},{"kind":"format","scope":"comment","to":"%artist%: %title%"}]}]}));
+        assert_eq!(
+            field(&result, &f.paths[0], "artist").unwrap()["new"],
+            "Björk; 日本語"
+        );
+        assert_eq!(
+            field(&result, &f.paths[0], "comment").unwrap()["new"],
+            "Björk; 日本語: Track"
         );
     }
 }

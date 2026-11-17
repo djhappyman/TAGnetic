@@ -4,6 +4,9 @@ Field recipes copy or build tag values, remove unwanted fields and keep selected
 fields. Their implementation lives in Rust. They use Tagnetic's existing plans,
 shared stage, field locks, Apply and journaled Undo.
 
+See [native batch operations](native-batch-operations.md) for extracting combined
+values, matched text imports, text sidecars, disc numbering and list operations.
+
 The existing **Format values** ribbon command now uses this engine for its common
 destination fields. Other native recipe operations are available to Rust callers
 and through MCP transformation groups. The graphical preset editor does not yet

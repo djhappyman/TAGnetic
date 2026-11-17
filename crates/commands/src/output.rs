@@ -249,6 +249,66 @@ impl Directory {
     }
 }
 
+/// Open a regular input beneath a chosen root using the same pinned-directory
+/// boundary as publication. Never follow a final symlink, junction or FIFO.
+pub(crate) fn read_under(root: &Path, relative: &Path) -> io::Result<std::fs::File> {
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "expected a relative path without parent traversal",
+        ));
+    }
+    let parent = root.join(relative.parent().unwrap_or_else(|| Path::new("")));
+    let directory = Directory::open(root, &parent)?;
+    let name = relative
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing filename"))?;
+    #[cfg(unix)]
+    let file = {
+        use rustix::fs::{openat, Mode, OFlags};
+        std::fs::File::from(openat(
+            &directory.fd,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?)
+    };
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x1)
+            .custom_flags(0x0020_0000)
+            .open(directory.path.join(name))?;
+        if file.metadata()?.file_attributes() & 0x400 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "input is a reparse point",
+            ));
+        }
+        file
+    };
+    #[cfg(not(any(unix, windows)))]
+    let file = {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "confined reads are not supported on this platform",
+        ));
+    };
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "input is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
 /// Prefer atomic no-replace operations; only unsupported-operation errors may
 /// reach the final checked rename. Permission, collision and I/O errors stop.
 #[cfg(unix)]
