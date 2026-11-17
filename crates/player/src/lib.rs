@@ -20,13 +20,15 @@
 //! so in the status, and retries the device on the next play.
 
 mod aiff;
+mod mailbox;
 mod mp4;
+pub use mailbox::PlayerError;
 pub mod tempo;
 
 use std::collections::VecDeque;
 use std::io::BufReader;
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -77,42 +79,45 @@ enum Cmd {
 /// Handle to the audio thread. `Send + Sync`, so it lives directly in Tauri's
 /// managed state.
 pub struct Player {
-    tx: Sender<Cmd>,
+    tx: mailbox::Sender,
     status: Arc<Mutex<PlayerStatus>>,
 }
 
 impl Player {
     pub fn new() -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = mailbox::channel();
         let status = Arc::new(Mutex::new(PlayerStatus::default()));
         let status_for_thread = Arc::clone(&status);
         std::thread::spawn(move || audio_thread(rx, status_for_thread, open_output));
         Self { tx, status }
     }
 
-    pub fn play(&self, path: PathBuf) {
-        let _ = self.tx.send(Cmd::Play(path));
+    pub fn play(&self, path: PathBuf) -> Result<(), PlayerError> {
+        self.tx.send(Cmd::Play(path))
     }
-    pub fn set_next(&self, path: PathBuf) {
-        let _ = self.tx.send(Cmd::SetNext(path));
+    pub fn set_next(&self, path: PathBuf) -> Result<(), PlayerError> {
+        self.tx.send(Cmd::SetNext(path))
     }
-    pub fn pause(&self) {
-        let _ = self.tx.send(Cmd::Pause);
+    pub fn pause(&self) -> Result<(), PlayerError> {
+        self.tx.send(Cmd::Pause)
     }
-    pub fn resume(&self) {
-        let _ = self.tx.send(Cmd::Resume);
+    pub fn resume(&self) -> Result<(), PlayerError> {
+        self.tx.send(Cmd::Resume)
     }
-    pub fn stop(&self) {
-        let _ = self.tx.send(Cmd::Stop);
+    pub fn stop(&self) -> Result<(), PlayerError> {
+        self.tx.send(Cmd::Stop)
     }
-    pub fn seek(&self, secs: f64) {
-        let _ = self.tx.send(Cmd::Seek(secs));
+    pub fn seek(&self, secs: f64) -> Result<(), PlayerError> {
+        self.tx.send(Cmd::Seek(secs))
     }
-    pub fn set_volume(&self, level: f32) {
-        let _ = self.tx.send(Cmd::SetVolume(level));
+    pub fn set_volume(&self, level: f32) -> Result<(), PlayerError> {
+        self.tx.send(Cmd::SetVolume(level))
     }
     pub fn status(&self) -> PlayerStatus {
-        self.status.lock().unwrap().clone()
+        self.status
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 }
 
@@ -143,7 +148,7 @@ struct Track {
 /// can drive this loop with an opener that fails deterministically — on a
 /// developer machine the real opener would find the sound card and prove
 /// nothing about the no-device path.
-fn audio_thread<F>(rx: Receiver<Cmd>, status: Arc<Mutex<PlayerStatus>>, mut open: F)
+fn audio_thread<F>(rx: mailbox::Receiver, status: Arc<Mutex<PlayerStatus>>, mut open: F)
 where
     F: FnMut() -> Result<MixerDeviceSink, DeviceSinkError>,
 {
@@ -797,16 +802,16 @@ mod without_an_output_device {
     /// A player thread whose device opener always fails, plus the handles to
     /// observe it: how often a device was asked for, and when the thread ended.
     struct DeviceFreePlayer {
-        tx: Sender<Cmd>,
+        tx: mailbox::Sender,
         status: Arc<Mutex<PlayerStatus>>,
         attempts: Arc<AtomicUsize>,
-        done: Receiver<()>,
+        done: std::sync::mpsc::Receiver<()>,
         handle: std::thread::JoinHandle<()>,
     }
 
     impl DeviceFreePlayer {
         fn new() -> Self {
-            let (tx, rx) = std::sync::mpsc::channel();
+            let (tx, rx) = mailbox::channel();
             let (done_tx, done) = std::sync::mpsc::channel();
             let status = Arc::new(Mutex::new(PlayerStatus::default()));
             let attempts = Arc::new(AtomicUsize::new(0));

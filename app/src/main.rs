@@ -1472,38 +1472,38 @@ async fn export_xml(
 }
 
 #[tauri::command]
-fn player_play(player: State<Player>, path: String) {
-    player.play(PathBuf::from(path));
+fn player_play(player: State<Player>, path: String) -> Result<(), ErrorDto> {
+    player.play(PathBuf::from(path)).map_err(shell_error)
 }
 
 #[tauri::command]
-fn player_set_next(player: State<Player>, path: String) {
-    player.set_next(PathBuf::from(path));
+fn player_set_next(player: State<Player>, path: String) -> Result<(), ErrorDto> {
+    player.set_next(PathBuf::from(path)).map_err(shell_error)
 }
 
 #[tauri::command]
-fn player_pause(player: State<Player>) {
-    player.pause();
+fn player_pause(player: State<Player>) -> Result<(), ErrorDto> {
+    player.pause().map_err(shell_error)
 }
 
 #[tauri::command]
-fn player_resume(player: State<Player>) {
-    player.resume();
+fn player_resume(player: State<Player>) -> Result<(), ErrorDto> {
+    player.resume().map_err(shell_error)
 }
 
 #[tauri::command]
-fn player_stop(player: State<Player>) {
-    player.stop();
+fn player_stop(player: State<Player>) -> Result<(), ErrorDto> {
+    player.stop().map_err(shell_error)
 }
 
 #[tauri::command]
-fn player_seek(player: State<Player>, secs: f64) {
-    player.seek(secs);
+fn player_seek(player: State<Player>, secs: f64) -> Result<(), ErrorDto> {
+    player.seek(secs).map_err(shell_error)
 }
 
 #[tauri::command]
-fn player_set_volume(player: State<Player>, level: f64) {
-    player.set_volume(level as f32);
+fn player_set_volume(player: State<Player>, level: f64) -> Result<(), ErrorDto> {
+    player.set_volume(level as f32).map_err(shell_error)
 }
 
 #[tauri::command]
