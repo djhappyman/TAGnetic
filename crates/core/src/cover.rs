@@ -5,6 +5,8 @@
 //! image to a maximum dimension and re-encodes it as JPEG at a chosen quality,
 //! feeding the same embed path so the result stays previewable and undoable.
 
+mod resources;
+
 use crate::model::CoverArt;
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
@@ -33,37 +35,79 @@ pub fn resize_cover(art: &CoverArt, max_px: u32, quality: u8) -> CoverArt {
     if width <= max_px && height <= max_px {
         return art.clone();
     }
+    if art.data.len() > resources::ENCODE_BYTES {
+        return art.clone();
+    }
+    let quality = quality.clamp(1, 100);
     let huge = u64::from(width) * u64::from(height) > ROW_SHRINK_PIXELS;
-    let shrunk = (is_png && huge)
+    let full_allowed = resources::admitted(width, height, max_px, false);
+    let rows_allowed = is_png && huge && resources::admitted(width, height, max_px, true);
+    if !full_allowed && !rows_allowed {
+        return art.clone();
+    }
+    let key = resources::Key::new(&art.data, max_px, quality);
+    let cached = || {
+        resources::CACHE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&key)
+    };
+    let result = |data| CoverArt {
+        mime: "image/jpeg".into(),
+        data,
+        kind: art.kind,
+        description: art.description.clone(),
+    };
+    if let Some(data) = cached() {
+        return result(data);
+    }
+    // Only one core decode/resize runs at once, independently of the fetch
+    // queues. Recheck the cache after waiting so duplicate album jobs reuse it.
+    let _processing = resources::PROCESS.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(data) = cached() {
+        return result(data);
+    }
+    let shrunk = rows_allowed
         .then(|| shrink_png_rows(&art.data, width, height, max_px.saturating_mul(2)))
         .flatten();
     let image = match shrunk {
         Some(image) => DynamicImage::ImageRgb8(image),
-        None => match image::load_from_memory(&art.data) {
-            Ok(image) => image,
-            Err(_) => return art.clone(),
-        },
+        None if full_allowed => {
+            let Ok(mut reader) =
+                image::ImageReader::new(Cursor::new(&art.data)).with_guessed_format()
+            else {
+                return art.clone();
+            };
+            let mut limits = image::Limits::default();
+            limits.max_alloc = Some(resources::WORK_BYTES / 2);
+            reader.limits(limits);
+            match reader.decode() {
+                Ok(image) => image,
+                Err(_) => return art.clone(),
+            }
+        }
+        None => return art.clone(),
     };
 
     // `resize` preserves aspect ratio within the max×max box; Lanczos3 is the
     // quality choice for downscaling photographic art.
     let resized = image.resize(max_px, max_px, FilterType::Lanczos3);
+    drop(image);
 
     // Covers are opaque; encode RGB JPEG (drops any alpha channel) — far smaller
     // than PNG for artwork and universally embeddable.
-    let rgb = resized.to_rgb8();
-    let mut data = Vec::new();
+    let rgb = resized.into_rgb8();
+    let mut data = resources::Encoded(Vec::new());
     let encoder = JpegEncoder::new_with_quality(&mut data, quality.clamp(1, 100));
     if rgb.write_with_encoder(encoder).is_err() {
         return art.clone();
     }
-    CoverArt {
-        mime: "image/jpeg".to_string(),
-        data: data.into(),
-        // Only the bytes change; what the image depicts does not (#56).
-        kind: art.kind,
-        description: art.description.clone(),
-    }
+    let data = std::sync::Arc::<[u8]>::from(data.0);
+    resources::CACHE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(key, data.clone());
+    result(data)
 }
 
 /// Whether `art`, as [`resize_cover`] returned it, is still over `max_px`.
@@ -98,7 +142,15 @@ const ROW_SHRINK_PIXELS: u64 = 16_000_000;
 /// `None` for what this does not handle (an interlaced PNG, whose rows arrive
 /// in passes, or a stream it cannot read), so the caller decodes it whole.
 fn shrink_png_rows(data: &[u8], width: u32, height: u32, box_px: u32) -> Option<RgbImage> {
-    let mut decoder = png::Decoder::new(Cursor::new(data));
+    if !resources::admitted(width, height, box_px.div_ceil(2), true) {
+        return None;
+    }
+    let mut decoder = png::Decoder::new_with_limits(
+        Cursor::new(data),
+        png::Limits {
+            bytes: resources::DECODE_BYTES,
+        },
+    );
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = decoder.read_info().ok()?;
     if reader.info().interlaced {
@@ -173,6 +225,30 @@ mod tests {
         (img.width(), img.height())
     }
 
+    #[test]
+    fn repeated_content_reuses_encoded_bytes_but_preserves_each_pictures_properties() {
+        let art = CoverArt {
+            mime: "image/png".into(),
+            data: png(640, 320).into(),
+            kind: crate::model::CoverKind::Front,
+            description: "Front".into(),
+        };
+        let first = resize_cover(&art, 160, 87);
+        let other = CoverArt {
+            kind: crate::model::CoverKind::Back,
+            description: "Back".into(),
+            ..art
+        };
+        let second = resize_cover(&other, 160, 87);
+        assert!(std::sync::Arc::ptr_eq(&first.data, &second.data));
+        assert_eq!(second.kind, crate::model::CoverKind::Back);
+        assert_eq!(second.description, "Back");
+        assert_eq!(first.kind, crate::model::CoverKind::Front);
+        assert_eq!(dimensions(&second.data), (160, 80));
+        let changed = resize_cover(&other, 100, 87);
+        assert_eq!(dimensions(&changed.data), (100, 50));
+        assert!(!std::sync::Arc::ptr_eq(&first.data, &changed.data));
+    }
     #[test]
     fn downscales_oversized_art_and_reencodes_jpeg() {
         let art = CoverArt {
