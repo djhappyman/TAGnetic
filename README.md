@@ -132,9 +132,6 @@ A completed basic feature does not mean every advanced option is finished. The l
   - [x] **Backend foundation.** Represent ordered values without losing literal punctuation, and refuse conversions the existing storage cannot preserve.
   - [ ] **Backend expansion.** Carry arbitrary repeated fields through container reads, writes, shared staging and journaled Undo without joining them into strings.
   - [ ] **UI completion.** Add a value-list editor and make supported repeated values available across the tools.
-  - [x] **Backend foundation.** Keep ordered values in a bounded Rust type and refuse conversions that would lose their meaning.
-  - [ ] **Backend expansion.** Preserve arbitrary repeated fields through format adapters, staging, storage, journal recovery and Undo.
-  - [ ] **UI completion.** Show and edit individual values without relying on a joined table string.
 - [ ] **Split values.** Turn a written list of artists or genres into separate values.
   - [x] **Backend.** Split Artist, Album Artist, Genre and Composer with an explicit separator, trimming spacing and leaving other fields alone.
   - [ ] **UI completion.** Add split-value controls and show the resulting separate values.
@@ -338,6 +335,7 @@ A completed basic feature does not mean every advanced option is finished. The l
 - [ ] **Full Mp3tag configuration compatibility.** Assess and support applicable export templates and source definitions with explicit compatibility limits.
 - [ ] **Deeper file-manager integration.** Add supported operating-system shortcuts for opening and adding files to the current session.
 - [ ] **Large-library performance.** Continue measuring and improving loading, scrolling, search and bulk operations on larger collections.
+  - [x] **Backend cache eviction.** Retain recently used metadata within bounded cache budgets, with file-change checks and invalidation after writes and settings changes.
 - [ ] **Accessibility and platform refinement.** Complete wider keyboard, screen-reader, contrast, input-method and native-platform checks.
 - [ ] **Complete localisation.** Translate newer controls and feedback consistently across supported interface languages.
 
