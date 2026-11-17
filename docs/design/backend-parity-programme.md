@@ -75,8 +75,9 @@ Every relevant checkpoint must demonstrate:
 - **App-wide hardening checkpoints, verified locally:** unchanged query reuse,
   staged-view lock/copy reduction, streaming plan accounting, bounded exports and
   derived query memory are implemented. See the [audit](../performance/rust-hardening-audit.md)
-  and linked evidence. Preview queue supersession and additional profiling work
-  remain open. Feature/UI completion is unchanged.
+  and linked evidence. Preview queue supersession, artwork resource admission, playback coalescing,
+  shared metadata and indexed integrity lookups are also implemented. Production
+  profiling and platform checks remain separate. Feature/UI completion is unchanged.
 
 ## Ownership and upstream route
 

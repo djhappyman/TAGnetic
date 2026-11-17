@@ -31,3 +31,8 @@ PNG quality/dimension, tag/artwork Apply, Undo and recovery suites passed on
 disposable fixtures. No user media or running app was mutated for these tests.
 
 Route: reusable core fix, eligible for curated upstream `main`.
+
+Review follow-up: header dimension reads also use the decoder allocation quota
+and shared processing gate. Oversized compressed inputs are refused before
+header parsing. The final combined workspace gate passed 1,148 tests (19 ignored)
+with clean workspace/all-target/all-feature Clippy and formatting.

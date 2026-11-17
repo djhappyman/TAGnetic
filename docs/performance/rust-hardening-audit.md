@@ -70,7 +70,20 @@ branch. The graph was used for discovery rather than completeness claims.
 - Findings 3–5: `1f7d3973`, [staged view/accounting evidence](staged-view-hardening.md).
 - Finding 2: `853011f3`, [bounded export evidence](bounded-export-rendering.md).
 - Finding 6: `f4653130`, [derived query memory evidence](derived-query-memory.md).
-- Finding 7 remains in progress. Additional targets below are not completion claims.
+- Finding 7: `25ef00c9`, [preview queue evidence](preview-queue-hardening.md).
+- Artwork: `45b7d275` plus the header-quota review follow-up; [resource evidence](artwork-resource-hardening.md).
+- Playback: `ca1d77de`, [command evidence](playback-command-hardening.md).
+- Metadata and integrity lookup work: `5f6cd3ab`, [evidence](metadata-and-integrity-lookups.md).
+
+All source-confirmed implementation areas listed in this audit are addressed.
+Production profiling and platform/hardware measurements remain useful validation;
+no general speedup percentage, process RSS guarantee or full parity is claimed.
+
+Final gate: `cargo test --workspace --all-features` passed 1,148 tests (19 ignored);
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` and formatting
+passed. Frontend checks reported zero errors/warnings; all 205 unit tests passed.
+Only backend capabilities are ticked in the README. The user-facing feature
+checkboxes and broader Mp3tag programme remain subject to their existing UI gates.
 
 ## Additional profiling/hardening targets
 

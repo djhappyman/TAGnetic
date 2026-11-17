@@ -20,22 +20,24 @@ use std::io::Cursor;
 /// already fits within `max_px`, or the bytes can't be decoded — a cover we
 /// can't read should still embed as-is rather than fail the whole operation.
 pub fn resize_cover(art: &CoverArt, max_px: u32, quality: u8) -> CoverArt {
-    if max_px == 0 {
+    if max_px == 0 || art.data.len() > resources::ENCODE_BYTES {
         return art.clone();
     }
     // The size from the header alone (#622): a cover that fits is never
     // decoded at all.
-    let Ok(reader) = image::ImageReader::new(Cursor::new(&art.data)).with_guessed_format() else {
+    let _processing = resources::PROCESS.lock().unwrap_or_else(|p| p.into_inner());
+    let Ok(mut reader) = image::ImageReader::new(Cursor::new(&art.data)).with_guessed_format()
+    else {
         return art.clone();
     };
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(resources::DECODE_BYTES as u64);
+    reader.limits(limits);
     let is_png = reader.format() == Some(image::ImageFormat::Png);
     let Ok((width, height)) = reader.into_dimensions() else {
         return art.clone();
     };
     if width <= max_px && height <= max_px {
-        return art.clone();
-    }
-    if art.data.len() > resources::ENCODE_BYTES {
         return art.clone();
     }
     let quality = quality.clamp(1, 100);
@@ -58,12 +60,6 @@ pub fn resize_cover(art: &CoverArt, max_px: u32, quality: u8) -> CoverArt {
         kind: art.kind,
         description: art.description.clone(),
     };
-    if let Some(data) = cached() {
-        return result(data);
-    }
-    // Only one core decode/resize runs at once, independently of the fetch
-    // queues. Recheck the cache after waiting so duplicate album jobs reuse it.
-    let _processing = resources::PROCESS.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(data) = cached() {
         return result(data);
     }
@@ -117,12 +113,20 @@ pub fn resize_cover(art: &CoverArt, max_px: u32, quality: u8) -> CoverArt {
 /// and so has to be said in the preview (#706). An image whose size cannot be
 /// read at all is not claimed to be over anything.
 pub fn is_over_max(art: &CoverArt, max_px: u32) -> bool {
-    max_px != 0
-        && image::ImageReader::new(Cursor::new(&art.data))
-            .with_guessed_format()
-            .ok()
-            .and_then(|reader| reader.into_dimensions().ok())
-            .is_some_and(|(width, height)| width > max_px || height > max_px)
+    if max_px == 0 {
+        return false;
+    }
+    let _processing = resources::PROCESS.lock().unwrap_or_else(|p| p.into_inner());
+    let Ok(mut reader) = image::ImageReader::new(Cursor::new(&art.data)).with_guessed_format()
+    else {
+        return false;
+    };
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(resources::DECODE_BYTES as u64);
+    reader.limits(limits);
+    reader
+        .into_dimensions()
+        .is_ok_and(|(width, height)| width > max_px || height > max_px)
 }
 
 /// The size past which a PNG cover is shrunk by [`shrink_png_rows`] before the

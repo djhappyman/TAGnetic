@@ -346,6 +346,11 @@ A completed basic feature does not mean every advanced option is finished. The l
   - [x] **Backend plan accounting.** Measure and hash plans without allocating full JSON copies, with explicit size budgets.
   - [x] **Backend export limits.** Stop oversized reports and playlists while building them, including escaped text and grouped outputs.
   - [x] **Backend search memory.** Share saved metadata with calculated fields and evict older derived caches within memory budgets.
+  - [x] **Backend preview queues.** Bound waiting work, cancel superseded field previews and keep writes serialized if a caller disconnects.
+  - [x] **Backend artwork resources.** Limit image-processing work and reuse encoded results while preserving picture properties.
+  - [x] **Backend playback commands.** Coalesce repeated seek and volume updates, retain transport order and report a full queue explicitly.
+  - [x] **Backend metadata sharing.** Reuse immutable metadata for property reads and duplicate grouping instead of copying all tags.
+  - [x] **Backend integrity lookups.** Find saved-file integrity records efficiently while retaining full-file verification.
 - [ ] **Accessibility and platform refinement.** Complete wider keyboard, screen-reader, contrast, input-method and native-platform checks.
 - [ ] **Complete localisation.** Translate newer controls and feedback consistently across supported interface languages.
 
