@@ -293,41 +293,79 @@ fn failing_reentrant_legacy_request_restores_the_outer_source_before_parser_runs
 #[test]
 fn non_utf8_logical_names_and_repeated_nested_same_source_reads_do_not_share_cursor_state() {
     use std::os::unix::ffi::OsStrExt;
+    fn read(
+        path: &Path,
+        backing: Option<&Path>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<tagrex_core::model::exact::ExactTrackRead, ExactReadError> {
+        if let Some(backing) = backing {
+            TagEngine::read_exact_file_with_cancel(
+                std::fs::File::open(backing).unwrap(),
+                path,
+                cancelled,
+            )
+        } else {
+            TagEngine::read_exact_with_cancel(path, cancelled)
+        }
+    }
+    fn verify(path: &Path, backing: Option<&Path>) {
+        let calls = Cell::new(0usize);
+        read(path, backing, &|| {
+            calls.set(calls.get() + 1);
+            false
+        })
+        .unwrap();
+        let total = calls.get();
+        let baseline = Budget::process().usage().0;
+        for _ in 0..24 {
+            let count = Cell::new(0usize);
+            let outer = read(path, backing, &|| {
+                count.set(count.get() + 1);
+                if count.get() == total - 2 {
+                    for _ in 0..4 {
+                        let inner = read(path, backing, &|| false).unwrap();
+                        assert_eq!(exact_title(&inner), "Exact non-UTF8 path");
+                        assert_eq!(
+                            TagEngine::read(backing.unwrap_or(path)).unwrap().tags[&TagField::Title],
+                            "Exact non-UTF8 path"
+                        );
+                    }
+                }
+                false
+            })
+            .unwrap();
+            assert_eq!(exact_title(&outer), "Exact non-UTF8 path");
+            assert_eq!(
+                outer.legacy().file.tags[&TagField::Title],
+                "Exact non-UTF8 path"
+            );
+            drop(outer);
+            assert_eq!(Budget::process().usage().0, baseline);
+        }
+    }
     let _case = CASE.lock().unwrap_or_else(|p| p.into_inner());
     let fixture = Fixture::new();
     let path = fixture
         .0
         .join(std::ffi::OsStr::from_bytes(b"native-\xff.flac"));
     let bytes = flac("Exact non-UTF8 path");
-    std::fs::write(&path, &bytes).unwrap();
-    let total = checkpoints(&path);
-    let baseline = Budget::process().usage().0;
-    for _ in 0..24 {
-        let count = Cell::new(0usize);
-        let outer = TagEngine::read_exact_with_cancel(&path, || {
-            count.set(count.get() + 1);
-            if count.get() == total - 2 {
-                for _ in 0..4 {
-                    let inner = TagEngine::read_exact(&path).unwrap();
-                    assert_eq!(exact_title(&inner), "Exact non-UTF8 path");
-                    assert_eq!(
-                        TagEngine::read(&path).unwrap().tags[&TagField::Title],
-                        "Exact non-UTF8 path"
-                    );
-                }
-            }
-            false
-        })
-        .unwrap();
-        assert_eq!(exact_title(&outer), "Exact non-UTF8 path");
-        assert_eq!(
-            outer.legacy().file.tags[&TagField::Title],
-            "Exact non-UTF8 path"
-        );
-        drop(outer);
-        assert_eq!(Budget::process().usage().0, baseline);
+    let backing = fixture.put("valid-backing.flac", "Exact non-UTF8 path");
+    // A logical name need not be representable on the backing filesystem.
+    // Always retain this capability contract, including on APFS.
+    verify(&path, Some(&backing));
+    match std::fs::write(&path, &bytes) {
+        Ok(()) => {
+            verify(&path, None);
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+        Err(error) if cfg!(target_vendor = "apple") && error.raw_os_error() == Some(92) => {
+            // APFS rejects invalid UTF-8 filenames with EILSEQ before any file
+            // exists; the held logical-name case above still runs in full.
+            assert!(std::fs::symlink_metadata(&path).is_err());
+        }
+        Err(error) => panic!("could not create native-byte filename: {error}"),
     }
-    assert_eq!(std::fs::read(path).unwrap(), bytes);
+    assert_eq!(std::fs::read(backing).unwrap(), bytes);
 }
 
 #[cfg(unix)]

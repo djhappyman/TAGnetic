@@ -1,9 +1,161 @@
 //! Bounded native envelope scans. Audio extents are sought over, never copied.
 use super::*;
+use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom};
 
 const RAW_LIMIT: usize = 16 * 1024 * 1024;
 const BOX_LIMIT: usize = 65_536;
+// Kept inside the existing 64 MiB working admission: only ranges and digests
+// are retained, never a second metadata image or any audio payload. The work
+// cap also bounds rereads of overlapping observations from nested layouts.
+const WITNESS_RANGE_BYTES: usize = 1024 * 1024;
+const WITNESS_IO_LIMIT: u64 = 64 * 1024 * 1024;
+const WITNESS_CHUNK: usize = 8192;
+
+#[cfg(test)]
+#[path = "raw_witness_tests.rs"]
+mod witness_tests;
+
+#[derive(Clone, Copy)]
+struct ReadSpan {
+    at: u64,
+    len: u64,
+}
+const WITNESS_RANGE_LIMIT: usize = WITNESS_RANGE_BYTES / std::mem::size_of::<ReadSpan>();
+
+fn witness_digest() -> Sha256 {
+    let mut digest = Sha256::new();
+    digest.update(b"tagrex-exact-observed-metadata-v1");
+    digest
+}
+
+fn append_span(digest: &mut Sha256, span: ReadSpan, bytes: impl AsRef<[u8]>) {
+    digest.update(span.at.to_le_bytes());
+    digest.update(span.len.to_le_bytes());
+    digest.update(bytes);
+}
+
+struct WitnessBuilder {
+    spans: Vec<ReadSpan>,
+    current: Option<ReadSpan>,
+    current_digest: Sha256,
+    digest: Sha256,
+    observed: u64,
+}
+impl WitnessBuilder {
+    fn new() -> Self {
+        Self {
+            spans: Vec::new(),
+            current: None,
+            current_digest: Sha256::new(),
+            digest: witness_digest(),
+            observed: 0,
+        }
+    }
+    fn finish_span(&mut self) -> Result<(), ExactReadError> {
+        let Some(span) = self.current.take() else {
+            return Ok(());
+        };
+        if self.spans.len() == WITNESS_RANGE_LIMIT {
+            return Err(ExactReadError::Limit);
+        }
+        if self.spans.len() == self.spans.capacity() {
+            let capacity = self.spans.capacity().max(1);
+            let next = capacity.saturating_mul(2).min(WITNESS_RANGE_LIMIT);
+            self.spans
+                .try_reserve_exact(next - self.spans.len())
+                .map_err(|_| ExactReadError::Limit)?;
+        }
+        let hash = std::mem::take(&mut self.current_digest).finalize();
+        append_span(&mut self.digest, span, hash);
+        self.spans.push(span);
+        Ok(())
+    }
+    fn admit(&self, len: u64) -> Result<(), ExactReadError> {
+        if self
+            .observed
+            .checked_add(len)
+            .is_none_or(|observed| observed > WITNESS_IO_LIMIT)
+        {
+            return Err(ExactReadError::Limit);
+        }
+        Ok(())
+    }
+    fn observe(&mut self, at: u64, bytes: &[u8]) -> Result<(), ExactReadError> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        self.admit(bytes.len() as u64)?;
+        if self
+            .current
+            .is_some_and(|span| span.at.checked_add(span.len) != Some(at))
+        {
+            self.finish_span()?;
+        }
+        if self.current.is_none() {
+            if self.spans.len() == WITNESS_RANGE_LIMIT {
+                return Err(ExactReadError::Limit);
+            }
+            self.current = Some(ReadSpan { at, len: 0 });
+        }
+        let span = self.current.as_mut().ok_or(ExactReadError::Limit)?;
+        span.len = span
+            .len
+            .checked_add(bytes.len() as u64)
+            .ok_or(ExactReadError::Limit)?;
+        self.current_digest.update(bytes);
+        self.observed += bytes.len() as u64;
+        Ok(())
+    }
+    fn finish(mut self) -> Result<ReadWitness, ExactReadError> {
+        self.finish_span()?;
+        Ok(ReadWitness {
+            spans: self.spans,
+            digest: self.digest.finalize().into(),
+        })
+    }
+}
+
+struct ReadWitness {
+    spans: Vec<ReadSpan>,
+    digest: [u8; 32],
+}
+
+enum ProofLayout {
+    Flac,
+    Mpeg,
+    Wave,
+    Aiff,
+    Mp4,
+}
+impl ReadWitness {
+    fn matches(&self, source: &std::fs::File) -> Result<bool, ExactReadError> {
+        // Shared-cursor clones are already excluded by the held-reader API.
+        // Compatibility passes rewind their own sessions before parsing.
+        let mut file = source.try_clone()?;
+        let mut digest = witness_digest();
+        let mut bytes = [0; WITNESS_CHUNK];
+        for span in &self.spans {
+            file.seek(SeekFrom::Start(span.at))?;
+            let mut remaining = span.len;
+            let mut part = Sha256::new();
+            while remaining != 0 {
+                let count = remaining.min(WITNESS_CHUNK as u64) as usize;
+                if let Err(error) = file.read_exact(&mut bytes[..count]) {
+                    if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                        return Ok(false);
+                    }
+                    return Err(error.into());
+                }
+                part.update(&bytes[..count]);
+                remaining -= count as u64;
+            }
+            append_span(&mut digest, *span, part.finalize());
+        }
+        let digest: [u8; 32] = digest.finalize().into();
+        Ok(digest == self.digest)
+    }
+}
 
 pub(super) struct RawBlock {
     pub kind: TagBlockKind,
@@ -115,6 +267,8 @@ pub(in crate::model) struct Input {
     stamp: Stamp,
     source: std::sync::Arc<std::fs::File>,
     named_path: Option<std::path::PathBuf>,
+    witness: ReadWitness,
+    layout: ProofLayout,
     _working: crate::resources::Lease,
 }
 struct Scan<'a> {
@@ -123,6 +277,9 @@ struct Scan<'a> {
     charged: usize,
     visits: usize,
     blocks: Vec<RawBlock>,
+    witness: WitnessBuilder,
+    metadata_proof_depth: usize,
+    leading_ape_span: Option<ReadSpan>,
     cancelled: &'a dyn Fn() -> bool,
 }
 impl Scan<'_> {
@@ -143,9 +300,11 @@ impl Scan<'_> {
         if at.checked_add(N as u64).is_none_or(|end| end > self.len) {
             return Err(ExactReadError::Invalid("Truncated metadata envelope"));
         }
+        self.witness.admit(N as u64)?;
         let mut bytes = [0; N];
         self.file.seek(SeekFrom::Start(at))?;
         self.file.read_exact(&mut bytes)?;
+        self.witness.observe(at, &bytes)?;
         Ok(bytes)
     }
     fn range(&mut self, at: u64, len: u64) -> Result<Vec<u8>, ExactReadError> {
@@ -160,6 +319,7 @@ impl Scan<'_> {
         if at.checked_add(len as u64).is_none_or(|end| end > self.len) {
             return Err(ExactReadError::Invalid("Truncated metadata payload"));
         }
+        self.witness.admit(len as u64)?;
         let mut bytes = Vec::new();
         bytes
             .try_reserve_exact(len)
@@ -167,7 +327,140 @@ impl Scan<'_> {
         bytes.resize(len, 0);
         self.file.seek(SeekFrom::Start(at))?;
         self.file.read_exact(&mut bytes)?;
+        self.witness.observe(at, &bytes)?;
         Ok(bytes)
+    }
+    fn witness_range(&mut self, mut at: u64, mut len: u64) -> Result<(), ExactReadError> {
+        if at.checked_add(len).is_none_or(|end| end > self.len) {
+            return Err(ExactReadError::Invalid("Metadata witness exceeds file"));
+        }
+        self.witness.admit(len)?;
+        self.file.seek(SeekFrom::Start(at))?;
+        let mut bytes = [0; WITNESS_CHUNK];
+        while len != 0 {
+            if (self.cancelled)() {
+                return Err(ExactReadError::Cancelled);
+            }
+            let count = len.min(WITNESS_CHUNK as u64) as usize;
+            // A checkpoint may reenter a held reader and move a shared cursor.
+            self.file.seek(SeekFrom::Start(at))?;
+            self.file.read_exact(&mut bytes[..count])?;
+            self.witness.observe(at, &bytes[..count])?;
+            at += count as u64;
+            len -= count as u64;
+        }
+        Ok(())
+    }
+    fn mp4_container(&mut self, at: u64, end: u64, depth: usize) -> Result<(), ExactReadError> {
+        let len = end.checked_sub(at).ok_or(ExactReadError::Limit)?;
+        if len > RAW_LIMIT as u64 {
+            return Err(ExactReadError::Limit);
+        }
+        // One outer-container proof covers ignored metadata payloads. Nested
+        // containers do not hash that whole extent repeatedly; actual parser
+        // observations still enter the witness to detect inconsistent reads.
+        if self.metadata_proof_depth == 0 {
+            self.witness_range(at, len)?;
+        }
+        self.metadata_proof_depth += 1;
+        let result = self.mp4(at, end, depth);
+        self.metadata_proof_depth -= 1;
+        result
+    }
+    fn charge_metadata(&mut self, len: u64) -> Result<(), ExactReadError> {
+        let len = usize::try_from(len).map_err(|_| ExactReadError::Limit)?;
+        self.charged = self.charged.checked_add(len).ok_or(ExactReadError::Limit)?;
+        if self.charged > RAW_LIMIT {
+            return Err(ExactReadError::Limit);
+        }
+        Ok(())
+    }
+    fn ape_footer(&mut self, end: u64) -> Result<bool, ExactReadError> {
+        if end < 32 || self.at::<8>(end - 32)? != *b"APETAGEX" {
+            return Ok(false);
+        }
+        let footer = self.at::<32>(end - 32)?;
+        let word = |at: usize| {
+            u32::from_le_bytes([footer[at], footer[at + 1], footer[at + 2], footer[at + 3]])
+        };
+        let version = word(8);
+        let size = u64::from(word(12));
+        let flags = word(20);
+        if !matches!(version, 1000 | 2000) || size < 32 || flags & (1 << 29) != 0 {
+            return Err(ExactReadError::Unavailable(
+                UnavailableReason::UnsupportedLayout,
+            ));
+        }
+        let header = if version == 2000 && flags & (1 << 31) != 0 {
+            32
+        } else {
+            0
+        };
+        let total = size.checked_add(header).ok_or(ExactReadError::Limit)?;
+        let at = end
+            .checked_sub(total)
+            .ok_or(ExactReadError::Invalid("APE metadata exceeds file"))?;
+        if header != 0 && self.at::<8>(at)? != *b"APETAGEX" {
+            return Err(ExactReadError::Invalid("APE metadata header is absent"));
+        }
+        if !self
+            .leading_ape_span
+            .is_some_and(|span| span.at == at && span.len == total)
+        {
+            self.charge_metadata(total)?;
+            self.witness_range(at, total)?;
+        }
+        Ok(true)
+    }
+    fn mpeg_trailers(&mut self) -> Result<(), ExactReadError> {
+        // These are fixed-size marker probes, not a scan/hash of audio. The
+        // legacy reader checks APE at EOF first, then before an ID3v1 tag.
+        let id3v1 = if self.len >= 128 && self.at::<3>(self.len - 128)? == *b"TAG" {
+            let at = self.len - 128;
+            self.charge_metadata(128)?;
+            self.witness_range(at, 128)?;
+            Some(at)
+        } else {
+            None
+        };
+        if self.ape_footer(self.len)? {
+            return Ok(());
+        }
+        let end = id3v1.unwrap_or(self.len);
+        if id3v1.is_some() && self.ape_footer(end)? {
+            return Ok(());
+        }
+        if end >= 9 {
+            let marker = self.at::<9>(end - 9)?;
+            if matches!(&marker, b"LYRICS200" | b"LYRICSEND") {
+                // A separate suffix grammar is needed to locate metadata
+                // before Lyrics3. Do not return an unproved legacy snapshot.
+                return Err(ExactReadError::Unavailable(
+                    UnavailableReason::UnsupportedLayout,
+                ));
+            }
+        }
+        Ok(())
+    }
+    fn leading_ape(&mut self, at: u64) -> Result<(), ExactReadError> {
+        let header = self.at::<32>(at)?;
+        if &header[..8] != b"APETAGEX" {
+            return Err(ExactReadError::Invalid("APE metadata header is absent"));
+        }
+        let version = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
+        let size = u64::from(u32::from_le_bytes([
+            header[12], header[13], header[14], header[15],
+        ]));
+        if version != 2000 || size < 32 {
+            return Err(ExactReadError::Unavailable(
+                UnavailableReason::UnsupportedLayout,
+            ));
+        }
+        let total = size.checked_add(32).ok_or(ExactReadError::Limit)?;
+        self.charge_metadata(total)?;
+        self.witness_range(at, total)?;
+        self.leading_ape_span = Some(ReadSpan { at, len: total });
+        Ok(())
     }
     fn id3(&mut self, at: u64, extent: u64) -> Result<u64, ExactReadError> {
         let header = self.at::<10>(at)?;
@@ -238,6 +531,7 @@ impl Scan<'_> {
                 });
             } else {
                 self.charged += size as usize;
+                self.witness_range(at + 4, size)?;
             }
             at = end;
             if header[0] & 0x80 != 0 {
@@ -301,6 +595,7 @@ impl Scan<'_> {
                 if self.charged > RAW_LIMIT {
                     return Err(ExactReadError::Limit);
                 }
+                self.witness_range(at + 8, length + (length & 1))?;
             }
             at = next;
         }
@@ -331,11 +626,17 @@ impl Scan<'_> {
                 return Err(ExactReadError::Invalid("MP4 atom exceeds its parent"));
             }
             match &header[4..8] {
+                b"ftyp" => {
+                    if size > RAW_LIMIT as u64 {
+                        return Err(ExactReadError::Limit);
+                    }
+                    self.witness_range(at + width, size - width)?;
+                }
                 b"moov" | b"udta" | b"trak" | b"mdia" | b"minf" | b"stbl" | b"edts" => {
                     if size > RAW_LIMIT as u64 {
                         return Err(ExactReadError::Limit);
                     }
-                    self.mp4(at + width, next, depth + 1)?;
+                    self.mp4_container(at + width, next, depth + 1)?;
                 }
                 b"meta" => {
                     if size < width + 4 || self.at::<4>(at + width)? != [0; 4] {
@@ -343,7 +644,7 @@ impl Scan<'_> {
                             UnavailableReason::UnsupportedLayout,
                         ));
                     }
-                    self.mp4(at + width + 4, next, depth + 1)?;
+                    self.mp4_container(at + width + 4, next, depth + 1)?;
                 }
                 b"ilst" => {
                     let bytes = self.range(at + width, size - width)?;
@@ -477,41 +778,88 @@ impl Input {
             charged: 0,
             visits: 0,
             blocks: Vec::new(),
+            witness: WitnessBuilder::new(),
+            metadata_proof_depth: 0,
+            leading_ape_span: None,
             cancelled,
         };
         let header = scan.at::<12>(0)?;
-        if &header[..4] == b"fLaC" {
+        let layout = if &header[..4] == b"fLaC" {
             scan.flac(0)?;
+            ProofLayout::Flac
         } else if &header[..3] == b"ID3" {
             let after = scan.id3(0, scan.len)?;
-            if after.checked_add(4).is_some_and(|end| end <= scan.len)
-                && scan.at::<4>(after)? == *b"fLaC"
-            {
+            let next = if after.checked_add(4).is_some_and(|end| end <= scan.len) {
+                Some(scan.at::<4>(after)?)
+            } else {
+                None
+            };
+            if next == Some(*b"fLaC") {
                 scan.flac(after)?;
+                ProofLayout::Flac
+            } else {
+                if next == Some(*b"APET") {
+                    scan.leading_ape(after)?;
+                }
+                scan.mpeg_trailers()?;
+                ProofLayout::Mpeg
             }
         } else if &header[..4] == b"RIFF" && &header[8..] == b"WAVE" {
             scan.riff(false)?;
+            ProofLayout::Wave
         } else if &header[..4] == b"FORM" && matches!(&header[8..], b"AIFF" | b"AIFC") {
             scan.riff(true)?;
+            ProofLayout::Aiff
         } else if matches!(&header[4..8], b"ftyp" | b"free" | b"moov") {
             let len = scan.len;
             scan.mp4(0, len, 0)?;
-        } else if header[0] != 0xff {
+            ProofLayout::Mp4
+        } else if header[0] == 0xff {
+            scan.mpeg_trailers()?;
+            ProofLayout::Mpeg
+        } else {
             return Err(ExactReadError::Unavailable(
                 UnavailableReason::UnsupportedLayout,
             ));
-        }
+        };
         let input = Self {
             blocks: scan.blocks,
             stamp,
             source,
             named_path: named_path.map(std::path::Path::to_path_buf),
+            witness: scan.witness.finish()?,
+            layout,
             _working: working,
         };
         input.ensure_unchanged()?;
         Ok(input)
     }
+    pub fn ensure_format(&self, format: AudioFormat) -> Result<(), ExactReadError> {
+        if !matches!(
+            (&self.layout, format),
+            (ProofLayout::Flac, AudioFormat::Flac)
+                | (ProofLayout::Mpeg, AudioFormat::Mp3 | AudioFormat::Aac)
+                | (ProofLayout::Wave, AudioFormat::Wav)
+                | (ProofLayout::Aiff, AudioFormat::Aiff)
+                | (ProofLayout::Mp4, AudioFormat::M4a)
+        ) {
+            return Err(ExactReadError::Unavailable(
+                UnavailableReason::UnsupportedLayout,
+            ));
+        }
+        Ok(())
+    }
     pub fn ensure_unchanged(&self) -> Result<(), ExactReadError> {
+        self.ensure_stamp()?;
+        // Windows and coarse-time filesystems may report equal stamps after a
+        // same-length write. Recheck the bounded metadata bytes actually used
+        // by this request, through its held source, with no public callbacks.
+        if !self.witness.matches(&self.source)? {
+            return Err(ExactReadError::Changed);
+        }
+        self.ensure_stamp()
+    }
+    fn ensure_stamp(&self) -> Result<(), ExactReadError> {
         if Stamp::from_file(&self.source)? != self.stamp {
             return Err(ExactReadError::Changed);
         }

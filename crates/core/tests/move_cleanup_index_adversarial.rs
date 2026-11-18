@@ -31,6 +31,7 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&path).unwrap();
+        let path = fs::canonicalize(path).unwrap();
         Self(path)
     }
     fn db(&self) -> PathBuf {

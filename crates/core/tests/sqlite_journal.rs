@@ -559,7 +559,9 @@ fn legacy_interrupted_moves_without_identity_refuse_automatic_recovery() {
             plan,
             created_dirs: Vec::new(),
             removed_dirs: Vec::new(),
-            allowed_roots: roots(dir.path()),
+            // Match the canonical roots persisted by public Apply; retain the
+            // raw caller path below to exercise public Undo normalization.
+            allowed_roots: vec![std::fs::canonicalize(dir.path()).unwrap()],
             copy_stamps: Vec::new(),
             applied_values: Vec::new(),
             block_fingerprints: Vec::new(),

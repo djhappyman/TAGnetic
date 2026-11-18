@@ -1,6 +1,10 @@
 # Protected FLAC publication checkpoint
 
-Status: local checkpoint ready after descriptor IO and directory receipt compatibility rechecks; exact-head hosted checks remain required before merge.
+Status: platform follow-up candidate under static review. Current changes have
+not been built, formatted or tested locally under the owner's no-local-workload
+instruction. Hosted verification is required before merge. The 1,638-test results
+below describe the earlier `b7e19f2a` source, not this changed candidate.
+
 
 ## Scope
 
@@ -301,3 +305,35 @@ diff checks and two private D-Bus tests passed. Independent review accepted 50
 distinct cases, including public raw-path alias and private cleanup-index alias
 runs. These counts overlap the workspace gate. Exact-head hosted checks remain
 required before merge; neither code nor documentation was merged at this gate.
+
+
+## Resumed platform correction candidate
+
+The owner has resumed the complete remaining backend programme; the former
+finish-and-pause boundary is superseded. Builds, tests, benchmarks and stress
+execution stay on hosted runners. See the active execution plan in the stacked
+documentation PR and issue #51. The preserved broader WIP is not integrated by
+this corrective slice.
+
+The candidate adds bounded metadata-byte witnesses to the common named/held
+exact reader, preserves source and name identity checks, and rechecks policy
+at publication. Optional missing-parent authority is keyed by canonical target,
+validates existing ancestors before allowing absence, and retires only matching
+subtrees. Apple terminal link entries use Darwin's entry-opening flag through
+held parent authority. Journal initialization and corruption classification use
+explicit 500 ms SQLite busy waits; this is per-statement wait policy, not a
+whole-operation wall-clock guarantee. Locked history is not corruption.
+
+The macOS fixture corrections retain substantive refusal, recovery, payload and
+history assertions while satisfying real filesystem prerequisites. Durable
+service test baselines wait for initial receipt persistence before checking that
+a denied later request changes no bytes. These are not new service durability
+guarantees. The combined static review records authorship, cross-review, limits,
+and all hosted failure groups. Current runtime/format/compile status is pending
+on the exact publication head; historical local pass counts are not reused.
+
+
+[Platform follow-up static review](backend-windows-read-recovery-independent-review.md)
+records the 14 frozen source hashes, nine witness and five private-authority probe
+functions, reciprocal review and hosted-only verification gate. Source acceptance
+is permission to run the candidate in CI, not a passing runtime result.
