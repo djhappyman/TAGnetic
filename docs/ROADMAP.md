@@ -2,21 +2,23 @@
 
 This is a working direction, not a promise of dates or platform performance. Current development targets `main` in this fork. Upstream contribution branches are curated separately.
 
-## Finish FLAC integration, then pause — 18 November 2026
+## Backend checkpoint and pause — 18 November 2026
 
-Service authority/lifecycle PR #50 is merged at `67625add` after all four hosted
-checks passed. Finish the independent review and merge of the narrow FLAC slice
-first, as the owner requested; remaining backend work is preserved and paused. It is
-not a new release or full UI readiness claim. See the [pause handoff](design/backend-pause-2026-11-18.md),
-[backend programme](design/backend-parity-programme.md) and
+Service authority/lifecycle PR #50 is merged at `67625add`. The finish-and-pause
+boundary is protected Linux FLAC [PR #54](https://github.com/djhappyman/TAGnetic/pull/54),
+reviewed head `f7e25856`; required hosted results and merge evidence live there.
+Its clean publication passed 1,598 workspace tests, Clippy and formatting after
+four independent scoped reviews. It includes required shared file-recovery,
+per-App policy and concurrent-admission corrections.
+
+All remaining backend implementation is paused and preserved. Start next time
+with the [handoff](design/backend-pause-2026-11-18.md),
+[programme](design/backend-parity-programme.md) and
 [resume issue #51](https://github.com/djhappyman/TAGnetic/issues/51).
-
-The ordinary FLAC Apply/persistent-Undo integration is under fresh independent
-review now. Resolve findings, run combined frozen-source checks and publish its
-focused scope before the final pause. Review the stress-runner contract in the
-next requested session. Keep exact staging, mixed/typed and
-other-format operations, picture/export integration and native platform/device
-proof open. Do not re-tick product features from backend-only evidence.
+Review the stress-runner contract independently before claiming a complete
+programme stress run. Exact staging, mixed/typed/other-format operations,
+picture/export integration and native platform/device/large-library proof remain
+open. Backend evidence does not re-tick product features or create a release.
 
 ## Current milestone — a coherent, testable workbench
 

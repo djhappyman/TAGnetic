@@ -1,3 +1,7 @@
+> Historical author checkpoint. The final clean publication, independent review
+> corrections and current limits are recorded in [native-flac-publication.md](native-flac-publication.md)
+> and PR #54. Counts below describe the earlier parked-source gate.
+
 # Protected FLAC Executor checkpoint
 
 2026-11-18. Implementation checkpoint for a **new independent review**, not a

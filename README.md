@@ -74,19 +74,23 @@ The backend foundation checkpoint `2a9341e9` is committed on `feat/native-field-
 
 A completed basic feature does not mean every advanced option is finished. The list tracks product capabilities, not delivery dates or a guarantee for every file variant. See the [changelog](CHANGELOG.md) for release history and the [engineering roadmap](docs/ROADMAP.md) for performance, platform testing and release work.
 
-### Backend finish-and-pause checkpoint — 18 November 2026
+### Backend checkpoint and pause — 18 November 2026
 
 Service authority/lifecycle [PR #50](https://github.com/djhappyman/TAGnetic/pull/50)
-is merged into `main` at `67625add`, with all four hosted checks passing.
-The owner has requested completion of the narrow FLAC integration review and
-merge before the final pause. Other backend work is **paused and preserved**,
-not merged or installed. Component reviews and the new Linux FLAC Apply/persistent-Undo
-candidate are recorded in [the handoff](docs/design/backend-pause-2026-11-18.md)
-and [resume issue #51](https://github.com/djhappyman/TAGnetic/issues/51).
-Independent FLAC coordinator/journal reviews are active. After that slice merges,
-refresh this handoff and pause; the stress-runner review and broader work remain
-for the next requested session.
-Feature/UI checkboxes below remain unchanged.
+is merged at `67625add`. The protected Linux FLAC text Apply/persistent-Undo
+checkpoint is [PR #54](https://github.com/djhappyman/TAGnetic/pull/54), reviewed
+head `f7e25856`; its hosted checks and merge record are tracked there. It includes
+required shared file-recovery, per-App metadata-policy and admission corrections.
+The clean publication passed 1,598 workspace tests, Clippy and formatting;
+independent coordinator, journal, policy and admission reviews completed.
+
+Remaining backend implementation is **paused and preserved**. This is not a
+complete backend/UI milestone or a new release. See [the handoff](docs/design/backend-pause-2026-11-18.md),
+[publication evidence](docs/performance/native-flac-publication.md) and
+[resume issue #51](https://github.com/djhappyman/TAGnetic/issues/51).
+The stress-runner review, exact staging, mixed/typed/other-format paths and
+platform/device/large-library proof remain open. Feature/UI checkboxes below
+remain unchanged.
 
 ### Editing and reviewing changes
 

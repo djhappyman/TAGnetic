@@ -7,54 +7,50 @@ product feature checkboxes unchecked until the UI is implemented and verified.
 
 ## Scope and dependency order
 
-### Finish FLAC integration, then pause — 18 November 2026
+### Checkpoint and pause — 18 November 2026
 
-At the owner’s clarified request, complete the narrow FLAC integration review
-and merge first, then pause all remaining implementation. [Resume tracker #51](https://github.com/djhappyman/TAGnetic/issues/51)
-and the [pause handoff](backend-pause-2026-11-18.md) are the starting points.
-The work remains on `feat/native-field-foundations`, based on `9da71249`.
-Only that integration and its necessary publication prerequisites are active.
-No broader feature work or stress-runner review resumes in this slice.
+The authorized finish-and-pause boundary is protected Linux FLAC
+[PR #54](https://github.com/djhappyman/TAGnetic/pull/54), reviewed head
+`f7e258562505c925d08f49c544c495d450d4a22e`. Required hosted checks and merge
+records are linked there. Service authority/lifecycle
+[PR #50](https://github.com/djhappyman/TAGnetic/pull/50) merged at `67625add`
+after all four hosted checks passed.
 
-**Merged:** service authority/handle-lifecycle [PR #50](https://github.com/djhappyman/TAGnetic/pull/50),
-reviewed head `a7a8b52e`, merge `67625add`. All four hosted Linux, Windows,
-macOS and advisories checks passed. Its local clean gate recorded 167 service
-and 1,208 workspace tests plus the two private D-Bus tests. This is the only
-newly merged code from the hardening programme; no installer or complete backend
-readiness follows from that merge.
+**Remaining implementation is paused.** Read [resume tracker #51](https://github.com/djhappyman/TAGnetic/issues/51)
+and the [handoff](backend-pause-2026-11-18.md) before starting again. The clean
+FLAC publication passed 1,598 workspace tests, zero failures, 34 existing optional
+ignored; workspace Clippy/formatting, two private D-Bus tests and UI check/lint/
+build plus 216 unit tests passed. Independent coordinator, journal, policy and
+admission reviews completed after corrections. These overlapping scopes do not
+certify the wider parked programme, every platform or a release.
 
-**Preserved locally:** the remaining resource, playback, recovery, native metadata,
-artwork, import and output implementation and evidence. Completed component
-reviews do not substitute for review of their later integration. In particular,
-the new ordinary FLAC production route and stress-runner contract are frozen
-candidates awaiting a new independent review.
-
-| Wave | Capability | Latest evidence and next gate |
+| Wave | Capability | Checkpoint and remaining work |
 | --- | --- | --- |
-| 1A | Shared resource admission, cache identity and policy invalidation | Component allocation/concurrency/cancellation reviews passed. DTO/response ownership, complete RSS and native large-library proof remain open. |
-| 1B | Track-bound seek and job/preview contracts | Playback/control ownership reviews passed. Physical-device and native lifecycle verification remain open. |
-| 1C | Durable Apply/Undo recovery | Copy/move/staging ownership reviewed; copy checkpoint fresh gate 437 passed, five existing optional tests ignored. Low-latency busy cancellation and native/power-loss gates remain open. |
-| 2 | Exact repeated metadata and native identity | Reader/writer/receipt/media/held-parent components reviewed. New FLAC tag-only Executor integration author gate: 850 core tests passed, 31 default ignored; 22 public probes and two explicit real-media/old-reader probes passed. Independent integration review is FIRST on resume. Broader exact Stage/DTO, mixed and other-format work remains open. |
-| 3 | Artwork processing, properties/order and patterned export | Pixel/EXIF engine reviewed. Native picture properties/order, shared stage/export and UI integration remain open. |
-| 4 | CSV/TSV import mapping | Scalar parser/shared-stage implementation and diagnostics reviewed locally. Exact-value destinations and UI remain open. |
-| 5 | Grouped playlists/reports/encodings/append | Renderer and output ownership components reviewed. Command/stage/grouped publication and atomic append remain open. |
+| 1A | Shared resource admission, cache identity and policy invalidation | Process Budget and required native admission/per-App policy included in #54. Broader resource/cache/query/response ownership WIP is parked; combined RSS and actual large-library proof remain open. |
+| 1B | Track-bound seek and job/preview contracts | Playback/control ownership reviews preserved locally. Physical-device/native lifecycle verification and focused publication remain open. |
+| 1C | Durable Apply/Undo recovery | Reviewed shared file authority and copy/move/staging recovery prerequisites included in #54. Native filesystems, power-loss and low-latency busy SQLite cancellation remain open. |
+| 2 | Exact repeated metadata and native identity | Narrow whole-plan in-place plain-text FLAC Apply/persistent Undo on supporting Linux profiles included in #54. Coordinator 135, journal 61, policy 17 and admission 54 scoped review gates passed (not additive). Exact Stage/DTO, mixed/typed/other-format and portable preservation remain open. |
+| 3 | Artwork processing, properties/order and patterned export | Pixel/EXIF implementation/reviews parked. Native picture properties/order, shared stage/export, command and UI integration remain open. |
+| 4 | CSV/TSV import mapping | Scalar parser/shared-stage implementation and diagnostics parked. Exact-value destinations, publication and UI remain open. |
+| 5 | Grouped playlists/reports/encodings/append | Renderer/output ownership implementations and reviews parked. Command/stage/grouped publication and atomic append remain open. |
 | 6 | Value/pattern helpers, mappings, filenames and composed recipes | Further implementation and end-to-end integration remain planned. |
 | 7 | Portable settings/recipes, safe sources and compatibility | Further implementation and producer/schema evidence remain planned. |
 | 8 | Format policies, timestamps, containers and chapters | Further implementation and per-container preservation/platform evidence remain planned. |
-| 9 | Integrated stress and delivery | New 48-case evidence contract has 16 passing harness tests; independent runner review and a complete frozen-source run remain open. No all-platform backend readiness claim. |
+| 9 | Integrated stress and delivery | Parked 48-case runner contract has 16 passing harness tests. NEW independent runner review and a complete frozen-programme run remain open. No full-backend readiness claim. |
 
-Resume with independent reviews of
-[the FLAC integration](../performance/backend-native-flac-executor-readiness.md)
-and [the runner contract](../performance/backend-stress-coverage-readiness.md).
-Then fix/recheck findings, run combined unchanged-source gates, curate focused
-publications with exact-head hosted checks, and only then continue feature/UI
-integration. Preserve the original failure canaries and existing quotas.
+On an explicitly requested resume, start from then-current merged main, reconcile
+already integrated #50/#54 code and curate only remaining WIP from the recovery
+archive. Do not apply the old whole-programme patch over main. Independently
+review [the runner contract](../performance/backend-stress-coverage-readiness.md),
+then run combined unchanged-source workloads. Keep original fault canaries and
+existing quotas; publish focused slices with exact-head hosted gates before
+continuing UI exposure. [Publication evidence](../performance/native-flac-publication.md)
+records the Linux-only route and portable canary curation limits.
 
-The [ranked findings ledger](../performance/backend-roadmap-findings.md) retains
-historical reproductions and correction gates. The original Title-only native
-preservation canary is now green in the new Linux FLAC candidate; it no longer
-represents a current red result in that admitted route. This does not certify
-mixed edits, typed fields, other formats or all existing legacy paths.
+The [ranked findings](../performance/backend-roadmap-findings.md) retain
+historical reproductions and correction gates. The Title-only preservation
+failure is corrected in the admitted Linux route; broader legacy-path
+preservation is still open.
 
 Tests must include cold/warm and over-capacity cases, concurrent operations,
 external changes, invalid input, cancellation, process death and recovery where
