@@ -162,3 +162,11 @@ Once split, the side is recoverable for display and for renaming through the
 `%side%` [mask placeholder](masks.md#side--vinyl-sides).
 
 Only rows that actually carry a side letter change.
+
+## Native field recipes
+
+The Rust backend also supports ordered field assignments, selective removal and
+keep-only lists through saved transformation groups and MCP. The existing
+**Format values** command uses this native engine. The graphical preset editor
+still focuses on the existing text transformations; additional recipe controls
+are future interface work. See [Native field recipes](field-recipes.md).

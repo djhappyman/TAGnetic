@@ -47,6 +47,7 @@ static IMAGE_ADMISSION: std::sync::LazyLock<operation_control::ImageAdmission> =
 static BROWSER_QUEUE: blocking::Queue = blocking::Queue::new();
 static SETTINGS_QUEUE: blocking::Queue = blocking::Queue::new();
 static SESSION_QUEUE: blocking::Queue = blocking::Queue::new();
+static FIELD_PREVIEW_LANE: blocking::Latest = blocking::Latest::new();
 static LIBRARY_QUERY_QUEUE: blocking::Queue = blocking::Queue::new();
 static LIBRARY_SUGGEST_QUEUE: blocking::Queue = blocking::Queue::new();
 static QUERY_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -989,6 +990,31 @@ async fn preview_move(
         .await
 }
 
+/// Preview native tag recipes against the current working plan.
+#[tauri::command]
+async fn preview_field_operations(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    operations: Vec<tagrex_commands::FieldOperation>,
+    working: Option<PlanDto>,
+) -> Result<PlanDto, ErrorDto> {
+    let state = state.inner().clone();
+    SESSION_QUEUE
+        .run_latest(&FIELD_PREVIEW_LANE, move |cancel| {
+            let paths = paths.into_iter().map(PathBuf::from).collect::<Vec<_>>();
+            with_app(&state, |app| {
+                app.preview_field_operations_with_cancel(
+                    &paths,
+                    &operations,
+                    working.as_ref(),
+                    || cancel.cancelled(),
+                )
+                .map_err(ErrorDto::from)
+            })
+        })
+        .await
+}
+
 #[tauri::command]
 async fn preview_tag_edits(
     state: State<'_, AppState>,
@@ -1446,38 +1472,44 @@ async fn export_xml(
 }
 
 #[tauri::command]
-fn player_play(player: State<Player>, path: String) {
-    player.play(PathBuf::from(path));
+fn player_play(player: State<Player>, path: String) -> Result<(), ErrorDto> {
+    player.play(PathBuf::from(path)).map_err(shell_error)
 }
 
 #[tauri::command]
-fn player_set_next(player: State<Player>, path: String) {
-    player.set_next(PathBuf::from(path));
+fn player_set_next(player: State<Player>, path: String) -> Result<(), ErrorDto> {
+    player.set_next(PathBuf::from(path)).map_err(shell_error)
 }
 
 #[tauri::command]
-fn player_pause(player: State<Player>) {
-    player.pause();
+fn player_pause(player: State<Player>) -> Result<(), ErrorDto> {
+    player.pause().map_err(shell_error)
 }
 
 #[tauri::command]
-fn player_resume(player: State<Player>) {
-    player.resume();
+fn player_resume(player: State<Player>) -> Result<(), ErrorDto> {
+    player.resume().map_err(shell_error)
 }
 
 #[tauri::command]
-fn player_stop(player: State<Player>) {
-    player.stop();
+fn player_stop(player: State<Player>) -> Result<(), ErrorDto> {
+    player.stop().map_err(shell_error)
 }
 
 #[tauri::command]
-fn player_seek(player: State<Player>, secs: f64) {
-    player.seek(secs);
+fn player_seek(player: State<Player>, secs: f64) -> Result<(), ErrorDto> {
+    player.seek(secs).map_err(shell_error)
 }
 
 #[tauri::command]
-fn player_set_volume(player: State<Player>, level: f64) {
-    player.set_volume(level as f32);
+fn player_set_volume(player: State<Player>, level: f64) -> Result<(), ErrorDto> {
+    // The slider is 0..1; a finite value beyond it is a request for quiet/loud
+    // rather than an error, so clamp before narrowing. Doing it in `f64` keeps a
+    // huge value from overflowing to an infinity the player would refuse, and a
+    // NaN still has no meaning and is still refused.
+    player
+        .set_volume(level.clamp(0.0, 1.0) as f32)
+        .map_err(shell_error)
 }
 
 #[tauri::command]
@@ -2897,6 +2929,7 @@ fn main() {
             preview_move,
             preview_transform,
             preview_tag_edits,
+            preview_field_operations,
             preview_live_edits,
             preview_cover_embed,
             preview_cover_embed_path,

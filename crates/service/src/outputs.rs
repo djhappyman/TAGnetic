@@ -3,7 +3,7 @@ use super::*;
 use std::sync::LazyLock;
 use tagrex_core::export::{self, CueTrack, PlaylistTrack};
 use tagrex_core::mask::Mask;
-use tagrex_core::model::{TagEngine, TrackFile};
+use tagrex_core::model::{AudioFormat, TagEngine, TagField, TrackFile};
 
 const MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ANALYSIS_PATH_BYTES: usize = 64 * 1024 * 1024;
@@ -123,15 +123,18 @@ impl Service {
         let app = app_guard.as_ref().ok_or_else(no_library)?;
         // Membership and scope are verified before the native exporter reads.
         let rows = app.read_track_rows(&paths)?;
+        if rows.iter().any(|row| row.unreadable) {
+            return Err(ServiceError::new(
+                "read_failed",
+                "A selected track cannot be read",
+            ));
+        }
         let root = output_root(&grant, args, app.library_root())?;
-        let tracks = paths
-            .iter()
-            .map(|p| {
-                TagEngine::read(p).map_err(|_| {
-                    ServiceError::new("read_failed", "A selected track cannot be read")
-                })
-            })
-            .collect::<ServiceResult<Vec<TrackFile>>>()?;
+        // The rows already carry the same tag snapshot the native exporter
+        // needs, keyed by storage key. Reuse it instead of reading every file a
+        // second time through `TagEngine::read`; playlist formats never need a
+        // `TrackFile` at all.
+        let tracks = || tracks_from_rows(&paths, &rows);
         let split = args.get("split").and_then(Value::as_str).unwrap_or("none");
         if split != "none" {
             if !["playlist", "m3u"].contains(&kind) || !["album", "folder"].contains(&split) {
@@ -188,7 +191,7 @@ impl Service {
                 let target = root.join(safe_name(&name)?);
                 destination(&grant, &target)?;
                 let members = indices.iter().map(|i| &rows[*i]).collect::<Vec<_>>();
-                let text = playlist(&root, members.into_iter());
+                let text = playlist(&root, members.into_iter(), MAX_OUTPUT_BYTES - budget)?;
                 budget = budget.saturating_add(text.len());
                 if budget > MAX_OUTPUT_BYTES {
                     return Err(ServiceError::new(
@@ -207,17 +210,33 @@ impl Service {
             .ok_or_else(|| ServiceError::invalid("filename is required"))?;
         let target = root.join(safe_name(name)?);
         destination(&grant, &target)?;
+        // Playlist rendering comes from the row snapshot above; only the
+        // tag-table/report formats need the full native file view. An unknown
+        // format still reports its own choice error below.
+        let tracks = if matches!(kind, "csv" | "html" | "xml" | "report" | "cue") {
+            tracks()?
+        } else {
+            Vec::new()
+        };
         let text = match kind {
-            "csv" => export::csv(&tracks),
-            "html" => export::html(&tracks),
-            "xml" => export::xml(&tracks),
+            "csv" => export::Format::Csv(&tracks)
+                .render_bounded(MAX_OUTPUT_BYTES)
+                .map_err(export_limit)?,
+            "html" => export::Format::Html(&tracks)
+                .render_bounded(MAX_OUTPUT_BYTES)
+                .map_err(export_limit)?,
+            "xml" => export::Format::Xml(&tracks)
+                .render_bounded(MAX_OUTPUT_BYTES)
+                .map_err(export_limit)?,
             "report" => {
                 let mask = Mask::parse(required(args, "mask")?)
                     .map_err(|_| ServiceError::invalid("Invalid report mask"))?;
-                export::report(&tracks, &mask)
+                export::Format::Report(&tracks, &mask)
+                    .render_bounded(MAX_OUTPUT_BYTES)
+                    .map_err(export_limit)?
             }
-            "playlist" | "m3u" => playlist(&root, rows.iter()),
-            "cue" => export::cue(
+            "playlist" | "m3u" => playlist(&root, rows.iter(), MAX_OUTPUT_BYTES)?,
+            "cue" => export::Format::Cue(
                 &tracks
                     .iter()
                     .map(|track| CueTrack {
@@ -225,7 +244,9 @@ impl Service {
                         tags: track.tags.clone(),
                     })
                     .collect::<Vec<_>>(),
-            ),
+            )
+            .render_bounded(MAX_OUTPUT_BYTES)
+            .map_err(export_limit)?,
             _ => {
                 return Err(ServiceError::invalid(
                     "Choose csv, html, xml, report, m3u or cue",
@@ -421,7 +442,7 @@ impl Service {
         if !bpm && !["exact", "same_audio", "likely"].contains(&kind) {
             return Err(ServiceError::invalid("Unsupported duplicate matching kind"));
         }
-        let path_bytes = paths.iter().map(|p| p.as_os_str().len()).sum::<usize>();
+        let (job_paths, path_bytes) = retained_paths(&paths, MAX_ANALYSIS_PATH_BYTES)?;
         let mut scans = lock(&SCANS)?;
         let running = scans
             .values()
@@ -429,7 +450,7 @@ impl Service {
             .count();
         let retained_bytes = scans
             .values()
-            .map(|job| job.paths.iter().map(String::len).sum::<usize>())
+            .map(|job| retained_path_bytes(&job.paths))
             .sum::<usize>();
         if scans.len() >= MAX_ANALYSIS_JOBS
             || running >= MAX_RUNNING_ANALYSIS
@@ -448,10 +469,7 @@ impl Service {
             epoch: self.0.epoch.clone(),
             kind: kind.into(),
             cancel: AtomicBool::new(false),
-            paths: paths
-                .iter()
-                .map(|p| p.to_string_lossy().into_owned())
-                .collect(),
+            paths: job_paths,
             status: Mutex::new(ScanStatus {
                 phase: "queued".into(),
                 status: "running".into(),
@@ -623,8 +641,12 @@ fn output_root(grant: &Grant, args: &Value, default: &Path) -> ServiceResult<Pat
     Ok(root)
 }
 
-fn playlist<'a>(root: &Path, rows: impl Iterator<Item = &'a TrackDto>) -> String {
-    export::m3u(
+fn playlist<'a>(
+    root: &Path,
+    rows: impl Iterator<Item = &'a TrackDto>,
+    limit: usize,
+) -> ServiceResult<String> {
+    export::Format::M3u(
         &rows
             .map(|row| PlaylistTrack {
                 path: portable_path(root, Path::new(&row.path)),
@@ -643,6 +665,64 @@ fn playlist<'a>(root: &Path, rows: impl Iterator<Item = &'a TrackDto>) -> String
             })
             .collect::<Vec<_>>(),
     )
+    .render_bounded(limit)
+    .map_err(export_limit)
+}
+
+/// Build the native export view from the row snapshot already read for library
+/// membership. `TrackDto` stores tags by the reversible storage key
+/// (`TagField::to_storage_key`), and the real `PathBuf` is kept alongside those
+/// rows so file placeholders still work for non-UTF-8 names.
+fn tracks_from_rows(paths: &[PathBuf], rows: &[TrackDto]) -> ServiceResult<Vec<TrackFile>> {
+    if rows.len() != paths.len() {
+        return Err(ServiceError::new(
+            "read_failed",
+            "A selected track cannot be read",
+        ));
+    }
+    paths
+        .iter()
+        .zip(rows)
+        .map(|(path, row)| {
+            if row.unreadable {
+                return Err(ServiceError::new(
+                    "read_failed",
+                    "A selected track cannot be read",
+                ));
+            }
+            let format = audio_format(&row.format).ok_or_else(|| {
+                ServiceError::new("read_failed", "A selected track cannot be read")
+            })?;
+            Ok(TrackFile {
+                path: path.clone(),
+                format,
+                tags: row
+                    .tags
+                    .iter()
+                    .map(|(key, value)| (TagField::from_storage_key(key), value.clone()))
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
+/// Inverse of the debug spelling `TrackDto::from` stores for `AudioFormat`.
+fn audio_format(name: &str) -> Option<AudioFormat> {
+    Some(match name {
+        "Mp3" => AudioFormat::Mp3,
+        "Flac" => AudioFormat::Flac,
+        "OggVorbis" => AudioFormat::OggVorbis,
+        "M4a" => AudioFormat::M4a,
+        "Aac" => AudioFormat::Aac,
+        "Aiff" => AudioFormat::Aiff,
+        "Wav" => AudioFormat::Wav,
+        "Opus" => AudioFormat::Opus,
+        "Speex" => AudioFormat::Speex,
+        "Musepack" => AudioFormat::Musepack,
+        "MonkeysAudio" => AudioFormat::MonkeysAudio,
+        "WavPack" => AudioFormat::WavPack,
+        _ => return None,
+    })
 }
 
 fn scan_page(id: &str, job: &ScanJob, args: &Value) -> ServiceResult<Value> {
@@ -691,6 +771,43 @@ fn scan_page(id: &str, job: &ScanJob, args: &Value) -> ServiceResult<Value> {
     Ok(response)
 }
 
+/// The owned path strings a scan job retains, and the bytes they actually
+/// occupy. `to_string_lossy` can expand one invalid byte to a three-byte
+/// replacement character, so the admission budget must use these lengths rather
+/// than the source `OsStr` lengths.
+fn retained_path_bytes(paths: &Vec<String>) -> usize {
+    paths.iter().fold(
+        paths
+            .capacity()
+            .saturating_mul(std::mem::size_of::<String>()),
+        |bytes, path| bytes.saturating_add(path.capacity()),
+    )
+}
+
+fn retained_paths(paths: &[PathBuf], limit: usize) -> ServiceResult<(Vec<String>, usize)> {
+    let quota = || ServiceError::new("quota", "Analysis path storage exceeds its budget");
+    if paths.len().saturating_mul(std::mem::size_of::<String>()) > limit {
+        return Err(quota());
+    }
+    let mut retained = Vec::new();
+    retained
+        .try_reserve_exact(paths.len())
+        .map_err(|_| quota())?;
+    let mut bytes = retained_path_bytes(&retained);
+    if bytes > limit {
+        return Err(quota());
+    }
+    for path in paths {
+        let value = path.to_string_lossy().into_owned();
+        if value.capacity() > limit.saturating_sub(bytes) {
+            return Err(quota());
+        }
+        bytes += value.capacity();
+        retained.push(value);
+    }
+    Ok((retained, bytes))
+}
+
 fn safe_name(name: &str) -> ServiceResult<String> {
     let name = name.trim();
     if name.is_empty()
@@ -720,6 +837,13 @@ fn portable_path(root: &Path, path: &Path) -> String {
 fn output_error(error: std::io::Error) -> ServiceError {
     ServiceError::new(if error.kind()==std::io::ErrorKind::AlreadyExists {"output_exists"} else {"output_failed"},
         "Output publication failed; existing outputs were retained or restored where supported. Inspect the output manifest before retrying.")
+}
+
+fn export_limit(_: export::OutputLimit) -> ServiceError {
+    ServiceError::new(
+        "quota",
+        "Export exceeds the 64 MiB output budget or available memory",
+    )
 }
 
 #[cfg(test)]
@@ -929,6 +1053,84 @@ mod tests {
         }
         assert_eq!(safe_name("my report.csv").unwrap(), "my report.csv");
     }
+    #[test]
+    fn every_text_export_format_uses_the_shared_row_snapshot() {
+        let (root, service, one, _, paths) = fixture();
+        let cases = [
+            ("csv", json!({}), "a.wav"),
+            ("html", json!({}), "Tagnetic export"),
+            ("xml", json!({}), "<library"),
+            (
+                "report",
+                json!({"mask":"%filenameext%|%_codec%"}),
+                "a.wav|WAV",
+            ),
+            ("playlist", json!({}), "a.wav"),
+            ("cue", json!({}), "FILE \""),
+        ];
+        for (format, extra, expected) in cases {
+            let mut args = json!({
+                "paths": paths,
+                "format": format,
+                "filename": format!("out.{format}"),
+                "preview": false,
+            });
+            for (key, value) in extra.as_object().unwrap() {
+                args[key] = value.clone();
+            }
+            service.call(&one, "exports.create", args).unwrap();
+            let text = fs::read_to_string(root.join(format!("media/out.{format}"))).unwrap();
+            assert!(
+                text.contains(expected),
+                "{format} missing {expected:?}: {text}"
+            );
+        }
+        drop(service);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn export_refuses_a_track_the_native_reader_cannot_read() {
+        let (root, service, one, _, _) = fixture();
+        let broken = root.join("media/broken.wav");
+        fs::write(&broken, b"not a wave file").unwrap();
+        for format in ["csv", "html", "xml", "report", "cue", "playlist", "m3u"] {
+            assert_eq!(
+            service
+                .call(
+                    &one,
+                    "exports.create",
+                    json!({"paths":[broken],"format":format,"filename":"broken.csv","preview":true})
+                )
+                .unwrap_err()
+                .code,
+            "read_failed"
+        );
+        }
+        drop(service);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn analysis_admission_counts_the_retained_lossy_path_bytes() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let raw = OsStr::from_bytes(b"/music/\xff.wav");
+        let path = PathBuf::from(raw);
+        let (retained, bytes) =
+            retained_paths(std::slice::from_ref(&path), MAX_ANALYSIS_PATH_BYTES).unwrap();
+        assert_eq!(
+            bytes,
+            retained[0].capacity() + std::mem::size_of::<String>()
+        );
+        assert!(retained_paths(std::slice::from_ref(&path), bytes - 1).is_err());
+        assert!(
+            bytes > raw.len(),
+            "an invalid byte expands in the retained string"
+        );
+    }
+
     #[test]
     fn result_pages_do_not_expand_large_groups() {
         let job = ScanJob {

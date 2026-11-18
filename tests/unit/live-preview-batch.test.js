@@ -44,7 +44,7 @@ function harness(tracks, values = []) {
     } },
     invoke: async (command, args) => {
       calls.invoke.push({ command, args });
-      if (command === 'render_column') return values;
+      if (command === 'preview_field_operations') return {changes: paths.map((path,index) => ({path, tag_changes:[{field:args.operations[0].field, new:values[index] || null}]}))};
       if (command === 'preview_tag_edits') return { changes: args.edits };
       throw Error(`Unexpected command: ${command}`);
     },
@@ -67,7 +67,7 @@ for (const count of [2000, 20000]) test(`Format Values stages ${count} ordered v
   assert.deepEqual(plain(await c.runRibbon('format-values', { field: 'title', pattern: '%artist%', mode: 'stage' })), { dialog: 'ribbon-format-dialog' });
   assert.deepEqual(plain(c.liveInputs().edits), paths.map((path, index) => ({ path, field: 'title', value: values[index] })));
   assert.deepEqual(paths, tracks.map(track => track.path));
-  assert.deepEqual(calls.invoke.map(call => call.command), ['render_column']);
+  assert.deepEqual(calls.invoke.map(call => call.command), ['preview_field_operations']);
   assert.equal(calls.writes.length, 0);
   t.diagnostic(JSON.stringify({ entries: count, events: calls.events, pendingEntriesAtEvents: calls.pendingEntriesAtEvents }));
   assert.equal(calls.events, 1, 'one complete pending-input notification per ribbon action');
@@ -143,8 +143,9 @@ test('a no-op batch still invalidates once; single-value editing retains its not
 test('Write uses its existing plan path; stale render results never mutate pending inputs', async () => {
   const { c, calls, paths } = harness(rows(2), ['Write', '']);
   await c.runRibbon('format-values', { field: 'title', pattern: '%artist%', mode: 'write' });
-  assert.deepEqual(calls.invoke.map(call => call.command), ['render_column', 'preview_tag_edits']);
-  assert.deepEqual(plain(calls.invoke[1].args), { edits: paths.map((path, index) => ({ path, field: 'title', value: index ? '' : 'Write' })), paths, cover: null });
+  assert.deepEqual(calls.invoke.map(call => call.command), ['preview_field_operations']);
+  assert.deepEqual(plain(calls.invoke[0].args), { paths, operations:[{kind:'format', field:'title', pattern:'%artist%'}], working:null });
+  assert.deepEqual(plain(calls.writes[0].changes).map(change=>change.tag_changes[0].new), ['Write',null]);
   assert.equal(calls.writes.length, 1);
   assert.equal(calls.events, 0);
   assert.equal(c.edits.size, 0);
@@ -152,4 +153,12 @@ test('Write uses its existing plan path; stale render results never mutate pendi
   await assert.rejects(c.runRibbon('format-values', { field: 'title', mode: 'stage' }), /selection changed/);
   assert.equal(calls.events, 0);
   assert.equal(c.edits.size, 0);
+});
+
+test('Format Values refuses late results when staged input changes during the native call', async () => {
+  const { c } = harness(rows(2), ['Old result', 'Old result']);
+  const pending = c.runRibbon('format-values', { field:'title', pattern:'%artist%', mode:'stage' });
+  c.recordLiveField(['p0'], 'artist', 'Newer human edit');
+  await assert.rejects(pending, /staged values changed/);
+  assert.deepEqual(plain(c.liveInputs().edits), [{path:'p0',field:'artist',value:'Newer human edit'}]);
 });

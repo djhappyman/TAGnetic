@@ -203,19 +203,27 @@ impl DesktopBackend for DesktopActions {
                     .ok_or_else(|| service_error("No files are open."))?;
                 app.read_track(std::path::Path::new(path))
                     .map_err(service_error)?;
-                player.play(PathBuf::from(path));
+                player.play(PathBuf::from(path)).map_err(|error| {
+                    ServiceError::new("playback_unavailable", error.to_string())
+                })?;
                 Ok(json!({"accepted":true}))
             }
             "playback.pause" => {
-                player.pause();
+                player.pause().map_err(|error| {
+                    ServiceError::new("playback_unavailable", error.to_string())
+                })?;
                 Ok(json!({"accepted":true}))
             }
             "playback.resume" => {
-                player.resume();
+                player.resume().map_err(|error| {
+                    ServiceError::new("playback_unavailable", error.to_string())
+                })?;
                 Ok(json!({"accepted":true}))
             }
             "playback.stop" => {
-                player.stop();
+                player.stop().map_err(|error| {
+                    ServiceError::new("playback_unavailable", error.to_string())
+                })?;
                 Ok(json!({"accepted":true}))
             }
             "playback.seek" => {
@@ -225,7 +233,9 @@ impl DesktopBackend for DesktopActions {
                     .and_then(Value::as_f64)
                     .filter(|value| value.is_finite() && *value >= 0.0)
                     .ok_or_else(|| service_error("Seek position must be nonnegative seconds."))?;
-                player.seek(seconds);
+                player.seek(seconds).map_err(|error| {
+                    ServiceError::new("playback_unavailable", error.to_string())
+                })?;
                 Ok(json!({"accepted":true}))
             }
             "playback.volume" => {
@@ -234,7 +244,9 @@ impl DesktopBackend for DesktopActions {
                     .and_then(Value::as_f64)
                     .filter(|value| (0.0..=1.0).contains(value))
                     .ok_or_else(|| service_error("Volume must be between zero and one."))?;
-                player.set_volume(level as f32);
+                player.set_volume(level as f32).map_err(|error| {
+                    ServiceError::new("playback_unavailable", error.to_string())
+                })?;
                 Ok(json!({"accepted":true}))
             }
             "session.open" => {

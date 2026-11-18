@@ -234,7 +234,7 @@ pub enum QueryError {
     Cancelled,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Value {
     raw: String,
     folded: String,
@@ -249,14 +249,16 @@ impl Value {
 }
 
 /// A single row's searchable saved metadata. Technical properties are optional.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryRow {
     pub path: String,
-    values: BTreeMap<String, Value>,
-    search: Value,
+    values: Arc<BTreeMap<String, Value>>,
+    computed: BTreeMap<String, Value>,
+    search: Arc<Value>,
     format: Option<tagrex_core::model::AudioFormat>,
     props: Option<tagrex_core::model::AudioProps>,
     modified: Option<SystemTime>,
+    source_fingerprint: Option<crate::read_cache::Fingerprint>,
 }
 
 impl QueryRow {
@@ -333,15 +335,23 @@ impl QueryRow {
         }
         Self {
             path: track.path.clone(),
-            values: fields
-                .into_iter()
-                .map(|(k, v)| (k, Value::new(v)))
-                .collect(),
-            search: Value::new(search),
+            values: Arc::new(
+                fields
+                    .into_iter()
+                    .map(|(k, v)| (k, Value::new(v)))
+                    .collect(),
+            ),
+            computed: BTreeMap::new(),
+            search: Arc::new(Value::new(search)),
             format: None,
             props: None,
             modified: None,
+            source_fingerprint: None,
         }
+    }
+
+    pub(crate) fn set_source_metadata(&mut self, metadata: Option<&std::fs::Metadata>) {
+        self.source_fingerprint = metadata.and_then(crate::read_cache::Fingerprint::from_metadata);
     }
 
     pub fn set_technical(
@@ -358,7 +368,7 @@ impl QueryRow {
             ("channels", channels.map(|v| v.to_string())),
         ] {
             if let Some(value) = value {
-                self.values.insert(key.into(), Value::new(value));
+                Arc::make_mut(&mut self.values).insert(key.into(), Value::new(value));
             }
         }
     }
@@ -375,14 +385,16 @@ impl QueryRow {
     }
 
     pub fn value(&self, field: &str) -> &str {
-        self.values
+        self.computed
             .get(canonical_field(field))
+            .or_else(|| self.values.get(canonical_field(field)))
             .map(|v| v.raw.as_str())
             .unwrap_or("")
     }
     fn folded(&self, field: &str) -> &str {
-        self.values
+        self.computed
             .get(canonical_field(field))
+            .or_else(|| self.values.get(canonical_field(field)))
             .map(|v| v.folded.as_str())
             .unwrap_or("")
     }
@@ -410,21 +422,102 @@ fn canonical_field(field: &str) -> &str {
 struct Facet {
     values: BTreeMap<String, (String, Vec<usize>)>,
     credits: HashMap<String, Vec<String>>,
+    working_bytes: usize,
 }
 
-type RegexCache = Arc<Mutex<HashMap<(String, bool), Arc<Regex>>>>;
+impl Facet {
+    fn retained_bytes(&self) -> usize {
+        let values = self
+            .values
+            .iter()
+            .fold(128usize, |sum, (folded, (raw, rows))| {
+                sum.saturating_add(128)
+                    .saturating_add(folded.capacity())
+                    .saturating_add(raw.capacity())
+                    .saturating_add(rows.capacity().saturating_mul(std::mem::size_of::<usize>()))
+            });
+        self.credits.iter().fold(values, |sum, (key, names)| {
+            sum.saturating_add(96)
+                .saturating_add(key.capacity())
+                .saturating_add(
+                    names
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<String>()),
+                )
+                .saturating_add(names.iter().map(|s| s.capacity()).sum::<usize>())
+        })
+    }
+}
+
+const MAX_FACET_WORK_BYTES: usize = 64 * 1024 * 1024;
+fn facet_budget(bytes: &mut usize, additional: usize) -> Result<(), QueryError> {
+    *bytes = bytes.saturating_add(additional);
+    if *bytes > MAX_FACET_WORK_BYTES {
+        return Err(invalid("Filter facets exceed the 64 MiB working budget."));
+    }
+    Ok(())
+}
+fn push_facet_value(
+    values: &mut BTreeMap<String, (String, Vec<usize>)>,
+    bytes: &mut usize,
+    folded: &str,
+    raw: &str,
+    index: usize,
+) -> Result<(), QueryError> {
+    if !values.contains_key(folded) {
+        facet_budget(
+            bytes,
+            folded.len().saturating_add(raw.len()).saturating_add(128),
+        )?;
+        values.insert(folded.into(), (raw.into(), Vec::new()));
+    }
+    let rows = &mut values.get_mut(folded).expect("inserted facet value").1;
+    if rows.len() == rows.capacity() {
+        let capacity = rows.capacity().saturating_mul(2).max(4);
+        facet_budget(
+            bytes,
+            (capacity - rows.capacity()).saturating_mul(std::mem::size_of::<usize>()),
+        )?;
+        rows.try_reserve_exact(capacity - rows.len())
+            .map_err(|_| invalid("Insufficient memory for filter facets."))?;
+    }
+    rows.push(index);
+    Ok(())
+}
+
+type RegexCache = Arc<Mutex<crate::bounded_cache::Cache<(String, bool), Arc<Regex>>>>;
+
+/// Retained facet memory. One suggestion over a large library needs several
+/// high-cardinality facets at once; at 32 MiB the cache could not hold two
+/// ~17 MiB facets from a 100k-row library, so each request rebuilt the ones it
+/// had just evicted. This cap holds the measured working set of the default
+/// eight suggestion fields at 100k rows with headroom for larger libraries.
+/// It remains a bounded, evictable derived cache, not a process-wide memory cap
+/// or a value authority; only the 100k-row workload was measured.
+const FACET_CACHE_BYTES: usize = 96 * 1024 * 1024;
+const FACET_CACHE_ENTRIES: usize = 32;
+
+/// How many exact stored field names one snapshot remembers. Scoped search text
+/// is resolved against this memo instead of rescanning every row per candidate
+/// prefix; a full memo stops admitting names and scopes still resolve by scan.
+const MAX_FIELD_KEY_MEMO: usize = 256;
+/// Only real field names are worth remembering; a longer prefix is search text.
+const MAX_FIELD_KEY_LEN: usize = 128;
 
 /// Immutable rows shared with query workers. Caches contain only derived data.
 #[derive(Debug)]
 pub struct QueryIndex {
     pub id: u64,
     pub rows: Vec<Arc<QueryRow>>,
-    facets: Mutex<HashMap<String, Arc<Facet>>>,
+    facets: Mutex<crate::bounded_cache::Cache<String, Arc<Facet>>>,
     duplicates: Arc<Mutex<HashMap<String, DuplicateResults>>>,
     valid: Arc<AtomicBool>,
     custom: Mutex<Option<(String, Arc<QueryIndex>)>>,
     custom_key: String,
     regex_cache: RegexCache,
+    /// Bounded "some row stores this exact field key" evidence, positive and
+    /// negative. Derived from immutable rows, never a value authority.
+    field_keys: Mutex<HashMap<String, bool>>,
 }
 
 impl QueryIndex {
@@ -438,12 +531,19 @@ impl QueryIndex {
         Self {
             id: SNAPSHOT_ID.fetch_add(1, Ordering::Relaxed),
             rows,
-            facets: Mutex::default(),
+            facets: Mutex::new(crate::bounded_cache::Cache::new(
+                FACET_CACHE_ENTRIES,
+                FACET_CACHE_BYTES,
+            )),
             duplicates: Arc::default(),
             valid: Arc::new(AtomicBool::new(true)),
             custom: Mutex::default(),
             custom_key: String::new(),
-            regex_cache: Arc::default(),
+            regex_cache: Arc::new(Mutex::new(crate::bounded_cache::Cache::new(
+                16,
+                32 * 1024 * 1024,
+            ))),
+            field_keys: Mutex::default(),
         }
     }
     pub fn with_updates(&self, rows: Vec<QueryRow>) -> Self {
@@ -459,6 +559,18 @@ impl QueryIndex {
             .collect();
         Self::from_shared_rows(rows)
     }
+    /// Read-only refreshes must not invalidate facets, ongoing queries or
+    /// duplicate evidence unless the rows or their source identity changed.
+    pub fn with_updates_if_changed(&self, rows: Vec<QueryRow>) -> Option<Self> {
+        let updates: HashMap<_, _> = rows.iter().map(|row| (row.path.as_str(), row)).collect();
+        let changed = !self.is_current()
+            || self.rows.iter().any(|row| {
+                updates
+                    .get(row.path.as_str())
+                    .is_some_and(|new| new.source_fingerprint.is_none() || row.as_ref() != *new)
+            });
+        changed.then(|| self.with_updates(rows))
+    }
     pub fn invalidate(&self) {
         self.valid.store(false, Ordering::Release);
         self.duplicates
@@ -472,7 +584,30 @@ impl QueryIndex {
     pub fn known_field(&self, field: &str) -> bool {
         FIELDS.contains(&field)
             || (field.starts_with("custom:") && field.len() > 7 && field.len() <= 256)
-            || self.rows.iter().any(|r| r.values.contains_key(field))
+            || self.stores_field_key(field)
+    }
+
+    /// Whether any row stores this exact field key. Remembered per snapshot:
+    /// query and suggestion work compile the same model several times, and a
+    /// colon-heavy search text can test many candidate prefixes.
+    fn stores_field_key(&self, field: &str) -> bool {
+        if let Some(known) = self
+            .field_keys
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(field)
+        {
+            return *known;
+        }
+        let known = self
+            .rows
+            .iter()
+            .any(|row| row.computed.contains_key(field) || row.values.contains_key(field));
+        let mut memo = self.field_keys.lock().unwrap_or_else(|p| p.into_inner());
+        if memo.len() < MAX_FIELD_KEY_MEMO && field.len() <= MAX_FIELD_KEY_LEN {
+            memo.insert(field.into(), known);
+        }
+        known
     }
 
     fn text_scope(&self, text: &str) -> Option<(String, usize)> {
@@ -480,16 +615,22 @@ impl QueryIndex {
             .rev()
             .find_map(|(offset, _)| {
                 let field = &text[..offset];
-                let folded = field.to_lowercase();
-                // Preserve custom storage keys, preferring the longest actual
-                // key. Standard field aliases are case-insensitive.
-                if self.rows.iter().any(|row| row.values.contains_key(field)) {
-                    Some((field.to_string(), offset + 1))
-                } else if FIELDS.contains(&folded.as_str()) {
-                    Some((folded, offset + 1))
-                } else {
-                    None
+                // An exactly spelled standard name needs no row evidence.
+                if FIELDS.contains(&field) {
+                    return Some((field.to_string(), offset + 1));
                 }
+                // A stored key still outranks a case-folded standard alias, so a
+                // computed field named "DATE" keeps resolving to itself. Absent
+                // names are remembered, so this is one pass per name per
+                // snapshot rather than one pass per candidate per request.
+                if self.stores_field_key(field) {
+                    return Some((field.to_string(), offset + 1));
+                }
+                let folded = field.to_lowercase();
+                if FIELDS.contains(&folded.as_str()) {
+                    return Some((folded, offset + 1));
+                }
+                None
             })
             .or_else(|| {
                 let rest = text.strip_prefix("custom:")?;
@@ -542,40 +683,35 @@ impl QueryIndex {
                 })?,
             );
         }
-        let mut rows = Vec::with_capacity(self.rows.len());
+        let render_fields = masks
+            .iter()
+            .flat_map(|mask| mask.render_fields())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut rows = Vec::new();
+        let mut derived_bytes = 0usize;
         for (i, source) in self.rows.iter().enumerate() {
             if i % 128 == 0 && cancelled() {
                 return Err(QueryError::Cancelled);
             }
-            let tags = source
-                .values
-                .iter()
-                .filter(|(key, _)| {
-                    ![
-                        "file",
-                        "path",
-                        "folder",
-                        "format",
-                        "cover",
-                        "unreadable",
-                        "tagtypes",
-                        "duration",
-                        "position",
-                        "bitrate",
-                        "samplerate",
-                        "size",
-                        "channels",
-                    ]
-                    .contains(&key.as_str())
-                })
-                .map(|(key, value)| {
-                    (
-                        tagrex_core::model::TagField::from_storage_key(key),
-                        value.raw.clone(),
-                    )
-                })
-                .collect();
-            let tags = tagrex_core::export::lenient_tags(&tags);
+            let mut tags = tagrex_core::export::lenient_tags(&tagrex_core::model::TagMap::new());
+            for field in &render_fields {
+                let key = field.to_storage_key();
+                let value = source.values.get(&key).or_else(|| {
+                    source
+                        .values
+                        .iter()
+                        .find(|(key, _)| {
+                            tagrex_core::model::TagField::from_storage_key(key).same_name(field)
+                        })
+                        .map(|(_, v)| v)
+                });
+                if let Some(value) = value {
+                    if value.raw.len() > 1024 * 1024 {
+                        return Err(invalid("A computed field input exceeds 1 MiB."));
+                    }
+                    tags.insert(field.clone(), value.raw.clone());
+                }
+            }
             let context = tagrex_core::mask::FileContext {
                 path: Some(std::path::Path::new(&source.path)),
                 format: source.format,
@@ -583,23 +719,45 @@ impl QueryIndex {
                 size_bytes: source.value("size").parse().ok(),
                 modified: source.modified,
             };
+            derived_bytes = derived_bytes
+                .saturating_add(256)
+                .saturating_add(source.path.len());
+            if derived_bytes > 64 * 1024 * 1024 {
+                return Err(invalid("Computed filter fields exceed the 64 MiB budget."));
+            }
             let mut row = (**source).clone();
             for (definition, mask) in definitions.iter().zip(&masks) {
                 let value = mask.render_with(&tags, &context).unwrap_or_default();
-                row.values.insert(definition.key.clone(), Value::new(value));
+                let value = Value::new(value);
+                derived_bytes = derived_bytes
+                    .saturating_add(128)
+                    .saturating_add(definition.key.len())
+                    .saturating_add(value.raw.capacity())
+                    .saturating_add(value.folded.capacity());
+                if derived_bytes > 64 * 1024 * 1024 {
+                    return Err(invalid("Computed filter fields exceed the 64 MiB budget."));
+                }
+                row.computed.insert(definition.key.clone(), value);
             }
             rows.push(Arc::new(row));
         }
         let index = Arc::new(Self {
             id: self.id,
             rows,
-            facets: Mutex::default(),
+            facets: Mutex::new(crate::bounded_cache::Cache::new(
+                FACET_CACHE_ENTRIES,
+                FACET_CACHE_BYTES,
+            )),
             duplicates: self.duplicates.clone(),
             valid: self.valid.clone(),
             custom: Mutex::default(),
             custom_key: key.clone(),
             regex_cache: self.regex_cache.clone(),
+            field_keys: Mutex::default(),
         });
+        if cancelled() {
+            return Err(QueryError::Cancelled);
+        }
         *self.custom.lock().unwrap_or_else(|p| p.into_inner()) = Some((key, index.clone()));
         Ok(Some(index))
     }
@@ -637,10 +795,10 @@ impl QueryIndex {
                 })?,
         );
         let mut cache = self.regex_cache.lock().unwrap_or_else(|p| p.into_inner());
-        if cache.len() >= 16 {
-            cache.clear();
-        }
-        cache.insert(key, regex.clone());
+        // Both compiled and lazy DFA limits contribute; this is conservative
+        // admission accounting, not an allocator/RSS measurement.
+        let bytes = 4 * 1024 * 1024 + key.0.capacity() + 128;
+        cache.insert(key, regex.clone(), bytes);
         Ok(regex)
     }
     pub fn set_duplicate_results(&self, kind: &str, result: DuplicateResults) {
@@ -669,20 +827,22 @@ impl QueryIndex {
             if raw.trim().is_empty() {
                 continue;
             }
-            facet
-                .values
-                .entry(row.folded(field).into())
-                .or_insert_with(|| (raw.into(), Vec::new()))
-                .1
-                .push(i);
+            push_facet_value(
+                &mut facet.values,
+                &mut facet.working_bytes,
+                row.folded(field),
+                raw,
+                i,
+            )?;
+        }
+        if cancelled() {
+            return Err(QueryError::Cancelled);
         }
         let facet = Arc::new(facet);
         // Bound cached fields, rather than retaining an index for every custom tag.
         let mut cache = self.facets.lock().unwrap_or_else(|p| p.into_inner());
-        if cache.len() >= 32 {
-            cache.clear();
-        }
-        cache.insert(field.into(), facet.clone());
+        let bytes = facet.retained_bytes().saturating_add(field.len() * 2 + 256);
+        cache.insert(field.into(), facet.clone(), bytes);
         Ok(facet)
     }
 
@@ -701,6 +861,27 @@ impl QueryIndex {
             .cloned()
         {
             return Ok(facet);
+        }
+        // Admission precedes the member parser's normalization scratch and
+        // known-credit set. Count unique borrowed inputs before making strings.
+        if field != "genre" {
+            let mut known_inputs = std::collections::HashSet::new();
+            let mut known_bytes = 0usize;
+            for (i, row) in self.rows.iter().enumerate() {
+                if i % 256 == 0 && cancelled() {
+                    return Err(QueryError::Cancelled);
+                }
+                for raw in [row.value("artist"), row.value("albumartist")] {
+                    if !raw.is_empty() && !known_inputs.contains(raw) {
+                        facet_budget(
+                            &mut known_bytes,
+                            raw.len().saturating_mul(16).saturating_add(256),
+                        )?;
+                        known_inputs.insert(raw);
+                    }
+                }
+            }
+            drop(known_inputs);
         }
         let known = if field == "genre" {
             std::collections::HashSet::new()
@@ -722,25 +903,46 @@ impl QueryIndex {
             if raw.trim().is_empty() {
                 continue;
             }
-            let names = facet
-                .credits
-                .entry(raw.into())
-                .or_insert_with(|| crate::query_members::members(raw, field, &known));
-            for name in names {
-                facet
-                    .values
-                    .entry(name.to_lowercase())
-                    .or_insert_with(|| (name.clone(), Vec::new()))
-                    .1
-                    .push(i);
+            if !facet.credits.contains_key(raw) {
+                // Includes normalization token scratch before parsing any row.
+                let mut scratch = facet.working_bytes;
+                facet_budget(
+                    &mut scratch,
+                    raw.len().saturating_mul(16).saturating_add(4096),
+                )?;
+                let names = crate::query_members::members(raw, field, &known);
+                let bytes = raw
+                    .len()
+                    .saturating_add(128)
+                    .saturating_add(
+                        names
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<String>()),
+                    )
+                    .saturating_add(names.iter().map(|n| n.capacity()).sum::<usize>());
+                facet_budget(&mut facet.working_bytes, bytes)?;
+                facet.credits.insert(raw.into(), names);
             }
+            for name in &facet.credits[raw] {
+                // The folded temporary is bounded by the admitted credit.
+                push_facet_value(
+                    &mut facet.values,
+                    &mut facet.working_bytes,
+                    &name.to_lowercase(),
+                    name,
+                    i,
+                )?;
+            }
+        }
+        if cancelled() {
+            return Err(QueryError::Cancelled);
         }
         let facet = Arc::new(facet);
         let mut cache = self.facets.lock().unwrap_or_else(|p| p.into_inner());
-        if cache.len() >= 32 {
-            cache.clear();
-        }
-        cache.insert(key, facet.clone());
+        let bytes = facet
+            .retained_bytes()
+            .saturating_add(key.capacity() * 2 + 256);
+        cache.insert(key, facet.clone(), bytes);
         Ok(facet)
     }
 
@@ -1754,6 +1956,58 @@ mod tests {
         serde_json::json!({"kind":"condition","id":id,"field":field,"operator":operator,"values":values})
     }
     #[test]
+    fn computed_overlay_shares_large_saved_values_and_search_text() {
+        let mut tracks = tracks();
+        tracks[0]
+            .tags
+            .insert("custom:LYRICS".into(), "x".repeat(2 * 1024 * 1024));
+        let index = QueryIndex::from_tracks(&tracks);
+        let definitions = [CustomField {
+            key: "custom:display".into(),
+            mask: "%artist% · %genre%".into(),
+        }];
+        let computed = index
+            .custom_index(&definitions, &|| false)
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&index.rows[0].values, &computed.rows[0].values));
+        assert!(Arc::ptr_eq(&index.rows[0].search, &computed.rows[0].search));
+        assert_eq!(
+            computed.rows[0].value("custom:display"),
+            "Example · Hardcore"
+        );
+        assert_eq!(index.rows[0].value("custom:display"), "");
+        assert_eq!(
+            computed.rows[0].value("custom:LYRICS").len(),
+            2 * 1024 * 1024
+        );
+    }
+    #[test]
+    fn facet_lru_keeps_hot_fields_and_budget_refuses_before_cloning_a_value() {
+        let index = QueryIndex::from_tracks(&tracks());
+        *index.facets.lock().unwrap() = crate::bounded_cache::Cache::new(2, 100_000);
+        let hot = index.facet("artist", &|| false).unwrap();
+        let cold = index.facet("genre", &|| false).unwrap();
+        assert!(Arc::ptr_eq(
+            &hot,
+            &index.facet("artist", &|| false).unwrap()
+        ));
+        index.facet("year", &|| false).unwrap();
+        assert!(Arc::ptr_eq(
+            &hot,
+            &index.facet("artist", &|| false).unwrap()
+        ));
+        assert!(!Arc::ptr_eq(
+            &cold,
+            &index.facet("genre", &|| false).unwrap()
+        ));
+        let mut values = BTreeMap::new();
+        let mut bytes = MAX_FACET_WORK_BYTES - 5;
+        assert!(push_facet_value(&mut values, &mut bytes, "new", "new", 0).is_err());
+        assert!(values.is_empty());
+        assert!(index.facet("title", &|| true).is_err());
+    }
+    #[test]
     fn nested_groups_multivalues_and_ranges() {
         let index = QueryIndex::from_tracks(&tracks());
         let query = request(
@@ -2480,6 +2734,257 @@ mod tests {
         assert_eq!(
             index.query(&q, || false).expect("valid").indices,
             vec![0, 2]
+        );
+    }
+}
+
+/// Scoped search resolution and derived-cache retention under a high-cardinality
+/// library. Both are read-only caches: results must not change, only the work
+/// done to reach them.
+#[cfg(test)]
+mod scoped_text_and_facet_cache_tests {
+    use super::*;
+
+    fn row(path: &str, tags: serde_json::Value) -> QueryRow {
+        let track: TrackDto = serde_json::from_value(serde_json::json!({
+            "path": path, "format": "FLAC", "tags": tags
+        }))
+        .expect("fixture");
+        QueryRow::from_track(&track)
+    }
+    fn index() -> QueryIndex {
+        QueryIndex::from_rows(vec![
+            row(
+                "/music/a.flac",
+                serde_json::json!({
+                    "artist": "Hixxy", "genre": "Jungle",
+                    "comment": "played 01:23:45", "custom:MOOD": "Dark"
+                }),
+            ),
+            row(
+                "/music/b.flac",
+                serde_json::json!({
+                    "artist": "Sharkey", "genre": "Hardcore", "media": "Vinyl"
+                }),
+            ),
+        ])
+    }
+    fn model(text: &str) -> QueryModel {
+        serde_json::from_value(serde_json::json!({
+            "version":2,"text":text,
+            "root":{"kind":"group","id":"root","mode":"all","children":[]}
+        }))
+        .expect("fixture")
+    }
+    fn query(index: &QueryIndex, text: &str) -> Vec<usize> {
+        index
+            .query(
+                &QueryRequest {
+                    request_id: 1,
+                    snapshot_id: Some(index.id),
+                    query: model(text),
+                },
+                || false,
+            )
+            .expect("valid query")
+            .indices
+    }
+
+    #[test]
+    fn scoped_search_resolves_known_fields_without_row_evidence() {
+        let index = index();
+        // A standard field resolves from the built-in list, the way an ordinary
+        // "genre:jungle" search does, and a stored key is preserved exactly.
+        assert_eq!(index.text_scope("genre:jungle"), Some(("genre".into(), 6)));
+        assert_eq!(index.text_scope("GENRE:jungle"), Some(("genre".into(), 6)));
+        assert_eq!(
+            index.text_scope("custom:MOOD:dark"),
+            Some(("custom:MOOD".into(), 12))
+        );
+        assert_eq!(index.text_scope("media:vinyl"), Some(("media".into(), 6)));
+        // A time-like text is not a field scope and never becomes one.
+        assert_eq!(index.text_scope("01:23:45"), None);
+        assert_eq!(index.text_scope("played 01:23:45"), None);
+        // Results are the same on the first and later resolutions.
+        assert_eq!(query(&index, "genre:jungle"), vec![0]);
+        assert_eq!(query(&index, "genre:jungle"), vec![0]);
+        assert_eq!(query(&index, "played 01:23:45"), vec![0]);
+        assert_eq!(query(&index, "01:23:45"), vec![0]);
+        assert!(index.known_field("media"));
+        assert!(!index.known_field("not_a_tag"));
+    }
+
+    #[test]
+    fn absent_scope_candidates_are_remembered_and_the_memo_stays_bounded() {
+        let index = index();
+        // Many distinct non-field prefixes, the shape of a colon-heavy search
+        // text that used to rescan every row per candidate.
+        for i in 0..(MAX_FIELD_KEY_MEMO * 3) {
+            assert_eq!(index.text_scope(&format!("n{i}:1:2:3")), None, "{i}");
+        }
+        let memo = index.field_keys.lock().unwrap();
+        assert!(memo.len() <= MAX_FIELD_KEY_MEMO);
+        assert!(memo
+            .iter()
+            .all(|(name, known)| !*known || index.known_field(name)));
+        drop(memo);
+        // Correctness is unaffected once the memo is full: the fallback scan
+        // still resolves a stored key and still rejects an absent one.
+        assert_eq!(
+            index.text_scope("custom:MOOD:dark"),
+            Some(("custom:MOOD".into(), 12))
+        );
+        assert_eq!(index.text_scope("n999999:1"), None);
+        assert!(index.known_field("custom:MOOD"));
+        assert!(!index.known_field("absent_field"));
+    }
+
+    #[test]
+    fn a_computed_key_that_case_folds_to_a_standard_name_keeps_its_identity() {
+        let index = index();
+        let derived = index
+            .custom_index(
+                &[CustomField {
+                    key: "DATE".into(),
+                    mask: "%genre%".into(),
+                }],
+                &|| false,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(derived.text_scope("DATE:jungle"), Some(("DATE".into(), 5)));
+        let mut request = QueryRequest {
+            request_id: 1,
+            snapshot_id: Some(index.id),
+            query: model("DATE:jungle"),
+        };
+        request.query.custom_fields = vec![CustomField {
+            key: "DATE".into(),
+            mask: "%genre%".into(),
+        }];
+        assert_eq!(index.query(&request, || false).unwrap().indices, vec![0]);
+        // Without the computed field the same text is a plain year search.
+        request.query.custom_fields.clear();
+        assert!(index.query(&request, || false).unwrap().indices.is_empty());
+    }
+
+    #[test]
+    fn long_scope_candidates_are_resolved_without_being_remembered() {
+        let index = index();
+        let long = "z".repeat(MAX_FIELD_KEY_LEN + 1);
+        assert_eq!(index.text_scope(&format!("{long}:value")), None);
+        assert!(index.field_keys.lock().unwrap().len() <= MAX_FIELD_KEY_MEMO);
+        assert!(index
+            .field_keys
+            .lock()
+            .unwrap()
+            .keys()
+            .all(|name| name.len() <= MAX_FIELD_KEY_LEN));
+    }
+
+    const ARTISTS: [&str; 3] = ["Hixxy", "Sharkey", "Dougal"];
+    const GENRES: [&str; 2] = ["Jungle", "Hardcore"];
+    fn high_cardinality(rows: usize) -> QueryIndex {
+        QueryIndex::from_rows(
+            (0..rows)
+                .map(|i| {
+                    row(
+                        &format!("/music/{i:05}.flac"),
+                        serde_json::json!({
+                            "artist": ARTISTS[i % ARTISTS.len()],
+                            "album": format!("Album {i}"),
+                            "title": format!("Track {i:05}"),
+                            "genre": GENRES[i % GENRES.len()],
+                        }),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn hot_high_cardinality_facets_stay_resident_across_suggestions() {
+        // A suggestion reads eight fields. When the budget can hold that whole
+        // working set, the two unique-per-row fields must be reused rather than
+        // rebuilt on the next keystroke; the eviction cycle only appeared once
+        // the budget was smaller than the set (measured at 100k rows).
+        let index = high_cardinality(2_000);
+        let working = [
+            "genre",
+            "artist",
+            "albumartist",
+            "album",
+            "title",
+            "year",
+            "label",
+            "format",
+        ]
+        .iter()
+        .map(|field| index.facet(field, &|| false).unwrap().retained_bytes())
+        .sum::<usize>()
+        .saturating_add(4_096);
+        *index.facets.lock().unwrap() =
+            crate::bounded_cache::Cache::new(FACET_CACHE_ENTRIES, working);
+        let request: SuggestRequest = serde_json::from_value(serde_json::json!({
+            "requestId":1,"text":"","strategy":"values",
+            "query":{"version":2,"root":{"kind":"group","id":"root","mode":"all","children":[]}}
+        }))
+        .unwrap();
+        let first = index.suggest(&request, || false).unwrap();
+        assert!(!first.suggestions.is_empty());
+        let album = index.facet("album", &|| false).unwrap();
+        let title = index.facet("title", &|| false).unwrap();
+        let second = index.suggest(&request, || false).unwrap();
+        assert_eq!(
+            first
+                .suggestions
+                .iter()
+                .map(|s| (&s.field, &s.value, s.count))
+                .collect::<Vec<_>>(),
+            second
+                .suggestions
+                .iter()
+                .map(|s| (&s.field, &s.value, s.count))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            Arc::ptr_eq(&album, &index.facet("album", &|| false).unwrap()),
+            "album facet was rebuilt between suggestions"
+        );
+        assert!(
+            Arc::ptr_eq(&title, &index.facet("title", &|| false).unwrap()),
+            "title facet was rebuilt between suggestions"
+        );
+        let limits = index.facets.lock().unwrap().limits();
+        assert_eq!(limits.1, working);
+    }
+
+    #[test]
+    fn the_default_facet_budget_holds_two_large_facets() {
+        // 17.3 and 17.5 MiB were measured for the 100k-distinct album and title
+        // facets of a 100k-row library. A budget under their sum forces every
+        // suggestion to rebuild both, so this guards the retention decision.
+        const { assert!(FACET_CACHE_BYTES >= 2 * 17 * 1024 * 1024) };
+        const { assert!(FACET_CACHE_ENTRIES >= 2) };
+        let index = index();
+        assert_eq!(
+            index.facets.lock().unwrap().limits(),
+            (FACET_CACHE_ENTRIES, FACET_CACHE_BYTES)
+        );
+        let derived = index
+            .custom_index(
+                &[CustomField {
+                    key: "custom:display".into(),
+                    mask: "%artist%".into(),
+                }],
+                &|| false,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            derived.facets.lock().unwrap().limits(),
+            (FACET_CACHE_ENTRIES, FACET_CACHE_BYTES),
+            "a computed overlay must not inherit the old thrashing budget"
         );
     }
 }
