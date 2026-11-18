@@ -79,16 +79,17 @@ A completed basic feature does not mean every advanced option is finished. The l
 Service authority/lifecycle [PR #50](https://github.com/djhappyman/TAGnetic/pull/50)
 is merged at `67625add`. The protected Linux FLAC text Apply/persistent-Undo
 checkpoint is [PR #54](https://github.com/djhappyman/TAGnetic/pull/54), reviewed
-head `96480a82`; its hosted checks and merge record are tracked there. It includes
+head `f663bd63`; its hosted checks and merge record are tracked there. It includes
 required shared file-recovery, per-App metadata-policy and admission corrections.
-The clean publication passed 1,598 workspace tests, Clippy and formatting;
-independent coordinator, journal, policy and admission reviews completed.
+The clean publication passed 1,623 workspace tests, Clippy and formatting;
+scoped independent reviews completed, including portable policy and true process-death harnesses.
 
 Remaining backend implementation is **paused and preserved**. This is not a
 complete backend/UI milestone or a new release. See [the handoff](docs/design/backend-pause-2026-11-18.md),
 [publication evidence](docs/performance/native-flac-publication.md) and
 [resume issue #51](https://github.com/djhappyman/TAGnetic/issues/51).
-The stress-runner review, exact staging, mixed/typed/other-format paths and
+The stress-runner review (including updated crash/unwind probe mapping), exact
+staging, mixed/typed/other-format paths and
 platform/device/large-library proof remain open. Feature/UI checkboxes below
 remain unchanged.
 

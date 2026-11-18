@@ -6,9 +6,9 @@ This is a working direction, not a promise of dates or platform performance. Cur
 
 Service authority/lifecycle PR #50 is merged at `67625add`. The finish-and-pause
 boundary is protected Linux FLAC [PR #54](https://github.com/djhappyman/TAGnetic/pull/54),
-reviewed head `96480a82`; required hosted results and merge evidence live there.
-Its clean publication passed 1,598 workspace tests, Clippy and formatting after
-four independent scoped reviews. It includes required shared file-recovery,
+reviewed head `f663bd63`; required hosted results and merge evidence live there.
+Its clean publication passed 1,623 workspace tests, Clippy and formatting after
+scoped independent reviews, including portable policy and true-death harnesses. It includes required shared file-recovery,
 per-App policy and concurrent-admission corrections.
 
 All remaining backend implementation is paused and preserved. Start next time

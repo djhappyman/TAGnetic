@@ -11,17 +11,17 @@ product feature checkboxes unchecked until the UI is implemented and verified.
 
 The authorized finish-and-pause boundary is protected Linux FLAC
 [PR #54](https://github.com/djhappyman/TAGnetic/pull/54), reviewed head
-`96480a82127fda33bd2a6ae7edae5a0d7f241b92`. Required hosted checks and merge
+`f663bd63e40302ce7fe8938fd9209d1b530bdfdc`. Required hosted checks and merge
 records are linked there. Service authority/lifecycle
 [PR #50](https://github.com/djhappyman/TAGnetic/pull/50) merged at `67625add`
 after all four hosted checks passed.
 
 **Remaining implementation is paused.** Read [resume tracker #51](https://github.com/djhappyman/TAGnetic/issues/51)
 and the [handoff](backend-pause-2026-11-18.md) before starting again. The clean
-FLAC publication passed 1,598 workspace tests, zero failures, 34 existing optional
+FLAC publication passed 1,623 workspace tests, zero failures, 34 existing optional
 ignored; workspace Clippy/formatting, two private D-Bus tests and UI check/lint/
-build plus 216 unit tests passed. Independent coordinator, journal, policy and
-admission reviews completed after corrections. These overlapping scopes do not
+build plus 216 unit tests passed. Independent coordinator, journal, policy, admission, portable-boundary and
+process-death harness reviews completed after corrections. These overlapping scopes do not
 certify the wider parked programme, every platform or a release.
 
 | Wave | Capability | Checkpoint and remaining work |
@@ -29,7 +29,7 @@ certify the wider parked programme, every platform or a release.
 | 1A | Shared resource admission, cache identity and policy invalidation | Process Budget and required native admission/per-App policy included in #54. Broader resource/cache/query/response ownership WIP is parked; combined RSS and actual large-library proof remain open. |
 | 1B | Track-bound seek and job/preview contracts | Playback/control ownership reviews preserved locally. Physical-device/native lifecycle verification and focused publication remain open. |
 | 1C | Durable Apply/Undo recovery | Reviewed shared file authority and copy/move/staging recovery prerequisites included in #54. Native filesystems, power-loss and low-latency busy SQLite cancellation remain open. |
-| 2 | Exact repeated metadata and native identity | Narrow whole-plan in-place plain-text FLAC Apply/persistent Undo on supporting Linux profiles included in #54. Coordinator 135, journal 61, policy 17 and admission 54 scoped review gates passed (not additive). Exact Stage/DTO, mixed/typed/other-format and portable preservation remain open. |
+| 2 | Exact repeated metadata and native identity | Narrow whole-plan in-place plain-text FLAC Apply/persistent Undo on supporting Linux profiles included in #54. Coordinator 135, journal 61, policy 17, admission 54 and portable-policy 36 scoped gates passed; crash harness 43 behavior +3 dispatchers passed (not additive). Exact Stage/DTO, mixed/typed/other-format and portable preservation remain open. |
 | 3 | Artwork processing, properties/order and patterned export | Pixel/EXIF implementation/reviews parked. Native picture properties/order, shared stage/export, command and UI integration remain open. |
 | 4 | CSV/TSV import mapping | Scalar parser/shared-stage implementation and diagnostics parked. Exact-value destinations, publication and UI remain open. |
 | 5 | Grouped playlists/reports/encodings/append | Renderer/output ownership implementations and reviews parked. Command/stage/grouped publication and atomic append remain open. |

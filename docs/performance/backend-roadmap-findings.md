@@ -51,11 +51,29 @@ PR scope; no whole-roadmap completion or release availability is claimed.
 
 ## Final FLAC publication compatibility review
 
-PR #54 (reviewed head `96480a82`) includes corrected per-App metadata policy,
+PR #54 (reviewed head `f663bd63`) includes corrected per-App metadata policy,
 rollback after settings changes, valid-generation display/query caching and
 bounded compound native admission. The final policy review accepted 17 independent
 probes; admission review accepted 54 tests after correcting private-sink reentry
-before callbacks/history. Combined publication workspace: 1,598 passed, zero
+before callbacks/history. Combined publication workspace: 1,623 passed, zero
 failed, 34 existing optional/manual ignored. See [publication evidence](native-flac-publication.md)
 for exact source hashes and hosted matrix/merge link. These overlapping component
 gates are not additive or a complete-backend/platform readiness claim.
+
+### Portable execution follow-up
+
+Windows execution exposed a P2 shared operation-boundary gap: legacy Apply/Undo
+continued after invalidation that the native route refused. Portable probes also
+caught a P2 native final-completion bypass. Both are corrected; the fresh review
+accepted 36 distinct tests. Settings are pinned for the synchronous operation,
+owned Apply rollback is sealed, and legacy Undo remains incremental.
+
+Surviving panic now runs owned rollback. Restart scenarios use genuine bounded
+child exit 73, retaining original foreign-data/whole-collection assertions. A
+separate review passed 43 behavior tests and three dispatchers; same-thread
+nested unwind retains its outer-authority assertions and verifies inner cleanup.
+Final combined scope: 1,623 passed, zero failed, 34 optional/manual ignored,
+workspace Clippy/formatting and two private D-Bus tests passed. Hosted results on
+the linked PR head remain the delivery gate. No full-platform/native/RSS/release
+claim follows; the runner contract must be reviewed on current main before
+broader work resumes.
