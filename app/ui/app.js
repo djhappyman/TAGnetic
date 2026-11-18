@@ -3603,6 +3603,7 @@ el("export-kind").addEventListener("click", (e) => {
 // TAGGER sub-tabs: ONLINE (a metadata source), EDITOR (tag fields + cover),
 // FROM NAME (the file's own name, #139) — three ways to the same outcome.
 function setSubtab(name) {
+  if (name === "transformations") name = "editor";
   publishWorkspaceSubtab(name);
   requestAnimationFrame(() => {
     const tab = document.querySelector(`.subtab[data-subtab="${name}"]`);

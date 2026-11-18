@@ -13,6 +13,16 @@
 // French selects between `one` (0 and 1) and `other` for a count — 1 piste,
 // 2 pistes. (Its `many` form, for round millions, falls back to `other`.)
 export const fr = {
+  "workbench.resize": "Redimensionner le tableau des transformations",
+  "workbench.chain": "Chaîne de transformations",
+  "workbench.options": "Options des transformations",
+  "workbench.transformations": "Transformations",
+  "workbench.add": "Ajouter",
+  "workbench.addTransformation": "Ajouter une transformation",
+  "workbench.newTransformation": "Nouvelle transformation…",
+  "workbench.advancedEditor": "Éditeur avancé…",
+  "workbench.emptyChain": "Ajoutez une transformation pour commencer.",
+
 
   "online.importFields": "Champs à importer",
   "online.importAction": "Importer",

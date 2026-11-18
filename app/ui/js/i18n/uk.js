@@ -14,6 +14,16 @@
 // 2 треки, 5 треків; 21 is `one` again and 11 is `many`. `tn` asks
 // `Intl.PluralRules` rather than guessing, so a form is never picked by hand.
 export const uk = {
+  "workbench.resize": "Змінити розмір таблиці перетворень",
+  "workbench.chain": "Ланцюжок перетворень",
+  "workbench.options": "Параметри перетворень",
+  "workbench.transformations": "Перетворення",
+  "workbench.add": "Додати",
+  "workbench.addTransformation": "Додати перетворення",
+  "workbench.newTransformation": "Нове перетворення…",
+  "workbench.advancedEditor": "Розширений редактор…",
+  "workbench.emptyChain": "Додайте перетворення, щоб почати.",
+
 
   "online.importFields": "Поля імпорту",
   "online.importAction": "Імпортувати",

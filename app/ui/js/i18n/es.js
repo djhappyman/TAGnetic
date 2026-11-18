@@ -11,6 +11,16 @@
 // Spanish selects between `one` and `other` for a count — 1 pista, 2 pistas.
 // (Its `many` form, for round millions, falls back to `other`.)
 export const es = {
+  "workbench.resize": "Cambiar el tamaño de la tabla de transformaciones",
+  "workbench.chain": "Cadena de transformaciones",
+  "workbench.options": "Opciones de transformación",
+  "workbench.transformations": "Transformaciones",
+  "workbench.add": "Añadir",
+  "workbench.addTransformation": "Añadir transformación",
+  "workbench.newTransformation": "Nueva transformación…",
+  "workbench.advancedEditor": "Editor avanzado…",
+  "workbench.emptyChain": "Añade una transformación para empezar.",
+
 
   "online.importFields": "Campos de importación",
   "online.importAction": "Importar",

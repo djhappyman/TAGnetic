@@ -88,7 +88,7 @@ body #tracks :is(th,td).artwork-col { border:0; }
 /* Inspector and filter geometry live in their component owners. */
 body .dock-module-chrome #presets-edit { background:transparent; border-color:transparent; color:var(--muted); }
 @property --footer-aside-width { syntax:'<length>'; inherits:false; initial-value:260px; }
-body .statusbar { display:grid; grid-template-columns:12px minmax(0,1fr) minmax(var(--footer-aside-width),max-content); transition:--footer-aside-width 240ms var(--workbench-ease); border:0; min-height:44px; padding:var(--sp-1) 0 var(--sp-2); background:var(--panel); gap:0; }
+body .statusbar { display:grid; grid-template-columns:12px minmax(0,1fr) minmax(var(--footer-aside-width),max-content); transition:--footer-aside-width var(--sidebar-duration) var(--sidebar-ease); border:0; min-height:44px; padding:var(--sp-1) 0 var(--sp-2); background:var(--panel); gap:0; }
 body .statusbar .sb-left { grid-column:2; min-width:0; padding-inline:3px; }
 body .statusbar .sb-right { position:relative; grid-column:3; min-width:0; max-width:none; padding-inline:9px 12px; flex-direction:column; align-items:stretch; justify-content:center; min-height:var(--ctl-h); gap:var(--sp-1); container-type:inline-size; }
 /* Scope and lock feedback must not resize the table during a live cell edit. */
@@ -101,7 +101,7 @@ body .statusbar .sb-right:not(:has(#diff-actionbar:not([hidden]),#busy-pill:not(
 body .statusbar .sb-right { grid-row:1; }
 body .statusbar .diff-actionbar { justify-content:end; }
 /* Fixed sidebar geometry also aligns the footer, without DOM measurements. */
-:root { --inspector-width:420px; }
+:root { --inspector-width:420px; --sidebar-duration:200ms; --sidebar-ease:cubic-bezier(.22,.61,.36,1); }
 body:has(.dock-frame[data-sidebar-drawer='true'][data-sidebar-closed='false']) .statusbar { --footer-aside-width:calc(var(--inspector-width) + 12px); }
 @media(max-width:599px) {
   body .statusbar { grid-template-columns:12px minmax(0,1fr) 12px; }

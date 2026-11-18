@@ -181,13 +181,6 @@ function smallWordsControl(rule) {
   return box;
 }
 
-// Readable names for the scopes whose stored key isn't already a field label.
-const SCOPE_LABELS = {
-  tags: "chain.scope.tags",
-  filename: "chain.scope.filename",
-  fileext: "chain.scope.fileext",
-};
-
 // Every target a rule can name (#250): all the tag fields the app models, plus
 // the two parts of the file name. The backend matches a scope against a field's
 // storage key, so this reads the app's own field table rather than keeping a
@@ -201,18 +194,6 @@ function scopeOptions() {
   ];
 }
 
-// One-line summary of a group for its tooltip.
-function groupSummary(group) {
-  const on = (group.rules || []).filter((r) => r.enabled !== false).length;
-  const total = (group.rules || []).length;
-  const scope = SCOPE_LABELS[group.scope]
-    ? t(SCOPE_LABELS[group.scope])
-    : group.scope
-      ? fieldLabel(group.scope)
-      : t("chain.scope.tags");
-  return `${on}/${tn("unit.step", total)} · ${scope}`;
-}
-
 // A built-in preset's name and note in the current language (#625). The
 // English name the backend sends stays the preset's identity, since the
 // ticked sets are keyed by it; only what is shown is translated.
@@ -222,10 +203,6 @@ function builtinKey(group, part) {
 
 export function presetLabel(group) {
   return group.builtin ? tOr(builtinKey(group, "name"), group.name) : group.name;
-}
-
-export function presetNote(group) {
-  return group.builtin ? tOr(builtinKey(group, "note"), group.note) : group.note;
 }
 
 // ---- the rule chain (#34) ----
@@ -734,143 +711,54 @@ function createRuleChain({ ids }) {
   return chain;
 }
 
-// ---- the preset checklist (#392) ----
-//
-// Every preset, yours first and then the built-ins, each with a tick. A tick
-// means "run this as part of the job", everywhere at once: the set is shared,
-// and each job takes only the rules aimed at what it produces (chains.js). So
-// the list also says, per row, whether the preset has anything for the job it
-// is shown in — one that only acts on file names reads dimmed under an import.
-//
-// Presets are not edited here; Edit presets… opens the window where they are
-// (#391). The callbacks keep this component free of the set's storage.
-function createPresetChecklist({ menu, context, isActive, setActive, appliesTo, ruleCount, onOpen, onEdit, onInspect, isInspected, matches = () => true, onRender }) {
-  const collapsed = new Set();
-  // Keep the header action mounted across checklist refreshes, like the rows'
-  // existing component buttons. Reparenting in one render preserves its owner.
-  const edit = onEdit ? createComponentElement("button", { variant: "ghost", size: "icon-sm" }) : null;
-  if (edit) {
-    edit.id = "presets-edit";
-    edit.type = "button";
-    edit.className = "transformations-edit icon";
-    edit.innerHTML = ico("rename");
-    edit.dataset.i18nTitle = "presets.edit";
-    edit.dataset.i18nAriaLabel = "presets.title";
-    edit.addEventListener("click", onEdit);
-  }
-
-  // What a preset acts on, from its rules: tags, the file name, or both.
-  function targetLabel(group) {
-    const scopes = (group.rules || []).map((r) => r.scope || group.scope || "tags");
-    const distinct = [...new Set(scopes)];
-    if (onInspect && distinct.length === 1) {
-      const scope = distinct[0];
-      return scope === 'tags' ? t('chain.scopeAll') : scope === 'filename' ? t('presets.target.file') : scope === 'fileext' ? t('presets.target.extension') : fieldLabel(scope);
-    }
-    if (onInspect && distinct.length > 1) return t('workbench.mixedFields');
-    const file = scopes.some((s) => s === "filename" || s === "fileext");
-    const tags = scopes.some((s) => s !== "filename" && s !== "fileext");
-    if (file && tags) return t("presets.target.both");
-    return file ? t("presets.target.file") : t("presets.target.tags");
-  }
-
-  function row(group) {
-    const label = document.createElement(onInspect ? "div" : "label");
-    label.className = "col-menu-row preset-row preset-check";
-    label.dataset.presetName = group.name;
-    label.dataset.builtin = String(!!group.builtin);
-    label.classList.toggle('inspected', !!isInspected?.(group));
-    const applies = appliesTo(group, context());
-    label.classList.toggle("off", !applies);
-
-    const tick = createComponentElement("input", { type: "checkbox" });
-    tick.className = "group-tick";
-    tick.checked = isActive(group);
-    // Each job has its own set (#555): a preset with nothing for this one can't
-    // be ticked here. One already ticked can still be unticked.
-    tick.disabled = !applies && !tick.checked;
-    tick.addEventListener("change", () => setActive(group, tick.checked));
-
-    // tick · name ……… target · rules for this job (or "not for this job") · ›
-    // (#556): what runs is the set of bold names, and › opens the preset.
-    const name = onInspect ? createComponentElement('button') : document.createElement("span");
-    name.className = "preset-apply";
-    name.textContent = presetLabel(group);
-    tick.setAttribute('aria-label', presetLabel(group));
-    if (onInspect) {
-      name.type = 'button';
-      name.setAttribute('aria-pressed', String(!!isInspected?.(group)));
-      name.addEventListener('click', () => onInspect(group));
-    }
-    const scope = document.createElement("span");
-    scope.className = "group-scope";
-    scope.textContent = targetLabel(group);
-    const count = document.createElement("span");
-    count.className = "group-rules";
-    count.textContent = applies ? tn("unit.rule", ruleCount(group, context())) : t("presets.notForJob");
-    const open = createComponentElement("button");
-    open.type = "button";
-    open.className = "icon preset-open";
-    open.innerHTML = ico("chevron-right");
-    open.title = t("presets.openOne");
-    open.setAttribute("aria-label", open.title);
-    open.addEventListener("click", (e) => {
-      e.preventDefault();
-      onOpen(group);
-    });
-
-    const note = presetNote(group);
-    const summary = note ? `${note}\n${groupSummary(group)}` : groupSummary(group);
-    label.title = applies ? summary : `${summary}\n${t("presets.notHere")}`;
-    label.append(tick, name, scope, count, open);
-    return label;
-  }
-
+// The ordered sidebar chain uses the runner's existing saved-preset order.
+// Expanding a row inspects its rules; only its checkbox changes enabled state.
+function createPresetChecklist({ menu, context, isActive, setActive, appliesTo, ruleCount, onInspect, isInspected, matches = () => true, renderDetails, onRender }) {
   function render() {
     const box = el(menu);
-    box.innerHTML = "";
-    let found = 0;
-    for (const [key, title, groups] of [['personal', 'presets.yours', actionGroups], ['builtin', 'chain.builtIn', builtinGroups]]) {
-      const visible = groups.filter(matches);
-      if (!visible.length && groups.length) continue;
-      if (!groups.length && key === 'builtin') continue;
-      const heading = onInspect ? createComponentElement('button') : document.createElement('div');
-      heading.className = 'col-menu-sep preset-section-heading';
-      heading.textContent = t(title);
-      const list = document.createElement('div');
-      if (onInspect) {
-        heading.type = 'button';
-        heading.setAttribute('aria-expanded', String(!collapsed.has(key)));
-        heading.innerHTML = `${ico(collapsed.has(key) ? 'chevron-right' : 'caret-down')}<span></span>`;
-        heading.querySelector('span').textContent = t(title);
-        heading.addEventListener('click', () => { if (collapsed.has(key)) collapsed.delete(key); else collapsed.add(key); render(); });
-        list.hidden = collapsed.has(key);
-      }
-      const header = document.createElement('div');
-      header.className = 'preset-section-row';
-      header.append(heading);
-      if (key === 'personal' && edit) {
-        edit.title = t('presets.edit');
-        edit.setAttribute('aria-label', t('presets.title'));
-        header.append(edit);
-      }
-      box.append(header, list);
-      for (const group of visible) { list.append(row(group)); found++; }
-      if (!groups.length) {
-        const empty = document.createElement('p'); empty.className = 'preset-none'; empty.textContent = t('presets.noneHere'); list.append(empty);
-      }
-
+    const focused = box.contains(document.activeElement) ? document.activeElement : null;
+    const focusName = focused?.closest('[data-preset-name]')?.dataset.presetName;
+    const focusKind = focused?.classList.contains('preset-apply') ? '.preset-apply' : '.group-tick';
+    box.replaceChildren();
+    // This is the same order the runner consumes: personal, then built-in.
+    for (const group of [...actionGroups, ...builtinGroups].filter(matches)) {
+      const item = document.createElement('section'); item.className = 'transform-chain-item';
+      item.dataset.presetName = group.name; item.dataset.builtin = String(!!group.builtin);
+      const row = document.createElement('div'); row.className = 'col-menu-row preset-row preset-check';
+      row.dataset.presetName = group.name; row.dataset.builtin = String(!!group.builtin);
+      const applies = appliesTo(group, context()), expanded = !!isInspected?.(group);
+      row.classList.toggle('off', !applies);
+      const tick = createComponentElement('input', {type:'checkbox'});
+      tick.className = 'group-tick'; tick.checked = isActive(group); tick.disabled = !applies && !tick.checked;
+      tick.setAttribute('aria-label', presetLabel(group));
+      tick.addEventListener('change', () => setActive(group, tick.checked));
+      const name = createComponentElement('button', {variant:'ghost',size:'sm'});
+      name.type = 'button'; name.className = 'preset-apply';
+      name.setAttribute('aria-expanded', String(expanded));
+      const label = document.createElement('span'); label.textContent = presetLabel(group);
+      const scopes = [...new Set((group.rules || []).map(rule => rule.scope || group.scope || 'tags'))];
+      const files = scopes.some(scope => scope === 'filename' || scope === 'fileext');
+      const tags = scopes.some(scope => scope !== 'filename' && scope !== 'fileext');
+      const target = document.createElement('span'); target.className = 'preset-target'; target.setAttribute('aria-hidden','true');
+      target.innerHTML = ico('arrow-right');
+      const targetName = document.createElement('span'); targetName.textContent = scopes.includes('tags') || (files && tags) ? 'ALL' : files ? 'FILENAME' : 'TAG';
+      target.append(targetName);
+      name.title = `${tn('unit.rule',ruleCount(group,context()))} · ${scopes.map(scope => scope === 'tags' ? t('chain.scopeAll') : scope === 'filename' ? t('presets.target.file') : scope === 'fileext' ? t('presets.target.extension') : fieldLabel(scope)).join(', ')}`;
+      name.append(label,target);
+      const details = renderDetails(group); details.hidden = !expanded;
+      details.id = `transform-rules-${box.children.length}`;
+      name.setAttribute('aria-controls', details.id);
+      name.addEventListener('click', () => onInspect(group));
+      row.append(tick,name); item.append(row,details); box.append(item);
     }
-    if (!found && onInspect) {
-      const empty = document.createElement('p'); empty.className = 'preset-none'; empty.textContent = t('workbench.noResults'); box.append(empty);
+    if (!box.children.length) {
+      const empty = document.createElement('p'); empty.className = 'preset-none'; empty.textContent = t('workbench.emptyChain'); box.append(empty);
     }
+    if (focusName) [...box.querySelectorAll('.preset-row')].find(row => row.dataset.presetName === focusName)?.querySelector(focusKind)?.focus({preventScroll:true});
     onRender?.();
   }
-
   render();
-  const api = { render };
-  groupMenus.push(api);
-  return api;
+  const api = { render }; groupMenus.push(api); return api;
 }
 
 // A preset name nobody has taken: `base`, then `base 2`, `base 3`… `extra` is

@@ -54,7 +54,6 @@
   }
   let moreOpen = $state(false);
   let applying = $state(false);
-  function openPresetLibrary() { document.getElementById('presets-edit')?.click(); }
   let generatorJob = $state<'transform' | 'number' | 'sides'>('transform');
   function attachPaneRouting(node: HTMLElement) {
     const onClick = (event: MouseEvent) => {
@@ -128,7 +127,7 @@
     subtab = next.subtab;
   }));
   function showTransformations() {
-    setWorkspaceSubtab('transformations');
+    setWorkspaceSubtab('editor');
     changeTab('tagger');
   }
   function changeTab(value: string, isSubtab = false) {
@@ -210,7 +209,6 @@
   </div>
   <!-- Legacy controller targets stay mounted during ribbon iteration. -->
   <div hidden inert aria-hidden="true">
-    <Button id="preset-library" variant="ghost" size="sm" disabled={applying} onclick={openPresetLibrary} data-i18n-title="presets.title" title="Transformation presets"><svg class="ico"><use href="#i-wand"/></svg><span data-i18n="toolbar.presetsShort">Presets</span></Button>
     <Button variant="ghost" size="sm" id="detect-bpm" class="toolbar-command search-toggle" title="Detect BPM" aria-label="Detect BPM"><svg class="ico glyph-search"><use href="#i-metronome"/></svg><svg class="ico glyph-stop"><use href="#i-stop"/></svg><span class="tray-label" data-i18n="toolbar.bpmShort">BPM</span></Button>
 
     <div class="toolbar-overflow">
@@ -422,68 +420,12 @@
 <Button {...props} data-slot="button" variant="ghost" size="sm" class="subtab" data-subtab="fromtext" type="button" data-i18n="tagger.fromText">From text</Button>
 {/snippet}
 </Tabs.Trigger>
-        <Tabs.Trigger value="transformations">
-{#snippet child({ props })}
-<Button {...props} data-slot="button" variant="ghost" size="sm" class="subtab" data-subtab="transformations" type="button" data-i18n="workspace.transformations">Transformations</Button>
-{/snippet}
-</Tabs.Trigger>
+
       </Tabs.List>
 
       </div>
 
-      <Tabs.Content value="transformations" id="subtab-transformations" class="subtab-panel transformations" hidden>
-        <div class="transformations-scroll docked-transformations">
-      <div id="transform-home"></div>
-      <div id="transform-block" class="panel-block">
-        <span id="transform-count" hidden></span>
-        <p id="transform-context-note" class="hint inert-panel" style="padding: 6px 8px" hidden></p>
 
-        <p id="transform-over-plan" class="hint inert-panel" style="padding: 6px 8px" hidden data-i18n="generator.overPlan">
-          This runs on the staged changes, not the files. The result replaces the plan, so one
-          Apply and one undo still cover everything.
-        </p>
-
-        <div class="transform-workspace-scroll">
-        <div class="transform-filter">
-          <label class="sr-only" for="transform-search" data-i18n="presets.search">Search transformations</label>
-          <Input id="transform-search" type="search" data-i18n-placeholder="presets.search" placeholder="Search transformations" />
-          <label class="transform-enabled"><NativeCheckbox id="transform-enabled" /><span data-i18n="workbench.enabledOnly">Enabled only</span></label>
-          <div class="transform-library-actions">
-            <Button id="transform-new" variant="ghost" size="sm" data-i18n="workbench.new">New</Button>
-            <Button id="transform-manage" variant="ghost" size="sm" data-i18n="workbench.manage">Manage</Button>
-          </div>
-        </div>
-        <p class="transform-order hint" data-i18n="workbench.order">Enabled presets run from top to bottom.</p>
-        <div id="groups-menu" class="groups-list"></div>
-        <section id="transform-inspect" class="transform-inspect" aria-labelledby="transform-inspect-title" hidden>
-          <div class="transform-inspect-heading"><h3 id="transform-inspect-title">Transformation</h3><Button id="transform-inspect-edit" variant="ghost" size="sm" data-i18n="workbench.edit">Edit</Button></div>
-          <p id="transform-inspect-note" class="hint"></p>
-          <ol id="transform-inspect-rules"></ol>
-        </section>
-        </div>
-        <section id="transform-sample" class="transform-sample" data-i18n-aria-label="presets.previewTitle" aria-label="Preview" hidden>
-          <div class="transform-sample-heading">
-            <label for="transform-sample-field" data-i18n="presets.fieldLabel">Field</label>
-            <NativeSelect id="transform-sample-field" />
-            <Button id="transform-sample-prev" variant="ghost" size="icon-sm" data-i18n-aria-label="player.prev" aria-label="Previous track"><svg class="ico"><use href="#i-chevron-right"/></svg></Button>
-            <Button id="transform-sample-next" variant="ghost" size="icon-sm" data-i18n-aria-label="player.next" aria-label="Next track"><svg class="ico"><use href="#i-chevron-right"/></svg></Button>
-          </div>
-          <p id="transform-sample-source" class="hint"></p>
-          <div class="transform-sample-values">
-            <div><label for="transform-sample-before" data-i18n="presets.sample">Before</label><Input id="transform-sample-before" type="text" /></div>
-            <div><span class="transform-sample-label" data-i18n="presets.result">After</span><output id="transform-sample-after" for="transform-sample-before"></output></div>
-          </div>
-          <span id="transform-sample-status" class="hint" role="status"></span>
-        </section>
-        <div class="panel-actions" hidden>
-
-          <div class="spacer"></div>
-          <Button variant="default" size="sm" id="transform-preview" class="primary" hidden data-i18n="generator.previewChanges">Preview</Button>
-        </div>
-      </div>
-
-        </div>
-      </Tabs.Content>
 
       <Tabs.Content value="online" id="subtab-online" aria-labelledby="workspace-online-tab" class="subtab-panel online">
         <div class="online-head">
@@ -545,6 +487,47 @@
 
       <Tabs.Content value="editor" id="subtab-editor" class="subtab-panel editor" hidden>
         <div class="editor-scroll">
+        <div id="transformation-pane" class="transformations-scroll docked-transformations">
+      <div id="transform-home"></div>
+      <div id="transform-block" class="panel-block">
+        <span id="transform-count" hidden></span>
+        <p id="transform-context-note" class="hint inert-panel" style="padding: 6px 8px" hidden></p>
+
+        <span id="transform-over-plan" hidden></span>
+
+        <div class="transform-heading">
+          <h3><Button id="transform-collapse" variant="ghost" size="sm" aria-expanded="true" aria-controls="transform-scroll"><svg class="ico transform-heading-caret" aria-hidden="true"><use href="#i-chevron-right"/></svg><span data-i18n="workbench.transformations">Transformations</span></Button></h3>
+          <div class="transform-heading-actions">
+            <Button id="transform-add" variant="ghost" size="icon-sm" aria-label="Add transformation" data-i18n-aria-label="workbench.addTransformation" title="Add transformation" aria-expanded="false" aria-controls="transform-library"><svg class="ico" aria-hidden="true"><use href="#i-plus"/></svg></Button>
+            <Button id="transform-options" variant="ghost" size="icon-sm" aria-label="Transformation options" data-i18n-aria-label="workbench.options" title="Transformation options" aria-expanded="false" aria-controls="transform-options-menu"><svg class="ico" aria-hidden="true"><use href="#i-more"/></svg></Button>
+          </div>
+        </div>
+        <section id="transform-library" class="transform-library" aria-label="Add transformation" data-i18n-aria-label="workbench.addTransformation" hidden>
+          <label class="sr-only" for="transform-search" data-i18n="presets.search">Search transformations</label>
+          <Input id="transform-search" type="search" data-i18n-placeholder="presets.search" placeholder="Search transformations" />
+          <div id="transform-library-list" class="transform-library-list"></div>
+          <div class="transform-library-actions">
+            <Button id="transform-new" variant="ghost" size="sm" data-i18n="workbench.newTransformation">New transformation…</Button>
+          </div>
+        </section>
+        <div id="transform-options-menu" class="transform-options-menu" hidden>
+          <Button id="presets-edit" variant="ghost" size="sm" data-i18n="workbench.advancedEditor">Advanced editor…</Button>
+        </div>
+        <div id="transform-scroll" class="transform-workspace-scroll overlay-scrollport" role="region" aria-label="Transformation chain" data-i18n-aria-label="workbench.chain">
+          <div id="groups-menu" class="groups-list"></div>
+        </div>
+        <div class="transform-table-footer">
+          <Button id="transform-resize" variant="ghost" role="separator" aria-orientation="horizontal" aria-label="Resize transformations table" data-i18n-aria-label="workbench.resize" aria-valuemin={124} aria-valuemax={2000} aria-valuenow={240}><span aria-hidden="true"></span></Button>
+        </div>
+        <div class="panel-actions" hidden>
+
+          <div class="spacer"></div>
+          <Button variant="default" size="sm" id="transform-preview" class="primary" hidden data-i18n="generator.previewChanges">Preview</Button>
+        </div>
+      </div>
+
+        </div>
+
           <div class="panel-block">
             <span id="fields-count" hidden></span>
 

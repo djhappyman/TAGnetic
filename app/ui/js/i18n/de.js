@@ -9,6 +9,16 @@
 //
 // German selects between `one` and `other` for a count — 1 Track, 2 Tracks.
 export const de = {
+  "workbench.resize": "Größe der Transformationstabelle ändern",
+  "workbench.chain": "Transformationskette",
+  "workbench.options": "Transformationsoptionen",
+  "workbench.transformations": "Transformationen",
+  "workbench.add": "Hinzufügen",
+  "workbench.addTransformation": "Transformation hinzufügen",
+  "workbench.newTransformation": "Neue Transformation…",
+  "workbench.advancedEditor": "Erweiterter Editor…",
+  "workbench.emptyChain": "Fügen Sie eine Transformation hinzu, um zu beginnen.",
+
 
   "online.importFields": "Importfelder",
   "online.importAction": "Importieren",

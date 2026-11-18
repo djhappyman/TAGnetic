@@ -13,6 +13,16 @@
 // 2 трека, 5 треков; 21 is `one` again and 11 is `many`. `tn` asks
 // `Intl.PluralRules` rather than guessing, so a form is never picked by hand.
 export const ru = {
+  "workbench.resize": "Изменить размер таблицы преобразований",
+  "workbench.chain": "Цепочка преобразований",
+  "workbench.options": "Параметры преобразований",
+  "workbench.transformations": "Преобразования",
+  "workbench.add": "Добавить",
+  "workbench.addTransformation": "Добавить преобразование",
+  "workbench.newTransformation": "Новое преобразование…",
+  "workbench.advancedEditor": "Расширенный редактор…",
+  "workbench.emptyChain": "Добавьте преобразование, чтобы начать.",
+
 
   "online.importFields": "Поля импорта",
   "online.importAction": "Импортировать",

@@ -13,6 +13,16 @@
 // `{name}` in a value is filled from the vars passed to `t`/`tn`; `{n}` is the
 // count `tn` was given.
 export const en = {
+  "workbench.resize": "Resize transformations table",
+  "workbench.chain": "Transformation chain",
+  "workbench.options": "Transformation options",
+  "workbench.transformations": "Transformations",
+  "workbench.add": "Add",
+  "workbench.addTransformation": "Add transformation",
+  "workbench.newTransformation": "New transformation…",
+  "workbench.advancedEditor": "Advanced editor…",
+  "workbench.emptyChain": "Add a transformation to get started.",
+
 
   "online.importFields": "Import fields",
   "online.importAction": "Import",

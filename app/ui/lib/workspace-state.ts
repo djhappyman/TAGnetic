@@ -1,5 +1,5 @@
 export const WORKSPACE_MODES = ['tagger', 'renamer', 'generator', 'deduplicator', 'exporter'] as const;
-export const WORKSPACE_SUBTABS = ['online', 'editor', 'filename', 'fromtext', 'transformations'] as const;
+export const WORKSPACE_SUBTABS = ['online', 'editor', 'filename', 'fromtext'] as const;
 export type WorkspaceMode = typeof WORKSPACE_MODES[number];
 export type WorkspaceSubtab = typeof WORKSPACE_SUBTABS[number];
 export type WorkspaceState = Readonly<{ mode: WorkspaceMode; subtab: WorkspaceSubtab }>;
@@ -27,7 +27,8 @@ export function subscribeWorkspaceState(subscriber: (state: WorkspaceState) => v
 export function publishWorkspaceMode(mode: WorkspaceMode) {
   publish({ ...state, mode });
 }
-export function publishWorkspaceSubtab(subtab: WorkspaceSubtab) {
+export function publishWorkspaceSubtab(value: WorkspaceSubtab | 'transformations') {
+  const subtab = value === 'transformations' ? 'editor' : value;
   publish({ ...state, subtab });
 }
 export function setWorkspaceMode(value: string) {
@@ -36,6 +37,7 @@ export function setWorkspaceMode(value: string) {
   if (publish({ ...state, mode })) controller?.setMode(mode);
 }
 export function setWorkspaceSubtab(value: string) {
+  if (value === 'transformations') value = 'editor';
   if (!WORKSPACE_SUBTABS.includes(value as WorkspaceSubtab)) return;
   const subtab = value as WorkspaceSubtab;
   if (publish({ ...state, subtab })) controller?.setSubtab(subtab);

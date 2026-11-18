@@ -13,6 +13,16 @@
 // `tn` asks `Intl.PluralRules`, so a form is never picked by hand, and a
 // missing key still falls back to English.
 export const it = {
+  "workbench.resize": "Ridimensiona la tabella delle trasformazioni",
+  "workbench.chain": "Catena di trasformazioni",
+  "workbench.options": "Opzioni di trasformazione",
+  "workbench.transformations": "Trasformazioni",
+  "workbench.add": "Aggiungi",
+  "workbench.addTransformation": "Aggiungi trasformazione",
+  "workbench.newTransformation": "Nuova trasformazione…",
+  "workbench.advancedEditor": "Editor avanzato…",
+  "workbench.emptyChain": "Aggiungi una trasformazione per iniziare.",
+
 
   "online.importFields": "Campi da importare",
   "online.importAction": "Importa",

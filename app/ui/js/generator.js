@@ -17,7 +17,7 @@ import { t, tn } from "./i18n.js";
 import { invoke } from "./invoke.js";
 import { hooks } from "./hooks.js";
 import { createPresetChecklist, renderAllGroupsMenus } from "./chain.js";
-import { onPresetsChanged, openPresetEditor } from "./presets.js";
+import { onPresetsChanged } from "./presets.js";
 import { currentFieldValue } from "./editor.js";
 import { groupKeyOf } from "./grouping.js";
 import { automaticStageScope } from './shared-stage.js';
@@ -662,12 +662,14 @@ function refreshTransformButton() {
 const workbench = createTransformationWorkbench({
   rerender: () => presetChecklist.render(),
   isActive: group => isPresetActive(group, shownContext || 'generator'),
+  enable: group => { setPresetActive(group, true, shownContext || 'generator'); refreshTransformButton(); presetChecklist.render(); },
 });
 const presetChecklist = createPresetChecklist({
   onInspect: workbench.inspect,
   isInspected: workbench.isInspected,
   matches: workbench.matches,
   onRender: workbench.refresh,
+  renderDetails: workbench.renderDetails,
   menu: "groups-menu",
   context: () => shownContext || "generator",
   // The set of the job the checklist is showing (#555).
@@ -682,9 +684,6 @@ const presetChecklist = createPresetChecklist({
   // job's normal import/rename chain still filters its own applicable scopes.
   appliesTo: group => presetAppliesTo(group, 'generator'),
   ruleCount: group => presetRuleCount(group, 'generator'),
-  // › on a row opens that preset in the editor, over this window (#556).
-  onOpen: (group) => openPresetEditor(group.name),
-  onEdit: () => openPresetEditor(),
 });
 for (const context of ['generator', 'online', 'fromname', 'renamer']) {
   onChainChanged(context, scheduleAutomaticTransformPreview);
