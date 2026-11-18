@@ -1,6 +1,6 @@
 # Protected FLAC publication checkpoint
 
-Status: local checkpoint ready after descriptor IO compatibility and independent rechecks; exact-head hosted checks remain required before merge.
+Status: local checkpoint ready after descriptor IO and internal authority fixture compatibility rechecks; exact-head hosted checks remain required before merge.
 
 ## Scope
 
@@ -57,7 +57,8 @@ Combined local verification on the frozen production source (base `c42a6cea`):
 [admission review](backend-native-admission-independent-review.md),
 [portable boundary review](backend-portable-policy-independent-review.md) and
 [process-death harness review](backend-process-death-harness-review.md) and
-[descriptor IO review](backend-descriptor-io-independent-review.md) retain ranked
+[descriptor IO review](backend-descriptor-io-independent-review.md) and
+[Windows fixture review](backend-windows-authority-independent-review.md) retain ranked
 findings, original probes, source hashes and limits. Earlier component counts
 overlap and must not be added together. The coordinator/journal reports record
 their earlier protocol freeze; subsequent policy/admission changes have their
@@ -221,3 +222,37 @@ D-Bus MPRIS tests passed. The production hashes match the independent descriptor
 review. The earlier 1,623 gate above records the previous common-policy freeze;
 1,638 is the current combined gate. Actual macOS runtime confirmation remains
 pending the new hosted head; no broader platform/format guarantee follows.
+
+
+## Windows internal authority fixture correction
+
+Windows on `f663bd63` reached seventeen move-staging unit cases and refused their
+initial ownership-proof setup. Both public Apply and Undo normalize approved
+roots before entering the private directory-capability scope. The direct unit
+fixtures supplied raw temporary roots instead; Windows canonicalization uses a
+different extended-length spelling. The correction normalizes each newly created,
+disposable fixture root before constructing any paths or entering that scope.
+The descriptor unit fixture follows the same private precondition.
+
+This is a fixture setup correction, with no production root, identity, reparse,
+sharing, budget or recovery predicate changed. The original fault assertions
+remain. Current-head Windows execution remains necessary to verify the previously
+unreached bodies; local Linux results do not establish Windows behavior.
+
+
+The [Windows fixture review](backend-windows-authority-independent-review.md)
+records the two constructor hashes and the static check of all seventeen
+previously unreached move-staging bodies. A Linux disposable symlink-TMPDIR probe
+fails before normalization and passes afterward; its pre-fix failure is Unix
+nofollow rejection, not a claim to emulate Windows prefix semantics. Existing
+file-race attacks remain enabled because entry transport handles share delete;
+ancestor directory guards remain held. No further scoped body defect was found
+from source review. Exact-head Windows execution is still required.
+
+
+The final combined gate was repeated on those frozen constructor changes:
+1,638 passed, zero failed, 34 optional/manual ignored across 89 outer targets;
+workspace all-target/all-feature Clippy, formatting, diff checks and two private
+D-Bus tests passed. Production source is byte-identical to `bd2e6091`. Original
+Windows-hosted failure evidence and current-head hosted results remain distinct;
+Windows runtime confirmation is still required before merge.
