@@ -744,10 +744,17 @@ function createRuleChain({ ids }) {
 //
 // Presets are not edited here; Edit presets… opens the window where they are
 // (#391). The callbacks keep this component free of the set's storage.
-function createPresetChecklist({ menu, context, isActive, setActive, appliesTo, ruleCount, onOpen }) {
+function createPresetChecklist({ menu, context, isActive, setActive, appliesTo, ruleCount, onOpen, onInspect, isInspected, matches = () => true, onRender }) {
+  const collapsed = new Set();
   // What a preset acts on, from its rules: tags, the file name, or both.
   function targetLabel(group) {
     const scopes = (group.rules || []).map((r) => r.scope || group.scope || "tags");
+    const distinct = [...new Set(scopes)];
+    if (onInspect && distinct.length === 1) {
+      const scope = distinct[0];
+      return scope === 'tags' ? t('chain.scopeAll') : scope === 'filename' ? t('presets.target.file') : scope === 'fileext' ? t('presets.target.extension') : fieldLabel(scope);
+    }
+    if (onInspect && distinct.length > 1) return t('workbench.mixedFields');
     const file = scopes.some((s) => s === "filename" || s === "fileext");
     const tags = scopes.some((s) => s !== "filename" && s !== "fileext");
     if (file && tags) return t("presets.target.both");
@@ -755,8 +762,11 @@ function createPresetChecklist({ menu, context, isActive, setActive, appliesTo, 
   }
 
   function row(group) {
-    const label = document.createElement("label");
+    const label = document.createElement(onInspect ? "div" : "label");
     label.className = "col-menu-row preset-row preset-check";
+    label.dataset.presetName = group.name;
+    label.dataset.builtin = String(!!group.builtin);
+    label.classList.toggle('inspected', !!isInspected?.(group));
     const applies = appliesTo(group, context());
     label.classList.toggle("off", !applies);
 
@@ -770,9 +780,15 @@ function createPresetChecklist({ menu, context, isActive, setActive, appliesTo, 
 
     // tick · name ……… target · rules for this job (or "not for this job") · ›
     // (#556): what runs is the set of bold names, and › opens the preset.
-    const name = document.createElement("span");
+    const name = onInspect ? createComponentElement('button') : document.createElement("span");
     name.className = "preset-apply";
     name.textContent = presetLabel(group);
+    tick.setAttribute('aria-label', presetLabel(group));
+    if (onInspect) {
+      name.type = 'button';
+      name.setAttribute('aria-pressed', String(!!isInspected?.(group)));
+      name.addEventListener('click', () => onInspect(group));
+    }
     const scope = document.createElement("span");
     scope.className = "group-scope";
     scope.textContent = targetLabel(group);
@@ -800,25 +816,33 @@ function createPresetChecklist({ menu, context, isActive, setActive, appliesTo, 
   function render() {
     const box = el(menu);
     box.innerHTML = "";
-    const head = (key) => {
-      const h = document.createElement("div");
-      h.className = "col-menu-sep";
-      h.textContent = t(key);
-      box.appendChild(h);
-    };
-    head("presets.yours");
-    if (!actionGroups.length) {
-      const empty = document.createElement("div");
-      // A note, not one more heading (#569): muted text, no small caps.
-      empty.className = "preset-none";
-      empty.textContent = t("presets.noneHere");
-      box.appendChild(empty);
+    let found = 0;
+    for (const [key, title, groups] of [['personal', 'presets.yours', actionGroups], ['builtin', 'chain.builtIn', builtinGroups]]) {
+      const visible = groups.filter(matches);
+      if (!visible.length && groups.length) continue;
+      if (!groups.length && key === 'builtin') continue;
+      const heading = onInspect ? createComponentElement('button') : document.createElement('div');
+      heading.className = 'col-menu-sep preset-section-heading';
+      heading.textContent = t(title);
+      const list = document.createElement('div');
+      if (onInspect) {
+        heading.type = 'button';
+        heading.setAttribute('aria-expanded', String(!collapsed.has(key)));
+        heading.innerHTML = `${ico(collapsed.has(key) ? 'chevron-right' : 'caret-down')}<span></span>`;
+        heading.querySelector('span').textContent = t(title);
+        heading.addEventListener('click', () => { if (collapsed.has(key)) collapsed.delete(key); else collapsed.add(key); render(); });
+        list.hidden = collapsed.has(key);
+      }
+      box.append(heading, list);
+      for (const group of visible) { list.append(row(group)); found++; }
+      if (!groups.length) {
+        const empty = document.createElement('p'); empty.className = 'preset-none'; empty.textContent = t('presets.noneHere'); list.append(empty);
+      }
     }
-    for (const group of actionGroups) box.appendChild(row(group));
-    if (builtinGroups.length) {
-      head("chain.builtIn");
-      for (const group of builtinGroups) box.appendChild(row(group));
+    if (!found && onInspect) {
+      const empty = document.createElement('p'); empty.className = 'preset-none'; empty.textContent = t('workbench.noResults'); box.append(empty);
     }
+    onRender?.();
   }
 
   render();

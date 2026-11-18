@@ -583,4 +583,6 @@ new MutationObserver(() => {
   scheduleSample();
 }).observe(el("pe-rules"), { childList: true });
 
+export function openNewPreset() { openPresetEditor(); newPreset(); }
+
 export { onPresetsChanged, openPresetEditor };

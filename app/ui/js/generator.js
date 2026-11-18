@@ -1,3 +1,4 @@
+import { createTransformationWorkbench } from './transformation-workbench.js';
 import { nativeLiveFields, nativeRecompute, hasLiveInputs, hasStructuralLiveInputs, isLiveImportBusy, liveInputs, liveInputRevision, hasInvalidLiveFields, hasInvalidPreview, optimisticLivePlan } from "./live-preview.js";
 // The GENERATOR mode (#143 split it out of app.js).
 //
@@ -84,6 +85,9 @@ export function setNativeStageSession(session, derivedFields = null, changes = [
   if(derivedFields){nativeDerivedFields.clear();for(const entry of derivedFields)nativeDerivedFields.set(entry.path+'\0'+entry.field,entry);}
   for(const entry of changes){const key=entry.path+'\0'+entry.field;if(entry.derived)nativeDerivedFields.set(key,{path:entry.path,field:entry.field});else if(entry.derived===false)nativeDerivedFields.delete(key);}
   if(nativeRecompute)for(const entry of nativeDerivedFields.values())nativeTransformPaths.add(entry.path);
+}
+export function isNativeTransformedTag(path, field) {
+  return nativeDerivedFields.has(path + '\0' + field);
 }
 function tagOnlyGroups(groups) {
   return groups.every(group => group.rules.every(rule => rule.enabled === false || !['filename','fileext'].includes(rule.scope ?? group.scope)));
@@ -641,7 +645,15 @@ function refreshTransformButton() {
 // The checklist inside the block (#392): which presets run. A tick takes effect
 // at once — the job's own read-out and any plan staged from it redo themselves
 // (#248), and the wand button's dot follows.
+const workbench = createTransformationWorkbench({
+  rerender: () => presetChecklist.render(),
+  isActive: group => isPresetActive(group, shownContext || 'generator'),
+});
 const presetChecklist = createPresetChecklist({
+  onInspect: workbench.inspect,
+  isInspected: workbench.isInspected,
+  matches: workbench.matches,
+  onRender: workbench.refresh,
   menu: "groups-menu",
   context: () => shownContext || "generator",
   // The set of the job the checklist is showing (#555).

@@ -435,7 +435,7 @@
           {:else if subtab === 'filename'}<InspectorHelp labelKey="inspector.nameInfo" helpKey="inspector.nameHelp" />
           {:else if subtab === 'fromtext'}<InspectorHelp labelKey="inspector.textInfo" helpKey="inspector.textHelp" />
           {:else if subtab === 'transformations'}<InspectorHelp labelKey="inspector.transformInfo" helpKey="generator.transformHint" />{/if}
-          <Button variant="ghost" size="icon-sm" id="presets-edit" hidden={subtab !== 'transformations'} class="transformations-edit icon" type="button" data-i18n-title="presets.edit" title="Edit transformation presets" data-i18n-aria-label="presets.title" aria-label="Transformation presets"><svg class="ico"><use href="#i-rename"/></svg></Button>
+          <Button variant="ghost" size="icon-sm" id="presets-edit" hidden class="transformations-edit icon" type="button" data-i18n-title="presets.edit" title="Edit transformation presets" data-i18n-aria-label="presets.title" aria-label="Transformation presets"><svg class="ico"><use href="#i-rename"/></svg></Button>
         </div>
       </div>
 
@@ -451,7 +451,38 @@
           Apply and one undo still cover everything.
         </p>
 
+        <div class="transform-workspace-scroll">
+        <div class="transform-filter">
+          <label class="sr-only" for="transform-search" data-i18n="presets.search">Search transformations</label>
+          <Input id="transform-search" type="search" data-i18n-placeholder="presets.search" placeholder="Search transformations" />
+          <label class="transform-enabled"><NativeCheckbox id="transform-enabled" /><span data-i18n="workbench.enabledOnly">Enabled only</span></label>
+          <div class="transform-library-actions">
+            <Button id="transform-new" variant="ghost" size="sm" data-i18n="workbench.new">New</Button>
+            <Button id="transform-manage" variant="ghost" size="sm" data-i18n="workbench.manage">Manage</Button>
+          </div>
+        </div>
+        <p class="transform-order hint" data-i18n="workbench.order">Enabled presets run from top to bottom.</p>
         <div id="groups-menu" class="groups-list"></div>
+        <section id="transform-inspect" class="transform-inspect" aria-labelledby="transform-inspect-title" hidden>
+          <div class="transform-inspect-heading"><h3 id="transform-inspect-title">Transformation</h3><Button id="transform-inspect-edit" variant="ghost" size="sm" data-i18n="workbench.edit">Edit</Button></div>
+          <p id="transform-inspect-note" class="hint"></p>
+          <ol id="transform-inspect-rules"></ol>
+        </section>
+        </div>
+        <section id="transform-sample" class="transform-sample" data-i18n-aria-label="presets.previewTitle" aria-label="Preview" hidden>
+          <div class="transform-sample-heading">
+            <label for="transform-sample-field" data-i18n="presets.fieldLabel">Field</label>
+            <NativeSelect id="transform-sample-field" />
+            <Button id="transform-sample-prev" variant="ghost" size="icon-sm" data-i18n-aria-label="player.prev" aria-label="Previous track"><svg class="ico"><use href="#i-chevron-right"/></svg></Button>
+            <Button id="transform-sample-next" variant="ghost" size="icon-sm" data-i18n-aria-label="player.next" aria-label="Next track"><svg class="ico"><use href="#i-chevron-right"/></svg></Button>
+          </div>
+          <p id="transform-sample-source" class="hint"></p>
+          <div class="transform-sample-values">
+            <div><label for="transform-sample-before" data-i18n="presets.sample">Before</label><Input id="transform-sample-before" type="text" /></div>
+            <div><span class="transform-sample-label" data-i18n="presets.result">After</span><output id="transform-sample-after" for="transform-sample-before"></output></div>
+          </div>
+          <span id="transform-sample-status" class="hint" role="status"></span>
+        </section>
         <div class="panel-actions" hidden>
 
           <div class="spacer"></div>
@@ -690,6 +721,10 @@
 
     <section id="staged-edits" class="staged-edits" tabindex="-1" aria-labelledby="staged-heading" hidden>
       <div class="staged-head"><div><h3 id="staged-heading" data-i18n="staging.heading">Staged edits</h3><span id="staged-count" class="staged-count"></span></div><Button id="diff-discard" variant="ghost" size="icon-sm" class="icon staged-remove" data-i18n-aria-label="staging.clear" aria-label="Clear staged edits" data-i18n-title="staging.clear" title="Clear staged edits"><svg class="ico"><use href="#i-close"/></svg></Button></div>
+      <div class="staged-details">
+        <span id="staged-transformations" hidden></span>
+        <span id="staged-tags" hidden></span>
+      </div>
     </section>
   </aside>
   </DockModule>

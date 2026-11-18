@@ -88,7 +88,7 @@ async function tick(page, name, on = true) {
   await openTagSource(page,'transformations');
   const row = page.locator('#groups-menu .preset-check').filter({ has: page.locator('.preset-apply', { hasText: name }) });
   const input = row.locator('input.group-tick');
-  if (await input.isChecked() !== on) await row.locator('.preset-apply').click();
+  if (await input.isChecked() !== on) await row.getByRole('checkbox').click();
   await expect(input).toBeChecked({ checked: on });
   if(previous!=='transformations')await openTagSource(page,previous);
 }
@@ -288,4 +288,48 @@ test('clearing mixed titles stages only the selected files and Apply/Undo round-
   expect(await page.evaluate(()=>window.tagrex.tracks.map(track=>track.tags.title||''))).toEqual(['','',before[2].tags.title]);
   await page.locator('#undo').click();
   await expect.poll(()=>page.evaluate(()=>window.tagrex.tracks.map(track=>track.tags))).toEqual(before.map(track=>track.tags));
+});
+
+for (const theme of ['dark','light']) test(`sidebar inspection and sample stay separate from enabled presets (${theme})`,async({page},info)=>{
+  await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
+  await openTagSource(page,'transformations');
+  const row=page.locator('#groups-menu .preset-row').filter({hasText:'Upper titles'});
+  await row.getByRole('button',{name:'Upper titles',exact:true}).click();
+  await expect(row.getByRole('button',{name:'Upper titles',exact:true})).toHaveAttribute('aria-pressed','true');
+  await expect(row.getByRole('checkbox')).not.toBeChecked();
+  await expect(page.locator('#transform-inspect-title')).toHaveText('Upper titles');
+  await expect(page.locator('#transform-inspect-rules li')).toHaveCount(1);
+  await expect(page.locator('#transform-sample-field')).toHaveValue('title');
+  await expect(page.locator('#transform-sample .app-select-label')).toHaveText('Title');
+  await page.locator('#transform-sample-before').fill('Sample title');
+  await expect(page.locator('#transform-sample-after')).toHaveText('SAMPLE TITLE');
+  await expect(page.locator('#staged-edits')).toBeHidden();
+  expect(await calls(page,'apply_plan')).toBe(0);
+  await page.locator('#transform-search').fill('Append');
+  await expect(page.locator('#groups-menu .preset-row')).toHaveCount(1);
+  await page.locator('#transform-search').clear();
+  await page.locator('#transform-enabled-control').click();
+  await expect(page.locator('#groups-menu .preset-row')).toHaveCount(0);
+  await expect(page.locator('#groups-menu')).toContainText('No matching presets');
+  await page.locator('#transform-enabled-control').click();
+  await page.getByRole('button',{name:'Your presets',exact:true}).click();
+  await expect(page.getByRole('button',{name:'Your presets',exact:true})).toHaveAttribute('aria-expanded','false');
+  await page.getByRole('button',{name:'Your presets',exact:true}).click();
+  await page.setViewportSize({width:1440,height:1000});
+  await page.locator('.mode-col').screenshot({path:info.outputPath(`transformation-workbench-desktop-${theme}.png`)});
+  await page.setViewportSize({width:1000,height:700});
+  await page.locator('.mode-col').evaluate(node=>{node.style.width='320px';node.style.flex='0 0 320px';});
+  await page.locator('.mode-col').screenshot({path:info.outputPath(`transformation-workbench-${theme}.png`)});
+  await expect(page.locator('#transform-sample-after')).toBeInViewport();
+  const geometry=await page.locator('#subtab-transformations').evaluate(node=>({overflow:node.scrollWidth-node.clientWidth}));
+  expect(geometry.overflow).toBeLessThanOrEqual(1);
+  await page.locator('.mode-col').screenshot({path:info.outputPath(`transformation-workbench-${theme}.png`)});
+});
+
+test('sidebar New opens a draft preset without changing the saved library',async({page})=>{
+  await openTagSource(page,'transformations');
+  await page.locator('#transform-new').click();
+  await expect(page.locator('#pe-editor')).toBeVisible();
+  await expect(page.locator('#pe-rules .rule-card')).toHaveCount(0);
+  expect(await calls(page,'apply_plan')).toBe(0);
 });

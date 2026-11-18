@@ -1174,6 +1174,9 @@ body .mode-col .staged-edits {
 .staged-head { display:flex; align-items:center; justify-content:space-between; gap:var(--sp-3); }
 .staged-head > div { display:flex; align-items:baseline; flex-wrap:wrap; gap:var(--sp-2); }
 .staged-head h3 { margin:0; font-size:var(--type-body-size); font-weight:var(--fw-strong); color:var(--text); }
+.staged-details { display:flex; flex-direction:column; gap:var(--sp-1); font-size:var(--type-help-size); color:var(--muted); }
+.staged-details:has(> :not([hidden])) { margin-top:var(--sp-2); }
+.staged-details > [hidden] { display:none; }
 .staged-count { font-size:var(--type-help-size); color:var(--muted); }
 body button.staged-remove { flex:none; width:24px; height:24px; min-width:24px; min-height:24px; padding:5px; border:0; background:transparent; color:var(--muted); border-radius:var(--r-compact); }
 body button.staged-remove:hover { background:var(--row-hover); color:var(--text); }
@@ -1279,3 +1282,50 @@ body .statusbar .sb-right:has(#diff-actionbar[data-has-work='false']) #ab-locked
 body .mode-col { position:relative; }
 body .mode-col .overlay-scrollport { scrollbar-width:none; scrollbar-gutter:auto; }
 body .mode-col .overlay-scrollport::-webkit-scrollbar { width:0; height:0; }
+
+/* A preset shelf, an inspectable rule list and a sample that stays in reach. */
+.transform-filter { display:flex; flex-wrap:wrap; align-items:center; gap:var(--sp-2); flex:none; }
+.transform-filter > input { width:100%; }
+.transform-enabled { display:flex; align-items:center; gap:var(--sp-2); font-size:var(--type-help-size); color:var(--muted); }
+.transform-library-actions { display:flex; gap:var(--sp-1); margin-inline-start:auto; }
+body .docked-transformations #groups-menu { flex:1 1 180px; min-height:90px; }
+body #groups-menu .preset-section-heading { display:flex; align-items:center; gap:var(--sp-1); width:100%; text-align:start; border:0; background:transparent; color:var(--muted); }
+body #groups-menu .preset-section-heading .ico { width:12px; height:12px; }
+body #groups-menu .preset-row.inspected { background:var(--row-hover); border-radius:var(--r-compact); }
+body #groups-menu button.preset-apply { padding:4px 0; border:0; background:transparent; color:inherit; box-shadow:none; border-radius:var(--r-compact); font-size:inherit; font-weight:inherit; height:auto; white-space:normal; }
+body #groups-menu .preset-row { gap:var(--sp-2); min-width:0; }
+body #groups-menu .group-scope { max-width:95px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.transform-inspect { flex:0 1 auto; min-height:70px; max-height:190px; overflow:auto; }
+.transform-inspect-heading { display:flex; align-items:center; justify-content:space-between; gap:var(--sp-2); }
+.transform-inspect h3 { margin:0; font-size:var(--type-body-size); font-weight:var(--fw-strong); overflow-wrap:anywhere; }
+.transform-inspect ol { margin:var(--sp-1) 0; padding-inline-start:22px; font-size:var(--type-help-size); }
+.transform-inspect li { padding:var(--sp-1) 0; }
+.transform-inspect li small { display:block; color:var(--muted); font-size:var(--type-meta-size); }
+.transform-inspect li.disabled { opacity:.55; }
+.transform-sample { flex:none; padding-top:var(--sp-2); min-width:0; }
+.transform-sample-heading { display:flex; align-items:center; gap:var(--sp-1); }
+.transform-sample-heading select { flex:1; min-width:0; }
+.transform-sample-heading label, .transform-sample-label, .transform-sample > label { font-size:var(--type-help-size); color:var(--muted); }
+.transform-sample > label, .transform-sample-label { display:block; margin-top:var(--sp-1); margin-bottom:var(--sp-1); }
+.transform-sample > input { width:100%; }
+.transform-sample output { display:block; min-height:28px; padding:var(--sp-1) var(--sp-2); color:var(--text); background:var(--bg); border-radius:var(--input-radius); font-size:var(--type-help-size); overflow-wrap:anywhere; }
+.transform-sample .hint { display:block; margin:var(--sp-1) 0; font-size:var(--type-meta-size); overflow-wrap:anywhere; }
+.transform-inspect[hidden], .transform-sample[hidden] { display:none; }
+@media(max-height:650px) { .transform-inspect { max-height:110px; } .transform-sample { flex-shrink:1; overflow:auto; min-height:100px; } }
+/* The upper workspace scrolls as one unit in short/stacked docks. The sample
+   stays outside that scrollport, so it cannot disappear below the panel. */
+.transform-workspace-scroll { flex:1 1 0; min-height:0; overflow:auto; display:flex; flex-direction:column; gap:var(--sp-3); }
+body .docked-transformations .transform-workspace-scroll #groups-menu { flex:none; min-height:0; overflow:visible; }
+.transform-workspace-scroll .transform-inspect { flex:none; min-height:0; max-height:none; overflow:visible; }
+.transform-sample-heading > button { flex:none; }
+.transform-sample-heading > select { height:28px; min-height:28px; }
+.transform-sample > input { height:28px; min-height:28px; }
+.transform-sample-heading > .app-select { flex:1; min-width:0; }
+.transform-sample-heading .app-select-trigger { height:28px; min-height:28px; }
+#transform-sample-prev .ico { transform:rotate(180deg); }
+.transform-sample-values { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:var(--sp-2); }
+.transform-sample-values label, .transform-sample-values .transform-sample-label { display:block; margin:var(--sp-1) 0; font-size:var(--type-help-size); color:var(--muted); }
+.transform-sample-values input { width:100%; height:28px; min-height:28px; }
+.transform-workspace-scroll { min-height:100px; }
+body #groups-menu .preset-section-heading { text-transform:none; letter-spacing:normal; font-size:var(--type-help-size); }
+body .transform-library-actions button { border:0; background:transparent; box-shadow:none; }
