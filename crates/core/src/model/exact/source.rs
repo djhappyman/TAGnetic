@@ -53,7 +53,7 @@ pub(super) fn open(path: &Path) -> io::Result<File> {
                 file.seek(SeekFrom::Start(0))?;
                 Ok(file)
             }
-            None => File::open(path),
+            None => crate::plan::open_metadata_file(path, false),
         }
     })
 }
