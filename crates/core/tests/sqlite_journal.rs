@@ -521,7 +521,7 @@ fn a_batch_is_journaled_before_its_first_write() {
 /// #659: a batch the process never finished is still there at the next start,
 /// marked, and undoing it puts back what it reached and skips what it did not.
 #[test]
-fn an_interrupted_batch_can_be_undone_after_a_restart() {
+fn legacy_interrupted_moves_without_identity_refuse_automatic_recovery() {
     let dir = TempDir::new("interrupted");
     let reached = dir.flac("reached.flac");
     let moved = dir.path().join("moved.flac");
@@ -551,6 +551,7 @@ fn an_interrupted_batch_can_be_undone_after_a_restart() {
     SqliteJournal::open(&dir.db())
         .unwrap()
         .record(&AppliedBatch {
+            native_tags: false,
             id: BatchId(0),
             description: plan.description.clone(),
             message: None,
@@ -571,27 +572,24 @@ fn an_interrupted_batch_can_be_undone_after_a_restart() {
     let batches = journal.batches().unwrap();
     assert_eq!(batches.len(), 1);
     assert!(batches[0].interrupted);
-    // An initial interrupted record has intent, but no observed outcome. The
-    // reached field is ambiguous until explicitly restored; no transfers run.
-    assert!(matches!(
-        Executor::undo(&mut journal, batches[0].id, &roots(dir.path())),
-        Err(tagrex_core::plan::PlanError::ChangedSinceApplied(_))
-    ));
-    assert!(moved.exists() && !reached.exists());
-    let mut file = TagEngine::read(&moved).unwrap();
-    file.tags.remove(&TagField::Artist);
-    TagEngine::write(&file).unwrap();
-    Executor::undo(&mut journal, batches[0].id, &roots(dir.path())).unwrap();
-
-    assert!(reached.exists() && !moved.exists());
-    assert!(unreached.exists() && !never_moved.exists());
-    for path in [&reached, &unreached] {
-        assert!(!TagEngine::read(path)
-            .unwrap()
-            .tags
-            .contains_key(&TagField::Artist));
+    // Legacy intent lacks native move ownership. Even manually restoring its
+    // field cannot prove that a named output is the original transferred inode.
+    for restored in [false, true] {
+        if restored {
+            let mut file = TagEngine::read(&moved).unwrap();
+            file.tags.remove(&TagField::Artist);
+            TagEngine::write(&file).unwrap();
+        }
+        let before = std::fs::read(&moved).unwrap();
+        assert!(matches!(
+            Executor::undo(&mut journal, batches[0].id, &roots(dir.path())),
+            Err(tagrex_core::plan::PlanError::Stale(_))
+        ));
+        assert_eq!(std::fs::read(&moved).unwrap(), before);
+        assert!(moved.exists() && !reached.exists());
+        assert!(unreached.exists() && !never_moved.exists());
+        assert_eq!(journal.batches().unwrap().len(), 1);
     }
-    assert!(journal.batches().unwrap().is_empty());
 }
 
 /// #666: the revision each file was in survives a restart, recorded once even
@@ -610,6 +608,7 @@ fn the_id3v2_revisions_survive_a_restart() {
         },
     ];
     let mut batch = AppliedBatch {
+        native_tags: false,
         id: BatchId(0),
         description: "edit".to_string(),
         message: None,
@@ -925,6 +924,32 @@ fn image_pool_checks_bytes_on_hash_collision_and_keeps_other_batch_references() 
 struct StopBeforeFinish(SqliteJournal);
 
 impl UndoJournal for StopBeforeFinish {
+    fn supports_copy_checkpoints(&self) -> bool {
+        self.0.supports_copy_checkpoints()
+    }
+    fn checkpoint_copy(
+        &mut self,
+        id: BatchId,
+        stamp: &tagrex_core::journal::CopyStamp,
+        previous: Option<&tagrex_core::journal::CopyStamp>,
+    ) -> Result<(), tagrex_core::journal::JournalError> {
+        self.0.checkpoint_copy(id, stamp, previous)
+    }
+
+    fn prepare_move_stage(
+        &mut self,
+        id: BatchId,
+        stage: &tagrex_core::journal::MoveStage,
+    ) -> Result<(), tagrex_core::journal::JournalError> {
+        self.0.prepare_move_stage(id, stage)
+    }
+    fn move_stages(
+        &self,
+        id: BatchId,
+    ) -> Result<Vec<tagrex_core::journal::MoveStage>, tagrex_core::journal::JournalError> {
+        self.0.move_stages(id)
+    }
+
     fn record(
         &mut self,
         batch: &AppliedBatch,
@@ -953,10 +978,21 @@ fn interrupt_before_finish(dir: &TempDir, plan: &ChangePlan) -> AppliedBatch {
     }))
     .is_err());
     drop(journal);
+    // Explicit historical/missing-proof fixture: new execution checkpoints
+    // completed copies before finish, unlike the older journal being tested.
+    let conn = rusqlite::Connection::open(dir.db()).unwrap();
+    conn.execute("DELETE FROM copy_stamps WHERE moved=0", [])
+        .unwrap();
+    drop(conn);
     let reopened = SqliteJournal::open(&dir.db()).unwrap();
     let batch = reopened.batches().unwrap().remove(0);
     assert!(batch.interrupted);
-    assert!(batch.copy_stamps.is_empty());
+    // This historical fixture keeps move identities, but deliberately drops
+    // completed-copy outcomes to exercise unproved older journal history.
+    assert!(batch
+        .copy_stamps
+        .iter()
+        .all(|stamp| stamp.moved && stamp.identity.is_some() && stamp.sha256.is_none()));
     batch
 }
 
@@ -1024,27 +1060,42 @@ fn interrupted_unstamped_copies_and_sidecars_are_never_deleted() {
 }
 
 #[test]
-fn completed_legacy_unstamped_copies_remain_undoable() {
-    let dir = TempDir::new("legacy-copy");
-    let source = dir.flac("source.flac");
-    let target = dir.path().join("target.flac");
-    let plan = ChangePlan {
-        changes: vec![FileChange {
-            path: source.clone(),
-            rename_to: Some(target.clone()),
-            copy: true,
-            ..FileChange::default()
-        }],
-        ..ChangePlan::default()
-    };
-    let mut batch = interrupt_before_finish(&dir, &plan);
-    batch.interrupted = false;
-    let mut journal = SqliteJournal::open(&dir.db()).unwrap();
-    journal.finish(batch.id, &batch).unwrap();
-    drop(journal);
-    let mut journal = SqliteJournal::open(&dir.db()).unwrap();
-    Executor::undo(&mut journal, batch.id, &roots(dir.path())).unwrap();
-    assert!(source.exists() && !target.exists());
+fn completed_legacy_unstamped_copies_refuse_unproved_deletion() {
+    for weak_stamp in [false, true] {
+        let dir = TempDir::new(if weak_stamp {
+            "legacy-weak-copy"
+        } else {
+            "legacy-copy"
+        });
+        let source = dir.flac("source.flac");
+        let target = dir.path().join("target.flac");
+        let plan = ChangePlan {
+            changes: vec![FileChange {
+                path: source.clone(),
+                rename_to: Some(target.clone()),
+                copy: true,
+                ..FileChange::default()
+            }],
+            ..ChangePlan::default()
+        };
+        let mut batch = interrupt_before_finish(&dir, &plan);
+        batch.interrupted = false;
+        if weak_stamp {
+            let mut stamp = CopyStamp::of(&target).unwrap();
+            stamp.sha256 = None;
+            batch.copy_stamps.push(stamp);
+        }
+        let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+        journal.finish(batch.id, &batch).unwrap();
+        drop(journal);
+        let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+        assert!(matches!(
+            Executor::undo(&mut journal, batch.id, &roots(dir.path())),
+            Err(tagrex_core::plan::PlanError::Stale(_))
+        ));
+        assert!(source.exists() && target.exists());
+        assert!(journal.batch(batch.id).unwrap().is_some());
+    }
 }
 
 #[test]

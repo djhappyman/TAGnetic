@@ -85,9 +85,10 @@ impl From<tagrex_commands::AppError> for ServiceError {
         // Provider responses may contain credential-bearing request URLs. Do not
         // propagate their error bodies; the provider adapter supplies safe errors.
         let code = match &error {
-            tagrex_commands::AppError::Plan(tagrex_core::plan::PlanError::RollbackIncomplete {
-                ..
-            }) => "recovery_required",
+            tagrex_commands::AppError::Plan(
+                tagrex_core::plan::PlanError::RollbackIncomplete { .. }
+                | tagrex_core::plan::PlanError::RecoveryRequired { .. },
+            ) => "recovery_required",
             tagrex_commands::AppError::Plan(tagrex_core::plan::PlanError::Cancelled) => {
                 "cancelled_and_restored"
             }

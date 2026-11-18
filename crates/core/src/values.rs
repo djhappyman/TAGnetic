@@ -33,6 +33,29 @@ impl FieldValues {
         &self.0
     }
 
+    /// Transfer the validated ordered values without changing their meaning.
+    pub fn into_vec(self) -> Vec<String> {
+        self.0
+    }
+
+    /// Append already validated members without copying existing values. A
+    /// limit failure leaves the receiver unchanged; no normalization occurs.
+    pub fn append(&mut self, other: Self) -> Result<(), MaskError> {
+        let bytes = self
+            .0
+            .iter()
+            .chain(&other.0)
+            .try_fold(0usize, |sum, value| sum.checked_add(value.len()))
+            .unwrap_or(usize::MAX);
+        if self.0.len().saturating_add(other.0.len()) > MAX_VALUES || bytes > MAX_BYTES {
+            return Err(invalid(
+                "The combined field exceeds its ordered-value limits.",
+            ));
+        }
+        self.0.extend(other.0);
+        Ok(())
+    }
+
     /// Read the existing joined representation for fields explicitly declared
     /// multiple-valued. Never use this to interpret an ordinary scalar field.
     pub fn from_legacy_list(value: &str, separator: &str) -> Result<Self, MaskError> {
@@ -124,6 +147,14 @@ impl FieldValues {
     }
 }
 
+impl TryFrom<Vec<String>> for FieldValues {
+    type Error = MaskError;
+
+    fn try_from(values: Vec<String>) -> Result<Self, Self::Error> {
+        Self::new(values)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +170,19 @@ mod tests {
             values(&["AC/DC", "Hello; Goodbye", " Björk "])
         );
         assert!(v.to_legacy_list("; ").is_err());
+    }
+    #[test]
+    fn validated_append_preserves_exact_members_and_limit_failure_is_atomic() {
+        let mut first = values(&["A; B", "", " 日本語 "]);
+        first.append(values(&["A; B", ""])).unwrap();
+        assert_eq!(first, values(&["A; B", "", " 日本語 ", "A; B", ""]));
+        let mut full = FieldValues::try_from(vec![String::new(); MAX_VALUES]).unwrap();
+        let original = full.clone();
+        assert!(full.append(values(&[""])).is_err());
+        assert_eq!(full, original);
+        let mut full = values(&[&"X".repeat(MAX_BYTES)]);
+        assert!(full.append(values(&["Y"])).is_err());
+        assert_eq!(full.as_slice()[0].len(), MAX_BYTES);
     }
     #[test]
     fn split_and_merge_are_explicit_and_bounded() {

@@ -1046,6 +1046,10 @@ fn error_message(error: &AppError) -> MessageDto {
             MaskError::UnterminatedQuote => coded("error.mask.unterminatedQuote", BTreeMap::new()),
         },
         AppError::Plan(inner) => match inner {
+            PlanError::RecoveryRequired { .. } => {
+                // Reuse the existing translated recovery refusal surface.
+                coded("error.journal.notRollbackable", arg("detail", inner))
+            }
             PlanError::Stale(path) => coded("error.plan.stale", arg("path", path.display())),
             PlanError::ChangedSinceApplied(path) => coded(
                 "error.plan.changedSinceApplied",
@@ -2397,8 +2401,10 @@ pub struct ImportOrderProposalDto {
 /// [`Executor`] `allowed_root`, so every write is confined to the opened
 /// library.
 pub struct App {
+    model_policy: tagrex_core::model::ModelPolicy,
     read_cache: RefCell<read_cache::ReadCache>,
     query_index: RefCell<Option<std::sync::Arc<query::QueryIndex>>>,
+    query_policy: Cell<u64>,
     query_pending: RefCell<Option<PendingQuery>>,
     library_root: PathBuf,
     /// When set, the session operates on this explicit list of files (a
@@ -2511,8 +2517,10 @@ impl App {
         }
         let (journal, journal_set_aside) = SqliteJournal::open_or_recover(journal_path)?;
         Ok(Self {
+            model_policy: tagrex_core::model::ModelPolicy::default(),
             read_cache: RefCell::default(),
             query_index: RefCell::default(),
+            query_policy: Cell::new(u64::MAX),
             query_pending: RefCell::default(),
             library_root,
             file_filter: None,
@@ -2545,6 +2553,7 @@ impl App {
         &self,
         path: &Path,
     ) -> Result<std::sync::Arc<tagrex_core::model::TrackRead>, tagrex_core::model::TagIoError> {
+        let _policy = self.model_policy.enter();
         self.read_cache.borrow_mut().read(path)
     }
 
@@ -2664,12 +2673,15 @@ impl App {
     /// here — they belong to [`ProviderHub`], which outlives any open library
     /// (#166).
     pub fn apply_settings(&self, settings: &SettingsDto) {
+        let _policy = self.model_policy.enter();
         self.invalidate_query();
         self.read_cache.borrow_mut().clear();
-        tagrex_core::model::set_write_id3v23(settings.id3_v23);
-        tagrex_core::model::set_read_priority(&settings.read_priority);
-        tagrex_core::model::set_multi_value_separator(&settings.multi_value_separator);
-        tagrex_core::model::set_legacy_code_page(&settings.legacy_code_page);
+        self.model_policy.configure(
+            settings.id3_v23,
+            &settings.read_priority,
+            &settings.multi_value_separator,
+            &settings.legacy_code_page,
+        );
         self.cover_max_px.set(settings.cover_max_px);
         self.cover_quality
             .set(effective_cover_quality(settings.cover_quality));
@@ -2697,11 +2709,13 @@ impl App {
     /// The longest file BPM detection should measure (#538), or `None` for no
     /// limit. The measuring runs outside the session, so it asks once up front.
     pub fn bpm_max_length(&self) -> Option<Duration> {
+        let _policy = self.model_policy.enter();
         self.bpm_max_length.get()
     }
 
     /// What an online import should do about the release's cover (#207).
     pub fn import_cover_mode(&self) -> ImportCover {
+        let _policy = self.model_policy.enter();
         self.import_cover.get()
     }
 
@@ -2710,6 +2724,7 @@ impl App {
     /// kept rather than rejected, since a key this build cannot name is a key it
     /// also cannot write.
     pub fn set_locked_fields(&self, fields: &[String]) {
+        let _policy = self.model_policy.enter();
         *self.locked_fields.borrow_mut() = fields.iter().cloned().collect();
     }
 
@@ -2717,6 +2732,7 @@ impl App {
     /// reads this back rather than assuming its own copy survived, since the
     /// lock lives here and the window can be reloaded out from under it.
     pub fn locked_fields(&self) -> Vec<String> {
+        let _policy = self.model_policy.enter();
         let mut fields: Vec<String> = self.locked_fields.borrow().iter().cloned().collect();
         fields.sort();
         fields
@@ -2885,6 +2901,8 @@ impl App {
     /// this order is also what mapping-by-position (rename masks, release
     /// import) lines up against.
     pub fn list_tracks(&self) -> Vec<TrackDto> {
+        let _policy = self.model_policy.enter();
+        let policy = tagrex_core::model::read_policy_revision();
         let mut records: Vec<(TrackDto, query::QueryRow)> = self
             .source_paths()
             .into_iter()
@@ -2897,8 +2915,17 @@ impl App {
         records.sort_by(|(a, _), (b, _)| natural_cmp(&a.path, &b.path));
         let (tracks, rows): (Vec<_>, Vec<_>) = records.into_iter().unzip();
         self.invalidate_query();
-        *self.query_index.borrow_mut() =
-            Some(std::sync::Arc::new(query::QueryIndex::from_rows(rows)));
+        let policy = if policy != u64::MAX && policy == tagrex_core::model::read_policy_revision() {
+            policy
+        } else {
+            u64::MAX
+        };
+        let index = std::sync::Arc::new(query::QueryIndex::from_rows(rows));
+        if policy == u64::MAX {
+            index.invalidate();
+        }
+        self.query_policy.set(policy);
+        *self.query_index.borrow_mut() = Some(index);
         tracks
     }
 
@@ -2922,6 +2949,14 @@ impl App {
             );
         }
         row
+    }
+
+    fn validate_query_policy(&self) -> u64 {
+        let revision = tagrex_core::model::read_policy_revision();
+        if revision == u64::MAX || self.query_policy.get() != revision {
+            self.invalidate_query();
+        }
+        revision
     }
 
     fn invalidate_query(&self) {
@@ -2960,6 +2995,8 @@ impl App {
     /// Share the current immutable query snapshot without sending rows through IPC.
     /// Warm queries reuse this `Arc` and never probe files.
     pub fn query_snapshot(&self) -> std::sync::Arc<query::QueryIndex> {
+        let _policy = self.model_policy.enter();
+        self.validate_query_policy();
         let dirty = self
             .query_pending
             .borrow()
@@ -2982,11 +3019,14 @@ impl App {
 
     /// Root of the authoritative session; this accessor does not grant access.
     pub fn library_root(&self) -> &Path {
+        let _policy = self.model_policy.enter();
         &self.library_root
     }
 
     /// Current query generation, without constructing a snapshot or reading files.
     pub fn query_snapshot_id(&self) -> Option<u64> {
+        let _policy = self.model_policy.enter();
+        self.validate_query_policy();
         self.query_index.borrow().as_ref().map(|index| index.id)
     }
 
@@ -2995,6 +3035,7 @@ impl App {
     /// require exact membership; directory sessions use the scanner's supported
     /// regular-file boundary, with no symlink traversal below the chosen root.
     pub fn read_track(&self, path: &Path) -> Result<TrackDto, AppError> {
+        let _policy = self.model_policy.enter();
         self.read_track_rows_inner(std::slice::from_ref(&path.to_path_buf()), true)
             .map(|mut rows| rows.remove(0))
     }
@@ -3041,6 +3082,7 @@ impl App {
     /// The whole request is validated before any snapshot is taken, so a path
     /// outside the library fails before a partial batch is returned.
     pub fn read_track_rows(&self, paths: &[PathBuf]) -> Result<Vec<TrackDto>, AppError> {
+        let _policy = self.model_policy.enter();
         self.read_track_rows_inner(paths, false)
     }
 
@@ -3049,6 +3091,7 @@ impl App {
         paths: &[PathBuf],
         force_refresh: bool,
     ) -> Result<Vec<TrackDto>, AppError> {
+        let policy = self.validate_query_policy();
         self.validate_track_paths(paths)?;
         let mut rows = Vec::with_capacity(paths.len());
         let tracks = paths
@@ -3059,6 +3102,11 @@ impl App {
                 track
             })
             .collect();
+        if policy == u64::MAX || policy != tagrex_core::model::read_policy_revision() {
+            self.invalidate_query();
+            self.query_policy.set(u64::MAX);
+            return Ok(tracks);
+        }
         let previous = self.query_index.borrow().clone();
         let pending = self.query_pending.borrow_mut().take();
         if let Some(previous) = previous {
@@ -3093,6 +3141,7 @@ impl App {
     /// copies apart, largest groups first. Unreadable files, and files lacking
     /// the data a criterion needs (e.g. no artist/title), are skipped.
     pub fn find_duplicates(&self, criterion: &str) -> Result<Vec<DuplicateGroupDto>, AppError> {
+        let _policy = self.model_policy.enter();
         use std::collections::BTreeMap;
         use std::hash::{Hash, Hasher};
 
@@ -3417,6 +3466,7 @@ impl App {
         mask_pattern: &str,
         paths: &[PathBuf],
     ) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         self.preview_rename_with_working(mask_pattern, paths, None)
     }
 
@@ -3428,6 +3478,7 @@ impl App {
         paths: &[PathBuf],
         working: &PlanDto,
     ) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         self.preview_rename_with_working(mask_pattern, paths, Some(working))
     }
 
@@ -3516,6 +3567,7 @@ impl App {
         mask_pattern: &str,
         paths: &[PathBuf],
     ) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         self.preview_tags_from_name_with_working(mask_pattern, paths, None)
     }
 
@@ -3527,6 +3579,7 @@ impl App {
         paths: &[PathBuf],
         working: &PlanDto,
     ) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         self.preview_tags_from_name_with_working(mask_pattern, paths, Some(working))
     }
 
@@ -3622,6 +3675,7 @@ impl App {
         mask_pattern: &str,
         path: &Path,
     ) -> Result<NameProbeDto, AppError> {
+        let _policy = self.model_policy.enter();
         let normalized = mask_pattern.replace('\\', "/");
         let mask = Mask::parse(&normalized)?;
         let depth = normalized.matches('/').count();
@@ -3658,6 +3712,7 @@ impl App {
         mask_pattern: &str,
         paths: &[PathBuf],
     ) -> Result<NameProbesDto, AppError> {
+        let _policy = self.model_policy.enter();
         let fields = Mask::parse(&mask_pattern.replace('\\', "/"))?
             .fields()
             .iter()
@@ -3688,6 +3743,7 @@ impl App {
         text: &str,
         paths: &[PathBuf],
     ) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         let _encoding_scope = cover_encoding::Scope::new();
         let mask = Mask::parse(&text_list_mask(mask_pattern))?;
         let (tracks, _) = text_list_tracks(&mask, text)?;
@@ -3748,6 +3804,7 @@ impl App {
         text: &str,
         paths: &[PathBuf],
     ) -> Result<TextLinesDto, AppError> {
+        let _policy = self.model_policy.enter();
         let mask = Mask::parse(&text_list_mask(mask_pattern))?;
         let fields = mask.fields().iter().map(TagField::to_storage_key).collect();
         let mut files = paths.iter();
@@ -3801,6 +3858,7 @@ impl App {
         mask_pattern: &str,
         text: &str,
     ) -> Result<TextProbeDto, AppError> {
+        let _policy = self.model_policy.enter();
         let mask = Mask::parse(&text_list_mask(mask_pattern))?;
         let (tracks, skipped) = text_list_tracks(&mask, text)?;
         let first = match tracks.first() {
@@ -3844,6 +3902,7 @@ impl App {
         rules: &[TransformRuleDto],
         scope: &str,
     ) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         let _encoding_scope = cover_encoding::Scope::new();
         let chain = build_chain(rules)?;
         let mut changes = Vec::new();
@@ -4003,6 +4062,7 @@ impl App {
         paths: &[PathBuf],
         groups: &[ActionGroupDto],
     ) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         let _encoding_scope = cover_encoding::Scope::new();
         if field_operations::has_field_rules(groups) {
             return self.preview_field_groups(paths, groups, None);
@@ -4143,6 +4203,7 @@ impl App {
         plan: &PlanDto,
         groups: &[ActionGroupDto],
     ) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         let _encoding_scope = cover_encoding::Scope::new();
         if field_operations::has_field_rules(groups) {
             let paths = plan
@@ -4391,6 +4452,7 @@ impl App {
         copy: bool,
         prune_empty_dirs: bool,
     ) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         self.preview_move_with_working(
             mask_pattern,
             paths,
@@ -4412,6 +4474,7 @@ impl App {
         prune_empty_dirs: bool,
         working: &PlanDto,
     ) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         self.preview_move_with_working(
             mask_pattern,
             paths,
@@ -4510,6 +4573,7 @@ impl App {
     /// real diff and the executor's staleness check is accurate) and drops
     /// no-op edits. An empty requested value clears the field.
     pub fn preview_tag_edits(&self, edits: &[TagEditDto]) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         let _encoding_scope = cover_encoding::Scope::new();
         self.preview_tag_edits_with_cover(edits, None)
     }
@@ -4529,6 +4593,7 @@ impl App {
         cover: Option<&CoverArtDto>,
         cover_paths: &[PathBuf],
     ) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         let covers = cover
             .map(|cover| LiveCoverAssignmentDto {
                 cover: cover.clone(),
@@ -4551,6 +4616,7 @@ impl App {
         groups: &[ActionGroupDto],
         covers: &[LiveCoverAssignmentDto],
     ) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         self.preview_live_edits_with_base(edits, paths, groups, covers, None)
     }
 
@@ -4565,6 +4631,7 @@ impl App {
         covers: &[LiveCoverAssignmentDto],
         base_plan: Option<&PlanDto>,
     ) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         let _encoding_scope = cover_encoding::Scope::new();
         let mut manual_covers = BTreeMap::new();
         if let Some(base) = base_plan {
@@ -4794,6 +4861,7 @@ impl App {
         edits: &[TagEditDto],
         cover: Option<&CoverArtDto>,
     ) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         let _encoding_scope = cover_encoding::Scope::new();
         // Group edits by file so each file is read once and becomes one change.
         let mut by_path: std::collections::BTreeMap<&str, Vec<&TagEditDto>> =
@@ -4931,6 +4999,7 @@ impl App {
     /// the cover well's Remove to drop the cover as well. Files that already have
     /// no modeled tags are skipped.
     pub fn preview_clear_tags(&self, paths: &[PathBuf]) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         let _encoding_scope = cover_encoding::Scope::new();
         let mut changes = Vec::new();
         for path in paths {
@@ -4970,6 +5039,7 @@ impl App {
     /// the field is written. A file that already holds that number (`128.0` is
     /// 128) is left out, and so is a path that has gone since it was measured.
     pub fn preview_bpm(&self, detected: &[(PathBuf, f64)]) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         let _encoding_scope = cover_encoding::Scope::new();
         let floor = self.bpm_floor.get();
         let mut changes = Vec::new();
@@ -5015,6 +5085,7 @@ impl App {
         paths: &[PathBuf],
         cover: &CoverArtDto,
     ) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         validate_inline_covers(std::slice::from_ref(cover))?;
         // Resize/recompress once, up front (#41), so every file embeds the same
         // trimmed image and the preview shows exactly what will be written.
@@ -5031,6 +5102,7 @@ impl App {
 
     /// Validate the complete target set before reading or processing an image.
     pub fn cover_embed_options(&self, paths: &[PathBuf]) -> Result<CoverEmbedOptions, AppError> {
+        let _policy = self.model_policy.enter();
         self.validate_track_paths(paths)?;
         Ok(CoverEmbedOptions {
             max_px: self.cover_max_px.get(),
@@ -5045,6 +5117,7 @@ impl App {
         paths: &[PathBuf],
         cover: PreparedCoverEmbed,
     ) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         self.validate_track_paths(paths)?;
         self.preview_cover_embed_art(paths, Some(&cover.art), cover.notes)
     }
@@ -5112,6 +5185,7 @@ impl App {
         paths: &[PathBuf],
         covers: &[CoverArtDto],
     ) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         let _encoding_scope = cover_encoding::Scope::new();
         validate_inline_covers(covers)?;
         // Resize once, up front (#41), so every file gets the same trimmed
@@ -5171,6 +5245,7 @@ impl App {
     /// they all share (#56) or a small fan of distinct front covers when they
     /// don't.
     pub fn read_cover_summary(&self, paths: &[PathBuf]) -> Result<CoverSummaryDto, AppError> {
+        let _policy = self.model_policy.enter();
         let _encoding_scope = cover_encoding::Scope::new();
         // Keep one reference set and at most three display samples. Comparing
         // each set only with the first is sufficient to establish whether the
@@ -5225,6 +5300,7 @@ impl App {
         first_image: bool,
         replace_existing: bool,
     ) -> Result<ArtworkImportSourcesDto, AppError> {
+        let _policy = self.model_policy.enter();
         self.validate_track_paths(paths)?; // validate the entire selection first
         let names = if first_image {
             Vec::new()
@@ -5324,6 +5400,7 @@ impl App {
     /// of the sidecar export. Returns the first match across the selection's
     /// distinct directories, ready to feed [`preview_cover_embed`]. Read-only.
     pub fn read_external_cover(&self, paths: &[PathBuf]) -> Result<Option<CoverArtDto>, AppError> {
+        let _policy = self.model_policy.enter();
         // Distinct parent directories, in selection order.
         let mut dirs: Vec<&Path> = Vec::new();
         let mut seen_dirs = HashSet::new();
@@ -5354,6 +5431,7 @@ impl App {
     /// through the normal preview/apply/undo path (files without a cover are
     /// skipped).
     pub fn preview_cover_remove(&self, paths: &[PathBuf]) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         let _encoding_scope = cover_encoding::Scope::new();
         let mut changes = Vec::new();
         for path in paths {
@@ -5395,6 +5473,7 @@ impl App {
         paths: &[PathBuf],
         kind: &str,
     ) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         let _encoding_scope = cover_encoding::Scope::new();
         let block_kind = TagBlockKind::from_storage_key(kind)
             .ok_or_else(|| AppError::UnknownTagBlock(kind.to_string()))?;
@@ -5446,6 +5525,7 @@ impl App {
     /// gets an ID3v2 tag with its text, which is the one place that text can go, and
     /// undoing that takes the new tag away.
     pub fn preview_fix_encoding(&self, paths: &[PathBuf]) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         let _encoding_scope = cover_encoding::Scope::new();
         let kind = TagBlockKind::Id3v2;
         let mut changes = Vec::new();
@@ -5516,6 +5596,7 @@ impl App {
     /// conversion would quietly skip half of them. Asked of the backend per
     /// container rather than answered from a table here.
     pub fn tag_block_targets(&self, paths: &[PathBuf]) -> Result<BlockTargetsDto, AppError> {
+        let _policy = self.model_policy.enter();
         let mut shared: Option<Vec<TagBlockKind>> = None;
         for path in paths {
             let format = self.read_cached(path)?.format;
@@ -5566,6 +5647,7 @@ impl App {
         to: &str,
         revision: Option<&str>,
     ) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         let _encoding_scope = cover_encoding::Scope::new();
         let source = TagBlockKind::from_storage_key(from)
             .ok_or_else(|| AppError::UnknownTagBlock(from.to_string()))?;
@@ -5692,6 +5774,7 @@ impl App {
         paths: &[PathBuf],
         basename: &str,
     ) -> Result<CoverExportDto, AppError> {
+        let _policy = self.model_policy.enter();
         let root = std::fs::canonicalize(&self.library_root)?;
         let mut written = Vec::new();
         let mut skipped_no_cover = Vec::new();
@@ -5803,6 +5886,7 @@ impl App {
     /// Entry paths are relative to the playlist when the track sits inside the
     /// library (portable), absolute otherwise. Read-only for the audio files.
     pub fn export_playlist(&self, paths: &[PathBuf], file_name: &str) -> Result<String, AppError> {
+        let _policy = self.model_policy.enter();
         let target = self.export_target(file_name)?;
         let root = std::fs::canonicalize(&self.library_root)?;
         let entries = self.playlist_entries(&root, paths);
@@ -5875,6 +5959,7 @@ impl App {
         grouping: &str,
         name_mask: &str,
     ) -> Result<Vec<String>, AppError> {
+        let _policy = self.model_policy.enter();
         let by_album = match grouping {
             "album" => true,
             "folder" => false,
@@ -6011,6 +6096,7 @@ impl App {
     /// One `FILE` per track — the shape a folder of separate tracks takes; see
     /// [`export::cue`] for why the continuous-mix shape is not written here.
     pub fn export_cue(&self, paths: &[PathBuf], file_name: &str) -> Result<String, AppError> {
+        let _policy = self.model_policy.enter();
         let target = self.export_target(file_name)?;
         let root = std::fs::canonicalize(&self.library_root)?;
         let entries: Vec<CueTrack> = paths
@@ -6034,6 +6120,7 @@ impl App {
 
     /// Export the tag columns of `paths` as CSV into the library root.
     pub fn export_csv(&self, paths: &[PathBuf], file_name: &str) -> Result<String, AppError> {
+        let _policy = self.model_policy.enter();
         let target = self.export_target(file_name)?;
         let tracks = read_tracks(paths);
         self.write_output(
@@ -6047,6 +6134,7 @@ impl App {
 
     /// Export `paths` as a self-contained HTML table into the library root (#42).
     pub fn export_html(&self, paths: &[PathBuf], file_name: &str) -> Result<String, AppError> {
+        let _policy = self.model_policy.enter();
         let target = self.export_target(file_name)?;
         let tracks = read_tracks(paths);
         self.write_output(
@@ -6060,6 +6148,7 @@ impl App {
 
     /// Export `paths` as an XML document into the library root (#42).
     pub fn export_xml(&self, paths: &[PathBuf], file_name: &str) -> Result<String, AppError> {
+        let _policy = self.model_policy.enter();
         let target = self.export_target(file_name)?;
         let tracks = read_tracks(paths);
         self.write_output(
@@ -6079,6 +6168,7 @@ impl App {
         mask_pattern: &str,
         file_name: &str,
     ) -> Result<String, AppError> {
+        let _policy = self.model_policy.enter();
         let target = self.export_target(file_name)?;
         let mask = Mask::parse(mask_pattern)?;
         let tracks = read_tracks(paths);
@@ -6108,6 +6198,7 @@ impl App {
         granted_roots: &[PathBuf],
         operation: impl FnOnce(&mut Self) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
+        let _policy = self.model_policy.enter();
         let existing = self.allowed_roots();
         let mut intersection = Vec::new();
         for granted in granted_roots {
@@ -6175,6 +6266,7 @@ impl App {
     ///
     /// Returns what went, so the caller can drop exactly those rows.
     pub fn trash_files(&mut self, paths: &[PathBuf]) -> Result<Vec<String>, AppError> {
+        let _policy = self.model_policy.enter();
         let roots: Vec<PathBuf> = self
             .allowed_roots()
             .iter()
@@ -6209,6 +6301,7 @@ impl App {
 
     /// Apply a previewed plan to disk and record it for undo.
     pub fn apply(&mut self, plan: &PlanDto) -> Result<BatchDto, AppError> {
+        let _policy = self.model_policy.enter();
         self.invalidate_query_plan(plan);
         self.read_cache.borrow_mut().clear();
         plan.validate_cover_assets()?;
@@ -6228,6 +6321,7 @@ impl App {
         plan: &PlanDto,
         staged: Option<&PlanDto>,
     ) -> Result<QuickWriteDto, AppError> {
+        let _policy = self.model_policy.enter();
         self.quick_write_with(plan, staged, &mut |_| {}, &AtomicBool::new(false))
     }
 
@@ -6239,6 +6333,7 @@ impl App {
         plan: &PlanDto,
         paths: &[PathBuf],
     ) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         plan.validate_cover_assets()?;
         self.validate_track_paths(paths)?;
         let mut staged = plan.clone();
@@ -6282,6 +6377,7 @@ impl App {
         progress: &mut dyn FnMut(&ApplyProgress),
         cancel: &AtomicBool,
     ) -> Result<QuickWriteDto, AppError> {
+        let _policy = self.model_policy.enter();
         // Ribbon metadata commands keep paths stable. Moves need a separate
         // path-remapping contract before using this entry point.
         if plan
@@ -6339,6 +6435,7 @@ impl App {
         progress: &mut dyn FnMut(&ApplyProgress),
         cancel: &AtomicBool,
     ) -> Result<BatchDto, AppError> {
+        let _policy = self.model_policy.enter();
         self.invalidate_query_plan(plan);
         self.read_cache.borrow_mut().clear();
         plan.validate_cover_assets()?;
@@ -6356,6 +6453,7 @@ impl App {
     /// journal opened as it was. The history it held is gone from Undo; the file
     /// is kept for recovery.
     pub fn take_journal_notice(&self) -> Option<String> {
+        let _policy = self.model_policy.enter();
         self.journal_set_aside
             .borrow_mut()
             .take()
@@ -6364,6 +6462,7 @@ impl App {
 
     /// Roll back a previously applied batch.
     pub fn undo(&mut self, batch_id: i64) -> Result<UndoReportDto, AppError> {
+        let _policy = self.model_policy.enter();
         self.undo_with(batch_id, &mut |_| {})
     }
 
@@ -6373,6 +6472,7 @@ impl App {
         batch_id: i64,
         progress: &mut dyn FnMut(&ApplyProgress),
     ) -> Result<UndoReportDto, AppError> {
+        let _policy = self.model_policy.enter();
         self.undo_with_mode(batch_id, UndoMode::Strict, progress)
     }
 
@@ -6384,6 +6484,7 @@ impl App {
         mode: UndoMode,
         progress: &mut dyn FnMut(&ApplyProgress),
     ) -> Result<UndoReportDto, AppError> {
+        let _policy = self.model_policy.enter();
         self.invalidate_query();
         let roots = self.allowed_roots();
         self.read_cache.borrow_mut().clear();
@@ -6419,15 +6520,18 @@ impl App {
     /// Stable identity of the top Redo entry, independent of other entries'
     /// pushes/pops. Pair it with the stack revision for guarded automation.
     pub fn redo_token(&self) -> Option<String> {
+        let _policy = self.model_policy.enter();
         self.redo_plans
             .last()
             .map(|(entry, _)| format!("{}:{entry}", self.redo_session_id))
     }
     pub fn redo_revision(&self) -> u64 {
+        let _policy = self.model_policy.enter();
         self.redo_revision
     }
     /// Native paths touched by the current top entry, for adapter grant checks.
     pub fn redo_scope(&self) -> Vec<PathBuf> {
+        let _policy = self.model_policy.enter();
         let Some((_, plan)) = self.redo_plans.last() else {
             return Vec::new();
         };
@@ -6447,6 +6551,7 @@ impl App {
 
     /// Number of fully undone batches available in this session.
     pub fn redo_count(&self) -> usize {
+        let _policy = self.model_policy.enter();
         self.redo_plans.len()
     }
 
@@ -6458,6 +6563,7 @@ impl App {
         &mut self,
         progress: &mut dyn FnMut(&ApplyProgress),
     ) -> Result<Option<BatchDto>, AppError> {
+        let _policy = self.model_policy.enter();
         let Some((_, plan)) = self.redo_plans.last() else {
             return Ok(None);
         };
@@ -6483,6 +6589,7 @@ impl App {
     /// current `allowed_root`. Filtering to batches whose paths sit under the
     /// open library keeps undo scoped to what the user is actually looking at.
     pub fn history(&self) -> Result<Vec<BatchDto>, AppError> {
+        let _policy = self.model_policy.enter();
         // A path belongs to the current library if it sits under the library
         // root in either its raw or canonicalized form. Checking both avoids
         // wrongly hiding a real batch when the two differ (e.g. a symlinked
@@ -6508,6 +6615,7 @@ impl App {
         &self,
         draft_id: &str,
     ) -> Result<(bool, Vec<RecoveryBatchDto>), AppError> {
+        let _policy = self.model_policy.enter();
         let marker = format!(" · MCP draft {draft_id}");
         let batches = self
             .journal
@@ -6544,6 +6652,7 @@ impl App {
         urls: &[String],
         overwrite: bool,
     ) -> Result<SaveImagesDto, AppError> {
+        let _policy = self.model_policy.enter();
         self.validate_image_target(track)?;
         let images = urls
             .iter()
@@ -6555,6 +6664,7 @@ impl App {
     /// Validate the destination before starting network work. Repeated when
     /// publishing downloaded images; callers must also preserve session identity.
     pub fn validate_image_target(&self, track: &Path) -> Result<PathBuf, AppError> {
+        let _policy = self.model_policy.enter();
         let root = std::fs::canonicalize(&self.library_root)?;
         let dir = track.parent().unwrap_or(Path::new("."));
         let canonical = std::fs::canonicalize(dir)?;
@@ -6571,6 +6681,7 @@ impl App {
         images: &[FetchedImage],
         overwrite: bool,
     ) -> Result<SaveImagesDto, AppError> {
+        let _policy = self.model_policy.enter();
         let dir = self.validate_image_target(track)?;
         let planned: Vec<_> = images
             .iter()
@@ -6631,6 +6742,7 @@ impl App {
         paths: &[PathBuf],
         tracks: &[ImportTrackDto],
     ) -> Result<Vec<Option<AlignMatchDto>>, AppError> {
+        let _policy = self.model_policy.enter();
         let locals: Vec<(String, String, Option<u64>, Option<String>)> = paths
             .iter()
             .map(|path| {
@@ -6736,6 +6848,7 @@ impl App {
         tracks: &[ImportTrackDto],
         release_tracks: &[ImportTrackDto],
     ) -> Result<Option<ImportOrderProposalDto>, AppError> {
+        let _policy = self.model_policy.enter();
         self.validate_track_paths(paths)?;
         let files = paths
             .iter()
@@ -6782,6 +6895,7 @@ impl App {
     /// yields an empty string for that row rather than failing the batch — a
     /// half-typed pattern is a normal state while someone is typing one.
     pub fn render_column(&self, pattern: &str, paths: &[PathBuf]) -> Result<Vec<String>, AppError> {
+        let _policy = self.model_policy.enter();
         self.render_column_with_working(pattern, paths, None)
     }
 
@@ -6793,6 +6907,7 @@ impl App {
         paths: &[PathBuf],
         working: &PlanDto,
     ) -> Result<Vec<String>, AppError> {
+        let _policy = self.model_policy.enter();
         self.render_column_with_working(pattern, paths, Some(working))
     }
 
@@ -6825,6 +6940,7 @@ impl App {
         patterns: &[String],
         paths: &[PathBuf],
     ) -> Result<Vec<Option<Vec<String>>>, AppError> {
+        let _policy = self.model_policy.enter();
         let masks: Vec<_> = patterns
             .iter()
             .map(|pattern| Mask::parse(pattern).ok())
@@ -6879,6 +6995,7 @@ impl App {
         selection: &ImportSelectionDto,
         vinyl_sides_to_disc: bool,
     ) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         let _encoding_scope = cover_encoding::Scope::new();
         let mut changes = Vec::new();
         // Per-side running track number, used only for vinyl positions that carry
@@ -8968,6 +9085,7 @@ mod tests {
         })
         .unwrap();
         let mut batch = tagrex_core::journal::AppliedBatch {
+            native_tags: false,
             id: BatchId(7),
             description: "Edit tags".to_string(),
             message: Some(stored),
@@ -9189,6 +9307,7 @@ mod tests {
         let db = dir.0.join("capacity.sqlite");
         let mut journal = SqliteJournal::open(&db).unwrap();
         let batch = AppliedBatch {
+            native_tags: false,
             id: BatchId(0),
             description: "Capacity probe".into(),
             message: None,
@@ -18128,6 +18247,149 @@ mod tests {
             std::fs::write(dir.0.join("What?.flac"), b"x").is_err(),
             "Windows refuses the raw name"
         );
+    }
+    #[test]
+    fn owned_model_policy_survives_reentrant_peer_settings_apply_undo_and_redo() {
+        let dir = TempDir::new("policy-owner");
+        let path = dir.tagged_flac("a.flac", "Original", "Before");
+        let peer_dir = TempDir::new("policy-peer");
+        let peer_path = peer_dir.tagged_flac("b.flac", "Peer", "Before");
+        let mut app = open_app(&dir);
+        let peer = open_app(&peer_dir);
+        let plan = app
+            .preview_tag_edits(&[TagEditDto {
+                path: path.to_string_lossy().into_owned(),
+                field: "artist".into(),
+                value: Some("One; Two".into()),
+            }])
+            .unwrap();
+        let mut callbacks = 0;
+        let batch = app
+            .apply_with(
+                &plan,
+                &mut |_| {
+                    callbacks += 1;
+                    peer.apply_settings(&SettingsDto {
+                        id3_v23: true,
+                        read_priority: vec!["vorbis".into()],
+                        multi_value_separator: " / ".into(),
+                        legacy_code_page: "windows-1251".into(),
+                        ..SettingsDto::default()
+                    });
+                    assert_eq!(peer.read_track(&peer_path).unwrap().tags["artist"], "Peer");
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert!(callbacks > 0);
+        assert_eq!(app.read_track(&path).unwrap().tags["artist"], "One; Two");
+        app.undo(batch.id).unwrap();
+        assert_eq!(app.read_track(&path).unwrap().tags["artist"], "Original");
+        app.redo_with(&mut |_| {
+            peer.apply_settings(&SettingsDto::default());
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(app.read_track(&path).unwrap().tags["artist"], "One; Two");
+        assert_eq!(peer.read_track(&peer_path).unwrap().tags["artist"], "Peer");
+    }
+    #[test]
+    fn owned_model_policy_keeps_custom_quick_write_rebase_and_external_undo_conflicts() {
+        let dir = TempDir::new("policy-quick-write");
+        let path = dir.tagged_flac("a.flac", "Original", "Before");
+        let peer_dir = TempDir::new("policy-quick-peer");
+        let peer = open_app(&peer_dir);
+        let mut app = open_app(&dir);
+        app.apply_settings(&SettingsDto {
+            multi_value_separator: " | ".into(),
+            ..SettingsDto::default()
+        });
+        let edit = |field: &str, value: &str| TagEditDto {
+            path: path.to_string_lossy().into_owned(),
+            field: field.into(),
+            value: Some(value.into()),
+        };
+        let staged = app.preview_tag_edits(&[edit("title", "Staged")]).unwrap();
+        let quick = app
+            .preview_tag_edits(&[edit("artist", "One | Two")])
+            .unwrap();
+        let result = app
+            .quick_write_with(
+                &quick,
+                Some(&staged),
+                &mut |_| {
+                    peer.apply_settings(&SettingsDto {
+                        id3_v23: true,
+                        multi_value_separator: " / ".into(),
+                        ..SettingsDto::default()
+                    });
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert_eq!(result.tracks[0].tags["artist"], "One | Two");
+        let batch = app.apply(&result.plan.unwrap()).unwrap();
+        app.undo(batch.id).unwrap();
+        app.undo(result.batch.id).unwrap();
+        assert_eq!(app.read_track(&path).unwrap().tags["artist"], "Original");
+        app.redo_with(&mut |_| {}).unwrap().unwrap();
+        assert_eq!(app.read_track(&path).unwrap().tags["artist"], "One | Two");
+        let title_batch = app
+            .apply(&app.preview_tag_edits(&[edit("title", "Owned")]).unwrap())
+            .unwrap();
+        let mut external = TagEngine::read(&path).unwrap();
+        external.tags.insert(TagField::Title, "External".into());
+        TagEngine::write(&external).unwrap();
+        assert!(app.undo(title_batch.id).is_err());
+        assert_eq!(app.read_track(&path).unwrap().tags["title"], "External");
+        assert!(app
+            .history()
+            .unwrap()
+            .iter()
+            .any(|b| b.id == title_batch.id));
+    }
+    #[test]
+    fn owned_model_policy_refuses_same_thread_core_policy_change_and_restores_after_panic() {
+        const CHILD: &str = "TAGREX_POLICY_CALLBACK_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tests::owned_model_policy_refuses_same_thread_core_policy_change_and_restores_after_panic", "--nocapture"])
+                .env(CHILD, "1").status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        let dir = TempDir::new("policy-callback");
+        let path = dir.tagged_flac("a.flac", "Artist", "Before");
+        let mut app = open_app(&dir);
+        let plan = app
+            .preview_tag_edits(&[TagEditDto {
+                path: path.to_string_lossy().into_owned(),
+                field: "title".into(),
+                value: Some("After".into()),
+            }])
+            .unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let result = app.apply_with(
+            &plan,
+            &mut |_| tagrex_core::model::set_multi_value_separator("changed"),
+            &AtomicBool::new(false),
+        );
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(app.history().unwrap().is_empty());
+        tagrex_core::model::set_multi_value_separator("");
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = app.apply_with(
+                &plan,
+                &mut |_| panic!("owned callback panic"),
+                &AtomicBool::new(false),
+            );
+        }));
+        assert!(panic.is_err());
+        assert_eq!(tagrex_core::model::multi_value_separator(), "; ");
+        let batch = app.apply(&plan).unwrap();
+        app.undo(batch.id).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), original);
     }
     include!("field_operations_tests.rs");
     include!("native_batch_tests.rs");
