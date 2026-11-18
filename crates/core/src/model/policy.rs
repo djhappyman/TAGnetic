@@ -13,13 +13,16 @@ use std::{
 
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 fn generation() -> u64 {
-    GENERATION
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
-            Some(old.saturating_add(1))
-        })
-        .expect("policy generation update always supplies a saturated successor")
-        .saturating_add(1)
+    let mut old = GENERATION.load(Ordering::Acquire);
+    loop {
+        let next = old.saturating_add(1);
+        match GENERATION.compare_exchange_weak(old, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return next,
+            Err(current) => old = current,
+        }
+    }
 }
+
 #[derive(Clone)]
 pub(super) struct Snapshot {
     pub revision: u64,
