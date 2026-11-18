@@ -1043,6 +1043,7 @@ impl Service {
             scope,
         };
         let mut state = lock(&self.0.state)?;
+        self.grant_in_state(&state, principal, "stage")?;
         quota(state.plans.len())?;
         let retained_bytes: usize = state.plans.values().map(|p| p.size_bytes).sum();
         let new_bytes = sealed.size_bytes;
@@ -1158,6 +1159,7 @@ impl Service {
             }
         };
         let mut state = lock(&self.0.state)?;
+        self.grant_in_state(&state, principal, "write")?;
         // Atomic acceptance: a simultaneous retry can create a different
         // temporary plan but must reserve exactly one caller intent.
         let key_hash = hash(format!("{}:{key}", principal.id).as_bytes());
@@ -1267,7 +1269,15 @@ impl Service {
             cancel: AtomicBool::new(false),
         });
         state.operations.insert(id.clone(), operation.clone());
-        persist_operations(&self.0.directory, &state)?;
+        if let Err(error) = persist_operations(&self.0.directory, &state) {
+            // No worker or receipt has been published yet. Retaining this
+            // in-memory queued entry would make the same-key retry reuse an
+            // operation that can never run. Leave uncertain on-disk evidence
+            // untouched: reopening still follows normal recovery checks.
+            state.operations.remove(&id);
+            drop(state);
+            return Err(error);
+        }
         drop(state);
         self.emit(
             "operation_changed",
@@ -1364,6 +1374,7 @@ impl Service {
             let app = app_guard.as_mut().ok_or_else(no_library)?;
             let (descriptor, mut accepted, manual, manual_revision) = {
                 let state = lock(&self.0.state)?;
+                self.grant_in_state(&state, &principal, "write")?;
                 let descriptor = if plan.live {
                     state
                         .plans
@@ -1648,6 +1659,11 @@ impl Service {
         let mut app_guard = lock(&self.0.app)?;
         let app = app_guard.as_mut().ok_or_else(no_library)?;
         let mut state = lock(&self.0.state)?;
+        // The App may have been busy since the earlier grant check. History
+        // already owns this state lock through mutation, so validate at that
+        // actual boundary rather than performing Undo and denying only its result.
+        self.grant_in_state(&state, principal, "history")?;
+        self.grant_in_state(&state, principal, "write")?;
         if state
             .manual_plan
             .as_ref()

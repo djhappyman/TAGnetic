@@ -45,6 +45,22 @@ fn account(value: &impl Serialize, limit: usize, digest: bool) -> ServiceResult<
 pub(super) fn size(value: &impl Serialize) -> ServiceResult<usize> {
     Ok(account(value, MAX_DRAFT_BYTES, false)?.bytes)
 }
+/// Check a response before committing handles that its caller must receive.
+/// The counting sink stops at the wire cap without allocating serialized JSON.
+pub(super) fn check_response(value: &Value) -> ServiceResult<()> {
+    account(value, MAX_ARGUMENT_BYTES, false)
+        .map(|_| ())
+        .map_err(|error| {
+            if error.code == "quota" {
+                ServiceError::new(
+                    "response_too_large",
+                    "Response exceeds 1 MiB; no new private handles were retained",
+                )
+            } else {
+                error
+            }
+        })
+}
 pub(super) fn digest(value: &impl Serialize) -> ServiceResult<String> {
     let sink = account(value, MAX_DRAFT_BYTES, true)?;
     Ok(format!(

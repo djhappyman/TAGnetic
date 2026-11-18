@@ -152,50 +152,44 @@ impl Service {
                 let release = self.providers()?.fetch_release(&source, requested)?;
                 let id = opaque("release")?;
                 let mut images = Vec::new();
-                let mut state = lock(&self.0.state)?;
-                quota(state.releases.len())?;
+                let mut receipts = Vec::new();
+                // Stage every fallible receipt and the response before changing
+                // any registry. A late quota/entropy/serialization refusal must
+                // not leave handles that were never returned to their owner.
                 for image in &release.images {
                     if validate_source_url(&source, &image.url, true).is_err() {
                         continue;
                     }
-                    quota(state.image_receipts.len())?;
+                    quota(receipts.len())?;
                     let receipt = opaque("image")?;
-                    state.image_receipts.insert(
+                    receipts.push((
                         receipt.clone(),
                         ImageReceipt {
                             owner: principal.id.clone(),
                             source: source.clone(),
                             url: image.url.clone(),
                         },
-                    );
+                    ));
                     images.push(json!({"image":receipt,"width":image.width,"height":image.height}));
                 }
                 if images.is_empty() {
                     if let Some(url) = &release.cover_image_url {
                         if validate_source_url(&source, url, true).is_ok() {
                             let receipt = opaque("image")?;
-                            state.image_receipts.insert(
+                            receipts.push((
                                 receipt.clone(),
                                 ImageReceipt {
                                     owner: principal.id.clone(),
                                     source: source.clone(),
                                     url: url.clone(),
                                 },
-                            );
+                            ));
                             images.push(json!({"image":receipt}));
                         }
                     }
                 }
-                state.releases.insert(
-                    id.clone(),
-                    ReleaseReceipt {
-                        owner: principal.id.clone(),
-                        source: source.clone(),
-                        release: release.clone(),
-                    },
-                );
                 let total_tracks = release.tracks.len();
-                let mut data = serde_json::to_value(release)?;
+                let mut data = serde_json::to_value(&release)?;
                 if let Some(data) = data.as_object_mut() {
                     data.remove("images");
                     data.remove("cover_image_url");
@@ -203,9 +197,27 @@ impl Service {
                         tracks.truncate(100);
                     }
                 }
-                Ok(
-                    json!({"release":id,"source":source,"data":data,"images":images,"total_tracks":total_tracks}),
-                )
+                let response = json!({"release":id,"source":source,"data":data,"images":images,"total_tracks":total_tracks});
+                super::json_accounting::check_response(&response)?;
+                let mut state = lock(&self.0.state)?;
+                self.grant_in_state(&state, principal, "providers")?;
+                quota(state.releases.len())?;
+                if state.image_receipts.len().saturating_add(receipts.len()) > MAX_HANDLES {
+                    return Err(ServiceError::new(
+                        "quota",
+                        "Release unused handles before creating more",
+                    ));
+                }
+                state.image_receipts.extend(receipts);
+                state.releases.insert(
+                    id.clone(),
+                    ReleaseReceipt {
+                        owner: principal.id.clone(),
+                        source: source.clone(),
+                        release,
+                    },
+                );
+                Ok(response)
             }
             "providers.release_tracks" => {
                 let state = lock(&self.0.state)?;
@@ -514,6 +526,9 @@ impl Service {
         let digest = hash(&bytes);
         let id = opaque("artwork")?;
         let mut state = lock(&self.0.state)?;
+        // Every asset entry point has checked its specific domain permission;
+        // active read authority is common to all handle-owning service calls.
+        self.grant_in_state(&state, principal, "read")?;
         quota(state.assets.len())?;
         if state.assets.values().map(|a| a.bytes).sum::<usize>() + bytes.len() > 64 * 1024 * 1024 {
             return Err(ServiceError::new(
