@@ -90,7 +90,7 @@ historical source snapshot and must not be applied wholesale over those merges.
 ## Hosted compatibility correction
 
 The first hosted head (`f7e25856`) stopped in Clippy on Windows/macOS. Hosted
-Rust 1.99 deprecates `fetch_update`; the local shared toolchain is 1.98.1. The
+Rust deprecates `fetch_update` since 1.99; the local shared toolchain is 1.98.1. The
 replacement `try_update` would raise this code's documented 1.90 minimum, so
 these two new atomic updates use compare-exchange instead. Saturating generation
 and bounded IO-slot accounting retain their ordering and quota behavior.
@@ -111,3 +111,8 @@ Follow-up source SHA-256 values:
 - `crates/core/src/model/policy.rs`: `75e1ab3ca940bf85612f95b65577518506b104e4f3ffeb360d1cb5080ded3401`
 - `crates/core/src/plan/native_flac.rs`: `333a71ca9d2363adbd046d0f56b00e01639650d2c7de29c985d2b96301204729`
 - `crates/core/src/plan_paths.rs`: `d39602e8d0071a864c94524e52f83de99437fb97a635392ba85e00d39ed6e629`
+
+The next hosted Windows lint gate identified a constant capability assertion
+in the non-Linux refusal test. It now evaluates in a const block, preserving
+the assertion and the actual runtime unsupported-Store checks. No production
+behavior, test exclusion or admission quota changed in that follow-up.
