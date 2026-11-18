@@ -1,6 +1,6 @@
 # Protected FLAC publication checkpoint
 
-Status: local checkpoint ready after shared-policy and real-process-death rechecks; exact-head hosted checks remain required before merge.
+Status: local checkpoint ready after descriptor IO compatibility and independent rechecks; exact-head hosted checks remain required before merge.
 
 ## Scope
 
@@ -40,8 +40,8 @@ An operation-local recovery policy cannot authorize new public Apply/Undo.
 
 Combined local verification on the frozen production source (base `c42a6cea`):
 
-- `cargo test --workspace --no-fail-fast`: 1,623 passed, zero failed, 34 optional/manual
-  tests ignored across 88 outer targets. Three newly added child dispatchers are
+- `cargo test --workspace --no-fail-fast`: 1,638 passed, zero failed, 34 optional/manual
+  tests ignored across 89 outer targets. Three newly added child dispatchers are
   included transparently in the pass count. Nested helper results are not added.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: passed.
 - `cargo fmt --all --check` and `git diff --check`: passed.
@@ -56,7 +56,8 @@ Combined local verification on the frozen production source (base `c42a6cea`):
 [policy review](backend-native-policy-independent-review.md) and
 [admission review](backend-native-admission-independent-review.md),
 [portable boundary review](backend-portable-policy-independent-review.md) and
-[process-death harness review](backend-process-death-harness-review.md) retain ranked
+[process-death harness review](backend-process-death-harness-review.md) and
+[descriptor IO review](backend-descriptor-io-independent-review.md) retain ranked
 findings, original probes, source hashes and limits. Earlier component counts
 overlap and must not be added together. The coordinator/journal reports record
 their earlier protocol freeze; subsequent policy/admission changes have their
@@ -186,3 +187,37 @@ in this report describe previous frozen checkpoints; the latest combined gate
 is 1,623. Actual Windows/macOS execution remains an exact-head hosted merge gate.
 Future stress-runner review must reconcile the true-death/renamed nested-unwind
 probe mapping against current main instead of copying old panic fixtures.
+
+
+## Descriptor IO correction after macOS execution
+
+macOS on `96480a82` exposed 54 command failures, predominantly unknown-format
+writes. Darwin descriptor aliases duplicate a shared file position; a previous
+read can leave the next writer at EOF. Artificial aliases also lose logical
+filename hints. The correction retains the logical name and supplies fresh file
+sessions through pinned parent authority, comparing each opened object against
+the held source before IO. Matching binding failures cannot fall back to an
+unchecked pathname. Exact candidate sources retain precedence.
+
+Independent review also challenged unrelated peer requests inside an operation.
+They retain their original standalone behavior instead of inheriting another
+App's root. The original command tests remain unchanged. There is no hardlink
+workaround, added dependency or new whole-file copying workaround.
+
+[Descriptor IO review](backend-descriptor-io-independent-review.md) records 31
+passing scoped tests, primary Apple/Lofty sources and the frozen hashes. It
+covers mixed MP3/FLAC/WAV tags/artwork with encoded-audio readback, logical-hint
+fallback, EOF, held-source precedence, foreign replacement, aliases, nested peer
+operations and unwind cleanup. Linux shared-description emulation proves the
+library mechanism; it does not replace actual macOS execution. Exact-head hosted
+Linux, Windows, macOS and advisory gates remain required before merging.
+
+
+Final combined verification on the descriptor IO freeze passed **1,638 workspace
+tests, zero failed, 34 optional/manual ignored across 89 outer targets**. Three
+child dispatchers are included, with nested results excluded from the count.
+Workspace all-target/all-feature Clippy, formatting, diff checks and two private
+D-Bus MPRIS tests passed. The production hashes match the independent descriptor
+review. The earlier 1,623 gate above records the previous common-policy freeze;
+1,638 is the current combined gate. Actual macOS runtime confirmation remains
+pending the new hosted head; no broader platform/format guarantee follows.

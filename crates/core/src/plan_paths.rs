@@ -855,33 +855,15 @@ pub(super) fn sync(path: &Path) -> io::Result<Option<()>> {
             .transpose()
     })
 }
-pub(super) fn metadata_path(path: &Path, write: bool) -> io::Result<(Option<File>, PathBuf)> {
-    let active = ACTIVE.with(|slot| slot.borrow().is_some());
-    if !active {
-        return Ok((None, path.to_path_buf()));
+/// Hold the media object for one logical metadata request. Individual model IO
+/// sessions reopen through this authority and compare against the held object;
+/// descriptor pseudo-paths are not equivalent to fresh opens on Darwin.
+pub(super) fn metadata_file(path: &Path, write: bool) -> io::Result<Option<File>> {
+    if ACTIVE.with(|slot| slot.borrow().is_some()) {
+        open(path, write, false).map(Some)
+    } else {
+        Ok(None)
     }
-    let file = open(path, write, false)?;
-    #[cfg(target_os = "linux")]
-    let resolved = {
-        use std::os::fd::AsRawFd;
-        PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()))
-    };
-    #[cfg(all(unix, not(target_os = "linux")))]
-    let resolved = {
-        use std::os::fd::AsRawFd;
-        PathBuf::from(format!("/dev/fd/{}", file.as_raw_fd()))
-    };
-    #[cfg(windows)]
-    let resolved = ACTIVE.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        let authority = slot.as_mut().ok_or_else(changed)?;
-        Ok::<_, io::Error>(
-            authority
-                .resolved(path.parent().ok_or_else(changed)?)?
-                .join(path.file_name().ok_or_else(changed)?),
-        )
-    })?;
-    Ok((Some(file), resolved))
 }
 
 pub(super) fn validate() -> io::Result<()> {

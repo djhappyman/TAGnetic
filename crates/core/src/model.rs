@@ -37,6 +37,17 @@ use lofty::wavpack::WavPackFile;
 use lofty::TextEncoding;
 use thiserror::Error;
 
+/// Lofty's path writer opens internally and starts format probing at its
+/// current cursor. A descriptor pseudo-path can duplicate a shared cursor on
+/// Darwin, so each writer receives a fresh, source-bound file description.
+trait BoundTagIo: TagExt {
+    fn save_bound(&self, path: &Path, options: WriteOptions) -> Result<(), FileEncodingError> {
+        let mut file = crate::plan::open_metadata_file(path, true)?;
+        self.save_to(&mut file, options)
+    }
+}
+impl<T: TagExt> BoundTagIo for T {}
+
 /// The silent MPEG frame [`TagEngine::restore_id3v2_bytes`] pads a journaled
 /// ID3v2 chunk with, and how many of them. Enough audio for the backend to
 /// recognize the bytes as an MP3 and hand the tag back; never written to disk.
@@ -1992,12 +2003,12 @@ fn unsynchronised_extended_header_len(raw: &[u8]) -> Option<usize> {
 fn drop_id3v2_extended_header(path: &Path) -> Result<(), TagIoError> {
     use std::io::Read;
     let mut head = [0u8; 10];
-    if std::fs::File::open(path)?.read_exact(&mut head).is_err()
+    if exact::source_file(path)?.read_exact(&mut head).is_err()
         || !starts_with_id3v2_extended_header(&head)
     {
         return Ok(());
     }
-    let raw = std::fs::read(path)?;
+    let raw = exact::source_bytes(path)?;
     if let Some(fixed) = without_id3v2_extended_header(&raw) {
         rewrite_in_place(path, &raw, &fixed)?;
     }
@@ -2145,7 +2156,7 @@ fn write_ape_pictures(
             tag.insert(item);
         }
     }
-    tag.save_to_path(path, write_options())?;
+    tag.save_bound(path, write_options())?;
     Ok(())
 }
 
@@ -2567,9 +2578,9 @@ fn ogg_safe_write<T>(
         pad_ape_tag_misread_as_id3v1(path)?;
         return Ok(result);
     }
-    let before = std::fs::read(path)?;
+    let before = exact::source_bytes(path)?;
     let result = body();
-    let after = std::fs::read(path)?;
+    let after = exact::source_bytes(path)?;
     if after == before {
         return result;
     }
@@ -2603,7 +2614,7 @@ fn holds_ogg(path: &Path) -> Result<bool, TagIoError> {
         return Ok(true);
     }
     let mut magic = [0u8; 4];
-    let read = std::fs::File::open(path)?.read_exact(&mut magic);
+    let read = exact::source_file(path)?.read_exact(&mut magic);
     Ok(read.is_ok() && &magic == b"OggS")
 }
 
@@ -2635,7 +2646,7 @@ fn leading_id3v2_revision(path: &Path) -> Result<Option<Id3v2Revision>, TagIoErr
         return Ok(None);
     }
     let mut head = [0u8; 10];
-    if std::fs::File::open(path)?.read_exact(&mut head).is_err() || &head[..3] != b"ID3" {
+    if exact::source_file(path)?.read_exact(&mut head).is_err() || &head[..3] != b"ID3" {
         return Ok(None);
     }
     Ok(match head[3] {
@@ -3120,7 +3131,7 @@ impl TagEngine {
             };
             match container_of(path)? {
                 Some(container) => save_id3v2_tag_with(path, container, &tag, options)?,
-                None => tag.save_to_path(path, options)?,
+                None => tag.save_bound(path, options)?,
             }
             Ok(())
         })
@@ -3173,7 +3184,7 @@ impl TagEngine {
                         PictureInformation::from_picture(&picture).unwrap_or_default();
                     tag.insert_picture(picture, Some(information)).ok();
                 }
-                tag.save_to_path(path, write_options())?;
+                tag.save_bound(path, write_options())?;
                 Ok(())
             })
         })
@@ -3354,10 +3365,7 @@ impl TagEngine {
                 {
                     return Ok(());
                 }
-                let mut handle = std::fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(path)?;
+                let mut handle = crate::plan::open_metadata_file(path, true)?;
                 kind.to_tag_type()
                     .remove_from(&mut handle, write_options())?;
                 Ok(())
@@ -3432,7 +3440,7 @@ impl TagEngine {
                         order_frames(&mut id3, None);
                         match container_of(path)? {
                             Some(container) => save_id3v2_tag_with(path, container, &id3, options)?,
-                            None => id3.save_to_path(path, options)?,
+                            None => id3.save_bound(path, options)?,
                         }
                     }
                     TagBlockKind::VorbisComments => {
@@ -3451,7 +3459,7 @@ impl TagEngine {
                         for (name, value) in named {
                             vorbis.push(name, value);
                         }
-                        vorbis.save_to_path(path, options)?;
+                        vorbis.save_bound(path, options)?;
                     }
                     TagBlockKind::Ape => {
                         let mut ape = ApeTag::from(tag);
@@ -3461,7 +3469,7 @@ impl TagEngine {
                                 ape.insert(item);
                             }
                         }
-                        ape.save_to_path(path, options)?;
+                        ape.save_bound(path, options)?;
                         // The APE tag carries its pictures as items of its own (#608).
                         if let Some(container) = container_of(path)? {
                             write_ape_pictures(path, container, &content.covers)?;
@@ -3484,9 +3492,9 @@ impl TagEngine {
                         if let Some(bpm) = content.tags.get(&TagField::Bpm) {
                             ilst.insert(mp4_tempo_atom(bpm));
                         }
-                        ilst.save_to_path(path, options)?;
+                        ilst.save_bound(path, options)?;
                     }
-                    _ => tag.save_to_path(path, options)?,
+                    _ => tag.save_bound(path, options)?,
                 }
                 Ok(())
             })
@@ -3588,7 +3596,7 @@ impl TagEngine {
                         let file = Self::read(path)?;
                         save_with_custom_items(path, file.format.to_lofty(), tag, &file.tags)?;
                     }
-                    _ => tag.save_to_path(path, write_options())?,
+                    _ => tag.save_bound(path, write_options())?,
                 }
                 Ok(())
             })
@@ -3632,7 +3640,7 @@ fn picture_from_cover(cover: &CoverArt) -> Picture {
 /// file again, which a write has already done once.
 fn has_id3v1(path: &Path) -> Result<bool, TagIoError> {
     use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path)?;
+    let mut file = exact::source_file(path)?;
     let length = file.metadata()?.len();
     if length < 128 {
         return Ok(false);
@@ -3783,13 +3791,10 @@ fn sync_id3v1(
         // reading only and then fails to shorten it, so the stale tag survives a
         // clear — the very thing #194 was about. Handing it a handle we opened
         // for writing is the same code path with a file it can actually write.
-        let mut handle = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)?;
+        let mut handle = crate::plan::open_metadata_file(path, true)?;
         TagType::Id3v1.remove_from(&mut handle, write_options())?;
     } else {
-        legacy.save_to_path(path, write_options())?;
+        legacy.save_bound(path, write_options())?;
     }
     Ok(())
 }
@@ -3890,13 +3895,10 @@ fn sync_ape(
     }
     if synced.is_empty() {
         // Not `remove_from_path`, for the reason [`sync_id3v1`] gives.
-        let mut handle = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)?;
+        let mut handle = crate::plan::open_metadata_file(path, true)?;
         TagType::Ape.remove_from(&mut handle, write_options())?;
     } else {
-        synced.save_to_path(path, write_options())?;
+        synced.save_bound(path, write_options())?;
     }
     Ok(())
 }
@@ -3990,13 +3992,10 @@ fn sync_iff_text(
                 return Ok(());
             }
             if synced.is_empty() {
-                let mut handle = std::fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(path)?;
+                let mut handle = crate::plan::open_metadata_file(path, true)?;
                 TagType::RiffInfo.remove_from(&mut handle, write_options())?;
             } else {
-                synced.save_to_path(path, write_options())?;
+                synced.save_bound(path, write_options())?;
             }
         }
         FileType::Aiff => {
@@ -4046,13 +4045,10 @@ fn sync_iff_text(
                 return Ok(());
             }
             if synced.is_empty() {
-                let mut handle = std::fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(path)?;
+                let mut handle = crate::plan::open_metadata_file(path, true)?;
                 TagType::AiffText.remove_from(&mut handle, write_options())?;
             } else {
-                synced.save_to_path(path, write_options())?;
+                synced.save_bound(path, write_options())?;
             }
         }
         _ => {}
@@ -4287,7 +4283,7 @@ fn write_id3v2(path: &Path, container: FileType, tags: &TagMap) -> Result<(), Ta
     // The bytes are put back on any error. The tag library reads such a file
     // whole to write it, so holding a copy costs no more than the write does.
     let original = if matches!(container, FileType::Wav | FileType::Aiff) {
-        Some(std::fs::read(path)?)
+        Some(exact::source_bytes(path)?)
     } else {
         None
     };
@@ -4309,7 +4305,7 @@ fn write_id3v2(path: &Path, container: FileType, tags: &TagMap) -> Result<(), Ta
         )))
     })();
     if let (Err(_), Some(original)) = (&written, original) {
-        let now = std::fs::read(path)?;
+        let now = exact::source_bytes(path)?;
         if now != original {
             rewrite_in_place(path, &now, &original)?;
         }
@@ -4813,9 +4809,9 @@ fn save_id3v2_tag_with(
             return Ok(());
         }
     }
-    tag.save_to_path(path, options)?;
+    tag.save_bound(path, options)?;
     if !dropped.is_empty() && matches!(container, FileType::Mpeg | FileType::Aac) {
-        let raw = std::fs::read(path)?;
+        let raw = exact::source_bytes(path)?;
         if raw.len() >= 10 && &raw[..3] == b"ID3" {
             let block_len = 10 + syncsafe_u32(&raw[6..10]) as usize;
             if let Some(mut spliced) = raw
@@ -4916,7 +4912,7 @@ fn splice_v23_frames(block: &[u8], frames: &[([u8; 4], Vec<u8>)]) -> Option<Vec<
 /// RIFF/WAVE — or one whose audio this walk cannot reach, so that a rebuild
 /// could never lose it. Written in place, by [`rewrite_in_place`].
 fn write_iff_id3(path: &Path, id3_bytes: Option<&[u8]>) -> Result<bool, TagIoError> {
-    let raw = std::fs::read(path)?;
+    let raw = exact::source_bytes(path)?;
     if raw.len() < 12 {
         return Ok(false);
     }
@@ -4996,7 +4992,7 @@ fn write_iff_id3(path: &Path, id3_bytes: Option<&[u8]>) -> Result<bool, TagIoErr
 /// are written; the `ID3 ` chunk sits after the audio, which then stays put.
 fn rewrite_in_place(path: &Path, old: &[u8], new: &[u8]) -> Result<(), TagIoError> {
     use std::io::{Seek, SeekFrom, Write};
-    let mut file = std::fs::OpenOptions::new().write(true).open(path)?;
+    let mut file = crate::plan::open_metadata_file(path, true)?;
     let header = new.len().min(12);
     let from = header
         + old
@@ -5032,7 +5028,7 @@ fn rewrite_in_place(path: &Path, old: &[u8], new: &[u8]) -> Result<(), TagIoErro
 /// a file whose chunks all parse to its end, so a healthy AIFF is left alone.
 /// Written in place, by [`rewrite_in_place`].
 fn repair_aiff_container(path: &Path) -> Result<bool, TagIoError> {
-    let bytes = std::fs::read(path)?;
+    let bytes = exact::source_bytes(path)?;
     // A FORM/AIFF (or AIFF-C) header, or there is nothing here to repair.
     if bytes.len() < 12 || &bytes[0..4] != b"FORM" {
         return Ok(false);
@@ -5357,7 +5353,7 @@ fn ensure_audio_after_tags(path: &Path) -> Result<(), TagIoError> {
 fn ensure_nothing_before_id3v2(path: &Path) -> Result<(), TagIoError> {
     use std::io::Read;
     let mut head = Vec::new();
-    std::fs::File::open(path)?
+    exact::source_file(path)?
         .take(STUBBORN_JUNK_BYTES as u64 + 10)
         .read_to_end(&mut head)?;
     if head.starts_with(b"ID3") {
@@ -5383,7 +5379,7 @@ fn ensure_nothing_before_id3v2(path: &Path) -> Result<(), TagIoError> {
 /// its tag begins, so walking them costs a real file nothing.
 fn ensure_ape_tag_clear_of_wavpack_blocks(path: &Path) -> Result<(), TagIoError> {
     use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path)?;
+    let mut file = exact::source_file(path)?;
     let len = file.metadata()?.len();
     let mut magic = [0u8; 4];
     if file.read_exact(&mut magic).is_err() || &magic != b"wvpk" {
@@ -5424,7 +5420,7 @@ fn ensure_ape_tag_clear_of_wavpack_blocks(path: &Path) -> Result<(), TagIoError>
 /// shows the bytes it is about to replace are the tag.
 fn ensure_ape_tag_header_where_the_write_expects_it(path: &Path) -> Result<(), TagIoError> {
     use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path)?;
+    let mut file = exact::source_file(path)?;
     let len = file.metadata()?.len();
     let Some((footer_end, footer)) = ape_footer(&mut file, len)? else {
         return Ok(());
@@ -5572,10 +5568,10 @@ fn with_ape_tag_padded(mut bytes: Vec<u8>) -> Vec<u8> {
 /// after one, because a tag that comes out at 131 bytes has that shape (#708) and
 /// other software that trusts `TAG` would misread it too. Nothing in the tag changes.
 fn pad_ape_tag_misread_as_id3v1(path: &Path) -> Result<(), TagIoError> {
-    if !tail_is_ape_tag_misread_as_id3v1(&mut std::fs::File::open(path)?)? {
+    if !tail_is_ape_tag_misread_as_id3v1(&mut exact::source_file(path)?)? {
         return Ok(());
     }
-    let before = std::fs::read(path)?;
+    let before = exact::source_bytes(path)?;
     let after = with_ape_tag_padded(before.clone());
     rewrite_in_place(path, &before, &after)?;
     Ok(())
@@ -5587,7 +5583,7 @@ fn pad_ape_tag_misread_as_id3v1(path: &Path) -> Result<(), TagIoError> {
 /// answers `false`.
 fn tags_reach_eof(path: &Path) -> Result<bool, TagIoError> {
     use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path)?;
+    let mut file = exact::source_file(path)?;
     let len = file.metadata()?.len();
     let mut pos = 0u64;
     // An ID3v2 block first: where MP3 and AAC keep their tag, and one a FLAC
@@ -5942,7 +5938,7 @@ fn save_with_custom_items(
                     merged.push(name.to_string(), value);
                 }
             }
-            merged.save_to_path(path, write_options())?;
+            merged.save_bound(path, write_options())?;
         }
         TagType::Ape => {
             let (remainder, _) = read_ape(path, container, tag_only_options())?
@@ -5968,7 +5964,7 @@ fn save_with_custom_items(
                     merged.insert(item);
                 }
             }
-            merged.save_to_path(path, write_options())?;
+            merged.save_bound(path, write_options())?;
         }
         TagType::Mp4Ilst => {
             // The MP4 conversion *does* carry the file's own atoms across, so
@@ -6035,9 +6031,9 @@ fn save_with_custom_items(
                 .ilst()
                 .cloned();
             order_atoms(&mut merged, original.as_ref());
-            merged.save_to_path(path, write_options())?;
+            merged.save_bound(path, write_options())?;
         }
-        _ => tag.save_to_path(path, write_options())?,
+        _ => tag.save_bound(path, write_options())?,
     }
     Ok(())
 }

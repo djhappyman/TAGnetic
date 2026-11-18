@@ -216,6 +216,9 @@ mod pinned_paths;
 #[path = "plan_copy_removal_tests.rs"]
 mod copy_removal_tests;
 #[cfg(test)]
+#[path = "plan_descriptor_io_tests.rs"]
+mod descriptor_io_tests;
+#[cfg(test)]
 #[path = "plan_move_metrics.rs"]
 pub(crate) mod move_metrics;
 #[cfg(test)]
@@ -1679,8 +1682,8 @@ fn operation_paths<'a>(
 }
 
 pub(crate) fn open_bound_entry(path: &Path) -> std::io::Result<std::fs::File> {
-    if METADATA_PATHS.with(|paths| paths.borrow().iter().any(|candidate| candidate == path)) {
-        return std::fs::File::open(path);
+    if metadata_identity(path).is_some() {
+        return open_bound_file(path, false, false);
     }
     pinned_paths::entry(path)
 }
@@ -2370,23 +2373,61 @@ fn staged_move_with(
     Ok(())
 }
 
+/// Model IO belongs to the current held metadata request only on an exact
+/// logical-name match. Independent public model requests (including a peer App
+/// in a progress callback) retain ordinary standalone IO. A matching request
+/// never falls back to the pathname if capability or identity checks fail.
+pub(crate) fn open_metadata_file(path: &Path, write: bool) -> std::io::Result<std::fs::File> {
+    if metadata_identity(path).is_some() {
+        open_bound_file(path, write, false)
+    } else {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(write)
+            .open(path)
+    }
+}
+
+/// Open a fresh file description through pinned parent authority, then bind it
+/// to the original metadata object before a backend can read or mutate it.
 pub(crate) fn open_bound_file(
     path: &Path,
     write: bool,
     create_new: bool,
 ) -> std::io::Result<std::fs::File> {
-    if METADATA_PATHS.with(|paths| paths.borrow().iter().any(|candidate| candidate == path)) {
-        if create_new {
-            return Err(std::io::Error::other("Cannot create a descriptor alias"));
-        }
-        return std::fs::OpenOptions::new()
-            .read(true)
-            .write(write)
-            .open(path);
+    let expected = metadata_identity(path);
+    if expected.is_some() && create_new {
+        return Err(std::io::Error::other(
+            "Cannot replace a held metadata source",
+        ));
     }
-    pinned_paths::open(path, write, create_new)
+    if write && expected.is_some() {
+        ensure_operation_policy().map_err(std::io::Error::other)?;
+    }
+    let file = pinned_paths::open(path, write, create_new)?;
+    if let Some(expected) = expected {
+        let current = same_file::Handle::from_file(file.try_clone()?)?;
+        if expected.as_ref() != &current {
+            return Err(std::io::Error::other("Held metadata source changed"));
+        }
+    }
+    Ok(file)
 }
-thread_local! {static METADATA_PATHS:std::cell::RefCell<Vec<PathBuf>>=const{std::cell::RefCell::new(Vec::new())};}
+struct MetadataBinding {
+    logical: PathBuf,
+    identity: std::rc::Rc<same_file::Handle>,
+}
+thread_local! {static METADATA_PATHS:std::cell::RefCell<Vec<MetadataBinding>>=const{std::cell::RefCell::new(Vec::new())};}
+fn metadata_identity(path: &Path) -> Option<std::rc::Rc<same_file::Handle>> {
+    METADATA_PATHS.with(|paths| {
+        paths
+            .borrow()
+            .iter()
+            .rev()
+            .find(|binding| binding.logical == path)
+            .map(|binding| binding.identity.clone())
+    })
+}
 struct MetadataPathGuard;
 impl Drop for MetadataPathGuard {
     fn drop(&mut self) {
@@ -2403,24 +2444,31 @@ fn with_bound_path<T>(
     if write {
         ensure_operation_policy()?;
     }
-    if METADATA_PATHS.with(|paths| paths.borrow().iter().any(|candidate| candidate == path)) {
+    if metadata_identity(path).is_some() {
         return body(path);
     }
-    let (file, resolved) = pinned_paths::metadata_path(path, write).map_err(PlanError::Io)?;
-    let _scope = if file.is_some() {
-        METADATA_PATHS.with(|paths| paths.borrow_mut().push(resolved.clone()));
+    let held = pinned_paths::metadata_file(path, write)
+        .map_err(PlanError::Io)?
+        .map(same_file::Handle::from_file)
+        .transpose()
+        .map_err(PlanError::Io)?
+        .map(std::rc::Rc::new);
+    let _scope = if let Some(identity) = &held {
+        METADATA_PATHS.with(|paths| {
+            paths.borrow_mut().push(MetadataBinding {
+                logical: path.to_path_buf(),
+                identity: identity.clone(),
+            });
+        });
         Some(MetadataPathGuard)
     } else {
         None
     };
-    let result = body(&resolved)?;
-    if let Some(file) = file {
-        let current = open_bound_file(path, false, false).map_err(PlanError::Io)?;
-        if same_file::Handle::from_file(file).map_err(PlanError::Io)?
-            != same_file::Handle::from_file(current).map_err(PlanError::Io)?
-        {
-            return Err(PlanError::Stale(path.to_path_buf()));
-        }
+    // The logical name keeps extension-directed parser/repair policy intact.
+    // All actual IO enters open_bound_file and receives its own seek cursor.
+    let result = body(path)?;
+    if held.is_some() {
+        open_bound_file(path, false, false).map_err(PlanError::Io)?;
     }
     Ok(result)
 }
