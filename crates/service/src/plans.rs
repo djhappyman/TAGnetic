@@ -999,7 +999,16 @@ impl Service {
             .iter()
             .map(|key| json!({"path":key.path,"field":key.field}))
             .collect::<Vec<_>>();
-        let size_bytes = super::json_accounting::size(&plan)?;
+        // The budget covers what the sealed draft retains, not just the JSON
+        // plan: the identity map and scope keys are owned and can outlive an
+        // almost-empty live projection.
+        let overhead = retained_overhead(
+            identities
+                .iter()
+                .map(|(key, identity)| (key.as_str(), identity.canonical.as_path())),
+            &scope,
+        );
+        let size_bytes = super::json_accounting::size(&plan)?.saturating_add(overhead);
         let digest = if publish {
             super::json_accounting::digest(
                 &json!({"intent":"apply_current_shared_stage","scope":scope_fields,"root":library_root,"principal":principal.id,"epoch":self.0.epoch}),
@@ -1068,7 +1077,15 @@ impl Service {
             sealed.plan = super::staging::filtered(&sealed.plan, |_| false);
             sealed.plan.locked_skipped = locked_skipped;
             sealed.plan.unrendered = unrendered;
-            sealed.size_bytes = super::json_accounting::size(&sealed.plan)?;
+            let retained = retained_overhead(
+                sealed
+                    .identities
+                    .iter()
+                    .map(|(key, identity)| (key.as_str(), identity.canonical.as_path())),
+                &sealed.scope,
+            );
+            sealed.size_bytes =
+                super::json_accounting::size(&sealed.plan)?.saturating_add(retained);
         }
         state.plans.insert(id, sealed);
         drop(state);
@@ -1749,6 +1766,29 @@ impl Service {
         self.emit("session_changed", json!({"refresh":true}));
         Ok(result)
     }
+}
+/// Conservative retained-memory estimate for the identity map and live scope a
+/// sealed draft keeps alongside its serialized plan. Both are owned per key and
+/// survive even when a live projection's plan is filtered to nothing, so the
+/// 128 MiB draft budget would otherwise miss them.
+fn retained_overhead<'a>(
+    identity_paths: impl Iterator<Item = (&'a str, &'a Path)>,
+    scope: &BTreeSet<super::staging::StageKey>,
+) -> usize {
+    let identities = identity_paths.fold(0usize, |total, (key, canonical)| {
+        total
+            .saturating_add(key.len())
+            .saturating_add(canonical.as_os_str().len())
+            .saturating_add(std::mem::size_of::<Identity>())
+            .saturating_add(64)
+    });
+    let scoped = scope.iter().fold(0usize, |total, key| {
+        total
+            .saturating_add(key.path.len())
+            .saturating_add(key.field.len())
+            .saturating_add(64)
+    });
+    identities.saturating_add(scoped)
 }
 fn persist_operations(directory: &Path, state: &State) -> ServiceResult<()> {
     let records = state
@@ -2823,5 +2863,19 @@ mod composition_tests {
             field(&result, &f.paths[0], "comment").unwrap()["new"],
             "Björk; 日本語: Track"
         );
+    }
+    #[test]
+    fn draft_retention_includes_scope_and_identity_overhead() {
+        use super::super::staging::StageKey;
+        let scope = (0..100)
+            .map(|i| StageKey::special(&format!("/music/track-{i}.flac"), "filename"))
+            .collect::<BTreeSet<_>>();
+        assert!(retained_overhead(std::iter::empty(), &scope) >= 100 * 64);
+        let path = "/music/track.flac";
+        assert!(
+            retained_overhead(std::iter::once((path, Path::new(path))), &BTreeSet::new())
+                >= std::mem::size_of::<Identity>() + 2 * path.len()
+        );
+        assert_eq!(retained_overhead(std::iter::empty(), &BTreeSet::new()), 0);
     }
 }
