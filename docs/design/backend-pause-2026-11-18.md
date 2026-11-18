@@ -2,7 +2,7 @@
 
 The finish-and-pause boundary is protected Linux FLAC
 [PR #54](https://github.com/djhappyman/TAGnetic/pull/54), reviewed head
-`bd2e6091518e77a15fc3c4c9080fc35cbe8fcdf7`. Its hosted matrix and merge
+`503408dade151fee2b92c614a4eebcb460f5c4c4`. Its hosted matrix and merge
 record are the authoritative delivery evidence. This handoff must land after
 that code slice. All remaining implementation is paused until the owner asks
 to resume. Start with [issue #51](https://github.com/djhappyman/TAGnetic/issues/51)
@@ -24,12 +24,14 @@ and [the programme](backend-parity-programme.md).
   probes remain, and all counts overlap. Descriptor IO review accepted 31 scoped
   probes after macOS exposed shared descriptor cursors and lost filename hints;
   fresh sessions retain held-source identity and independent peer requests.
+  Windows then exposed noncanonical roots in two direct internal fixtures; their
+  setup now matches public admission, with all fault assertions retained.
 - Clean publication: 1,638 workspace tests passed, zero failed, 34
   optional/manual ignored; workspace all-target/all-feature Clippy and formatting
   passed. Three newly added child dispatchers are included in the 1,638 count.
   Two private D-Bus tests, UI check/lint/build and 216 unit tests passed.
   See [publication evidence](../performance/native-flac-publication.md) and its
-  seven independent review reports for source hashes, gates and limits.
+  eight independent review reports for source hashes, gates and limits.
 
 The native route covers whole plans of in-place plain-text FLAC edits on
 supporting Linux profiles/SQLite journals. Mixed artwork/block/transfer plans,

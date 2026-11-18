@@ -51,7 +51,7 @@ PR scope; no whole-roadmap completion or release availability is claimed.
 
 ## Final FLAC publication compatibility review
 
-PR #54 (reviewed head `bd2e6091`) includes corrected per-App metadata policy,
+PR #54 (reviewed head `503408da`) includes corrected per-App metadata policy,
 rollback after settings changes, valid-generation display/query caching and
 bounded compound native admission. The final policy review accepted 17 independent
 probes; admission review accepted 54 tests after correcting private-sink reentry
@@ -88,3 +88,14 @@ also corrected a P2 nested-peer root regression and accepted 31 scoped tests.
 See [the independent review](backend-descriptor-io-independent-review.md) for
 primary source evidence and exact hashes. Linux emulation establishes the
 cursor mechanism; actual macOS hosted execution remains required before merge.
+
+
+### Windows fixture admission follow-up
+
+Windows reached seventeen direct move-staging unit tests whose disposable roots
+bypassed the canonical-root preparation used by public Apply/Undo. Both that
+fixture and the direct descriptor unit fixture now normalize their owned roots
+before constructing paths. Production authority predicates and original fault
+assertions are unchanged. [Independent review](backend-windows-authority-independent-review.md)
+checked the previously hidden bodies and found no further scoped defect from
+source; exact-head Windows execution remains required.
