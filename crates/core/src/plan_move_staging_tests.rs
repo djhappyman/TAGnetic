@@ -16,7 +16,9 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir(&path).unwrap();
-        Self(path)
+        // Direct private Scope callers must supply the same canonical roots as
+        // public Executor admission (including Windows verbatim path prefixes).
+        Self(std::fs::canonicalize(path).unwrap())
     }
 }
 impl Drop for Fixture {

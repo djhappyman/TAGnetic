@@ -12,7 +12,9 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir(&root).unwrap();
-        Self(root)
+        // Direct private Scope callers must supply the same canonical roots as
+        // public Executor admission (including Windows verbatim path prefixes).
+        Self(std::fs::canonicalize(root).unwrap())
     }
     fn wav(&self) -> PathBuf {
         let mut bytes = b"RIFF".to_vec();
