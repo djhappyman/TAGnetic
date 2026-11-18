@@ -15,4 +15,6 @@ pub mod model;
 pub mod plan;
 pub mod provider;
 pub mod scanner;
+pub mod text_codec;
 pub mod transform;
+pub mod values;

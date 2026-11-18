@@ -744,8 +744,21 @@ function createRuleChain({ ids }) {
 //
 // Presets are not edited here; Edit presets… opens the window where they are
 // (#391). The callbacks keep this component free of the set's storage.
-function createPresetChecklist({ menu, context, isActive, setActive, appliesTo, ruleCount, onOpen, onInspect, isInspected, matches = () => true, onRender }) {
+function createPresetChecklist({ menu, context, isActive, setActive, appliesTo, ruleCount, onOpen, onEdit, onInspect, isInspected, matches = () => true, onRender }) {
   const collapsed = new Set();
+  // Keep the header action mounted across checklist refreshes, like the rows'
+  // existing component buttons. Reparenting in one render preserves its owner.
+  const edit = onEdit ? createComponentElement("button", { variant: "ghost", size: "icon-sm" }) : null;
+  if (edit) {
+    edit.id = "presets-edit";
+    edit.type = "button";
+    edit.className = "transformations-edit icon";
+    edit.innerHTML = ico("rename");
+    edit.dataset.i18nTitle = "presets.edit";
+    edit.dataset.i18nAriaLabel = "presets.title";
+    edit.addEventListener("click", onEdit);
+  }
+
   // What a preset acts on, from its rules: tags, the file name, or both.
   function targetLabel(group) {
     const scopes = (group.rules || []).map((r) => r.scope || group.scope || "tags");
@@ -833,11 +846,20 @@ function createPresetChecklist({ menu, context, isActive, setActive, appliesTo, 
         heading.addEventListener('click', () => { if (collapsed.has(key)) collapsed.delete(key); else collapsed.add(key); render(); });
         list.hidden = collapsed.has(key);
       }
-      box.append(heading, list);
+      const header = document.createElement('div');
+      header.className = 'preset-section-row';
+      header.append(heading);
+      if (key === 'personal' && edit) {
+        edit.title = t('presets.edit');
+        edit.setAttribute('aria-label', t('presets.title'));
+        header.append(edit);
+      }
+      box.append(header, list);
       for (const group of visible) { list.append(row(group)); found++; }
       if (!groups.length) {
         const empty = document.createElement('p'); empty.className = 'preset-none'; empty.textContent = t('presets.noneHere'); list.append(empty);
       }
+
     }
     if (!found && onInspect) {
       const empty = document.createElement('p'); empty.className = 'preset-none'; empty.textContent = t('workbench.noResults'); box.append(empty);

@@ -106,8 +106,9 @@ window.__TAURI__ = {
       throw new Error('Settings changed elsewhere. Read them again before saving.');
     }
     if (command === 'mcp_pair_client') {
-      state.clients.push({ id: 'client_fixture', label: args.label, grant: copy(args.grant), revoked: false });
-      return { principal_id: 'client_fixture', executable: '/fixture/Tagnetic', profile: '/fixture/profile', credential_file: '/fixture/profile/mcp/credentials/client_fixture.token' };
+      const id = state.clients.length ? `client_fixture_${state.clients.length + 1}` : 'client_fixture';
+      state.clients.push({ id, label: args.label, grant: copy(args.grant), revoked: false });
+      return { principal_id: id, executable: '/fixture/Tagnetic', profile: '/fixture/profile', credential_file: `/fixture/profile/mcp/credentials/${id}.token` };
     }
     if (command === 'mcp_revoke_client') { state.clients.find(client => client.id === args.principalId).revoked = true; return; }
     if (command === 'mcp_patch_query_presets') return { ...(await mock('load_settings', {})), query_presets: args.upsert };

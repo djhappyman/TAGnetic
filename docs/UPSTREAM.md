@@ -128,3 +128,63 @@ font choices remain intact.
 The legacy-JS undefined-name check adapts `e40bfda`; output-test token scoping
 adapts `2947a3d`. Only the missing condensed-font coverage from `fe97686` is
 adopted. The other bundled font families already contain Greek and Vietnamese.
+
+## Backend integration and upstream review (2026-11-18)
+
+The personal integration combines fork main `d4df9a35` with the completed
+backend checkpoint `9da71249` from `feat/native-field-foundations` (19 commits).
+Scope: native field recipes, imports/extraction/numbering, bounded playlist/text
+loading, cache/query/staging/export/artwork/queue/player hardening, their tests
+and guides. Completion requires combined-source verification and hosted Linux,
+Windows, macOS and advisory checks before merging to fork main. No release or
+new interface feature is implied. Existing uncommitted research and the live
+runtime remain outside this integration.
+
+Shared native fixes remain eligible for focused `tagrex/tagrex:main` curation;
+service/query integration needs compatibility review, preserving upstream inline
+artwork journals and stable waveform APIs. Existing fork UI adaptations route
+to `next` after foundation #729. This integration does not claim new upstream
+submissions or acceptance. The separate journal-permission fix is already in
+fork main at `805bdd4d`; its upstream proposal is
+[#791](https://github.com/tagrex/tagrex/pull/791). The shared-artwork and compositor
+proposal branches must not replace the fork's intentional implementations.
+
+Upstream main reviewed through `bf8e68475de702d7a43a76bc3b43094364476d9b`:
+
+- [Combined generator plan](https://github.com/tagrex/tagrex/commit/ff5479fe988352307265d9a1f73498f870bd0018):
+  vinyl conversion, numbering and transforms run in order with one preview/Undo
+  entry. Useful candidate; adapt to the fork's native batch and staged-value
+  model rather than replacing its component generator with the static UI.
+- [Editor presets](https://github.com/tagrex/tagrex/commit/10221c42d15cc6cd0de2c0d6b4b167e58b669120):
+  opt-in, independently selected tag presets on typed field values. Useful
+  candidate requiring Inspector/staging integration and stale-result guards.
+- [Write and next](https://github.com/tagrex/tagrex/commit/eea2a1e8deb5b5f187d5adffcca217de83703721):
+  single-file editor write, then advance and restore field focus. Useful candidate;
+  retain refusal for multiple selection, staged plans and invalid fields.
+- [RPM 6 updater](https://github.com/tagrex/tagrex/commit/ee0a394095e51f1603f3bae6ded783177e8ffb77):
+  signed-download validation followed by polkit installation of an unsigned RPM,
+  retaining digest checks and clearer errors. Evaluate separately against the
+  personal updater/release identity; it is not adopted by this integration.
+- [Font-subset recipe](https://github.com/tagrex/tagrex/commit/4e7347ad45cc9a78a9ebe46a9a5a2c347eaff62c):
+  reproducible version-pinned font tooling with a non-writing check mode. Useful
+  maintenance candidate; account for the fork's additional font families.
+
+The upstream review is a shortlist, not adoption. No upstream release identity,
+version numbers or experimental Next branch is merged into personal main.
+The backend's documented stalled-output seek limitation remains open; this
+integration does not claim physical-device loss or gapless validation.
+
+PR #29 compatibility follow-up: the new bounded queue admission uses an explicit
+compare-exchange loop instead of `AtomicUsize::fetch_update`, which Rust 1.100
+deprecates. This preserves Rust 1.90 compatibility and strict-warning builds
+without suppressing the lint. It belongs with the new queue implementation's
+focused upstream curation; it is not a standalone patch to upstream's older
+queue implementation.
+
+PR #29 playlist follow-up: retain lexical and canonical spellings of each
+explicitly approved root, so absolute `/var/...` entries match a macOS
+`/private/var/...` root. Read only the matched suffix beneath the canonical
+root through the existing pinned, no-follow input path. Root-alias deduplication
+and refusal of final/escaping symlinks have disposable-fixture regressions.
+This shared backend fix belongs with focused playlist-loader curation to upstream
+`main`; upstream does not yet have this fork's loader implementation.

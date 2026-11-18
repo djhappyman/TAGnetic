@@ -194,8 +194,22 @@ function clearAutomaticPlan(paths = []) {
 }
 
 function scheduleAutomaticTransformPreview({ modelChanged = false, nativeStructural = false } = {}) {
-  if (nativeRecompute && !nativeStructural && scheduleNativeRecompute()) return;
-  if (nativeLiveFields && !hasStructuralLiveInputs() && !automaticPlan && !automaticFieldScope.length && !presetsFor(chainContext(), {allScopes:true}).length) return;
+  if (nativeRecompute && !nativeStructural && scheduleNativeRecompute()) {
+    // Native publication owns the pending/validation gate. A selection change
+    // must not leave the retired JS preview's busy flag latched after its ack.
+    const gateChanged = automaticBusy || automaticBlocked || automaticFailed;
+    cancelAutomaticRequest();
+    automaticBlocked = automaticFailed = false;
+    if (gateChanged) announceAutomaticScope();
+    return;
+  }
+  if (nativeLiveFields && !hasStructuralLiveInputs() && !automaticPlan && !automaticFieldScope.length && !presetsFor(chainContext(), {allScopes:true}).length) {
+    const gateChanged = automaticBusy || automaticBlocked || automaticFailed;
+    cancelAutomaticRequest();
+    automaticBlocked = automaticFailed = false;
+    if (gateChanged) announceAutomaticScope();
+    return;
+  }
   if (modelChanged) modelRevision++;
   const snapshot = automaticSnapshot();
   if (isLiveImportBusy()) { cancelAutomaticRequest(); automaticBusy = true; announceAutomaticScope(); return; }
@@ -670,6 +684,7 @@ const presetChecklist = createPresetChecklist({
   ruleCount: group => presetRuleCount(group, 'generator'),
   // › on a row opens that preset in the editor, over this window (#556).
   onOpen: (group) => openPresetEditor(group.name),
+  onEdit: () => openPresetEditor(),
 });
 for (const context of ['generator', 'online', 'fromname', 'renamer']) {
   onChainChanged(context, scheduleAutomaticTransformPreview);
@@ -705,7 +720,6 @@ onPresetsChanged((renamed) => {
   notifyChainChanged();
 });
 el("transform-preview").addEventListener("click", previewTransform);
-el("presets-edit").addEventListener("click", () => openPresetEditor());
 el("transform-btn").addEventListener("click", () =>
   transformModalOpen() ? closeTransformModal() : openTransformModal()
 );

@@ -26,10 +26,15 @@ test('tabs show file counts only and the multi-selection pill does not resize th
  await page.locator('#selection-summary-clear').click();await expect(summary(page)).toBeHidden();await expect(page.locator('#files-total-count')).toHaveText('3');
  expect(await page.evaluate(()=>window.tagrex.selection.size)).toBe(0);await expect(page.locator('#tracks')).toBeFocused();
 });
-test('hidden selections remain explicit, including a single hidden selected file',async({page})=>{
- await page.locator('#filter').fill('Wish Mountain');await expect(summary(page)).toContainText('1 hidden by the current view');await expect(page.locator('#files-selected-count')).toHaveText('1');
+test('filtering preserves selection without hidden-file notices',async({page})=>{
+ await page.locator('#filter').fill('Wish Mountain');await expect(summary(page)).toBeHidden();
+ await expect(page.locator('#filter-feedback')).toBeHidden();
+ expect(await page.evaluate(()=>window.tagrex.selection.size)).toBe(1);
  await page.locator('#filter-clear').click();await expect(summary(page)).toBeHidden();
- await select(page,2);await page.locator('#filter').fill('zz-no-match');await expect(summary(page)).toContainText('2 hidden');await expect(summary(page)).toContainText('0 matches');
+ await select(page,2);await page.locator('#filter').fill('zz-no-match');await expect(summary(page)).toContainText('2 selected');await expect(summary(page)).not.toContainText('hidden');
+ await expect(page.locator('#selection-summary-detail')).toBeEmpty();
+ await expect(page.locator('#filter-feedback')).toContainText('No files match');
+ await expect(page.locator('.query-hidden-selection')).toHaveCount(0);
  await page.locator('#selection-summary-clear').click();await expect(summary(page)).toBeHidden();
 });
 test('Staged distinguishes included scope and clearing selection never discards edits',async({page})=>{
@@ -48,8 +53,10 @@ test('rapid reversals settle without stale hiding or animation replay',async({pa
  await page.evaluate(()=>window.tagrex.renderTracks());await page.evaluate(()=>new Promise(requestAnimationFrame));expect(await summary(page).evaluate(n=>n.getAnimations().length)).toBe(0);
 });
 test('width growth is centred and spring entry changes only the overlay',async({page})=>{
- await select(page,2);await settled(page);const before=await page.locator('#files-view').boundingBox();
- await page.locator('#filter').fill('Wish Mountain');await expect(summary(page)).toContainText('hidden');
+ await select(page,2);await page.locator('.mode-tab[data-mode="renamer"]').click();await page.locator('#mask').fill('New %title%');await page.locator('#preview').click();
+ await expect(page.locator('#staged-tab-count')).toHaveText('2');await page.locator('#files-tab').click();
+ await settled(page);const before=await page.locator('#files-view').boundingBox();
+ await page.locator('#staged-tab').click();await expect(summary(page)).toContainText('included for Apply');
  const frames=await page.evaluate(async()=>{
   const samples=[];for(let i=0;i<18;i++){await new Promise(requestAnimationFrame);const p=document.querySelector('.files-col').getBoundingClientRect(),n=document.getElementById('selection-summary'),r=n.getBoundingClientRect(),t=document.getElementById('files-view').getBoundingClientRect();samples.push({width:r.width,offset:r.left+r.width/2-p.left-p.width/2,table:{x:t.x,y:t.y,width:t.width,height:t.height},effects:n.getAnimations().map(a=>Object.keys(a.effect.getKeyframes()[0]))});}return samples;
  });

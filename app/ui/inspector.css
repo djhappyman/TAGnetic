@@ -61,7 +61,7 @@ body .mode-col button[data-slot='button'].subtab {
   flex: 0 1 auto;
   height: var(--ctl-h);
   min-height: var(--ctl-h);
-  padding: 0 var(--sp-1);
+  padding: 0 var(--sp-2);
   border: 0;
   border-radius: var(--r-compact);
   background: transparent;
@@ -1264,14 +1264,25 @@ body .mode-col button.fe-clear .ico { width:14px; height:14px; }
 @media(prefers-reduced-motion:reduce) { body .mode-col button.fe-clear { transition:none; } }
 
 body .mode-col .transformations-scroll { display:flex; flex:1; min-height:0; padding:var(--sp-3) var(--inspector-inset) var(--sp-4); background:var(--workbench-chrome,var(--panel)); gap:var(--sp-3); }
-body .mode-col .transformations-edit { margin-inline-start:auto; color:var(--muted); }
+body .mode-col #groups-menu .preset-section-heading {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:var(--sp-2);
+  margin:0;
+  padding:var(--sp-2);
+  color:var(--text);
+  font-size:var(--type-heading-size);
+  font-weight:var(--fw-strong);
+  line-height:var(--lh-tight);
+  letter-spacing:0;
+  text-transform:none;
+}
+body .mode-col .transformations-edit { flex:none; width:24px; height:24px; min-height:24px; padding:3px; color:var(--muted); }
 
 body .mode-col .source-navigation { display:flex; align-items:center; flex:none; min-width:0; }
 body .mode-col .source-navigation[hidden] { display:none; }
 body .mode-col .source-navigation .subtabs { flex:1; width:0; overflow-x:auto; scrollbar-width:none; padding-inline-end:var(--sp-1); }
-body .mode-col .source-tools { display:flex; align-items:center; flex:none; gap:var(--sp-1); padding-inline-end:var(--inspector-inset); }
-body .mode-col .source-tools button { width:24px; height:24px; min-height:24px; padding:3px; }
-body .mode-col .source-tools button[hidden] { display:none; }
 
 /* Field feedback floats over the form rather than growing a row on focus. */
 body .mode-col .fe-hint { position:absolute; top:calc(100% + 2px); inset-inline:0; z-index:4; max-height:none; padding:4px 8px; border-radius:var(--r-compact); background:var(--panel); box-shadow:0 4px 12px rgb(0 0 0 / .18); opacity:0; pointer-events:none; transform:translateY(-2px); transition:opacity 150ms ease,transform 150ms ease; }
@@ -1329,3 +1340,6 @@ body .docked-transformations .transform-workspace-scroll #groups-menu { flex:non
 .transform-workspace-scroll { min-height:100px; }
 body #groups-menu .preset-section-heading { text-transform:none; letter-spacing:normal; font-size:var(--type-help-size); }
 body .transform-library-actions button { border:0; background:transparent; box-shadow:none; }
+
+body #groups-menu .preset-section-row { display:flex; align-items:center; gap:var(--sp-1); }
+body #groups-menu .preset-section-row > .preset-section-heading { flex:1; min-width:0; }

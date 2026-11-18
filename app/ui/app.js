@@ -1698,23 +1698,12 @@ function animateSelectionSummaryWidth(oldWidth) {
 }
 function paintSelectionSummary(count) {
   const review = usingReviewSelection();
-  let hidden = 0, staged = 0;
-  for (const path of rowSelectionSet()) {
-    if (!viewPathIndex.has(path)) hidden++;
-    if (diffByPath?.has(path)) staged++;
-  }
-  hidden = Math.min(count, hidden);
-  const details = [];
-  if (hidden) details.push(`${hidden.toLocaleString()} hidden by the current view`);
-  if (!stagedView && !filterPending && hasLibraryQuery()) details.push(`${matchingTrackCount.toLocaleString()} ${matchingTrackCount === 1 ? 'match' : 'matches'}`);
-  if (!review && staged) details.push(`${Math.min(count, staged).toLocaleString()} with staged edits`);
   const kind = review ? 'included for Apply' : 'selected';
   if (el('selection-summary-kind').textContent !== kind) el('selection-summary-kind').textContent = kind;
-  const detail = details.length ? ` · ${details.join(' · ')}` : '';
-  if (el('selection-summary-detail').textContent !== detail) el('selection-summary-detail').textContent = detail;
-  setSelectionSummaryVisible(count > 1 || hidden > 0);
+  if (el('selection-summary-detail').textContent) el('selection-summary-detail').textContent = '';
+  setSelectionSummaryVisible(count > 1);
   el('selection-summary-clear').disabled = applying || undoing || filterPending;
-  const signature = `${count}|${kind}|${detail}`;
+  const signature = `${count}|${kind}`;
   if (selectionSummarySizeSignature !== signature) {
     selectionSummarySizeSignature = signature;
     animateSelectionSummaryWidth(selectionSummaryOldWidth);
@@ -3538,18 +3527,29 @@ connectRibbonActions(async (action, options) => {
     }
     return {dialog:'ribbon-remove-dialog'};
   } else if (action === 'format-values') {
-    const values = await invoke('render_column', {pattern:options.pattern, paths});
+    const inputRevision = liveInputRevision();
+    const inputPlan = previewPlan;
+    const plan = await invoke('preview_field_operations', {
+      paths, operations: [{kind:'format', field:options.field, pattern:options.pattern}],
+      working: inputPlan,
+    });
+    if (inputRevision !== liveInputRevision() || inputPlan !== previewPlan) throw new Error('The staged values changed. Try again.');
     if (!isSelectionCurrent(subject)) throw new Error('The selection changed. Try again.');
     if (options.mode === 'write') {
-      const edits = paths.map((path,index) => ({path, field:options.field, value:values[index] || ''}));
-      const plan = await invoke('preview_tag_edits', {edits, paths, cover:null});
-      if (!isSelectionCurrent(subject)) throw new Error('The selection changed. Try again.');
-      await writeQuickPlan(plan);
+      // Preserve the shared stage: immediate Write saves only this operation's
+      // target field, while its expression still reads current staged inputs.
+      const selected = new Set(paths);
+      const changes = plan.changes.filter(change => selected.has(change.path)).map(change => ({
+        ...change, rename_to:null, cover_change:null, block_changes:[], sidecar_renames:[],
+        copy:false, folder_extras:[], tag_changes:change.tag_changes.filter(edit => edit.field === options.field),
+      }));
+      await writeQuickPlan({...plan, changes});
     } else {
-      // Adopt first so returning a later field to its base cannot resurrect a
-      // previous staged value when the complete batch is announced.
       adoptTagOnlyPreview();
-      recordLiveFields(paths.map((path,index) => ({path, field:options.field, value:values[index] || ''})));
+      const values = new Map(plan.changes.map(change => [change.path, change.tag_changes.find(edit => edit.field === options.field)]));
+      recordLiveFields(paths.map(path => ({path, field:options.field,
+        value:values.has(path) && values.get(path) ? values.get(path).new ?? '' : trackAt(path)?.tags?.[options.field] ?? '',
+      })));
     }
     return {dialog:'ribbon-format-dialog'};
   } else if (action === 'import-artwork') {
@@ -4968,10 +4968,8 @@ if (TAURI) {
     activity.classList.toggle('has-active-work', active > 0);
     if (agentsEnabled && !wasEnabled) mirrorManualPlan(previewPlan);
   }
-  el('agent-activity').addEventListener('click', async () => {
-    await openSettings();
-    const groups = [...document.querySelectorAll('.settings-body .settings-group')];
-    selectSettingsGroup(groups.findIndex(group => group.classList.contains('agent-connections')));
+  el('agent-activity').addEventListener('click', () => {
+    document.dispatchEvent(new CustomEvent('tagrex:show-agent-activity'));
   });
   document.addEventListener('tagrex:show-shared-stage', () => {
     el('settings').hidden = true;
@@ -5043,9 +5041,6 @@ if (TAURI) {
         if (data?.module) setMode(data.module);
         if (data?.path) hooks.revealPath(data.path);
         if (data?.draft) {
-          await openSettings();
-          const groups = [...document.querySelectorAll('.settings-body .settings-group')];
-          selectSettingsGroup(groups.findIndex(group => group.classList.contains('agent-connections')));
           document.dispatchEvent(new CustomEvent('tagrex:review-agent-draft', { detail: data }));
         }
       } else if (kind === 'ui_preferences') {

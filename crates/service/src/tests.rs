@@ -3216,3 +3216,118 @@ fn incremental_intents_refuse_filename_rules_instead_of_dropping_their_output() 
     assert_eq!(result.unwrap_err().code, "full_plan_required");
     assert!(f.service.shared_stage().unwrap().plan.is_none());
 }
+
+#[test]
+fn native_field_recipes_save_and_read_protected_human_sources() {
+    let f = Fixture::new();
+    f.service
+        .set_settings_backend(Arc::new(MemorySettings(Mutex::new(
+            json!({"action_groups":[]}),
+        ))))
+        .unwrap();
+    let loaded = f.call("settings.get", json!({})).unwrap();
+    let group = json!({"scope":"comment","rules":[{"kind":"format","to":"%title%"},{"kind":"remove_fields","from":"ENCODEDBY"}]});
+    f.call("presets.put",json!({"kind":"transform","name":"Copy title","revision":loaded["revision"],"preset":group})).unwrap();
+    let initial = f.service.shared_stage_delta(None, None).unwrap();
+    human_intents(
+        &f,
+        &[(0, "title", Some("Human / 日本語"))],
+        initial.revision,
+    );
+    let result=f.call("draft.transform",json!({"paths":[f.paths[0]],"groups":[{"name":"Copy title","scope":"comment","rules":[{"kind":"format","to":"%title%"}]}]})).unwrap();
+    assert!(result["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|change| change["tags"].as_array().unwrap())
+        .any(|field| field["field"] == "comment" && field["new"] == "Human / 日本語"));
+    let shared = f.call("staging.get", json!({})).unwrap();
+    assert!(shared["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|change| change["tags"].as_array().unwrap())
+        .any(|field| field["field"] == "title" && field["new"] == "Human / 日本語"));
+}
+
+#[test]
+fn stage_view_checks_each_path_once_without_holding_shared_state() {
+    let f = Fixture::new();
+    human_intents(
+        &f,
+        &[
+            (0, "title", Some("Title")),
+            (0, "album", Some("Album")),
+            (1, "artist", Some("Artist")),
+        ],
+        stage_revision(&f),
+    );
+    let calls = std::cell::Cell::new(0);
+    let view = f
+        .service
+        .stage_get_with_path_check(&f.principal, &json!({"limit":1}), |grant, path| {
+            assert!(
+                f.service.0.state.try_lock().is_ok(),
+                "filesystem check held shared state"
+            );
+            calls.set(calls.get() + 1);
+            destination(grant, path).is_ok()
+        })
+        .unwrap();
+    assert_eq!(calls.get(), 2);
+    assert_eq!(view["files"], 2);
+    assert_eq!(view["changes"].as_array().unwrap().len(), 1);
+    assert_eq!(view["changes"][0]["tags"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn stage_view_rejects_revision_and_authorization_changes_during_io() {
+    let f = Fixture::new();
+    f.draft("Title");
+    let result = f
+        .service
+        .stage_get_with_path_check(&f.principal, &json!({}), |_, _| {
+            lock(&f.service.0.state).unwrap().manual_revision += 1;
+            true
+        });
+    assert_eq!(result.unwrap_err().code, "conflict");
+    let result = f
+        .service
+        .stage_get_with_path_check(&f.principal, &json!({}), |_, _| {
+            lock(&f.service.0.state).unwrap().security.clients[0].revoked = true;
+            true
+        });
+    assert_eq!(result.unwrap_err().code, "permission_denied");
+}
+
+#[test]
+fn stage_view_uses_recursive_root_scope_and_filters_fields_before_path_io() {
+    let f = Fixture::new();
+    let nested = f.media.join("Disc 1");
+    fs::create_dir(&nested).unwrap();
+    let path = nested.join("Nested.wav");
+    fs::copy(&f.paths[0], &path).unwrap();
+    f.call(
+        "draft.create",
+        json!({"paths":[path],"values":{"title":"Nested title","album":"Hidden album"}}),
+    )
+    .unwrap();
+    {
+        let mut state = lock(&f.service.0.state).unwrap();
+        state.security.clients[0].grant.fields = ["title".into()].into();
+    }
+    let view = f.service.stage_get(&f.principal, &json!({})).unwrap();
+    assert_eq!(view["files"], 1);
+    assert_eq!(view["changes"][0]["tags"].as_array().unwrap().len(), 1);
+    assert_eq!(view["changes"][0]["tags"][0]["field"], "title");
+    lock(&f.service.0.state).unwrap().security.clients[0]
+        .grant
+        .fields = ["composer".into()].into();
+    let view = f
+        .service
+        .stage_get_with_path_check(&f.principal, &json!({}), |_, _| {
+            panic!("no visible fields need a path check")
+        })
+        .unwrap();
+    assert_eq!(view["files"], 0);
+}

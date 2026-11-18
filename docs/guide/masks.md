@@ -50,7 +50,18 @@ An unknown name is an error rather than being passed through as literal text, so
 a typo tells you instead of quietly producing `%artsit% - Title`. Hovering a
 table column header names the placeholder that addresses it.
 
-Custom (non-modeled) fields cannot be addressed from a mask yet.
+Custom text fields use an explicit name, such as `%custom:Venue%` or
+`%custom:DISCOGS_RELEASE_ID%`. This works for naming, reports, calculated
+columns and extraction from filenames or text. A name matches existing custom
+fields without regard to ASCII letter case; edits retain the stored spelling.
+The explicit `custom:` prefix also lets a custom field named `ARTIST` remain
+separate from the standard Artist field. Unknown ordinary placeholders still
+report mistakes instead of silently becoming custom fields.
+
+Field formatting uses the same grammar but keeps the original text, including
+slashes and line breaks, and does not automatically pad track numbers. Filename
+rendering keeps its existing sanitisation and default padding. See
+[Native field recipes](field-recipes.md) for ordered assignments and cleanup.
 
 ## Zero-padding
 

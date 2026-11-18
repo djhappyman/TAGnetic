@@ -57,7 +57,9 @@ test('Transformations is a fourth source tab at the top of the inspector', async
  await expect(transforms(page)).toBeVisible();
  await expect(page.locator('.manual-inspector-heading')).toHaveCount(0);
  const tab=await page.locator('.subtab[data-subtab="transformations"]').boundingBox(),pane=await page.locator('.mode-col').boundingBox();expect(tab.y-pane.y).toBeLessThan(16);
- await page.getByRole('button',{name:'About transformations',exact:true}).click();await expect(page.locator('.inspector-help-content')).toContainText('Nothing is written');
+ await expect(page.locator('.mode-col .inspector-help')).toHaveCount(0);
+ await expect(page.locator('#groups-menu .preset-section-heading').first()).toContainText('Your presets');
+ await expect(page.locator('#groups-menu .preset-section-heading #presets-edit')).toBeVisible();
 });
 
 test('everyday fields stay open while More tags stays an accessible collapsible', async ({ page }) => {
@@ -156,7 +158,7 @@ for (const theme of ['dark', 'light']) for (const size of [{ width: 375, height:
     const compact = page.getByRole('tablist', { name: 'Workspace module' });
     await openTagSource(page,'transformations');
     await expect(page.locator('.subtab[data-subtab="transformations"]')).toBeInViewport({ratio:1});
-    await expect(page.locator('.source-tools .inspector-help')).toBeInViewport({ratio:1});
+    await expect(page.locator('.mode-col .inspector-help')).toHaveCount(0);
     await expect(page.locator('#presets-edit')).toBeInViewport({ ratio: 1 });
     await editor(page);
     await page.locator('#editor-field-title').scrollIntoViewIfNeeded();

@@ -260,6 +260,15 @@ impl Function {
                 if args[1].is_empty() {
                     first.to_string()
                 } else {
+                    let matches = first.matches(args[1].as_str()).count();
+                    let size = first.len().saturating_add(
+                        matches.saturating_mul(args[2].len().saturating_sub(args[1].len())),
+                    );
+                    if size > super::MAX_PATTERN_OUTPUT {
+                        return Err(MaskError::BadArgument(
+                            "A replacement exceeds 1 MiB.".into(),
+                        ));
+                    }
                     first.replace(args[1].as_str(), &args[2])
                 }
             }
@@ -615,12 +624,18 @@ fn format_number(value: f64) -> String {
 /// out wrong, it is a pattern that was written wrong, and saying so beats
 /// silently picking a number.
 fn count(function: Function, value: &str) -> Result<usize, MaskError> {
-    value.trim().parse::<usize>().map_err(|_| {
+    let parsed = value.trim().parse::<usize>().map_err(|_| {
         MaskError::BadArgument(format!(
             "${} needs a whole number, not {value:?}",
             function.name()
         ))
-    })
+    })?;
+    if parsed > super::MAX_PATTERN_OUTPUT / 4 {
+        return Err(MaskError::BadArgument(
+            "A function count exceeds the pattern output budget.".into(),
+        ));
+    }
+    Ok(parsed)
 }
 
 /// Upper-case the first letter of each whitespace-separated word. `lower_rest`

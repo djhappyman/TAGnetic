@@ -9,7 +9,7 @@ pub struct ToolDefinition {
 /// Compact, explicit application API. Every method is permissioned at execution;
 /// descriptions and read-only annotations never serve as authorization.
 pub fn tool_catalog() -> Vec<ToolDefinition> {
-    let entries:[(&str,&str,&str);58]=[
+    let entries:[(&str,&str,&str);59]=[
         ("session.status","Inspect the shared session, this client's grants, and recovery state.",""),
         ("session.open","Open approved files/folders in the existing desktop session; refuses pending human work.","paths"),
         ("session.refresh","Refresh the current desktop file table without replacing pending desired edits.",""),
@@ -25,12 +25,13 @@ pub fn tool_catalog() -> Vec<ToolDefinition> {
         ("draft.create","Stage desired tags immediately into the same live Staged area as the desktop, without writing disk. Require top-level paths or selection. edits items are {path,field,value}; values is a field-to-string/null map applied to that scope. Explicit values replace prior draft intent even when equal to saved tags. Returned files counts changed files, not evaluated files.","selection paths edits values draft"),
         ("draft.get","Read the sanitized, paged diff of an owned draft; files is the number with actual changes, not the number evaluated. Artwork bytes use separate handles.","draft offset limit"),
         ("draft.discard","Discard an owned draft without writing files.","draft"),
-        ("draft.transform","Preview transformation rules/groups over selected saved values, or over an existing draft.","selection paths rules groups scope draft"),
+        ("draft.transform","Preview ordered tag rules against current shared working values. Native kinds: format (scope destination, to pattern), extract (from source expression, to extraction pattern), split_values (scope field, from separator), merge_values (scope field, to separator), deduplicate_values (scope field), remove_fields and keep_fields (from semicolon-separated names). Value operations currently support artist, albumartist, genre and composer. Keep-only preserves artwork. Existing text transformations remain supported.","selection paths rules groups scope draft"),
         ("draft.rename","Preview renaming with the application's mask grammar, including sidecars.","selection paths mask draft"),
         ("draft.move","Preview move/copy under an already-authorized destination. Directory pruning is disabled.","selection paths mask destination copy draft"),
         ("draft.from_name","Extract tags from selected filenames using a reusable mask.","selection paths mask draft"),
-        ("draft.from_text","Extract tags from ordered text lines using the app's mask grammar.","selection paths mask text draft"),
-        ("draft.number","Preview ordered track/disc numbering with optional totals and zero padding.","selection paths start step total width write_total disc disc_total draft"),
+        ("draft.from_text","Extract tags from text. mode sequential (default), filename (%_filename_ext%) or path (%_path%). Duplicate matching keys fail; unmatched rows are reported. Uses current staging.","selection paths mask text mode draft"),
+        ("draft.from_sidecars","Import UTF-8/UTF-16 lyrics or notes from a relative patterned text file beneath each audio folder. Requires the folder read grant. skip_missing reports missing files; invalid files fail.","selection paths field pattern skip_missing draft"),
+        ("draft.number","Preview native ordered track/disc numbering using staged tags. Boundaries are folder or field objects, e.g. {kind:field,field:album}; counters reset on consecutive changes. keep_vinyl defaults true. Automatic totals use the highest generated number per counter group.","selection paths start step total width write_total disc disc_width disc_total write_disc_total next_disc_on reset_disc_on reset_track_on reset_track_on_disc keep_vinyl draft"),
         ("draft.import","Preview release tags with explicit file order and zero-based release-track indices. Known track totals are per disc, not whole-release counts. Require top-level paths or selection. Uses a fetched release receipt or typed import values.","selection paths release track_indices import vinyl_sides_to_disc draft"),
         ("draft.artwork","Preview owned artwork on top-level paths or selection. mode native preserves existing non-front images; replace_all explicitly replaces every picture; replace_front preserves other roles; append retains the pending set. remove=true removes all. Role metadata is shown in the diff.","selection paths asset remove mode draft"),
         ("draft.clear_tags","Preview removing saved tags; full field grant required when multiple fields are touched.","selection paths draft"),
@@ -95,9 +96,20 @@ fn schema(keys: &str) -> Value {
     for key in keys.split_whitespace() {
         let value = match key {
             "offset" | "limit" | "start" | "step" | "total" | "width" | "disc" | "disc_total"
-            | "redo_revision" | "group" | "table_font_px" => json!({"type":"integer","minimum":0}),
+            | "disc_width" | "redo_revision" | "group" | "table_font_px" => {
+                json!({"type":"integer","minimum":0})
+            }
             "seconds" | "volume" => json!({"type":"number","minimum":0}),
-            "preview" | "copy" | "write_total" | "vinyl_sides_to_disc" | "remove" | "overwrite" => {
+            "preview"
+            | "copy"
+            | "write_total"
+            | "write_disc_total"
+            | "reset_track_on_disc"
+            | "keep_vinyl"
+            | "skip_missing"
+            | "vinyl_sides_to_disc"
+            | "remove"
+            | "overwrite" => {
                 json!({"type":"boolean"})
             }
             "paths" | "fields" => json!({"type":"array","items":{"type":"string"}}),
@@ -108,7 +120,8 @@ fn schema(keys: &str) -> Value {
                 json!({"type":"array","description":"Exact {path,field,value} items. Top-level paths or selection is also required.","items":{"type":"object","properties":{"path":{"type":"string"},"field":{"type":"string","description":"Storage key, e.g. title, tracktotal, custom:MYFIELD"},"value":{"type":["string","null"]}},"required":["path","field","value"],"additionalProperties":false}})
             }
             "rules" | "groups" => json!({"type":"array","items":{"type":"object"}}),
-            "query" | "values" | "import" | "preset" | "patch" => json!({"type":"object"}),
+            "query" | "values" | "import" | "preset" | "patch" | "next_disc_on"
+            | "reset_disc_on" | "reset_track_on" => json!({"type":"object"}),
             _ => json!({"type":"string"}),
         };
         properties.insert(key.into(), value);

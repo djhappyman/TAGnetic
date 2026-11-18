@@ -1399,6 +1399,26 @@ function mockInvoke(cmd, args) {
     // Mask-defined columns (#150). The dev mock renders a couple of plain
     // placeholders so the column can be seen filling in; the real grammar is
     // mask.rs and this is not a second implementation of it.
+    // Browser fixture for the ribbon's native formatting request. This only
+    // substitutes plain placeholders; Rust tests verify the real recipe engine.
+    case "preview_field_operations": {
+      const operation = args.operations?.[0];
+      if (operation?.kind !== 'format') return Promise.reject('This browser fixture supports only Format values.');
+      const working = new Map((args.working?.changes || []).map(change => [change.path, change]));
+      const tracks = s.tracks.map(track => {
+        const tags = {...track.tags};
+        for (const edit of working.get(track.path)?.tag_changes || []) {
+          if (edit.new == null) delete tags[edit.field]; else tags[edit.field] = edit.new;
+        }
+        return {...track, tags};
+      });
+      return renderMockColumn({pattern:operation.pattern, paths:args.paths}, tracks).then(values => ({
+        ...args.working, description:'Format values', changes:(args.paths || []).map((path,index) => ({
+          path, rename_to:null, cover_change:null, block_changes:[], sidecar_renames:[], copy:false, folder_extras:[],
+          tag_changes:[{field:operation.field, old:s.tracks.find(track=>track.path===path)?.tags?.[operation.field] ?? null, new:values[index] || null}],
+        })),
+      }));
+    }
     case "render_columns":
       return Promise.all((args.patterns || []).map((pattern) =>
         renderMockColumn({ pattern, paths: args.paths }, s.tracks).catch(() => null)));

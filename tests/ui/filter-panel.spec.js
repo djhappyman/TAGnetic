@@ -231,7 +231,8 @@ test('compact conditions combine with search and edit/remove without losing sele
   await addCondition(page, 'cover', 'missing');
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(1);
   await expect(page.locator('#tracks-body')).toContainText('Radio');
-  await expect(page.locator('#filter-feedback')).toContainText('1 selected file is hidden');
+  await expect(page.locator('#filter-feedback')).toBeHidden();
+  expect(await page.evaluate(() => [...window.tagrex.selection])).toEqual(selected);
   await page.locator('#filter').fill('wish');
   await expect(page.locator('#status-sel')).toContainText('1/');
   await page.getByRole('button', { name: 'Edit Artwork: missing', exact: true }).click();

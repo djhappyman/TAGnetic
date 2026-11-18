@@ -13,8 +13,6 @@
   import QueryChips from './QueryChips.svelte';
   import QueryFeedback from './QueryFeedback.svelte';
   import DuplicateScanControls from './DuplicateScanControls.svelte';
-  import DuplicateHelp from './DuplicateHelp.svelte';
-  import InspectorHelp from './InspectorHelp.svelte';
   import ImportFields from './ImportFields.svelte';
   import NativeCheckbox from './controls/NativeCheckbox.svelte';
   import NativeSlider from './controls/NativeSlider.svelte';
@@ -430,13 +428,7 @@
 {/snippet}
 </Tabs.Trigger>
       </Tabs.List>
-        <div class="source-tools">
-          {#if subtab === 'editor'}<InspectorHelp labelKey="inspector.editorInfo" helpKey="inspector.editorHelp" />
-          {:else if subtab === 'filename'}<InspectorHelp labelKey="inspector.nameInfo" helpKey="inspector.nameHelp" />
-          {:else if subtab === 'fromtext'}<InspectorHelp labelKey="inspector.textInfo" helpKey="inspector.textHelp" />
-          {:else if subtab === 'transformations'}<InspectorHelp labelKey="inspector.transformInfo" helpKey="generator.transformHint" />{/if}
-          <Button variant="ghost" size="icon-sm" id="presets-edit" hidden class="transformations-edit icon" type="button" data-i18n-title="presets.edit" title="Edit transformation presets" data-i18n-aria-label="presets.title" aria-label="Transformation presets"><svg class="ico"><use href="#i-rename"/></svg></Button>
-        </div>
+
       </div>
 
       <Tabs.Content value="transformations" id="subtab-transformations" class="subtab-panel transformations" hidden>
@@ -495,7 +487,7 @@
 
       <Tabs.Content value="online" id="subtab-online" aria-labelledby="workspace-online-tab" class="subtab-panel online">
         <div class="online-head">
-          <div class="inspector-heading"><h2 data-i18n="inspector.onlineHeading">Find a release</h2><InspectorHelp labelKey="inspector.onlineInfo" helpKey="inspector.onlineHelp" /></div>
+          <div class="inspector-heading"><h2 data-i18n="inspector.onlineHeading">Find a release</h2></div>
           <div class="online-head-row">
             <div class="source-label">
               <NativeSelect size="sm" id="online-source" data-i18n-aria-label="online.source" aria-label="Source" data-i18n-title="online.sourceTitle" title="Metadata source">
@@ -660,7 +652,7 @@
 
     <Tabs.Content value="deduplicator" id="panel-deduplicator" class="mode-panel" hidden>
       <div class="panel-block">
-        <div class="duplicate-heading"><h2>Find duplicates</h2><DuplicateHelp /></div>
+        <div class="duplicate-heading"><h2>Find duplicates</h2></div>
         {#if mode === 'deduplicator'}<DuplicateScanControls />{/if}
         <Button id="dup-scan" hidden>Scan</Button>
       </div>
