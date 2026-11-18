@@ -25,6 +25,12 @@ impl<K: Clone + Eq + Hash, V> Cache<K, V> {
             max_bytes,
         }
     }
+    /// The admission limits this store was built with. Test-only: callers must
+    /// never rely on them instead of the documented per-cache budget.
+    #[cfg(test)]
+    pub fn limits(&self) -> (usize, usize) {
+        (self.max_entries, self.max_bytes)
+    }
     fn tick(&mut self) -> u64 {
         if self.clock == u64::MAX {
             // Keep LRU order on counter rollover, including long-lived sessions.

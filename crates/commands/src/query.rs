@@ -487,6 +487,23 @@ fn push_facet_value(
 
 type RegexCache = Arc<Mutex<crate::bounded_cache::Cache<(String, bool), Arc<Regex>>>>;
 
+/// Retained facet memory. One suggestion over a large library needs several
+/// high-cardinality facets at once; at 32 MiB the cache could not hold two
+/// ~17 MiB facets from a 100k-row library, so each request rebuilt the ones it
+/// had just evicted. This cap holds the measured working set of the default
+/// eight suggestion fields at 100k rows with headroom for larger libraries.
+/// It remains a bounded, evictable derived cache, not a process-wide memory cap
+/// or a value authority; only the 100k-row workload was measured.
+const FACET_CACHE_BYTES: usize = 96 * 1024 * 1024;
+const FACET_CACHE_ENTRIES: usize = 32;
+
+/// How many exact stored field names one snapshot remembers. Scoped search text
+/// is resolved against this memo instead of rescanning every row per candidate
+/// prefix; a full memo stops admitting names and scopes still resolve by scan.
+const MAX_FIELD_KEY_MEMO: usize = 256;
+/// Only real field names are worth remembering; a longer prefix is search text.
+const MAX_FIELD_KEY_LEN: usize = 128;
+
 /// Immutable rows shared with query workers. Caches contain only derived data.
 #[derive(Debug)]
 pub struct QueryIndex {
@@ -498,6 +515,9 @@ pub struct QueryIndex {
     custom: Mutex<Option<(String, Arc<QueryIndex>)>>,
     custom_key: String,
     regex_cache: RegexCache,
+    /// Bounded "some row stores this exact field key" evidence, positive and
+    /// negative. Derived from immutable rows, never a value authority.
+    field_keys: Mutex<HashMap<String, bool>>,
 }
 
 impl QueryIndex {
@@ -511,7 +531,10 @@ impl QueryIndex {
         Self {
             id: SNAPSHOT_ID.fetch_add(1, Ordering::Relaxed),
             rows,
-            facets: Mutex::new(crate::bounded_cache::Cache::new(32, 32 * 1024 * 1024)),
+            facets: Mutex::new(crate::bounded_cache::Cache::new(
+                FACET_CACHE_ENTRIES,
+                FACET_CACHE_BYTES,
+            )),
             duplicates: Arc::default(),
             valid: Arc::new(AtomicBool::new(true)),
             custom: Mutex::default(),
@@ -520,6 +543,7 @@ impl QueryIndex {
                 16,
                 32 * 1024 * 1024,
             ))),
+            field_keys: Mutex::default(),
         }
     }
     pub fn with_updates(&self, rows: Vec<QueryRow>) -> Self {
@@ -560,10 +584,30 @@ impl QueryIndex {
     pub fn known_field(&self, field: &str) -> bool {
         FIELDS.contains(&field)
             || (field.starts_with("custom:") && field.len() > 7 && field.len() <= 256)
-            || self
-                .rows
-                .iter()
-                .any(|r| r.computed.contains_key(field) || r.values.contains_key(field))
+            || self.stores_field_key(field)
+    }
+
+    /// Whether any row stores this exact field key. Remembered per snapshot:
+    /// query and suggestion work compile the same model several times, and a
+    /// colon-heavy search text can test many candidate prefixes.
+    fn stores_field_key(&self, field: &str) -> bool {
+        if let Some(known) = self
+            .field_keys
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(field)
+        {
+            return *known;
+        }
+        let known = self
+            .rows
+            .iter()
+            .any(|row| row.computed.contains_key(field) || row.values.contains_key(field));
+        let mut memo = self.field_keys.lock().unwrap_or_else(|p| p.into_inner());
+        if memo.len() < MAX_FIELD_KEY_MEMO && field.len() <= MAX_FIELD_KEY_LEN {
+            memo.insert(field.into(), known);
+        }
+        known
     }
 
     fn text_scope(&self, text: &str) -> Option<(String, usize)> {
@@ -571,20 +615,22 @@ impl QueryIndex {
             .rev()
             .find_map(|(offset, _)| {
                 let field = &text[..offset];
-                let folded = field.to_lowercase();
-                // Preserve custom storage keys, preferring the longest actual
-                // key. Standard field aliases are case-insensitive.
-                if self
-                    .rows
-                    .iter()
-                    .any(|row| row.computed.contains_key(field) || row.values.contains_key(field))
-                {
-                    Some((field.to_string(), offset + 1))
-                } else if FIELDS.contains(&folded.as_str()) {
-                    Some((folded, offset + 1))
-                } else {
-                    None
+                // An exactly spelled standard name needs no row evidence.
+                if FIELDS.contains(&field) {
+                    return Some((field.to_string(), offset + 1));
                 }
+                // A stored key still outranks a case-folded standard alias, so a
+                // computed field named "DATE" keeps resolving to itself. Absent
+                // names are remembered, so this is one pass per name per
+                // snapshot rather than one pass per candidate per request.
+                if self.stores_field_key(field) {
+                    return Some((field.to_string(), offset + 1));
+                }
+                let folded = field.to_lowercase();
+                if FIELDS.contains(&folded.as_str()) {
+                    return Some((folded, offset + 1));
+                }
+                None
             })
             .or_else(|| {
                 let rest = text.strip_prefix("custom:")?;
@@ -698,12 +744,16 @@ impl QueryIndex {
         let index = Arc::new(Self {
             id: self.id,
             rows,
-            facets: Mutex::new(crate::bounded_cache::Cache::new(32, 32 * 1024 * 1024)),
+            facets: Mutex::new(crate::bounded_cache::Cache::new(
+                FACET_CACHE_ENTRIES,
+                FACET_CACHE_BYTES,
+            )),
             duplicates: self.duplicates.clone(),
             valid: self.valid.clone(),
             custom: Mutex::default(),
             custom_key: key.clone(),
             regex_cache: self.regex_cache.clone(),
+            field_keys: Mutex::default(),
         });
         if cancelled() {
             return Err(QueryError::Cancelled);
@@ -2684,6 +2734,257 @@ mod tests {
         assert_eq!(
             index.query(&q, || false).expect("valid").indices,
             vec![0, 2]
+        );
+    }
+}
+
+/// Scoped search resolution and derived-cache retention under a high-cardinality
+/// library. Both are read-only caches: results must not change, only the work
+/// done to reach them.
+#[cfg(test)]
+mod scoped_text_and_facet_cache_tests {
+    use super::*;
+
+    fn row(path: &str, tags: serde_json::Value) -> QueryRow {
+        let track: TrackDto = serde_json::from_value(serde_json::json!({
+            "path": path, "format": "FLAC", "tags": tags
+        }))
+        .expect("fixture");
+        QueryRow::from_track(&track)
+    }
+    fn index() -> QueryIndex {
+        QueryIndex::from_rows(vec![
+            row(
+                "/music/a.flac",
+                serde_json::json!({
+                    "artist": "Hixxy", "genre": "Jungle",
+                    "comment": "played 01:23:45", "custom:MOOD": "Dark"
+                }),
+            ),
+            row(
+                "/music/b.flac",
+                serde_json::json!({
+                    "artist": "Sharkey", "genre": "Hardcore", "media": "Vinyl"
+                }),
+            ),
+        ])
+    }
+    fn model(text: &str) -> QueryModel {
+        serde_json::from_value(serde_json::json!({
+            "version":2,"text":text,
+            "root":{"kind":"group","id":"root","mode":"all","children":[]}
+        }))
+        .expect("fixture")
+    }
+    fn query(index: &QueryIndex, text: &str) -> Vec<usize> {
+        index
+            .query(
+                &QueryRequest {
+                    request_id: 1,
+                    snapshot_id: Some(index.id),
+                    query: model(text),
+                },
+                || false,
+            )
+            .expect("valid query")
+            .indices
+    }
+
+    #[test]
+    fn scoped_search_resolves_known_fields_without_row_evidence() {
+        let index = index();
+        // A standard field resolves from the built-in list, the way an ordinary
+        // "genre:jungle" search does, and a stored key is preserved exactly.
+        assert_eq!(index.text_scope("genre:jungle"), Some(("genre".into(), 6)));
+        assert_eq!(index.text_scope("GENRE:jungle"), Some(("genre".into(), 6)));
+        assert_eq!(
+            index.text_scope("custom:MOOD:dark"),
+            Some(("custom:MOOD".into(), 12))
+        );
+        assert_eq!(index.text_scope("media:vinyl"), Some(("media".into(), 6)));
+        // A time-like text is not a field scope and never becomes one.
+        assert_eq!(index.text_scope("01:23:45"), None);
+        assert_eq!(index.text_scope("played 01:23:45"), None);
+        // Results are the same on the first and later resolutions.
+        assert_eq!(query(&index, "genre:jungle"), vec![0]);
+        assert_eq!(query(&index, "genre:jungle"), vec![0]);
+        assert_eq!(query(&index, "played 01:23:45"), vec![0]);
+        assert_eq!(query(&index, "01:23:45"), vec![0]);
+        assert!(index.known_field("media"));
+        assert!(!index.known_field("not_a_tag"));
+    }
+
+    #[test]
+    fn absent_scope_candidates_are_remembered_and_the_memo_stays_bounded() {
+        let index = index();
+        // Many distinct non-field prefixes, the shape of a colon-heavy search
+        // text that used to rescan every row per candidate.
+        for i in 0..(MAX_FIELD_KEY_MEMO * 3) {
+            assert_eq!(index.text_scope(&format!("n{i}:1:2:3")), None, "{i}");
+        }
+        let memo = index.field_keys.lock().unwrap();
+        assert!(memo.len() <= MAX_FIELD_KEY_MEMO);
+        assert!(memo
+            .iter()
+            .all(|(name, known)| !*known || index.known_field(name)));
+        drop(memo);
+        // Correctness is unaffected once the memo is full: the fallback scan
+        // still resolves a stored key and still rejects an absent one.
+        assert_eq!(
+            index.text_scope("custom:MOOD:dark"),
+            Some(("custom:MOOD".into(), 12))
+        );
+        assert_eq!(index.text_scope("n999999:1"), None);
+        assert!(index.known_field("custom:MOOD"));
+        assert!(!index.known_field("absent_field"));
+    }
+
+    #[test]
+    fn a_computed_key_that_case_folds_to_a_standard_name_keeps_its_identity() {
+        let index = index();
+        let derived = index
+            .custom_index(
+                &[CustomField {
+                    key: "DATE".into(),
+                    mask: "%genre%".into(),
+                }],
+                &|| false,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(derived.text_scope("DATE:jungle"), Some(("DATE".into(), 5)));
+        let mut request = QueryRequest {
+            request_id: 1,
+            snapshot_id: Some(index.id),
+            query: model("DATE:jungle"),
+        };
+        request.query.custom_fields = vec![CustomField {
+            key: "DATE".into(),
+            mask: "%genre%".into(),
+        }];
+        assert_eq!(index.query(&request, || false).unwrap().indices, vec![0]);
+        // Without the computed field the same text is a plain year search.
+        request.query.custom_fields.clear();
+        assert!(index.query(&request, || false).unwrap().indices.is_empty());
+    }
+
+    #[test]
+    fn long_scope_candidates_are_resolved_without_being_remembered() {
+        let index = index();
+        let long = "z".repeat(MAX_FIELD_KEY_LEN + 1);
+        assert_eq!(index.text_scope(&format!("{long}:value")), None);
+        assert!(index.field_keys.lock().unwrap().len() <= MAX_FIELD_KEY_MEMO);
+        assert!(index
+            .field_keys
+            .lock()
+            .unwrap()
+            .keys()
+            .all(|name| name.len() <= MAX_FIELD_KEY_LEN));
+    }
+
+    const ARTISTS: [&str; 3] = ["Hixxy", "Sharkey", "Dougal"];
+    const GENRES: [&str; 2] = ["Jungle", "Hardcore"];
+    fn high_cardinality(rows: usize) -> QueryIndex {
+        QueryIndex::from_rows(
+            (0..rows)
+                .map(|i| {
+                    row(
+                        &format!("/music/{i:05}.flac"),
+                        serde_json::json!({
+                            "artist": ARTISTS[i % ARTISTS.len()],
+                            "album": format!("Album {i}"),
+                            "title": format!("Track {i:05}"),
+                            "genre": GENRES[i % GENRES.len()],
+                        }),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn hot_high_cardinality_facets_stay_resident_across_suggestions() {
+        // A suggestion reads eight fields. When the budget can hold that whole
+        // working set, the two unique-per-row fields must be reused rather than
+        // rebuilt on the next keystroke; the eviction cycle only appeared once
+        // the budget was smaller than the set (measured at 100k rows).
+        let index = high_cardinality(2_000);
+        let working = [
+            "genre",
+            "artist",
+            "albumartist",
+            "album",
+            "title",
+            "year",
+            "label",
+            "format",
+        ]
+        .iter()
+        .map(|field| index.facet(field, &|| false).unwrap().retained_bytes())
+        .sum::<usize>()
+        .saturating_add(4_096);
+        *index.facets.lock().unwrap() =
+            crate::bounded_cache::Cache::new(FACET_CACHE_ENTRIES, working);
+        let request: SuggestRequest = serde_json::from_value(serde_json::json!({
+            "requestId":1,"text":"","strategy":"values",
+            "query":{"version":2,"root":{"kind":"group","id":"root","mode":"all","children":[]}}
+        }))
+        .unwrap();
+        let first = index.suggest(&request, || false).unwrap();
+        assert!(!first.suggestions.is_empty());
+        let album = index.facet("album", &|| false).unwrap();
+        let title = index.facet("title", &|| false).unwrap();
+        let second = index.suggest(&request, || false).unwrap();
+        assert_eq!(
+            first
+                .suggestions
+                .iter()
+                .map(|s| (&s.field, &s.value, s.count))
+                .collect::<Vec<_>>(),
+            second
+                .suggestions
+                .iter()
+                .map(|s| (&s.field, &s.value, s.count))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            Arc::ptr_eq(&album, &index.facet("album", &|| false).unwrap()),
+            "album facet was rebuilt between suggestions"
+        );
+        assert!(
+            Arc::ptr_eq(&title, &index.facet("title", &|| false).unwrap()),
+            "title facet was rebuilt between suggestions"
+        );
+        let limits = index.facets.lock().unwrap().limits();
+        assert_eq!(limits.1, working);
+    }
+
+    #[test]
+    fn the_default_facet_budget_holds_two_large_facets() {
+        // 17.3 and 17.5 MiB were measured for the 100k-distinct album and title
+        // facets of a 100k-row library. A budget under their sum forces every
+        // suggestion to rebuild both, so this guards the retention decision.
+        const { assert!(FACET_CACHE_BYTES >= 2 * 17 * 1024 * 1024) };
+        const { assert!(FACET_CACHE_ENTRIES >= 2) };
+        let index = index();
+        assert_eq!(
+            index.facets.lock().unwrap().limits(),
+            (FACET_CACHE_ENTRIES, FACET_CACHE_BYTES)
+        );
+        let derived = index
+            .custom_index(
+                &[CustomField {
+                    key: "custom:display".into(),
+                    mask: "%artist%".into(),
+                }],
+                &|| false,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            derived.facets.lock().unwrap().limits(),
+            (FACET_CACHE_ENTRIES, FACET_CACHE_BYTES),
+            "a computed overlay must not inherit the old thrashing budget"
         );
     }
 }

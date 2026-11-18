@@ -508,6 +508,34 @@ fn remember_asset(stage: &mut StageState, identity: ArtIdentity, revision: u64) 
     }
 }
 
+/// The exact JSON a staged tag value is digested from. Borrowed so a long value
+/// is streamed into the hash instead of being copied into a temporary buffer and
+/// then into a serialized one, per field. Field order matches the sorted keys
+/// `json!` produced, so the digest of an unchanged field is unchanged.
+#[derive(Serialize)]
+struct TagAtom<'a> {
+    invalid: bool,
+    value: &'a Option<String>,
+}
+
+/// Hash the JSON encoding of `value` without materializing it. The digest equals
+/// hashing `serde_json::to_vec(value)`, including escaping and unicode.
+fn digest_json(value: &impl Serialize) -> ServiceResult<String> {
+    struct Sink(Sha256);
+    impl std::io::Write for Sink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut sink = Sink(Sha256::new());
+    serde_json::to_writer(&mut sink, value)?;
+    Ok(format!("{:x}", sink.0.finalize()))
+}
+
 pub(super) fn atoms(plan: &PlanDto) -> ServiceResult<BTreeMap<StageKey, String>> {
     let mut result = BTreeMap::new();
     let mut cache = HashMap::new();
@@ -519,9 +547,10 @@ pub(super) fn atoms(plan: &PlanDto) -> ServiceResult<BTreeMap<StageKey, String>>
                     path: path.clone(),
                     field: format!("tag:{}", field.field),
                 },
-                hash(&serde_json::to_vec(
-                    &json!({"value":field.new,"invalid":field.invalid}),
-                )?),
+                digest_json(&TagAtom {
+                    invalid: field.invalid,
+                    value: &field.new,
+                })?,
             );
         }
         if let Some(cover) = &change.cover_change {
@@ -705,20 +734,105 @@ fn empty_plan() -> PlanDto {
     }
 }
 fn snapshot(state: &State, accepted: bool) -> SharedStageSnapshot {
+    let derived_fields = derived_fields(state);
+    snapshot_with(state, accepted, derived_fields)
+}
+/// The derived-field references a snapshot reports, borrowed from the claim
+/// ledger rather than copied out of a whole snapshot value.
+fn derived_fields(state: &State) -> Vec<StageFieldRef> {
+    state
+        .stage
+        .claims
+        .iter()
+        .filter(|(_, claim)| claim.derived)
+        .map(|(key, _)| key.public())
+        .collect()
+}
+fn snapshot_with(
+    state: &State,
+    accepted: bool,
+    derived_fields: Vec<StageFieldRef>,
+) -> SharedStageSnapshot {
     SharedStageSnapshot {
         revision: state.manual_revision,
         human_revision: state.stage.human_updated_at,
         accepted,
         plan: state.manual_plan.clone(),
         human_plan: state.stage.human_plan.clone(),
-        derived_fields: state
-            .stage
-            .claims
-            .iter()
-            .filter(|(_, claim)| claim.derived)
-            .map(|(key, _)| key.public())
-            .collect(),
+        derived_fields,
     }
+}
+/// The exact field set a snapshot serializes to, borrowed so the inline budget
+/// can be measured before any of the plans is cloned.
+#[derive(Serialize)]
+struct SnapshotView<'a> {
+    revision: u64,
+    human_revision: u64,
+    accepted: bool,
+    plan: Option<&'a PlanDto>,
+    human_plan: Option<&'a PlanDto>,
+    derived_fields: BorrowedDerivedFields<'a>,
+}
+/// Stream derived references directly from the ledger. Even a non-inline
+/// snapshot must not first clone a potentially large list of field/path strings.
+struct BorrowedDerivedFields<'a>(&'a BTreeMap<StageKey, Claim>);
+impl Serialize for BorrowedDerivedFields<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        #[derive(Serialize)]
+        struct Field<'a> {
+            path: &'a str,
+            field: &'a str,
+        }
+        let mut seq = serializer.serialize_seq(None)?;
+        for (key, claim) in self.0 {
+            if claim.derived {
+                seq.serialize_element(&Field {
+                    path: &key.path,
+                    field: key.field.strip_prefix("tag:").unwrap_or(&key.field),
+                })?;
+            }
+        }
+        seq.end()
+    }
+}
+
+/// Counts serialized bytes and stops as soon as a budget is crossed, so a
+/// projection that cannot be kept costs no full JSON copy at all.
+struct ByteBudget {
+    bytes: usize,
+    limit: usize,
+    exceeded: bool,
+}
+impl std::io::Write for ByteBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.limit.saturating_sub(self.bytes) {
+            self.exceeded = true;
+            return Err(std::io::Error::other("serialized budget exceeded"));
+        }
+        self.bytes += bytes.len();
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+/// Serialized length of `value` without materializing it, refusing as soon as it
+/// would cross `limit`. The count is exactly `serde_json::to_vec(value).len()`.
+fn json_len_within(value: &impl Serialize, limit: usize) -> ServiceResult<usize> {
+    let mut budget = ByteBudget {
+        bytes: 0,
+        limit,
+        exceeded: false,
+    };
+    if let Err(error) = serde_json::to_writer(&mut budget, value) {
+        return Err(if budget.exceeded {
+            ServiceError::new("quota", "Serialized plan exceeds its accounting budget")
+        } else {
+            error.into()
+        });
+    }
+    Ok(budget.bytes)
 }
 pub(super) fn event(state: &State, changed: &BTreeSet<StageKey>) -> Value {
     // The event is a wake-up, not the payload: a delta read supplies the
@@ -752,18 +866,15 @@ pub(super) fn event(state: &State, changed: &BTreeSet<StageKey>) -> Value {
     })
 }
 fn stage_budget(plan: Option<&PlanDto>) -> ServiceResult<usize> {
-    let bytes = plan
-        .map(serde_json::to_vec)
-        .transpose()?
-        .map(|plan| plan.len())
-        .unwrap_or(0);
-    if bytes > STAGE_BUDGET {
-        return Err(ServiceError::new(
-            "quota",
-            "The shared staged plan exceeds its 128 MiB budget",
-        ));
-    }
-    Ok(bytes)
+    let Some(plan) = plan else {
+        return Ok(0);
+    };
+    // Same byte count as `serde_json::to_vec(plan)`, streamed: a large staged
+    // plan is measured without materializing a second complete copy of it.
+    json_len_within(plan, STAGE_BUDGET).map_err(|error| match error.code.as_str() {
+        "quota" => ServiceError::new("quota", "The shared staged plan exceeds its 128 MiB budget"),
+        _ => error,
+    })
 }
 /// Positions are keyed by a 64-bit path hash: building and updating the index
 /// allocates nothing per file, which matters at 100k-row stages. A collision
@@ -1133,10 +1244,25 @@ fn resync_delta(
     if files > MAX_RESYNC_INLINE_FILES {
         required = true;
     } else {
-        let value = snapshot(state, true);
-        match serde_json::to_vec(&value) {
-            Ok(bytes) if bytes.len() <= MAX_RESYNC_INLINE_BYTES => snapshot_value = Some(value),
-            _ => required = true,
+        // Measure the exact bytes an inline snapshot would carry from borrowed
+        // data, stopping at the inline budget. The previous shape serialized a
+        // full clone, so a stage too large to inline paid two complete copies
+        // (and their allocation) inside the shared state lock to discover that.
+        let fits = {
+            let view = SnapshotView {
+                revision,
+                human_revision,
+                accepted: true,
+                plan: state.manual_plan.as_ref(),
+                human_plan: state.stage.human_plan.as_ref(),
+                derived_fields: BorrowedDerivedFields(&state.stage.claims),
+            };
+            json_len_within(&view, MAX_RESYNC_INLINE_BYTES).is_ok()
+        };
+        if fits {
+            snapshot_value = Some(snapshot(state, true));
+        } else {
+            required = true;
         }
     }
     StageDelta {
@@ -1714,9 +1840,15 @@ impl Service {
         let incoming = atoms(&plan)?;
         let plan_tags = plan_tag_values(&plan);
         let locked = plan.locked_skipped.clone();
-        let added = serde_json::to_vec(&plan.changes)
-            .map(|changes| changes.len())
-            .unwrap_or(0)
+        // Streamed estimate, so a scope-sized preview is never serialized into a
+        // throwaway buffer just to learn how large it is.
+        let added = json_len_within(&plan.changes, STAGE_BUDGET)
+            .map_err(|error| match error.code.as_str() {
+                "quota" => {
+                    ServiceError::new("quota", "The shared staged plan exceeds its 128 MiB budget")
+                }
+                _ => error,
+            })?
             .saturating_add(256);
         let mut state = lock(&self.0.state)?;
         let current_session = state.stage.session.clone();
@@ -2454,4 +2586,240 @@ impl Service {
 /// Pure field visibility; path admission is evaluated once per request.
 fn visible_field(grant: &Grant, field: &str) -> bool {
     grant.fields.is_empty() || grant.fields.contains(field)
+}
+
+/// Projection accounting and digest compatibility: bounded serialization must
+/// produce the same bytes, digests and inline/required decisions as the owned
+/// path it replaced, without materializing a second full copy of a large stage.
+#[cfg(test)]
+mod stage_projection_accounting_tests {
+    use super::*;
+    use tagrex_commands::FieldChangeDto;
+
+    fn change(index: usize, value_bytes: usize) -> FileChangeDto {
+        FileChangeDto {
+            path: format!("/music/{index:05}.flac"),
+            rename_to: None,
+            copy: false,
+            tag_changes: ["title", "artist", "album", "genre"]
+                .iter()
+                .enumerate()
+                .map(|(field, name)| FieldChangeDto {
+                    field: name.to_string(),
+                    old: Some(format!("old {index} {field}")),
+                    new: Some("y".repeat(value_bytes)),
+                    invalid: field == 1,
+                })
+                .collect(),
+            cover_change: None,
+            sidecar_renames: Vec::new(),
+            block_changes: Vec::new(),
+            rename_root: None,
+            creates_folder: index.is_multiple_of(7),
+            folder_extras: Vec::new(),
+        }
+    }
+    fn plan(files: usize, value_bytes: usize) -> PlanDto {
+        PlanDto {
+            cover_assets: Vec::new(),
+            description: "Staged edits".into(),
+            message: None,
+            notes: Vec::new(),
+            changes: (0..files).map(|i| change(i, value_bytes)).collect(),
+            prune_empty_dirs: false,
+            locked_skipped: Vec::new(),
+            unrendered: Vec::new(),
+        }
+    }
+    fn state(plan: Option<PlanDto>, human: Option<PlanDto>) -> State {
+        let mut claims = BTreeMap::new();
+        claims.insert(
+            StageKey::tag("/music/00000.flac", "genre"),
+            Claim {
+                fingerprint: "fp".into(),
+                owners: [HUMAN.into()].into(),
+                derived: true,
+            },
+        );
+        let stage = StageState {
+            session: "stage_projection".into(),
+            human_plan: human,
+            human_updated_at: 7,
+            claims,
+            ..Default::default()
+        };
+        State {
+            security: SecurityStore::default(),
+            snapshots: HashMap::new(),
+            snapshot_cache: None,
+            selections: HashMap::new(),
+            query_lanes: HashMap::new(),
+            plans: HashMap::new(),
+            assets: HashMap::new(),
+            releases: HashMap::new(),
+            image_receipts: HashMap::new(),
+            operations: HashMap::new(),
+            manual_plan: plan,
+            manual_revision: 11,
+            stage,
+            recovery_required: false,
+            redo_revision: 0,
+        }
+    }
+
+    #[test]
+    fn the_borrowed_snapshot_view_serializes_exactly_the_snapshot_bytes() {
+        let manual = plan(3, 32);
+        let human = plan(2, 16);
+        let mut state = state(Some(manual), Some(human));
+        state.stage.claims.insert(
+            StageKey::special("/music/cover.flac", "artwork"),
+            Claim {
+                fingerprint: "art".into(),
+                owners: [HUMAN.into()].into(),
+                derived: true,
+            },
+        );
+        state.stage.claims.insert(
+            StageKey::tag("/music/plain.flac", "title"),
+            Claim {
+                fingerprint: "plain".into(),
+                owners: [HUMAN.into()].into(),
+                derived: false,
+            },
+        );
+        let derived = derived_fields(&state);
+        let owned = snapshot(&state, true);
+        assert_eq!(owned.derived_fields, derived);
+        let view = SnapshotView {
+            revision: owned.revision,
+            human_revision: owned.human_revision,
+            accepted: owned.accepted,
+            plan: state.manual_plan.as_ref(),
+            human_plan: state.stage.human_plan.as_ref(),
+            derived_fields: BorrowedDerivedFields(&state.stage.claims),
+        };
+        assert_eq!(
+            serde_json::to_vec(&view).unwrap(),
+            serde_json::to_vec(&owned).unwrap(),
+            "the inline decision must measure the bytes the answer carries"
+        );
+        assert_eq!(
+            json_len_within(&view, MAX_RESYNC_INLINE_BYTES).unwrap(),
+            serde_json::to_vec(&owned).unwrap().len()
+        );
+    }
+
+    #[test]
+    fn a_small_resync_still_inlines_the_same_snapshot() {
+        let mut state = state(Some(plan(2, 8)), None);
+        let delta = stage_delta_locked(&mut state, None, None, Instant::now()).unwrap();
+        assert!(delta.resync);
+        assert_eq!(delta.resync_reason.as_deref(), Some("initial"));
+        assert!(!delta.snapshot_required);
+        let inline = delta.snapshot.expect("bounded snapshot is inlined");
+        assert_eq!(inline.revision, 11);
+        assert_eq!(inline.human_revision, 7);
+        assert_eq!(inline.plan.as_ref().map(|plan| plan.changes.len()), Some(2));
+        assert_eq!(inline.derived_fields.len(), 1);
+    }
+
+    #[test]
+    fn an_oversized_resync_requires_the_explicit_snapshot_without_building_it() {
+        // 3000 files stay inside the inline file bound, so only the byte budget
+        // can decide; each file is far over it.
+        let mut state = state(Some(plan(3_000, 1_024)), None);
+        let serialized = serde_json::to_vec(state.manual_plan.as_ref().unwrap())
+            .unwrap()
+            .len();
+        assert!(serialized > MAX_RESYNC_INLINE_BYTES);
+        let started = Instant::now();
+        let delta = stage_delta_locked(&mut state, None, None, Instant::now()).unwrap();
+        assert!(delta.snapshot_required);
+        assert!(delta.snapshot.is_none());
+        assert_eq!(delta.resync_reason.as_deref(), Some("initial"));
+        assert_eq!(delta.files, 3_000);
+        // The bounded decision is a read, not a full JSON render: it must stay
+        // well inside the work a full serialize of this stage would take.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+
+        // A source change still resyncs with the same bounded decision.
+        let delta = stage_delta_locked(
+            &mut state,
+            Some(1),
+            Some("stage_projection"),
+            Instant::now(),
+        )
+        .unwrap();
+        assert!(delta.resync);
+        assert!(delta.snapshot_required);
+        assert!(delta.snapshot.is_none());
+        // Another session can never receive this stage incrementally.
+        let delta =
+            stage_delta_locked(&mut state, Some(11), Some("other"), Instant::now()).unwrap();
+        assert_eq!(delta.resync_reason.as_deref(), Some("session"));
+        assert!(delta.snapshot.is_none());
+    }
+
+    #[test]
+    fn stage_budget_matches_the_wire_length_and_refuses_before_copying() {
+        let plan = plan(40, 64);
+        let wire = serde_json::to_vec(&plan).unwrap().len();
+        assert_eq!(stage_budget(None).unwrap(), 0);
+        assert_eq!(stage_budget(Some(&plan)).unwrap(), wire);
+        assert_eq!(json_len_within(&plan, STAGE_BUDGET).unwrap(), wire);
+        let refused = json_len_within(&plan, wire - 1).expect_err("over budget");
+        assert_eq!(refused.code, "quota");
+        assert_eq!(
+            stage_budget(Some(&plan)).unwrap(),
+            wire,
+            "the staged-plan budget must not drift from the wire length"
+        );
+    }
+
+    #[test]
+    fn over_budget_accounting_stops_instead_of_rendering_every_element() {
+        use serde::ser::SerializeSeq;
+        struct Many(std::cell::Cell<usize>);
+        impl Serialize for Many {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let mut seq = serializer.serialize_seq(Some(1_000_000))?;
+                for _ in 0..1_000_000 {
+                    self.0.set(self.0.get() + 1);
+                    seq.serialize_element(&"expansion\n\"é")?;
+                }
+                seq.end()
+            }
+        }
+        let many = Many(std::cell::Cell::new(0));
+        assert_eq!(
+            json_len_within(&many, 128).expect_err("over budget").code,
+            "quota"
+        );
+        assert!(many.0.get() < 20, "visited {}", many.0.get());
+    }
+
+    #[test]
+    fn atoms_digest_the_wire_json_and_keep_stage_keys() {
+        let mut plan = plan(2, 0);
+        plan.changes[0].tag_changes[0].new = Some("Café \"quoted\"\nline".into());
+        plan.changes[0].tag_changes[2].new = None;
+        plan.changes[1].tag_changes[1].new = Some("ジャングル".into());
+        let atoms = atoms(&plan).unwrap();
+        assert_eq!(atoms.len(), 8);
+        for change in &plan.changes {
+            for field in &change.tag_changes {
+                let key = StageKey::tag(&change.path, &field.field);
+                let expected = hash(
+                    &serde_json::to_vec(&json!({"value":field.new,"invalid":field.invalid}))
+                        .unwrap(),
+                );
+                assert_eq!(atoms.get(&key), Some(&expected), "{key:?}");
+            }
+        }
+    }
 }
