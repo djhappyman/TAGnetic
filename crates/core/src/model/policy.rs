@@ -184,11 +184,60 @@ pub(super) fn update_global(change: impl Fn(&mut Snapshot)) {
     });
     GLOBAL.update(change);
 }
+thread_local! { static OPERATIONS: RefCell<Vec<Rc<u64>>> = const { RefCell::new(Vec::new()) }; }
+/// Pins the caller's active policy, or standalone defaults, for a synchronous
+/// Executor call. Nested user operations have independent admission identities.
+pub(crate) struct OperationPolicy {
+    token: Rc<u64>,
+    _scope: PolicyScope,
+}
+impl OperationPolicy {
+    pub(crate) fn enter() -> Option<Self> {
+        let owner = ACTIVE
+            .with(|active| active.borrow().last().map(|frame| frame.owner.clone()))
+            .unwrap_or_else(|| GLOBAL.clone());
+        let scope = owner.enter();
+        let revision = capture().1;
+        if revision == u64::MAX {
+            return None;
+        }
+        let token = Rc::new(revision);
+        OPERATIONS.with(|operations| operations.borrow_mut().push(token.clone()));
+        Some(Self {
+            token,
+            _scope: scope,
+        })
+    }
+}
+impl Drop for OperationPolicy {
+    fn drop(&mut self) {
+        let _ = OPERATIONS.try_with(|operations| {
+            operations
+                .borrow_mut()
+                .retain(|token| !Rc::ptr_eq(token, &self.token))
+        });
+    }
+}
+pub(crate) fn operation_policy_valid() -> bool {
+    // Only trusted private rollback may keep using the originally admitted
+    // interpretation after a public callback invalidated its parent operation.
+    let recovery = ACTIVE.with(|active| {
+        active
+            .borrow()
+            .iter()
+            .rev()
+            .find(|frame| frame.sealed)
+            .map(|frame| frame.snapshot.revision)
+    });
+    let expected = recovery
+        .or_else(|| OPERATIONS.with(|operations| operations.borrow().last().map(|token| **token)));
+    let revision = capture().1;
+    revision != u64::MAX && expected.is_none_or(|expected| revision == expected)
+}
+
 /// An operation-local copy of an already admitted interpretation. This is
 /// private rollback authority, never a persisted policy or a user IO scope.
-#[cfg(target_os = "linux")]
 pub(crate) struct RecoveryPolicy(ModelPolicy);
-#[cfg(target_os = "linux")]
 impl RecoveryPolicy {
     pub(crate) fn capture() -> Option<Self> {
         let (snapshot, revision) = capture();

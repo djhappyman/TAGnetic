@@ -2,6 +2,7 @@
 use std::{
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
 };
 use tagrex_core::{
     journal::{AppliedBatch, BatchId, JournalError, MoveStage, SqliteJournal, UndoJournal},
@@ -63,14 +64,14 @@ impl UndoJournal for InterruptAfterIntent {
     }
     fn prepare_move_stage(&mut self, id: BatchId, stage: &MoveStage) -> Result<(), JournalError> {
         self.journal.prepare_move_stage(id, stage)?;
-        // Simulate an interruption with material in the reserved entry. No
-        // production fault hook or real external path is used.
+        // Terminate the disposable child after durable intent. No unwind
+        // rollback, production fault hook or external path is involved.
         if self.capture_owned {
             std::fs::rename(&stage.from, &stage.path).unwrap();
         } else {
             std::fs::write(&stage.path, b"foreign fixture material").unwrap();
         }
-        panic!("fixture interruption after durable stage intent");
+        std::process::exit(73);
     }
     fn move_stages(&self, id: BatchId) -> Result<Vec<MoveStage>, JournalError> {
         self.journal.move_stages(id)
@@ -85,29 +86,88 @@ fn pending_named(
     let target = fixture.0.join(format!("{name}-target.wav"));
     let original = wav(0);
     std::fs::write(&source, &original).unwrap();
-    let mut journal = InterruptAfterIntent {
-        journal: SqliteJournal::open(&fixture.database()).unwrap(),
-        capture_owned,
+    let log_path = fixture.0.join(format!("{name}-crash-child.log"));
+    let log = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&log_path)
+        .unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "move_stage_interruption_child", "--nocapture"])
+        .env("TAGREX_STAGE_CRASH_ROOT", &fixture.0)
+        .env("TAGREX_STAGE_CRASH_NAME", name)
+        .env("TAGREX_STAGE_CRASH_CAPTURE", capture_owned.to_string())
+        .stdout(log.try_clone().unwrap())
+        .stderr(log.try_clone().unwrap())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < Duration::from_secs(30) => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => {
+                let _ = child.kill();
+                let _ = child.wait();
+                drop(log);
+                let output = std::fs::read(&log_path).unwrap_or_default();
+                panic!(
+                    "crash child deadline/wait failure {result:?}: {}",
+                    String::from_utf8_lossy(&output)
+                );
+            }
+        }
     };
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        Executor::apply(
-            &ChangePlan {
-                changes: vec![FileChange {
-                    path: source.clone(),
-                    rename_to: Some(target.clone()),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-            &mut journal,
-            std::slice::from_ref(&fixture.0),
-        )
-    }));
-    assert!(result.is_err());
-    let batch = journal.journal.batches().unwrap().remove(0);
-    let stage = journal.journal.move_stages(batch.id).unwrap().remove(0);
+    drop(log);
+    let output = std::fs::read(&log_path).unwrap();
+    assert_eq!(
+        status.code(),
+        Some(73),
+        "child missed durable intent: {}",
+        String::from_utf8_lossy(&output)
+    );
+    std::fs::remove_file(log_path).unwrap();
+    let journal = SqliteJournal::open(&fixture.database()).unwrap();
+    let batch = journal.batches().unwrap().remove(0);
+    let stage = journal.move_stages(batch.id).unwrap().remove(0);
     (batch.id, stage, source, target, original)
 }
+/// Only the parent owns fixture cleanup, even if this child unexpectedly unwinds.
+#[test]
+fn move_stage_interruption_child() {
+    let Some(root) = std::env::var_os("TAGREX_STAGE_CRASH_ROOT") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let name = std::env::var("TAGREX_STAGE_CRASH_NAME").unwrap();
+    let capture_owned = std::env::var("TAGREX_STAGE_CRASH_CAPTURE")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let source = root.join(format!("{name}-source.wav"));
+    let target = root.join(format!("{name}-target.wav"));
+    let mut journal = InterruptAfterIntent {
+        journal: SqliteJournal::open(&root.join("journal.sqlite")).unwrap(),
+        capture_owned,
+    };
+    Executor::apply(
+        &ChangePlan {
+            changes: vec![FileChange {
+                path: source,
+                rename_to: Some(target),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        &mut journal,
+        std::slice::from_ref(&root),
+    )
+    .unwrap();
+    panic!("child never reached its durable intent boundary");
+}
+
 fn pending(
     fixture: &Fixture,
     capture_owned: bool,
