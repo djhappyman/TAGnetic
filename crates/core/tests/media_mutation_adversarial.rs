@@ -250,7 +250,7 @@ fn non_linux_store_remains_an_explicit_opt_out() {
         media_mutation::{Error, Limits, Store},
         resources::Budget,
     };
-    assert!(!tagrex_core::media_mutation::SUPPORTED);
+    const { assert!(!tagrex_core::media_mutation::SUPPORTED) };
     assert!(matches!(
         Store::open(
             std::path::Path::new("."),
