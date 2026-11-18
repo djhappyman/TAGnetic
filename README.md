@@ -79,7 +79,7 @@ A completed basic feature does not mean every advanced option is finished. The l
 Service authority/lifecycle [PR #50](https://github.com/djhappyman/TAGnetic/pull/50)
 is merged at `67625add`. The protected Linux FLAC text Apply/persistent-Undo
 checkpoint is [PR #54](https://github.com/djhappyman/TAGnetic/pull/54), reviewed
-head `503408da`; its hosted checks and merge record are tracked there. It includes
+head `b7e19f2a`; its hosted checks and merge record are tracked there. It includes
 required shared file-recovery, per-App metadata-policy and admission corrections.
 The clean publication passed 1,638 workspace tests, Clippy and formatting;
 scoped independent reviews completed, including portable policy, true process-death harnesses and descriptor IO compatibility.

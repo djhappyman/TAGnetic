@@ -51,7 +51,7 @@ PR scope; no whole-roadmap completion or release availability is claimed.
 
 ## Final FLAC publication compatibility review
 
-PR #54 (reviewed head `503408da`) includes corrected per-App metadata policy,
+PR #54 (reviewed head `b7e19f2a`) includes corrected per-App metadata policy,
 rollback after settings changes, valid-generation display/query caching and
 bounded compound native admission. The final policy review accepted 17 independent
 probes; admission review accepted 54 tests after correcting private-sink reentry
@@ -99,3 +99,22 @@ before constructing paths. Production authority predicates and original fault
 assertions are unchanged. [Independent review](backend-windows-authority-independent-review.md)
 checked the previously hidden bodies and found no further scoped defect from
 source; exact-head Windows execution remains required.
+
+
+### Created-directory receipt comparison
+
+Windows passed the previous core fixture and command failures, then found one
+Executor assertion comparing resolved receipt paths with raw temporary-root
+spelling. [Independent review](backend-created-directory-path-independent-review.md)
+accepted canonical containment comparison while preserving raw public inputs,
+folder counts, Undo removal and pre-existing-folder survival. The old assertion
+reproduced under a Linux symlink-TMPDIR; all 48 Executor cases passed under the
+same alias after correction. Fork CI now collects every target failure using
+`--no-fail-fast`; failed targets still block merge. Backend code is unchanged.
+
+
+The Unix-only cleanup-index fixture had the same private canonical-root
+precondition; its original setup failed under a disposable symlink TMPDIR.
+Two test-only setup lines now normalize that root, and both retained index and
+retirement cases pass under the alias. All alias-redirection and retained-pin
+assertions remain. This is local Unix evidence, not actual macOS execution.
