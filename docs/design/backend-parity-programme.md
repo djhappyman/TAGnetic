@@ -1,5 +1,10 @@
 # Backend parity and hardening programme
 
+> Resumed: the owner now authorizes completion of the remaining backend programme.
+> Follow [the active execution plan](backend-resumption.md). Earlier pause wording
+> below records the historical checkpoint and is superseded for current work.
+
+
 This programme covers the remaining Rust capabilities in the README roadmap,
 including the new foundations at `2a9341e9` and `75fc07fc`. It preserves
 Tagnetic's current workflow and existing data. Backend-only delivery leaves
@@ -11,18 +16,20 @@ product feature checkboxes unchecked until the UI is implemented and verified.
 
 The authorized finish-and-pause boundary is protected Linux FLAC
 [PR #54](https://github.com/djhappyman/TAGnetic/pull/54), reviewed head
-`b7e19f2a0fd5170fda939476aeaa2d376d157a04`. Required hosted checks and merge
+`63102f9cce292096c07214c74238e4f80e1abcce`. Required hosted checks and merge
 records are linked there. Service authority/lifecycle
 [PR #50](https://github.com/djhappyman/TAGnetic/pull/50) merged at `67625add`
 after all four hosted checks passed.
 
 **Remaining implementation is paused.** Read [resume tracker #51](https://github.com/djhappyman/TAGnetic/issues/51)
-and the [handoff](backend-pause-2026-11-18.md) before starting again. The clean
-FLAC publication passed 1,638 workspace tests, zero failures, 34 existing optional
+and the [handoff](backend-pause-2026-11-18.md) before starting again. The historical `b7e19f2a`
+FLAC checkpoint passed 1,638 Linux workspace tests, zero failures, 34 existing optional
 ignored; workspace Clippy/formatting, two private D-Bus tests and UI check/lint/
 build plus 216 unit tests passed. Independent coordinator, journal, policy,
 admission, portable-boundary, process-death harness, descriptor IO, Windows
 fixture and created-directory receipt reviews completed after corrections.
+The current platform candidate adds a reciprocal static review and has not been
+compiled, tested or formatted locally; all runtime gates are hosted.
 These overlapping scopes do not
 certify the wider parked programme, every platform or a release.
 

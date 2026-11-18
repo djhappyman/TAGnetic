@@ -74,17 +74,19 @@ The backend foundation checkpoint `2a9341e9` is committed on `feat/native-field-
 
 A completed basic feature does not mean every advanced option is finished. The list tracks product capabilities, not delivery dates or a guarantee for every file variant. See the [changelog](CHANGELOG.md) for release history and the [engineering roadmap](docs/ROADMAP.md) for performance, platform testing and release work.
 
-### Backend checkpoint and pause — 18 November 2026
+### Backend checkpoint and resumed programme — 18 November 2026
 
 Service authority/lifecycle [PR #50](https://github.com/djhappyman/TAGnetic/pull/50)
 is merged at `67625add`. The protected Linux FLAC text Apply/persistent-Undo
 checkpoint is [PR #54](https://github.com/djhappyman/TAGnetic/pull/54), reviewed
-head `b7e19f2a`; its hosted checks and merge record are tracked there. It includes
+head `63102f9c`; its hosted checks and merge record are tracked there. It includes
 required shared file-recovery, per-App metadata-policy and admission corrections.
-The clean publication passed 1,638 workspace tests, Clippy and formatting;
+The historical Linux checkpoint `b7e19f2a` passed 1,638 workspace tests, Clippy and formatting;
+the changed platform candidate is source-reviewed and awaits hosted validation.
 scoped independent reviews completed, including portable policy, true process-death harnesses and descriptor IO compatibility.
 
-Remaining backend implementation is **paused and preserved**. This is not a
+Remaining backend implementation is **active again** under the owner’s resumed
+programme. See [the active execution plan](docs/design/backend-resumption.md). This is not a
 complete backend/UI milestone or a new release. See [the handoff](docs/design/backend-pause-2026-11-18.md),
 [publication evidence](docs/performance/native-flac-publication.md) and
 [resume issue #51](https://github.com/djhappyman/TAGnetic/issues/51).

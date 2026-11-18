@@ -2,16 +2,19 @@
 
 This is a working direction, not a promise of dates or platform performance. Current development targets `main` in this fork. Upstream contribution branches are curated separately.
 
-## Backend checkpoint and pause — 18 November 2026
+## Backend checkpoint and resumed programme — 18 November 2026
 
 Service authority/lifecycle PR #50 is merged at `67625add`. The finish-and-pause
 boundary is protected Linux FLAC [PR #54](https://github.com/djhappyman/TAGnetic/pull/54),
-reviewed head `b7e19f2a`; required hosted results and merge evidence live there.
-Its clean publication passed 1,638 workspace tests, Clippy and formatting after
+reviewed head `63102f9c`; required hosted results and merge evidence live there.
+The earlier `b7e19f2a` source passed 1,638 Linux workspace tests, Clippy and formatting after
 scoped independent reviews, including portable policy, true-death harnesses and descriptor IO compatibility. It includes required shared file-recovery,
-per-App policy and concurrent-admission corrections.
+per-App policy and concurrent-admission corrections. The new platform correction
+is source-reviewed only; current runtime/compile/format verification is pending hosted CI.
 
-All remaining backend implementation is paused and preserved. Start next time
+The owner has resumed all remaining backend implementation. Follow the
+[active execution plan](design/backend-resumption.md). The historical handoff
+preserves the earlier checkpoint. Continue with
 with the [handoff](design/backend-pause-2026-11-18.md),
 [programme](design/backend-parity-programme.md) and
 [resume issue #51](https://github.com/djhappyman/TAGnetic/issues/51).
