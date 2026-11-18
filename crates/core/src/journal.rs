@@ -534,6 +534,14 @@ fn is_damaged_database(path: &Path) -> bool {
     else {
         return false;
     };
+    // A locked healthy journal must not stall recovery classification on the
+    // dependency's longer default busy wait, or be mistaken for corruption.
+    if conn
+        .busy_timeout(std::time::Duration::from_millis(500))
+        .is_err()
+    {
+        return false;
+    }
     match conn.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0)) {
         Ok(verdict) => verdict != "ok",
         Err(rusqlite::Error::SqliteFailure(failure, _)) => matches!(
@@ -1430,6 +1438,7 @@ impl SqliteJournal {
         #[cfg(target_os = "linux")]
         let native_profile = native::Profile::capture(path)?;
         let mut storage = rusqlite::Connection::open(path)?;
+        storage.busy_timeout(std::time::Duration::from_millis(500))?;
         let version: i64 = storage.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if !(0..=VERSION).contains(&version) {
             return Err(JournalError::Storage(format!(

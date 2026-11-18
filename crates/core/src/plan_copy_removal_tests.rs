@@ -18,6 +18,7 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir(&root).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
         Self(root)
     }
 }

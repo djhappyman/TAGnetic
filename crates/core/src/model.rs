@@ -2777,6 +2777,7 @@ impl TagEngine {
         if cancelled() {
             return Err(exact::ExactReadError::Cancelled);
         }
+        input.ensure_format(legacy.file.format)?;
         input.ensure_unchanged()?;
         let text = exact::snapshot(
             &input,
@@ -2793,6 +2794,9 @@ impl TagEngine {
             return Err(exact::ExactReadError::Changed);
         }
         input.ensure_unchanged()?;
+        if policy == u64::MAX || exact::ExactReadPolicy::capture() != read_policy {
+            return Err(exact::ExactReadError::Changed);
+        }
         exact::ExactTrackRead::new(legacy, text)
     }
 

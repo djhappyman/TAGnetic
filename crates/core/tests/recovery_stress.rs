@@ -695,6 +695,16 @@ fn unversioned_migration_failure_is_transactional() {
 #[test]
 fn non_unicode_paths_are_refused_before_any_journal_or_media_mutation() {
     use std::os::unix::ffi::OsStringExt;
+    fn create_native_entry(result: std::io::Result<()>) {
+        match result {
+            Ok(()) => {}
+            Err(error) if cfg!(target_vendor = "apple") && error.raw_os_error() == Some(92) => {
+                // APFS cannot create invalid UTF-8 filenames. The invalid path
+                // still enters the public plan and must fail before mutation.
+            }
+            Err(error) => panic!("could not create native-byte fixture entry: {error}"),
+        }
+    }
     for variant in ["audio", "destination", "sidecar", "root"] {
         let fixture = Fixture::new("native-path-refusal");
         let invalid = fixture
@@ -711,27 +721,43 @@ fn non_unicode_paths_are_refused_before_any_journal_or_media_mutation() {
         };
         match variant {
             "audio" => {
-                std::fs::write(&invalid, flac()).unwrap();
+                create_native_entry(std::fs::write(&invalid, flac()));
                 plan.changes[0].path = invalid.clone();
             }
             "destination" => plan.changes[0].rename_to = Some(invalid.clone()),
             "sidecar" => {
-                std::fs::write(&invalid, b"sidecar").unwrap();
+                create_native_entry(std::fs::write(&invalid, b"sidecar"));
                 plan.changes[0]
                     .sidecar_renames
                     .push((invalid.clone(), fixture.0.join("target.txt")));
             }
             "root" => {
-                std::fs::create_dir(&invalid).unwrap();
+                create_native_entry(std::fs::create_dir(&invalid));
                 roots = vec![invalid.clone()];
             }
             _ => unreachable!(),
         }
         let mut journal = SqliteJournal::open(&fixture.0.join("journal.sqlite")).unwrap();
-        let before = std::fs::read(&plan.changes[0].path).unwrap();
+        let watched: Vec<_> = ["a.flac", "b.flac", "a.lrc"]
+            .into_iter()
+            .map(|name| {
+                let path = fixture.0.join(name);
+                let bytes = std::fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect();
+        let invalid_before = std::fs::read(&invalid).ok();
+        let invalid_exists = std::fs::symlink_metadata(&invalid).is_ok();
         let error = Executor::apply(&plan, &mut journal, &roots).unwrap_err();
         assert!(error.to_string().contains("Unicode"));
-        assert_eq!(std::fs::read(&plan.changes[0].path).unwrap(), before);
+        for (path, before) in watched {
+            assert_eq!(std::fs::read(path).unwrap(), before);
+        }
+        assert_eq!(std::fs::read(&invalid).ok(), invalid_before);
+        assert_eq!(std::fs::symlink_metadata(&invalid).is_ok(), invalid_exists);
+        if variant == "root" && invalid_exists {
+            assert!(std::fs::read_dir(&invalid).unwrap().next().is_none());
+        }
         assert!(journal.batches().unwrap().is_empty());
         assert!(!fixture.0.join("target.flac").exists());
         assert!(!fixture.0.join("target.txt").exists());

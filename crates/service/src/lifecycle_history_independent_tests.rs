@@ -62,7 +62,16 @@ fn expired_undo_and_redo_waiters_preserve_every_file_history_and_durable_receipt
         let until = Instant::now() + Duration::from_secs(3);
         loop {
             let operations = service.operations().unwrap();
-            if operations["operations"][0]["status"] == "succeeded" {
+            // Initial in-memory success precedes receipt persistence. Establish
+            // a durable baseline before testing that expired waiters cannot act.
+            let receipts: Vec<OperationRecord> =
+                read_json(&root.path().join("service/operations.json")).unwrap().unwrap();
+            if operations["operations"][0]["status"] == "succeeded"
+                && receipts.iter().any(|record| {
+                    record.id == operation["operation"].as_str().unwrap()
+                        && record.status == "succeeded"
+                })
+            {
                 break;
             }
             assert!(Instant::now() < until, "initial operation: {operations}");

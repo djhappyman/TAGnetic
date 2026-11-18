@@ -2,7 +2,7 @@
 //! redirect a later mutation by replacing an ancestor with a directory link.
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fs::File,
     io,
     path::{Component, Path, PathBuf},
@@ -56,7 +56,7 @@ impl Scope {
             directory_paths: std::collections::BTreeSet::new(),
             #[cfg(unix)]
             aliases_by_directory: std::collections::BTreeMap::new(),
-            optional: HashSet::new(),
+            optional: BTreeSet::new(),
             anchors: HashMap::new(),
             step_pins: Vec::new(),
             step_files: HashMap::new(),
@@ -96,7 +96,8 @@ impl Scope {
                         .walk(&resolved, false, true, &mut Vec::new())?
                         .is_none()
                     {
-                        authority.optional.insert(parent);
+                        // Alias spellings share one admitted absent target.
+                        authority.optional.insert(resolved);
                     }
                 }
             }
@@ -125,7 +126,8 @@ struct Authority {
     directory_paths: std::collections::BTreeSet<PathBuf>,
     #[cfg(unix)]
     aliases_by_directory: std::collections::BTreeMap<PathBuf, HashSet<PathBuf>>,
-    optional: HashSet<PathBuf>,
+    // Canonical directory targets admitted as absent at the operation boundary.
+    optional: BTreeSet<PathBuf>,
     anchors: HashMap<PathBuf, Arc<File>>,
     step_pins: Vec<Arc<File>>,
     step_files: HashMap<PathBuf, Arc<File>>,
@@ -251,6 +253,17 @@ impl Authority {
         }
         Ok(current)
     }
+    fn retire_optional(&mut self, directory: &Path) {
+        let retired: Vec<_> = self
+            .optional
+            .range(directory.to_path_buf()..)
+            .take_while(|path| path.starts_with(directory))
+            .cloned()
+            .collect();
+        for path in retired {
+            self.optional.remove(&path);
+        }
+    }
 }
 fn absolute(path: &Path) -> io::Result<PathBuf> {
     let path = if path.is_absolute() {
@@ -303,11 +316,20 @@ impl Authority {
                         && create
                         && self.roots.iter().any(|root| next.starts_with(root)) =>
                 {
+                    if self.directories.contains_key(&next) {
+                        return Err(changed());
+                    }
                     mkdirat(directory.as_ref(), name, Mode::from_bits_truncate(0o755))?;
                     created.push(next.clone());
                     openat(directory.as_ref(), name, flags, Mode::empty())?
                 }
-                Err(error) if error == rustix::io::Errno::NOENT && missing_ok => return Ok(None),
+                Err(error) if error == rustix::io::Errno::NOENT && missing_ok => {
+                    return if self.directories.contains_key(&next) {
+                        Err(changed())
+                    } else {
+                        Ok(None)
+                    };
+                }
                 Err(error) => return Err(error.into()),
             };
             let opened = Arc::new(File::from(opened));
@@ -348,18 +370,20 @@ impl Authority {
                     },
                 );
             }
+            // Any verified opening consumes absence authority for every alias,
+            // including intermediate parents created by a deeper create_all.
+            self.optional.remove(&next);
             current = next;
             directory = opened;
         }
         Ok(Some(directory))
     }
     fn directory(&mut self, path: &Path) -> io::Result<Arc<File>> {
-        let original = absolute(path)?;
         let path = self.resolved(path)?;
         let file = self
             .walk(&path, false, false, &mut Vec::new())?
             .ok_or_else(changed)?;
-        self.optional.remove(&original);
+        self.optional.remove(&path);
         Ok(file)
     }
     fn parent(&mut self, path: &Path) -> io::Result<(Arc<File>, std::ffi::OsString)> {
@@ -406,7 +430,16 @@ impl Authority {
         let (parent, name) = self.parent(path)?;
         #[cfg(any(target_os = "linux", target_os = "android"))]
         let flags = OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        // Darwin has no O_PATH. O_SYMLINK opens the terminal link itself;
+        // O_NOFOLLOW with an ordinary read instead refuses every link (ELOOP).
+        // The parent descriptor still comes from the no-follow directory walk.
+        #[cfg(target_vendor = "apple")]
+        let flags = OFlags::RDONLY | OFlags::SYMLINK | OFlags::CLOEXEC | OFlags::NONBLOCK;
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_vendor = "apple"
+        )))]
         let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
         let file = File::from(openat(parent.as_ref(), &name, flags, Mode::empty())?);
         let kind = file.metadata()?.file_type();
@@ -526,6 +559,10 @@ impl Authority {
     }
     fn remove(&mut self, path: &Path, directory: bool) -> io::Result<()> {
         let (parent, name) = self.parent(path)?;
+        // Resolve only the parent: terminal links remain entry operations.
+        let resolved = self
+            .resolved(path.parent().ok_or_else(changed)?)?
+            .join(&name);
         let result = rustix::fs::unlinkat(
             parent.as_ref(),
             &name,
@@ -537,8 +574,7 @@ impl Authority {
         )
         .map_err(Into::into);
         if result.is_ok() && directory {
-            let path = absolute(path)?;
-            let resolved = self.aliases.get(&path).cloned().unwrap_or(path);
+            self.retire_optional(&resolved);
             let paths: Vec<_> = self
                 .directory_paths
                 .range(resolved.clone()..)
@@ -637,6 +673,9 @@ impl Authority {
                         && create
                         && self.roots.iter().any(|root| current.starts_with(root)) =>
                 {
+                    if self.directories.contains_key(&current) {
+                        return Err(changed());
+                    }
                     std::fs::create_dir(&current)?;
                     created.push(current.clone());
                     std::fs::OpenOptions::new()
@@ -646,7 +685,11 @@ impl Authority {
                         .open(&current)?
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound && missing_ok => {
-                    return Ok(None)
+                    return if self.directories.contains_key(&current) {
+                        Err(changed())
+                    } else {
+                        Ok(None)
+                    };
                 }
                 Err(error) => return Err(error),
             };
@@ -662,18 +705,18 @@ impl Authority {
                 }
             }
             let file = Arc::new(file);
+            self.optional.remove(&current);
             self.directories.insert(current.clone(), file.clone());
             last = Some(file);
         }
         Ok(last)
     }
     fn directory(&mut self, path: &Path) -> io::Result<Arc<File>> {
-        let original = absolute(path)?;
         let path = self.resolved(path)?;
         let file = self
             .walk(&path, false, false, &mut Vec::new())?
             .ok_or_else(changed)?;
-        self.optional.remove(&original);
+        self.optional.remove(&path);
         Ok(file)
     }
     fn open(&mut self, path: &Path, write: bool, create_new: bool) -> io::Result<File> {
@@ -741,6 +784,7 @@ impl Authority {
             self.directories.retain(|key, _| !key.starts_with(&actual));
             let result = std::fs::remove_dir(&actual);
             if result.is_ok() {
+                self.retire_optional(&actual);
                 self.aliases
                     .retain(|_, canonical| !canonical.starts_with(&actual));
             }
@@ -827,7 +871,7 @@ pub(super) fn create_all(path: &Path) -> io::Result<Vec<PathBuf>> {
                     .as_path(),
             )?;
             authority.walk(&resolved, true, false, &mut created)?;
-            authority.optional.remove(&absolute(path)?);
+            authority.optional.remove(&resolved);
             Ok(created)
         }
         None => {
@@ -874,17 +918,28 @@ pub(super) fn validate() -> io::Result<()> {
         };
         let paths: Vec<_> = authority.aliases.keys().cloned().collect();
         for path in paths {
-            if authority.optional.contains(&path)
-                && std::fs::symlink_metadata(&path)
-                    .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
-            {
-                continue;
+            // Check immutable alias/root binding before allowing absence. A
+            // still-missing leaf cannot hide replacement of a present ancestor.
+            let resolved = authority.resolved(&path)?;
+            if authority.optional.contains(&resolved) {
+                if authority
+                    .walk(&resolved, false, true, &mut Vec::new())?
+                    .is_none()
+                {
+                    continue;
+                }
+                authority.optional.remove(&resolved);
+            } else {
+                authority.directory(&path)?;
             }
-            authority.directory(&path)?;
         }
         Ok(())
     })
 }
+
+#[cfg(all(test, unix))]
+#[path = "plan_optional_parent_tests.rs"]
+mod optional_parent_tests;
 
 #[cfg(all(test, unix))]
 mod cleanup_index_tests {

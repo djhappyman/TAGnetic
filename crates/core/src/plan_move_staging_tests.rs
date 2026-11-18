@@ -437,13 +437,23 @@ fn replaced_private_directory_after_restart_is_refused_and_retry_is_safe() {
 fn real_sqlite_full_during_stage_intent_does_not_move_any_payload() {
     let fixture = Fixture::new("sqlite-full-stage");
     let mut nested = fixture.0.clone();
-    // A long valid source directory makes the journal stage row require an
-    // overflow page. The actual SQLite pager cap then produces SQLITE_FULL.
-    for index in 0..7 {
-        nested.push(format!("{index}-{}", "x".repeat(180)));
+    // Small real SQLite pages make this valid, portable source path require an
+    // overflow page without first exceeding Darwin's pathname limit. Configure
+    // the empty database before the journal creates its schema.
+    let db = fixture.0.join("journal.sqlite");
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection.pragma_update(None, "page_size", 512).unwrap();
+    connection.execute_batch("VACUUM").unwrap();
+    let page_size: i64 = connection
+        .pragma_query_value(None, "page_size", |row| row.get(0))
+        .unwrap();
+    assert_eq!(page_size, 512);
+    drop(connection);
+    for index in 0..4 {
+        nested.push(format!("{index}-{}", "x".repeat(120)));
         std::fs::create_dir(&nested).unwrap();
     }
-    let (mut journal, batch) = seeded_at(&nested, &fixture.0.join("journal.sqlite"));
+    let (mut journal, batch) = seeded_at(&nested, &db);
     journal.test_limit_to_current_pages().unwrap();
     let source = nested.join("source.bin");
     let target = nested.join("target.bin");
