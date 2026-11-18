@@ -1,9 +1,10 @@
 # Backend pause checkpoint — 18 November 2026
 
-Implementation is paused at the owner’s request. Start with [resume issue #51](https://github.com/djhappyman/TAGnetic/issues/51)
-and [the programme](backend-parity-programme.md). No implementation or review
-agent remains active. Resume only when requested; no product feature was marked
-complete by this pause.
+The owner clarified: finish reviewing and merging the narrow FLAC integration
+slice first, then pause all remaining implementation. Start with [resume issue #51](https://github.com/djhappyman/TAGnetic/issues/51)
+and [the programme](backend-parity-programme.md). Independent coordinator and journal reviews are active for that slice. Broader
+work remains paused; the stress-runner review is deferred. No product feature
+was marked complete by this checkpoint.
 
 ## What is actually merged
 
@@ -25,7 +26,7 @@ This is the only newly merged code from the wider hardening programme.
 | Copy/move/staging recovery | Fresh copy review: 437 passed, five optional ignored; strong ownership and duplicate-proof refusal | Native filesystems, power loss and low-latency busy cancellation |
 | Exact held-file reads and selective candidate/receipt components | 100 combined tests, plus all six explicit manual probes passed; component reviews recorded | Their later integration must be reviewed anew |
 | Protected media and held-parent opening | Fresh 71-test gate, one manual profile ignored; controlled parent substitution and real process-death evidence | Production coordinator and platform integration |
-| Ordinary FLAC Apply/persistent Undo | Frozen author candidate: 850 core tests passed, 31 default ignored; 22 new public probes and two explicit manual probes passed | **NEW independent integration review — first on resume** |
+| Ordinary FLAC Apply/persistent Undo | Frozen author candidate: 850 core tests passed, 31 default ignored; 22 new public probes and two explicit manual probes passed | **Independent integration review active before final pause** |
 | Artwork/EXIF, scalar CSV/TSV imports, structured report rendering/output ownership | Scoped implementations and reviews preserved | Native picture/stage/command/grouped export/append and UI integration |
 | Stress coverage contract | 48 registered cases; 16 harness tests passed | **NEW independent runner review**, then full frozen-programme run |
 

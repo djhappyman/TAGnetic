@@ -2,17 +2,19 @@
 
 This is a working direction, not a promise of dates or platform performance. Current development targets `main` in this fork. Upstream contribution branches are curated separately.
 
-## Backend implementation paused — 18 November 2026
+## Finish FLAC integration, then pause — 18 November 2026
 
 Service authority/lifecycle PR #50 is merged at `67625add` after all four hosted
-checks passed. Remaining backend work is preserved locally and paused; it is
+checks passed. Finish the independent review and merge of the narrow FLAC slice
+first, as the owner requested; remaining backend work is preserved and paused. It is
 not a new release or full UI readiness claim. See the [pause handoff](design/backend-pause-2026-11-18.md),
 [backend programme](design/backend-parity-programme.md) and
 [resume issue #51](https://github.com/djhappyman/TAGnetic/issues/51).
 
-Resume with fresh independent reviews of the ordinary FLAC Apply/persistent-Undo
-integration and stress-runner contract. Then run combined frozen-source checks,
-resolve findings and publish focused PRs. Keep exact staging, mixed/typed and
+The ordinary FLAC Apply/persistent-Undo integration is under fresh independent
+review now. Resolve findings, run combined frozen-source checks and publish its
+focused scope before the final pause. Review the stress-runner contract in the
+next requested session. Keep exact staging, mixed/typed and
 other-format operations, picture/export integration and native platform/device
 proof open. Do not re-tick product features from backend-only evidence.
 

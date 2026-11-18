@@ -74,16 +74,18 @@ The backend foundation checkpoint `2a9341e9` is committed on `feat/native-field-
 
 A completed basic feature does not mean every advanced option is finished. The list tracks product capabilities, not delivery dates or a guarantee for every file variant. See the [changelog](CHANGELOG.md) for release history and the [engineering roadmap](docs/ROADMAP.md) for performance, platform testing and release work.
 
-### Backend pause checkpoint — 18 November 2026
+### Backend finish-and-pause checkpoint — 18 November 2026
 
 Service authority/lifecycle [PR #50](https://github.com/djhappyman/TAGnetic/pull/50)
 is merged into `main` at `67625add`, with all four hosted checks passing.
-The remaining backend hardening work is **paused and preserved**, not merged or
-installed. Component reviews and the new Linux FLAC Apply/persistent-Undo
+The owner has requested completion of the narrow FLAC integration review and
+merge before the final pause. Other backend work is **paused and preserved**,
+not merged or installed. Component reviews and the new Linux FLAC Apply/persistent-Undo
 candidate are recorded in [the handoff](docs/design/backend-pause-2026-11-18.md)
 and [resume issue #51](https://github.com/djhappyman/TAGnetic/issues/51).
-The first tasks on resumption are independent reviews of that integration and
-the stress-runner contract, followed by combined verification and focused PRs.
+Independent FLAC coordinator/journal reviews are active. After that slice merges,
+refresh this handoff and pause; the stress-runner review and broader work remain
+for the next requested session.
 Feature/UI checkboxes below remain unchanged.
 
 ### Editing and reviewing changes

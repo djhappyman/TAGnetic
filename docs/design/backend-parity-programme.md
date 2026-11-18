@@ -7,12 +7,14 @@ product feature checkboxes unchecked until the UI is implemented and verified.
 
 ## Scope and dependency order
 
-### Paused checkpoint — 18 November 2026
+### Finish FLAC integration, then pause — 18 November 2026
 
-Implementation is paused at the owner’s request. [Resume tracker #51](https://github.com/djhappyman/TAGnetic/issues/51)
+At the owner’s clarified request, complete the narrow FLAC integration review
+and merge first, then pause all remaining implementation. [Resume tracker #51](https://github.com/djhappyman/TAGnetic/issues/51)
 and the [pause handoff](backend-pause-2026-11-18.md) are the starting points.
 The work remains on `feat/native-field-foundations`, based on `9da71249`.
-No new feature or review work resumes without a new request.
+Only that integration and its necessary publication prerequisites are active.
+No broader feature work or stress-runner review resumes in this slice.
 
 **Merged:** service authority/handle-lifecycle [PR #50](https://github.com/djhappyman/TAGnetic/pull/50),
 reviewed head `a7a8b52e`, merge `67625add`. All four hosted Linux, Windows,
