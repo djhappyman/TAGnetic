@@ -59,8 +59,23 @@ impl Queue {
         job: impl FnOnce(Option<Cancellation>) -> Result<T, ErrorDto> + Send + 'static,
     ) -> Result<T, ErrorDto> {
         let resource = self.resource();
-        resource.pending.fetch_update(Ordering::AcqRel,Ordering::Acquire,|pending|(pending<MAX_PENDING).then_some(pending+1))
-            .map_err(|_|ErrorDto::plain("Too many pending operations; wait for the current work to finish and try again"))?;
+        // Keep admission compatible with the MSRV and newer Rust versions,
+        // which deprecate fetch_update in favor of the newer try_update API.
+        let mut pending = resource.pending.load(Ordering::Acquire);
+        loop {
+            if pending >= MAX_PENDING {
+                return Err(ErrorDto::plain("Too many pending operations; wait for the current work to finish and try again"));
+            }
+            match resource.pending.compare_exchange_weak(
+                pending,
+                pending + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(current) => pending = current,
+            }
+        }
         let admission = Admission(resource.clone());
         // A rejected request must not cancel an already admitted preview.
         let cancel = lane.map(Latest::begin);

@@ -173,3 +173,10 @@ The upstream review is a shortlist, not adoption. No upstream release identity,
 version numbers or experimental Next branch is merged into personal main.
 The backend's documented stalled-output seek limitation remains open; this
 integration does not claim physical-device loss or gapless validation.
+
+PR #29 compatibility follow-up: the new bounded queue admission uses an explicit
+compare-exchange loop instead of `AtomicUsize::fetch_update`, which Rust 1.100
+deprecates. This preserves Rust 1.90 compatibility and strict-warning builds
+without suppressing the lint. It belongs with the new queue implementation's
+focused upstream curation; it is not a standalone patch to upstream's older
+queue implementation.
