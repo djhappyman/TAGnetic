@@ -1,6 +1,6 @@
 # Protected FLAC publication checkpoint
 
-Status: local checkpoint ready after descriptor IO and internal authority fixture compatibility rechecks; exact-head hosted checks remain required before merge.
+Status: local checkpoint ready after descriptor IO and directory receipt compatibility rechecks; exact-head hosted checks remain required before merge.
 
 ## Scope
 
@@ -58,7 +58,8 @@ Combined local verification on the frozen production source (base `c42a6cea`):
 [portable boundary review](backend-portable-policy-independent-review.md) and
 [process-death harness review](backend-process-death-harness-review.md) and
 [descriptor IO review](backend-descriptor-io-independent-review.md) and
-[Windows fixture review](backend-windows-authority-independent-review.md) retain ranked
+[Windows fixture review](backend-windows-authority-independent-review.md) and
+[created-directory review](backend-created-directory-path-independent-review.md) retain ranked
 findings, original probes, source hashes and limits. Earlier component counts
 overlap and must not be added together. The coordinator/journal reports record
 their earlier protocol freeze; subsequent policy/admission changes have their
@@ -256,3 +257,47 @@ workspace all-target/all-feature Clippy, formatting, diff checks and two private
 D-Bus tests passed. Production source is byte-identical to `bd2e6091`. Original
 Windows-hosted failure evidence and current-head hosted results remain distinct;
 Windows runtime confirmation is still required before merge.
+
+
+## Created-directory containment oracle and complete CI diagnostics
+
+Windows on code `503408da` and docs `a9987bb5` passed the previous internal fixture
+failures: 270 core unit tests passed, with one existing ignored, and 345 command
+unit tests passed, with seven existing ignored. The original policy/panic canary
+passed. Both jobs then reached the same single Executor containment assertion:
+47 passed and one failed. These are component results, not complete hosted gates.
+
+The failing test compared canonical created-directory receipts with its raw
+temporary-root spelling. Cleanup receipts do not promise caller spelling. The
+assertion now resolves the existing root and each receipt directory before
+checking containment; this also verifies those directories exist. Raw public
+input paths are retained, as are the count of two created folders, file movement,
+Undo removal and pre-existing-folder survival checks. No backend code changes.
+The exact old assertion reproduced on Linux using an owned symlink-TMPDIR; all
+48 Executor cases passed under that same alias after the oracle correction.
+
+[Independent review](backend-created-directory-path-independent-review.md)
+records the contract/consumer audit and verification. The fork's Linux, Windows
+and macOS test commands now use `--no-fail-fast` to collect failures from every
+workspace target in one run. Any failed target still produces a failing command
+and blocks merge. This fork CI diagnostic policy changes no platform guard,
+ignore, requirement or release policy. Shared backend upstream eligibility remains
+waiting on compatible foundations; no upstream workflow contribution is implied.
+
+
+The same review also covers a confirmed alias-path precondition in the Unix-only
+cleanup-index fixture. Its original setup failed under a disposable symlink
+TMPDIR before the private scope; normalizing the newly created root lets both
+retained index/retirement cases run. Every retained-pin, alias-redirection and
+index assertion remains. Only two setup lines inside `cfg(test, unix)` changed;
+runtime authority logic is unchanged. This portable check does not claim actual
+macOS execution. The final combined source hashes belong to the new review.
+
+
+The final combined gate on the path-oracle, Unix fixture and CI diagnostic
+freeze passed 1,638 workspace tests, zero failed, 34 optional/manual ignored
+across 89 outer targets. Workspace all-target/all-feature Clippy, formatting,
+diff checks and two private D-Bus tests passed. Independent review accepted 50
+distinct cases, including public raw-path alias and private cleanup-index alias
+runs. These counts overlap the workspace gate. Exact-head hosted checks remain
+required before merge; neither code nor documentation was merged at this gate.
