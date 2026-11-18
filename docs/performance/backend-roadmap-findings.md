@@ -51,11 +51,11 @@ PR scope; no whole-roadmap completion or release availability is claimed.
 
 ## Final FLAC publication compatibility review
 
-PR #54 (reviewed head `f663bd63`) includes corrected per-App metadata policy,
+PR #54 (reviewed head `bd2e6091`) includes corrected per-App metadata policy,
 rollback after settings changes, valid-generation display/query caching and
 bounded compound native admission. The final policy review accepted 17 independent
 probes; admission review accepted 54 tests after correcting private-sink reentry
-before callbacks/history. Combined publication workspace: 1,623 passed, zero
+before callbacks/history. Combined publication workspace: 1,638 passed, zero
 failed, 34 existing optional/manual ignored. See [publication evidence](native-flac-publication.md)
 for exact source hashes and hosted matrix/merge link. These overlapping component
 gates are not additive or a complete-backend/platform readiness claim.
@@ -72,8 +72,19 @@ Surviving panic now runs owned rollback. Restart scenarios use genuine bounded
 child exit 73, retaining original foreign-data/whole-collection assertions. A
 separate review passed 43 behavior tests and three dispatchers; same-thread
 nested unwind retains its outer-authority assertions and verifies inner cleanup.
-Final combined scope: 1,623 passed, zero failed, 34 optional/manual ignored,
+Final combined scope: 1,638 passed, zero failed, 34 optional/manual ignored,
 workspace Clippy/formatting and two private D-Bus tests passed. Hosted results on
 the linked PR head remain the delivery gate. No full-platform/native/RSS/release
 claim follows; the runner contract must be reviewed on current main before
 broader work resumes.
+
+
+### Descriptor IO follow-up
+
+macOS exposed a P2 legacy metadata IO fault: descriptor aliases share file
+positions and discard logical filename hints. Fresh held-parent sessions now
+check the opened object against the held source before IO. Independent review
+also corrected a P2 nested-peer root regression and accepted 31 scoped tests.
+See [the independent review](backend-descriptor-io-independent-review.md) for
+primary source evidence and exact hashes. Linux emulation establishes the
+cursor mechanism; actual macOS hosted execution remains required before merge.

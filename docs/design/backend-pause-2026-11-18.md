@@ -2,7 +2,7 @@
 
 The finish-and-pause boundary is protected Linux FLAC
 [PR #54](https://github.com/djhappyman/TAGnetic/pull/54), reviewed head
-`f663bd63e40302ce7fe8938fd9209d1b530bdfdc`. Its hosted matrix and merge
+`bd2e6091518e77a15fc3c4c9080fc35cbe8fcdf7`. Its hosted matrix and merge
 record are the authoritative delivery evidence. This handoff must land after
 that code slice. All remaining implementation is paused until the owner asks
 to resume. Start with [issue #51](https://github.com/djhappyman/TAGnetic/issues/51)
@@ -21,13 +21,15 @@ and [the programme](backend-parity-programme.md).
   reentry. Portable review then corrected the shared operation boundary and
   native final-completion bypass; 36 distinct probes passed. Crash-harness review
   passed 43 behavior tests plus three transparent dispatchers. Original failing
-  probes remain, and all counts overlap.
-- Clean publication: 1,623 workspace tests passed, zero failed, 34
+  probes remain, and all counts overlap. Descriptor IO review accepted 31 scoped
+  probes after macOS exposed shared descriptor cursors and lost filename hints;
+  fresh sessions retain held-source identity and independent peer requests.
+- Clean publication: 1,638 workspace tests passed, zero failed, 34
   optional/manual ignored; workspace all-target/all-feature Clippy and formatting
-  passed. Three newly added child dispatchers are included in the 1,623 count.
+  passed. Three newly added child dispatchers are included in the 1,638 count.
   Two private D-Bus tests, UI check/lint/build and 216 unit tests passed.
   See [publication evidence](../performance/native-flac-publication.md) and its
-  four independent review reports for source hashes, gates and limits.
+  seven independent review reports for source hashes, gates and limits.
 
 The native route covers whole plans of in-place plain-text FLAC edits on
 supporting Linux profiles/SQLite journals. Mixed artwork/block/transfer plans,
@@ -68,7 +70,7 @@ marked complete, no installer published and no live profile/Undo history changed
   actual restore matched all 909 recorded source paths (160 untracked files),
   including bytes, modes and links; zero mismatches.
 - The parked tree contains older equivalents of already integrated #50/#54.
-  Final per-App/common-policy, admission and actual-death harness fixes live in
+  Final per-App/common-policy, admission, descriptor IO and actual-death harness fixes live in
   the publication commit/main, not
   retrofitted across the broad parked tree. Start from current merged main and
   curate remaining changes; NEVER apply the whole historical patch over main.

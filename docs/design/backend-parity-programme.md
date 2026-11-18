@@ -11,17 +11,17 @@ product feature checkboxes unchecked until the UI is implemented and verified.
 
 The authorized finish-and-pause boundary is protected Linux FLAC
 [PR #54](https://github.com/djhappyman/TAGnetic/pull/54), reviewed head
-`f663bd63e40302ce7fe8938fd9209d1b530bdfdc`. Required hosted checks and merge
+`bd2e6091518e77a15fc3c4c9080fc35cbe8fcdf7`. Required hosted checks and merge
 records are linked there. Service authority/lifecycle
 [PR #50](https://github.com/djhappyman/TAGnetic/pull/50) merged at `67625add`
 after all four hosted checks passed.
 
 **Remaining implementation is paused.** Read [resume tracker #51](https://github.com/djhappyman/TAGnetic/issues/51)
 and the [handoff](backend-pause-2026-11-18.md) before starting again. The clean
-FLAC publication passed 1,623 workspace tests, zero failures, 34 existing optional
+FLAC publication passed 1,638 workspace tests, zero failures, 34 existing optional
 ignored; workspace Clippy/formatting, two private D-Bus tests and UI check/lint/
 build plus 216 unit tests passed. Independent coordinator, journal, policy, admission, portable-boundary and
-process-death harness reviews completed after corrections. These overlapping scopes do not
+process-death harness and descriptor IO reviews completed after corrections. These overlapping scopes do not
 certify the wider parked programme, every platform or a release.
 
 | Wave | Capability | Checkpoint and remaining work |

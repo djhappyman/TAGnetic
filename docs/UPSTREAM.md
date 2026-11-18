@@ -7,9 +7,9 @@ Tagnetic builds on [tagrex/tagrex](https://github.com/tagrex/tagrex). This fork'
 ### Protected FLAC and required recovery/policy foundations (18 November 2026)
 
 Fork [PR #54](https://github.com/djhappyman/TAGnetic/pull/54), reviewed commit
-`f663bd63e40302ce7fe8938fd9209d1b530bdfdc`, carries Linux native FLAC text
+`bd2e6091518e77a15fc3c4c9080fc35cbe8fcdf7`, carries Linux native FLAC text
 Apply/persistent Undo, shared file-authority/recovery prerequisites and required
-policy/cache/admission corrections. Four scoped independent reviews completed;
+policy/cache/admission and descriptor IO corrections. Seven scoped independent reviews completed;
 its exact-head hosted matrix and merge record are linked in the PR.
 
 Upstream status: **waiting** for compatible native-field/text-codec foundations.

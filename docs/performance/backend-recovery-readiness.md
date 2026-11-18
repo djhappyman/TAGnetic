@@ -292,8 +292,10 @@ roots. This is not a promise that every 100,000-file selection fits. Windows
 currently retains deny-delete directory handles and has a conservative 4,096-entry
 cap; own prune/remove closes the corresponding cached leaf handles first.
 Native Windows validation is still required, including delete sharing,
-reparse points, case-only names and directory cleanup. macOS descriptor-alias
-behaviour is likewise unverified. No cross-platform scale claim follows.
+reparse points, case-only names and directory cleanup. This historical
+checkpoint used descriptor aliases. The later [descriptor IO correction](backend-descriptor-io-independent-review.md)
+replaces them with logical names and fresh identity-checked sessions; exact-head
+macOS hosted verification remains required. No cross-platform scale claim follows.
 
 Additional fixture-only tests cover redirected ancestors for Apply tags,
 copy/move, whole-block changes and metadata Undo; a final file link installed
