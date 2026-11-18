@@ -6,7 +6,7 @@ use std::{
 use tagrex_core::{
     model::{
         exact::{ExactReadError, ExactTextState, NativeTextTarget},
-        TagEngine, TagField,
+        TagEngine,
     },
     resources::Budget,
 };
@@ -66,6 +66,7 @@ fn target(name: &str) -> NativeTextTarget {
 #[test]
 #[cfg(unix)]
 fn changing_owned_parent_link_cannot_mix_legacy_and_exact_snapshots() {
+    use tagrex_core::model::TagField;
     let _case = CASE.lock().unwrap_or_else(|p| p.into_inner());
     let fixture = Fixture::new();
     for (name, title) in [("a", "TITLE=First"), ("b", "TITLE=Other")] {

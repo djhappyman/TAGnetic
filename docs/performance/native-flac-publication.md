@@ -116,3 +116,30 @@ The next hosted Windows lint gate identified a constant capability assertion
 in the non-Linux refusal test. It now evaluates in a const block, preserving
 the assertion and the actual runtime unsupported-Store checks. No production
 behavior, test exclusion or admission quota changed in that follow-up.
+
+A subsequent Windows all-target lint identified `TagField` imported globally
+for a Unix-only probe. The import now lives inside that unchanged Unix test;
+no test was removed, disabled or given a broader allow attribute.
+
+Read-only portability audit found a P3 in the optional move profiler: flushing
+an owned fixture opened read-only fails on Windows. The profiler now opens its
+owned fixture read/write before syncing; assertions and default opt-in status
+are unchanged. [Microsoft's FlushFileBuffers contract](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)
+requires write access. This is a test-harness correction, not new native Windows
+protected-write support.
+
+The read-only portability review covered all 35 added core test targets: nine
+whole-crate Linux targets, three Linux-scoped modules (two with portable opt-out
+probes), two whole-crate Unix targets and 21 portable crates with item guards.
+It found no further confirmed cfg/import/helper gap after the known import and
+P3 profiler findings. This is static source evidence, not Windows/macOS execution.
+
+The corrected exact-read adversarial target passed four tests. The existing
+explicit `actual_journal_and_directory_layout_costs` profile also passed: 1,000
+owned synthetic WAV fixtures in each shared/fanout layout, data-advised and warm
+repeat cases, complete restored bytes/history cleanup and four extra descriptors
+observed at progress callbacks. It finished in 25.06 seconds locally. Metadata
+cache state was uncontrolled; this is not a real-library throughput measurement.
+Workspace all-target/all-feature Clippy, formatting and diff checks pass. The
+production source is unchanged from the 1,598-test compatibility gate; current
+hosted Windows/macOS/Linux/advisory results remain mandatory.
