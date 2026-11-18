@@ -2,6 +2,20 @@
 
 This is a working direction, not a promise of dates or platform performance. Current development targets `main` in this fork. Upstream contribution branches are curated separately.
 
+## Backend implementation paused — 18 November 2026
+
+Service authority/lifecycle PR #50 is merged at `67625add` after all four hosted
+checks passed. Remaining backend work is preserved locally and paused; it is
+not a new release or full UI readiness claim. See the [pause handoff](design/backend-pause-2026-11-18.md),
+[backend programme](design/backend-parity-programme.md) and
+[resume issue #51](https://github.com/djhappyman/TAGnetic/issues/51).
+
+Resume with fresh independent reviews of the ordinary FLAC Apply/persistent-Undo
+integration and stress-runner contract. Then run combined frozen-source checks,
+resolve findings and publish focused PRs. Keep exact staging, mixed/typed and
+other-format operations, picture/export integration and native platform/device
+proof open. Do not re-tick product features from backend-only evidence.
+
 ## Current milestone — a coherent, testable workbench
 
 - Bring the foundation, compact-player work, progressive filters, interaction fixes and measured optimizations into one maintained branch.

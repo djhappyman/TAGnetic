@@ -4,6 +4,21 @@ Tagnetic builds on [tagrex/tagrex](https://github.com/tagrex/tagrex). This fork'
 
 ## Current coverage
 
+### Service authority and handle lifecycle (18 November 2026)
+
+Fork [PR #50](https://github.com/djhappyman/TAGnetic/pull/50) merged at
+`67625add6853e36e1f823ed3fb3b15df588e0bda`, containing reviewed head
+`a7a8b52e0a6221f9aaeb274e8bc158b180f85776`. Linux, Windows, macOS and
+advisories passed on that exact head. Revoked history admission, atomic handle
+publication and failed initial-operation retry cleanup are reusable backend
+fixes for `tagrex/tagrex:main`.
+
+Upstream status: **waiting** for the compatible service/query foundation.
+Upstream main lacks the service crate, so the focused fix is not independently
+buildable there yet. No upstream PR or acceptance is claimed. Preserve upstream
+inline journal images and the stable waveform API when preparing that foundation;
+personal branding/release changes are excluded.
+
 ### 1.4.8 live fields and table stability
 
 Fork branch `fix/behaviour-refinements` builds on the released 1.4.7 MCP service.
