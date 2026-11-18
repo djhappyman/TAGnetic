@@ -760,6 +760,10 @@ impl Service {
         let id = opaque("snapshot")?;
         let total = rows.len();
         let mut state = lock(&self.0.state)?;
+        // Revocation can retire every handle while this build is waiting for
+        // the App mutex. Validate under the same lock as insertion so a denied
+        // caller cannot leave an unreachable retained snapshot after revocation.
+        self.grant_in_state(&state, principal, "read")?;
         quota(state.snapshots.len())?;
         let indexed_rows: usize = state.snapshots.values().map(|s| s.rows.len()).sum();
         if indexed_rows.saturating_add(total) > 400_000 {
@@ -816,6 +820,10 @@ impl Service {
                 .cloned()
                 .ok_or_else(|| ServiceError::invalid("query is required"))?,
         )?;
+        let fields: Option<Vec<String>> = args
+            .get("fields")
+            .map(|v| serde_json::from_value(v.clone()))
+            .transpose()?;
         let request = tagrex_commands::query::QueryRequest {
             request_id: 1,
             snapshot_id: Some(snapshot.index.id),
@@ -844,6 +852,7 @@ impl Service {
         let cancel = Arc::new(AtomicBool::new(false));
         {
             let mut state = lock(&self.0.state)?;
+            self.grant_in_state(&state, principal, "read")?;
             if !state.query_lanes.contains_key(&key)
                 && state
                     .query_lanes
@@ -903,7 +912,20 @@ impl Service {
             .map(|r| PathBuf::from(&r.path))
             .collect();
         let id = opaque("selection")?;
+        let offset = number(args, "offset", 0);
+        let limit = number(args, "limit", 100).clamp(1, MAX_PAGE);
+        let rows: Vec<_> = result
+            .indices
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .filter_map(|i| snapshot.rows.get(*i))
+            .map(|row| project_track(row, fields.as_deref()))
+            .collect();
+        let response = json!({"snapshot":snapshot.id,"selection":id,"lane":lane,"query_request":query_request,"matched":result.matched,"total":result.total,"rows":rows,"next_offset":(offset+rows.len()<result.matched).then_some(offset+rows.len())});
+        json_accounting::check_response(&response)?;
         let mut state = lock(&self.0.state)?;
+        self.grant_in_state(&state, principal, "read")?;
         quota(state.selections.len())?;
         selection_budget(&state, bytes)?;
         state.selections.insert(
@@ -914,23 +936,7 @@ impl Service {
                 bytes,
             },
         );
-        let offset = number(args, "offset", 0);
-        let limit = number(args, "limit", 100).clamp(1, MAX_PAGE);
-        let fields: Option<Vec<String>> = args
-            .get("fields")
-            .map(|v| serde_json::from_value(v.clone()))
-            .transpose()?;
-        let rows: Vec<_> = result
-            .indices
-            .iter()
-            .skip(offset)
-            .take(limit)
-            .filter_map(|i| snapshot.rows.get(*i))
-            .map(|row| project_track(row, fields.as_deref()))
-            .collect();
-        Ok(
-            json!({"snapshot":snapshot.id,"selection":id,"lane":lane,"query_request":query_request,"matched":result.matched,"total":result.total,"rows":rows,"next_offset":(offset+rows.len()<result.matched).then_some(offset+rows.len())}),
-        )
+        Ok(response)
     }
     fn select(&self, principal: &Principal, args: &Value) -> ServiceResult<Value> {
         let snapshot = self.get_snapshot(principal, args)?;
@@ -983,6 +989,7 @@ impl Service {
         let id = opaque("selection")?;
         let count = paths.len();
         let mut state = lock(&self.0.state)?;
+        self.grant_in_state(&state, principal, "read")?;
         quota(state.selections.len())?;
         selection_budget(&state, estimated_bytes)?;
         state.selections.insert(
@@ -1331,3 +1338,9 @@ impl Drop for Inner {
 
 #[cfg(test)]
 mod scale_tests;
+
+#[cfg(test)]
+mod handle_lifecycle_tests;
+
+#[cfg(test)]
+mod lifecycle_history_independent_tests;
