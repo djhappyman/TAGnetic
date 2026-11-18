@@ -2,7 +2,7 @@
 
 The finish-and-pause boundary is protected Linux FLAC
 [PR #54](https://github.com/djhappyman/TAGnetic/pull/54), reviewed head
-`5af5d3885244bb9f894bc6175a34858005cdc5a6`. Its hosted matrix and merge
+`96480a82127fda33bd2a6ae7edae5a0d7f241b92`. Its hosted matrix and merge
 record are the authoritative delivery evidence. This handoff must land after
 that code slice. All remaining implementation is paused until the owner asks
 to resume. Start with [issue #51](https://github.com/djhappyman/TAGnetic/issues/51)
