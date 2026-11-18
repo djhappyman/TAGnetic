@@ -8,6 +8,11 @@ use tagrex_core::text_codec::{self, TextEncoding};
 const MAX_ENTRIES: usize = 100_000;
 const MAX_RESOLVED_BYTES: usize = 64 * 1024 * 1024;
 
+struct ApprovedRoot {
+    lexical: PathBuf,
+    canonical: PathBuf,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PlaylistLoadOptions {
@@ -93,11 +98,18 @@ impl App {
             .iter()
             .map(|root| {
                 check_cancel()?;
-                let root = root.canonicalize()?;
-                if !root.is_dir() {
+                let canonical = root.canonicalize()?;
+                if !canonical.is_dir() {
                     return Err(invalid("Playlist roots must be directories."));
                 }
-                Ok(root)
+                let absolute = if root.is_absolute() {
+                    root.clone()
+                } else {
+                    std::env::current_dir()?.join(root)
+                };
+                let lexical = normalize(&absolute)
+                    .map_err(|_| invalid("Playlist root has an unsafe path."))?;
+                Ok(ApprovedRoot { lexical, canonical })
             })
             .collect::<Result<Vec<_>, AppError>>()?;
         let parent = playlist
@@ -180,7 +192,11 @@ impl App {
     }
 }
 
-fn resolve(reference: &str, base: &Path, roots: &[PathBuf]) -> Result<PathBuf, PlaylistIssueKind> {
+fn resolve(
+    reference: &str,
+    base: &Path,
+    roots: &[ApprovedRoot],
+) -> Result<PathBuf, PlaylistIssueKind> {
     use PlaylistIssueKind as Issue;
     if reference.len() > 4096 || reference.chars().any(char::is_control) {
         return Err(Issue::UnsafePath);
@@ -212,31 +228,26 @@ fn resolve(reference: &str, base: &Path, roots: &[PathBuf]) -> Result<PathBuf, P
     } else {
         base.join(path)
     };
-    let mut normalized = PathBuf::new();
-    for component in joined.components() {
-        match component {
-            Component::CurDir => (),
-            Component::ParentDir => {
-                if !normalized.pop() {
-                    return Err(Issue::UnsafePath);
-                }
-            }
-            other => normalized.push(other.as_os_str()),
-        }
-    }
+    let normalized = normalize(&joined)?;
     if normalized.to_str().is_none() {
         return Err(Issue::UnsafePath);
     }
     if !scanner::is_supported_audio(&normalized) {
         return Err(Issue::UnsupportedExtension);
     }
-    let root = roots
+    // Accept both spellings of an explicitly approved root (for example,
+    // macOS /var and /private/var). Resolve its suffix beneath the canonical
+    // root; do not canonicalize arbitrary entries before the no-follow check.
+    let (root, relative) = roots
         .iter()
-        .find(|root| normalized.starts_with(root))
+        .find_map(|root| {
+            normalized
+                .strip_prefix(&root.canonical)
+                .or_else(|_| normalized.strip_prefix(&root.lexical))
+                .ok()
+                .map(|relative| (&root.canonical, relative))
+        })
         .ok_or(Issue::OutsideScope)?;
-    let relative = normalized
-        .strip_prefix(root)
-        .map_err(|_| Issue::OutsideScope)?;
     // A pinned, regular, no-follow input prevents final links and devices from
     // being accepted as media. Escaping parent links fail confinement here.
     let _file = output::read_under(root, relative).map_err(|error| match error.kind() {
@@ -244,9 +255,31 @@ fn resolve(reference: &str, base: &Path, roots: &[PathBuf]) -> Result<PathBuf, P
         std::io::ErrorKind::PermissionDenied => Issue::OutsideScope,
         _ => Issue::Unreadable,
     })?;
-    let canonical = normalized.canonicalize().map_err(|_| Issue::Unreadable)?;
-    if !roots.iter().any(|root| canonical.starts_with(root)) {
+    let canonical = root
+        .join(relative)
+        .canonicalize()
+        .map_err(|_| Issue::Unreadable)?;
+    if !roots
+        .iter()
+        .any(|root| canonical.starts_with(&root.canonical))
+    {
         return Err(Issue::OutsideScope);
     }
     Ok(canonical)
+}
+
+fn normalize(path: &Path) -> Result<PathBuf, PlaylistIssueKind> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => (),
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(PlaylistIssueKind::UnsafePath);
+                }
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    Ok(normalized)
 }

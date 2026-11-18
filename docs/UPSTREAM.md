@@ -180,3 +180,11 @@ deprecates. This preserves Rust 1.90 compatibility and strict-warning builds
 without suppressing the lint. It belongs with the new queue implementation's
 focused upstream curation; it is not a standalone patch to upstream's older
 queue implementation.
+
+PR #29 playlist follow-up: retain lexical and canonical spellings of each
+explicitly approved root, so absolute `/var/...` entries match a macOS
+`/private/var/...` root. Read only the matched suffix beneath the canonical
+root through the existing pinned, no-follow input path. Root-alias deduplication
+and refusal of final/escaping symlinks have disposable-fixture regressions.
+This shared backend fix belongs with focused playlist-loader curation to upstream
+`main`; upstream does not yet have this fork's loader implementation.

@@ -1,4 +1,21 @@
 // Uses the existing disposable native fixtures; playlist previews never write.
+#[cfg(unix)]
+#[test]
+fn playlist_loading_accepts_absolute_references_through_an_approved_root_alias() {
+    let dir = TempDir::new("playlist-root-alias");
+    let aliases = TempDir::new("playlist-root-alias-parent");
+    let alias = aliases.0.join("approved");
+    std::os::unix::fs::symlink(&dir.0, &alias).unwrap();
+    let audio = dir.tagged_flac("track.flac", "Artist", "Title");
+    let playlist = dir.0.join("alias.m3u8");
+    std::fs::write(&playlist, format!("track.flac\n{}\n", alias.join("track.flac").display())).unwrap();
+    let app = App::open(&dir.0, &dir.0.join("journal.sqlite")).unwrap();
+    let result = app.preview_playlist_load(&playlist, &[alias], &Default::default()).unwrap();
+    assert_eq!(result.paths, vec![audio.canonicalize().unwrap()]);
+    assert_eq!(result.issues.len(), 1);
+    assert_eq!(result.issues[0].kind, PlaylistIssueKind::Duplicate);
+}
+
 #[test]
 fn playlist_loading_keeps_order_deduplicates_and_leaves_audio_and_history_untouched() {
     let dir = TempDir::new("playlist-ordered");
@@ -162,17 +179,24 @@ fn playlist_loading_rejects_hls_bad_input_limits_and_cancellation_without_partia
 fn playlist_loading_refuses_final_symlinks_and_escaping_parent_links() {
     let dir = TempDir::new("playlist-links");
     let outside = TempDir::new("playlist-link-target");
+    let aliases = TempDir::new("playlist-link-alias");
+    let alias = aliases.0.join("approved");
+    std::os::unix::fs::symlink(&dir.0, &alias).unwrap();
     let audio = outside.tagged_flac("one.flac", "A", "B");
     std::os::unix::fs::symlink(&audio, dir.0.join("link.flac")).unwrap();
     std::os::unix::fs::symlink(&outside.0, dir.0.join("folder")).unwrap();
     let playlist = dir.0.join("links.m3u8");
     std::fs::write(&playlist, "link.flac\nfolder/one.flac\n").unwrap();
     let app = App::open(&dir.0, &dir.0.join("journal.sqlite")).unwrap();
-    let result = app
-        .preview_playlist_load(&playlist, std::slice::from_ref(&dir.0), &Default::default())
-        .unwrap();
-    assert!(result.paths.is_empty());
-    assert_eq!(result.issues.len(), 2);
+    for root in [&dir.0, &alias] {
+        std::fs::write(&playlist, format!("link.flac\nfolder/one.flac\n{}\n{}\n",
+            root.join("link.flac").display(), root.join("folder/one.flac").display())).unwrap();
+        let result = app
+            .preview_playlist_load(&playlist, std::slice::from_ref(root), &Default::default())
+            .unwrap();
+        assert!(result.paths.is_empty());
+        assert_eq!(result.issues.len(), 4);
+    }
     let source = dir.0.join("source.m3u8");
     std::os::unix::fs::symlink(&playlist, &source).unwrap();
     assert!(app
