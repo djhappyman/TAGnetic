@@ -259,6 +259,7 @@ test('sidebar scroll indicators overlay, fade, and support keyboard without chan
   const scroller=page.locator('.editor-scroll'), id=await scroller.getAttribute('id');
   const rail=page.locator(`.inspector-scrollbar.is-vertical[aria-controls="${id}"]`);
   await expect(rail).toBeVisible();
+  await scroller.evaluate(n=>n.scrollTop=0);
   const field=page.locator('#editor-field-title'),before=await field.boundingBox();
   expect(await scroller.evaluate(n=>n.offsetWidth-n.clientWidth)).toBe(0);
   await scroller.evaluate(n=>n.scrollTop=100);
