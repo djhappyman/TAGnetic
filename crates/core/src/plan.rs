@@ -280,6 +280,9 @@ impl Executor {
             )
             .into());
         }
+        let _policy = crate::model::OperationPolicy::enter().ok_or_else(policy_changed)?;
+        let rollback_policy = crate::model::RecoveryPolicy::capture().ok_or_else(policy_changed)?;
+        ensure_operation_policy()?;
         ensure_unicode_plan(plan, allowed_roots)?;
         if plan.changes.iter().any(|change| {
             change.copy
@@ -291,6 +294,7 @@ impl Executor {
             )
             .into());
         }
+        ensure_operation_policy()?;
         let roots = canonical_roots(allowed_roots)?;
         let _paths = pinned_paths::Scope::enter(&roots, operation_paths(plan, &[]))
             .map_err(PlanError::Io)?;
@@ -304,6 +308,8 @@ impl Executor {
         } else {
             None
         };
+
+        ensure_operation_policy()?;
 
         // Pre-flight: validate the WHOLE plan before touching disk. Rename
         // targets are collected so two files can't be planned onto the same
@@ -326,6 +332,7 @@ impl Executor {
                 path: change.path.clone(),
                 completed: None,
             });
+            ensure_operation_policy()?;
             ensure_within_roots(&change.path, &roots)?;
             ensure_not_stale(change)?;
             ensure_storable_custom_names(change)?;
@@ -355,6 +362,8 @@ impl Executor {
         if let Some(captured) = &native_capture {
             native_flac::revalidate(plan, captured, cancel)?;
         }
+
+        ensure_operation_policy()?;
 
         // Everything below touches disk. A failure part-way must not leave the
         // library half-applied with nothing in the journal for Undo to find
@@ -395,9 +404,11 @@ impl Executor {
             let driver = journal.native_tags().ok_or_else(|| {
                 JournalError::NotRollbackable("native journal capability disappeared".into())
             })?;
+            ensure_operation_policy()?;
             return native_flac::apply(batch, captured, driver, progress, cancel);
         }
         let mut move_context = MoveContext::compile(BatchId(0), plan, &batch.copy_stamps, &roots)?;
+        ensure_operation_policy()?;
         batch.id = journal.record(&batch)?;
         move_context.id = batch.id;
         let _move_context = MoveContextScope::activate(move_context);
@@ -418,43 +429,43 @@ impl Executor {
         written.revisions.clone_from(&batch.id3v2_revisions);
         let mut steps = Steps::new(total, progress, cancel);
         steps.done = plan.changes.len();
-        let removed_dirs = match Self::write_phase(
-            plan,
-            &roots,
-            &batch.removed_dirs,
-            &mut batch.block_fingerprints,
-            &mut written,
-            &mut steps,
-            journal,
-            batch.id,
-        ) {
-            Ok(removed_dirs) => removed_dirs,
-            Err(error) => {
-                batch.copy_stamps = written.copy_stamps.values().cloned().collect();
-                for fingerprint in &mut batch.block_fingerprints {
-                    fingerprint.after = written.block_outcomes.get(&fingerprint.path).cloned();
-                }
-                batch.applied_values = merge_applied_values(&written.applied_values, Vec::new());
-                // Any copy rollback may first move material to a private path.
-                // Persist the strong identities before that can occur.
-                let _ = journal.retain_interrupted(batch.id, &batch);
-                let error = written.roll_back_after(plan, &[], error, journal, batch.id);
-                if !matches!(
+        let phase = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ensure_operation_policy()?;
+            Self::write_phase(
+                plan,
+                &roots,
+                &batch.removed_dirs,
+                &mut batch.block_fingerprints,
+                &mut written,
+                &mut steps,
+                journal,
+                batch.id,
+            )
+        }));
+        let removed_dirs = match phase {
+            Ok(Ok(removed_dirs)) => removed_dirs,
+            Ok(Err(error)) => {
+                return Err(rollback_failed_apply(
+                    plan,
+                    &mut batch,
+                    &mut written,
+                    journal,
+                    &rollback_policy,
                     error,
-                    PlanError::RollbackIncomplete { .. } | PlanError::RecoveryRequired { .. }
-                ) {
-                    let _ = journal.rollback(batch.id);
-                } else {
-                    batch.created_dirs.clone_from(&written.created_dirs);
-                    batch.applied_values =
-                        merge_applied_values(&written.applied_values, Vec::new());
-                    for fingerprint in &mut batch.block_fingerprints {
-                        fingerprint.after = written.block_outcomes.get(&fingerprint.path).cloned();
-                    }
-                    retain_copy_removal_paths(&mut batch, journal);
-                    let _ = journal.retain_interrupted(batch.id, &batch);
-                }
-                return Err(error);
+                    false,
+                ))
+            }
+            Err(payload) => {
+                let _ = rollback_failed_apply(
+                    plan,
+                    &mut batch,
+                    &mut written,
+                    journal,
+                    &rollback_policy,
+                    JournalError::Storage("Apply callback unwound".into()).into(),
+                    false,
+                );
+                std::panic::resume_unwind(payload)
             }
         };
         batch.created_dirs = std::mem::take(&mut written.created_dirs);
@@ -462,26 +473,36 @@ impl Executor {
         batch.copy_stamps = written.copy_stamps.values().cloned().collect();
         batch.applied_values = merge_applied_values(&written.applied_values, Vec::new());
         batch.interrupted = false;
-        if let Err(error) = journal.finish(batch.id, &batch) {
-            written.created_dirs.clone_from(&batch.created_dirs);
-            let _ = journal.retain_interrupted(batch.id, &batch);
-            let error =
-                written.roll_back_after(plan, &batch.removed_dirs, error.into(), journal, batch.id);
-            if !matches!(
-                error,
-                PlanError::RollbackIncomplete { .. } | PlanError::RecoveryRequired { .. }
-            ) {
-                let _ = journal.rollback(batch.id);
-            } else {
-                batch.interrupted = true;
-                batch.applied_values = merge_applied_values(&written.applied_values, Vec::new());
-                for fingerprint in &mut batch.block_fingerprints {
-                    fingerprint.after = written.block_outcomes.get(&fingerprint.path).cloned();
-                }
-                retain_copy_removal_paths(&mut batch, journal);
-                let _ = journal.retain_interrupted(batch.id, &batch);
+        let finish = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ensure_operation_policy()?;
+            journal.finish(batch.id, &batch)?;
+            ensure_operation_policy()
+        }));
+        match finish {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                return Err(rollback_failed_apply(
+                    plan,
+                    &mut batch,
+                    &mut written,
+                    journal,
+                    &rollback_policy,
+                    error,
+                    true,
+                ))
             }
-            return Err(error);
+            Err(payload) => {
+                let _ = rollback_failed_apply(
+                    plan,
+                    &mut batch,
+                    &mut written,
+                    journal,
+                    &rollback_policy,
+                    JournalError::Storage("Apply completion unwound".into()).into(),
+                    true,
+                );
+                std::panic::resume_unwind(payload)
+            }
         }
         Ok(batch)
     }
@@ -559,6 +580,7 @@ impl Executor {
                 .applied_values
                 .extend(applied_values_at(change, &change.path));
             steps.complete(&change.path, ApplyStep::Tags);
+            ensure_operation_policy()?;
         }
         // ...then the moves and copies, creating any folders the targets need.
         // Directories are created here rather than in the pre-flight so a
@@ -606,8 +628,10 @@ impl Executor {
                         .get(target)
                         .ok_or_else(|| PlanError::Stale(target.to_path_buf()))?;
                     journal.checkpoint_copy(batch_id, stamp, None)?;
+                    ensure_operation_policy()?;
                 }
                 steps.complete(&change.path, ApplyStep::Transfer);
+                ensure_operation_policy()?;
             }
         }
         // Sidecars follow their file, the same way (#58), after the main
@@ -655,8 +679,10 @@ impl Executor {
                         .get(to)
                         .ok_or_else(|| PlanError::Stale(to.clone()))?;
                     journal.checkpoint_copy(batch_id, stamp, None)?;
+                    ensure_operation_policy()?;
                 }
                 steps.complete(from, ApplyStep::Transfer);
+                ensure_operation_policy()?;
             }
         }
         // Now that the source is a copy of its own, the copy gets the tag
@@ -716,7 +742,9 @@ impl Executor {
                 .get(target)
                 .ok_or_else(|| PlanError::Stale(target.to_path_buf()))?;
             journal.checkpoint_copy(batch_id, stamp, Some(&previous))?;
+            ensure_operation_policy()?;
             steps.complete(&change.path, ApplyStep::Tags);
+            ensure_operation_policy()?;
         }
 
         // A move can leave the folder it emptied behind (#153). Removing those
@@ -744,6 +772,7 @@ impl Executor {
                 fingerprint.after = Some(observed.clone());
             }
         }
+        ensure_operation_policy()?;
         let pruned = if plan.prune_empty_dirs {
             prune_emptied_dirs(pruning_intent, roots, &written.created_dirs)
         } else {
@@ -816,10 +845,13 @@ impl Executor {
             )
             .into());
         }
+        let _policy = crate::model::OperationPolicy::enter().ok_or_else(policy_changed)?;
+        ensure_operation_policy()?;
         let mut report = UndoReport::default();
         let batch = journal
             .batch(batch_id)?
             .ok_or(PlanError::Journal(JournalError::UnknownBatch(batch_id)))?;
+        ensure_operation_policy()?;
         ensure_unicode_plan(&batch.plan, allowed_roots)?;
         // Ambiguous persisted ownership must refuse before move recovery or
         // any earlier copy can be removed. Never silently choose one row.
@@ -841,6 +873,7 @@ impl Executor {
         let _move_context =
             MoveContextScope::enter(batch.id, &batch.plan, &batch.copy_stamps, &roots)?;
         let move_stages = journal.move_stages(batch_id)?;
+        ensure_operation_policy()?;
         let _paths = pinned_paths::Scope::enter(
             &roots,
             operation_paths(&batch.plan, &batch.copy_stamps).chain(
@@ -862,6 +895,7 @@ impl Executor {
                 let driver = journal.native_tags().ok_or_else(|| {
                     JournalError::NotRollbackable("native journal capability unavailable".into())
                 })?;
+                ensure_operation_policy()?;
                 return native_flac::undo(&batch, driver, mode, progress, false);
             }
             #[cfg(not(target_os = "linux"))]
@@ -870,6 +904,7 @@ impl Executor {
             )
             .into());
         }
+        ensure_operation_policy()?;
         recover_move_stages(&move_stages)?;
 
         // Validate before touching disk: the file's current location (rename
@@ -952,6 +987,7 @@ impl Executor {
 
         // Put back the folders the batch emptied, before anything moves: a file
         // has to have a directory to move back into (#153).
+        ensure_operation_policy()?;
         for dir in &batch.removed_dirs {
             if resolve_target_within_roots(dir, &roots).is_ok() {
                 pinned_paths::create_all(dir).map_err(PlanError::Io)?;
@@ -1091,6 +1127,9 @@ impl Executor {
         }
 
         pinned_paths::validate().map_err(PlanError::Io)?;
+        ensure_operation_policy()?;
+        // Successful terminal removal is the commit boundary. An arbitrary
+        // adapter's post-delete callback cannot be uncommitted by this API.
         journal.rollback(batch_id)?;
         Ok(report)
     }
@@ -1167,6 +1206,61 @@ pub enum ApplyStep {
     Transfer,
 }
 
+fn policy_changed() -> PlanError {
+    JournalError::NotRollbackable("metadata operation policy changed".into()).into()
+}
+fn ensure_operation_policy() -> Result<(), PlanError> {
+    if crate::model::operation_policy_valid() {
+        Ok(())
+    } else {
+        Err(policy_changed())
+    }
+}
+fn rollback_failed_apply(
+    plan: &ChangePlan,
+    batch: &mut AppliedBatch,
+    written: &mut Written,
+    journal: &mut dyn UndoJournal,
+    policy: &crate::model::RecoveryPolicy,
+    cause: PlanError,
+    after_write_phase: bool,
+) -> PlanError {
+    let _recovery = policy.enter();
+    if after_write_phase {
+        written.created_dirs.clone_from(&batch.created_dirs);
+    }
+    batch.interrupted = true;
+    batch.copy_stamps = written.copy_stamps.values().cloned().collect();
+    batch.applied_values = merge_applied_values(&written.applied_values, Vec::new());
+    for fingerprint in &mut batch.block_fingerprints {
+        fingerprint.after = written.block_outcomes.get(&fingerprint.path).cloned();
+    }
+    // A copy rollback may first reserve/move material. Keep its strong witness
+    // durable before invoking the existing ownership-checked restoration.
+    let _ = journal.retain_interrupted(batch.id, batch);
+    let dirs = if after_write_phase {
+        batch.removed_dirs.as_slice()
+    } else {
+        &[]
+    };
+    let error = written.roll_back_after(plan, dirs, cause, journal, batch.id);
+    if !matches!(
+        error,
+        PlanError::RollbackIncomplete { .. } | PlanError::RecoveryRequired { .. }
+    ) {
+        let _ = journal.rollback(batch.id);
+    } else {
+        batch.created_dirs.clone_from(&written.created_dirs);
+        batch.applied_values = merge_applied_values(&written.applied_values, Vec::new());
+        for fingerprint in &mut batch.block_fingerprints {
+            fingerprint.after = written.block_outcomes.get(&fingerprint.path).cloned();
+        }
+        retain_copy_removal_paths(batch, journal);
+        let _ = journal.retain_interrupted(batch.id, batch);
+    }
+    error
+}
+
 /// Counts the steps of the write phase and is the one place it asks whether to
 /// go on: before every step, never inside one.
 struct Steps<'a> {
@@ -1195,12 +1289,14 @@ impl<'a> Steps<'a> {
         if self.cancel.load(Ordering::SeqCst) {
             return Err(PlanError::Cancelled);
         }
+        ensure_operation_policy()?;
         (self.progress)(&ApplyProgress {
             done: self.done,
             total: self.total,
             path: path.to_path_buf(),
             completed: None,
         });
+        ensure_operation_policy()?;
         Ok(())
     }
 
@@ -2169,6 +2265,7 @@ fn staged_move_with(
     attempted: &mut bool,
     mut checkpoint: impl FnMut(&str),
 ) -> Result<(), PlanError> {
+    ensure_operation_policy()?;
     if !proof.matches_identity(from) {
         return Err(PlanError::Stale(from.to_path_buf()));
     }
@@ -2202,6 +2299,7 @@ fn staged_move_with(
             .ok_or_else(|| recovery_required(&stage.path, "missing immutable staging context"))?;
         context.remember_stages(std::slice::from_ref(&stage))
     })?;
+    ensure_operation_policy()?;
     checkpoint("intent");
     {
         #[cfg(test)]
@@ -2302,6 +2400,9 @@ fn with_bound_path<T>(
     write: bool,
     body: impl FnOnce(&Path) -> Result<T, PlanError>,
 ) -> Result<T, PlanError> {
+    if write {
+        ensure_operation_policy()?;
+    }
     if METADATA_PATHS.with(|paths| paths.borrow().iter().any(|candidate| candidate == path)) {
         return body(path);
     }
@@ -2907,9 +3008,11 @@ fn remove_recorded_copy_with(
                 }
                 return Err(error.into());
             }
+            ensure_operation_policy()?;
             path
         }
     };
+    ensure_operation_policy()?;
     checkpoint("intent");
     if !undo_path.exists() {
         if !target.exists() {

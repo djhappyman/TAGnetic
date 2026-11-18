@@ -1,6 +1,6 @@
 # Protected FLAC publication checkpoint
 
-Status: local checkpoint ready; exact-head hosted checks remain required before merge.
+Status: local checkpoint ready after shared-policy and real-process-death rechecks; exact-head hosted checks remain required before merge.
 
 ## Scope
 
@@ -40,8 +40,9 @@ An operation-local recovery policy cannot authorize new public Apply/Undo.
 
 Combined local verification on the frozen production source (base `c42a6cea`):
 
-- `cargo test --workspace`: 1,598 passed, zero failed, 34 existing optional/manual
-  tests ignored across 85 outer targets. Nested helper results are not added.
+- `cargo test --workspace --no-fail-fast`: 1,623 passed, zero failed, 34 optional/manual
+  tests ignored across 88 outer targets. Three newly added child dispatchers are
+  included transparently in the pass count. Nested helper results are not added.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: passed.
 - `cargo fmt --all --check` and `git diff --check`: passed.
 - Private D-Bus MPRIS tests: two passed.
@@ -53,7 +54,9 @@ Combined local verification on the frozen production source (base `c42a6cea`):
 [Coordinator review](backend-native-flac-executor-independent-review.md),
 [journal review](backend-native-flac-journal-independent-review.md),
 [policy review](backend-native-policy-independent-review.md) and
-[admission review](backend-native-admission-independent-review.md) retain ranked
+[admission review](backend-native-admission-independent-review.md),
+[portable boundary review](backend-portable-policy-independent-review.md) and
+[process-death harness review](backend-process-death-harness-review.md) retain ranked
 findings, original probes, source hashes and limits. Earlier component counts
 overlap and must not be added together. The coordinator/journal reports record
 their earlier protocol freeze; subsequent policy/admission changes have their
@@ -143,3 +146,43 @@ cache state was uncontrolled; this is not a real-library throughput measurement.
 Workspace all-target/all-feature Clippy, formatting and diff checks pass. The
 production source is unchanged from the 1,598-test compatibility gate; current
 hosted Windows/macOS/Linux/advisory results remain mandatory.
+
+## Shared operation policy correction after Windows execution
+
+Hosted Windows at `96480a82` reached the unchanged App policy/panic canary and
+failed: the native route refused invalidation but portable legacy Apply did not.
+Real WAV/SQLite and FLAC/VecJournal probes reproduced the shared boundary gap on
+Linux. A further independent SQLite probe exposed a native final-completion
+callback bypass. Both P2 groups are corrected in the new frozen source.
+
+The common entry pins inherited App settings or standalone defaults. Policy
+checks surround public progress, material journal calls and writes. Failed or
+panicking Apply makes ownership-checked rollback under a sealed admitted snapshot;
+existing field/block/source/root witnesses remain. Legacy Undo retains its
+incremental contract and history on refusal before the next effect. Successful
+terminal history removal is its commit boundary; arbitrary adapter behavior
+after deletion cannot be transactionally recreated through the old trait.
+
+[Portable boundary review](backend-portable-policy-independent-review.md)
+accepted 36 distinct tests: eighteen new probes plus retained policy/App cases
+and the original unconditional App canary. The root App/WAV bridge additionally
+checks staged-plan preservation, byte/history readback and retry through
+Apply/Undo/Redo/Undo. These counts overlap the workspace gate.
+
+Surviving Rust unwind now performs owned rollback. Crash scenarios therefore
+use actual disposable child termination with exact exit status, not panic as a
+stand-in for death. Their original restart/foreign-data recovery assertions stay
+retained. A nested unwind case still checks same-thread outer-context restoration
+and now explicitly verifies automatic inner cleanup. Independent process-death review accepted all three targets: 46 raw tests,
+comprising 43 behavior tests and three default no-op dispatchers. All original
+foreign-object/whole-collection assertions remain; each child must exit exactly
+73, with a 30-second watchdog, kill/reap cleanup and owned logfile diagnostics.
+No platform gate or existing test was ignored to obtain green results.
+
+The final source passed the complete workspace (1,623/0/34), workspace all-target/
+all-feature Clippy, formatting, diff checks and two private D-Bus tests. The
+original Windows canary remains unchanged. Earlier 1,598-test results elsewhere
+in this report describe previous frozen checkpoints; the latest combined gate
+is 1,623. Actual Windows/macOS execution remains an exact-head hosted merge gate.
+Future stress-runner review must reconcile the true-death/renamed nested-unwind
+probe mapping against current main instead of copying old panic fixtures.

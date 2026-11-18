@@ -74,7 +74,7 @@ impl UndoJournal for Interrupt {
         self.calls += 1;
         if self.calls == self.stop {
             std::fs::rename(&stage.from, &stage.path).unwrap();
-            panic!("owned fixture interrupted after durable intent and capture");
+            std::process::exit(73);
         }
         Ok(())
     }
@@ -105,24 +105,72 @@ fn pending(fixture: &Fixture, count: usize) -> Pending {
         targets.push(target);
         bytes.push(data);
     }
-    let mut journal = Interrupt {
-        journal: SqliteJournal::open(&fixture.database()).unwrap(),
-        stop: count,
-        calls: 0,
+    let plan = ChangePlan {
+        changes,
+        ..Default::default()
     };
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        Executor::apply(
-            &ChangePlan {
-                changes,
-                ..Default::default()
-            },
-            &mut journal,
-            std::slice::from_ref(&fixture.0),
-        )
-    }));
-    assert!(result.is_err());
-    let batch = journal.journal.batches().unwrap().remove(0);
-    let stages = journal.journal.move_stages(batch.id).unwrap();
+    let seed_dir = fixture.0.join("crash-plan-seed");
+    std::fs::create_dir(&seed_dir).unwrap();
+    let mut seed = SqliteJournal::open(&seed_dir.join("plan.sqlite")).unwrap();
+    seed.record(&AppliedBatch {
+        native_tags: false,
+        id: BatchId(0),
+        description: plan.description.clone(),
+        message: plan.message.clone(),
+        applied_at: 0,
+        plan,
+        allowed_roots: vec![fixture.0.clone()],
+        created_dirs: Vec::new(),
+        removed_dirs: Vec::new(),
+        copy_stamps: Vec::new(),
+        applied_values: Vec::new(),
+        block_fingerprints: Vec::new(),
+        interrupted: true,
+        id3v2_revisions: Vec::new(),
+    })
+    .unwrap();
+    drop(seed);
+    let log_path = seed_dir.join("child.log");
+    let log = std::fs::File::create(&log_path).unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "move_context_interruption_process_child",
+            "--nocapture",
+        ])
+        .env("TAGREX_MOVE_CONTEXT_CRASH_ROOT", &fixture.0)
+        .env("TAGREX_MOVE_CONTEXT_CRASH_COUNT", count.to_string())
+        .stdout(log.try_clone().unwrap())
+        .stderr(log)
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < std::time::Duration::from_secs(30) => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            result => {
+                let _ = child.kill();
+                let reaped = child.wait();
+                panic!(
+                    "move child timed out or wait failed: {result:?}; reaped={reaped:?}\n{}",
+                    String::from_utf8_lossy(&std::fs::read(&log_path).unwrap())
+                );
+            }
+        }
+    };
+    assert_eq!(
+        status.code(),
+        Some(73),
+        "child missed the durable intent/capture boundary: {}",
+        String::from_utf8_lossy(&std::fs::read(&log_path).unwrap())
+    );
+    std::fs::remove_dir_all(seed_dir).unwrap();
+    let journal = SqliteJournal::open(&fixture.database()).unwrap();
+    let batch = journal.batches().unwrap().remove(0);
+    let stages = journal.move_stages(batch.id).unwrap();
     assert_eq!(stages.len(), count);
     Pending {
         id: batch.id,
@@ -132,6 +180,28 @@ fn pending(fixture: &Fixture, count: usize) -> Pending {
         bytes,
     }
 }
+/// Dispatcher only; parent probes assert exact exit73 and reopened authority.
+#[test]
+fn move_context_interruption_process_child() {
+    let Some(root) = std::env::var_os("TAGREX_MOVE_CONTEXT_CRASH_ROOT") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let seed = SqliteJournal::open(&root.join("crash-plan-seed/plan.sqlite")).unwrap();
+    let plan = seed.batches().unwrap().remove(0).plan;
+    drop(seed);
+    let mut journal = Interrupt {
+        journal: SqliteJournal::open(&root.join("journal.sqlite")).unwrap(),
+        stop: std::env::var("TAGREX_MOVE_CONTEXT_CRASH_COUNT")
+            .unwrap()
+            .parse()
+            .unwrap(),
+        calls: 0,
+    };
+    Executor::apply(&plan, &mut journal, &[root]).unwrap();
+    panic!("child did not reach durable intent/capture boundary");
+}
+
 fn assert_unchanged_pending(fixture: &Fixture, state: &Pending) {
     for i in 0..state.sources.len() {
         assert!(
@@ -298,7 +368,7 @@ fn future_or_unknown_native_roles_refuse_before_any_mixed_collection_effect() {
 }
 
 #[test]
-fn nested_interrupted_executor_restores_outer_move_context_and_directory_authority() {
+fn nested_unwinding_executor_restores_outer_move_context_and_directory_authority() {
     let fixture = Fixture::new();
     let state = pending(&fixture, 2);
     let inner = Fixture::new();
@@ -339,8 +409,11 @@ fn nested_interrupted_executor_restores_outer_move_context_and_directory_authori
                 )
             }));
             assert!(interrupted.is_err());
-            let id = nested_journal.batches().unwrap()[0].id;
-            Executor::undo(&mut nested_journal, id, std::slice::from_ref(&inner.0)).unwrap();
+            // The process survived this unwind: Apply must clean its own
+            // interrupted operation before restoring the outer thread context.
+            assert!(nested_journal.batches().unwrap().is_empty());
+            assert_eq!(std::fs::read(&inner_source).unwrap(), bytes);
+            assert!(!inner_target.exists());
         },
     )
     .unwrap();

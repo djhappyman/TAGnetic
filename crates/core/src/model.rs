@@ -3,9 +3,7 @@
 pub mod exact;
 pub mod native_patch;
 mod policy;
-pub(crate) use policy::recovery_active;
-#[cfg(target_os = "linux")]
-pub(crate) use policy::RecoveryPolicy;
+pub(crate) use policy::{operation_policy_valid, recovery_active, OperationPolicy, RecoveryPolicy};
 pub use policy::{ModelPolicy, PolicyScope};
 
 use std::collections::{BTreeMap, HashMap, HashSet};

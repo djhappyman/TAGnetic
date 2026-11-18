@@ -402,6 +402,7 @@ struct Driver<'a> {
 }
 impl StateSink for Driver<'_> {
     fn persist(&mut self, record: &Record) -> io::Result<()> {
+        ensure_operation_policy().map_err(io_error)?;
         if record.phase() == Phase::Publishing
             && crate::model::read_policy_revision() != self.policy_revision
         {
@@ -416,7 +417,8 @@ impl StateSink for Driver<'_> {
                 self.receipts.as_deref(),
                 record.phase() >= Phase::Published && self.operation != 1,
             )
-            .map_err(io_error)
+            .map_err(io_error)?;
+        ensure_operation_policy().map_err(io_error)
     }
 }
 fn push_bundle(parts: &mut Vec<Vec<u8>>, bytes: &[u8], owner: &mut Lease) -> io::Result<()> {
@@ -451,7 +453,8 @@ fn verify_finish(driver: &mut Driver<'_>, record: &Record) -> io::Result<()> {
                 .as_deref()
                 .ok_or_else(|| io::Error::other("native receipt missing"))?,
         )
-        .map_err(io_error)
+        .map_err(io_error)?;
+    ensure_operation_policy().map_err(io_error)
 }
 fn growth<'a>(
     values: impl Iterator<Item = (&'a NativeTextTarget, &'a ExactTextState)>,
@@ -583,11 +586,16 @@ pub(super) fn apply(
     let (patches, intents): (Vec<_>, Vec<_>) =
         captured.into_iter().map(|c| (c.patches, c.intent)).unzip();
     batch.id = journal.record_native(&batch, &intents)?;
-    let store = match journal.store() {
+    let store = match ensure_operation_policy().and_then(|_| {
+        let store = journal.store()?;
+        ensure_operation_policy()?;
+        Ok(store)
+    }) {
         Ok(store) => store,
-        Err(e) => {
+        Err(error) => {
+            let _rollback_policy = rollback_policy.enter();
             let _ = journal.remove_native(batch.id);
-            return Err(e.into());
+            return Err(error);
         }
     };
     let mut steps = Steps::new(batch.plan.changes.len() * 2, progress, cancel);
@@ -612,13 +620,19 @@ pub(super) fn apply(
                     .applied_values
                     .extend(applied_values_at(change, &change.path));
                 steps.complete(&change.path, ApplyStep::Tags);
+                ensure_operation_policy()?;
             }
+            ensure_operation_policy()?;
+            batch.interrupted = false;
+            journal.finish_native(&batch)?;
+            ensure_operation_policy()?;
             Ok(())
         }));
     match result {
         Ok(Ok(())) => {}
         Ok(Err(cause)) => {
             let _rollback_policy = rollback_policy.enter();
+            batch.interrupted = true;
             let _ = journal.retain_native(&batch);
             return match undo(&batch, journal, UndoMode::KeepChanged, &mut |_| {}, true) {
                 Ok(_) => Err(cause),
@@ -634,27 +648,11 @@ pub(super) fn apply(
         }
         Err(payload) => {
             let _rollback_policy = rollback_policy.enter();
+            batch.interrupted = true;
             let _ = journal.retain_native(&batch);
             let _ = undo(&batch, journal, UndoMode::KeepChanged, &mut |_| {}, true);
             std::panic::resume_unwind(payload)
         }
-    }
-    batch.interrupted = false;
-    if let Err(cause) = journal.finish_native(&batch) {
-        let _rollback_policy = rollback_policy.enter();
-        batch.interrupted = true;
-        let _ = journal.retain_native(&batch);
-        return match undo(&batch, journal, UndoMode::KeepChanged, &mut |_| {}, true) {
-            Ok(_) => Err(cause.into()),
-            Err(PlanError::RollbackIncomplete { count, first, .. }) => {
-                Err(PlanError::RollbackIncomplete {
-                    cause: Box::new(cause.into()),
-                    count,
-                    first,
-                })
-            }
-            Err(_) => Err(recovery(&batch.plan.changes[0].path, cause)),
-        };
     }
     Ok(batch)
 }
@@ -1151,8 +1149,10 @@ pub(super) fn undo(
     let rollback_policy = crate::model::RecoveryPolicy::capture()
         .ok_or_else(|| error("native Undo policy changed before admission"))?;
     let entries = journal.entries(batch)?;
+    ensure_operation_policy()?;
     let (mut validated, unreached, report) = validated(batch, entries, mode, rollback)?;
     let store = journal.store()?;
+    ensure_operation_policy()?;
     attach_records(batch, &mut validated, &unreached, &store)?;
     let mut interrupted = batch.clone();
     interrupted.interrupted = true;
@@ -1178,8 +1178,10 @@ pub(super) fn undo(
                     completed.push(ordinal);
                     undo_file(&store, journal, batch, valid, 1)?;
                 }
+                ensure_operation_policy()?;
                 steps.done();
             }
+            ensure_operation_policy()?;
             Ok(())
         }));
     match result {
