@@ -351,6 +351,10 @@ A completed basic feature does not mean every advanced option is finished. The l
   - [x] **Backend playback commands.** Coalesce repeated seek and volume updates, retain transport order and report a full queue explicitly.
   - [x] **Backend metadata sharing.** Reuse immutable metadata for property reads and duplicate grouping instead of copying all tags.
   - [x] **Backend integrity lookups.** Find saved-file integrity records efficiently while retaining full-file verification.
+  - [x] **Backend large-stage accounting.** Measure and hash staged changes without making full temporary JSON copies.
+  - [x] **Backend search reuse under load.** Keep the measured suggestion working set cached and remember field-name resolution within bounded per-snapshot budgets.
+  - [x] **Backend playback regression coverage.** Exercise playback boundaries, pause, seek and command ordering without requiring sound hardware.
+  - [x] **Backend conservative folder cleanup.** Preserve links and real files added while an emptied folder is being checked.
 - [ ] **Accessibility and platform refinement.** Complete wider keyboard, screen-reader, contrast, input-method and native-platform checks.
 - [ ] **Complete localisation.** Translate newer controls and feedback consistently across supported interface languages.
 
