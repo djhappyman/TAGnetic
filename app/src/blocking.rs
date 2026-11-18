@@ -159,6 +159,7 @@ impl Cancellation {
 #[cfg(test)]
 mod tests {
     use super::Queue;
+    use std::future::Future;
     use std::sync::{mpsc, Arc};
     use std::time::Duration;
 
@@ -360,6 +361,89 @@ mod tests {
         tauri::async_runtime::block_on(third).unwrap();
         assert_eq!(*order.lock().unwrap(), vec![1, 2, 3]);
     }
+    /// A waker that only counts how often it was woken.
+    struct CountingWaker(std::sync::atomic::AtomicUsize);
+
+    impl std::task::Wake for CountingWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn supersession_wakes_a_parked_waiter_and_frees_its_slot() {
+        use std::sync::atomic::Ordering;
+        let queue = Queue::new();
+        let lane = super::Latest::new();
+        let held = tauri::async_runtime::block_on(queue.resource().gate.clone().lock_owned());
+        let wakes = Arc::new(CountingWaker(std::sync::atomic::AtomicUsize::new(0)));
+        let waker = std::task::Waker::from(wakes.clone());
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut parked = Box::pin(queue.run_latest(&lane, |_| Ok(())));
+
+        // Polled once: the waiter registers its waker and waits for the gate.
+        assert!(parked.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+
+        // A newer request on the lane supersedes it. Waking the parked waiter is
+        // what stops it sitting behind slow I/O until the gate happens to free.
+        let newest = lane.begin();
+        assert_eq!(
+            wakes.0.load(Ordering::SeqCst),
+            1,
+            "a superseded waiter was left parked"
+        );
+
+        // Re-polled, it reports supersession instead of queueing for the gate.
+        assert!(matches!(
+            parked.as_mut().poll(&mut cx),
+            std::task::Poll::Ready(Err(_))
+        ));
+        assert_eq!(queue.resource().pending.load(Ordering::Acquire), 0);
+        assert!(!newest.cancelled(), "the newest request was cancelled");
+        drop(held);
+    }
+
+    #[test]
+    fn a_superseded_preview_never_executes_and_does_not_hold_up_a_regular_job() {
+        let queue = Queue::new();
+        let lane = super::Latest::new();
+        let held = tauri::async_runtime::block_on(queue.resource().gate.clone().lock_owned());
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let mut preview = Box::pin(queue.run_latest(&lane, {
+            let order = order.clone();
+            move |_| {
+                order.lock().unwrap().push("preview");
+                Ok(())
+            }
+        }));
+        prime(preview.as_mut());
+        let mut regular = Box::pin(queue.run({
+            let order = order.clone();
+            move || {
+                order.lock().unwrap().push("regular");
+                Ok(())
+            }
+        }));
+        prime(regular.as_mut());
+
+        // The newer preview cancels the queued one, which leaves the gate queue
+        // instead of waiting its turn — a regular job behind it runs.
+        lane.begin();
+        assert!(tauri::async_runtime::block_on(preview).is_err());
+        drop(held);
+        tauri::async_runtime::block_on(regular).unwrap();
+        assert_eq!(*order.lock().unwrap(), vec!["regular"]);
+        assert_eq!(
+            queue
+                .resource()
+                .pending
+                .load(std::sync::atomic::Ordering::Acquire),
+            0
+        );
+    }
+
     #[test]
     fn worker_errors_and_panics_release_both_admission_and_serialization() {
         let queue = Queue::new();

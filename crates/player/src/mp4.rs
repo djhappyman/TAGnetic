@@ -24,6 +24,23 @@ const FTYP_SEARCH: u64 = 64 * 1024;
 /// Boxes that hold the boxes on the way down to the sample tables.
 const CONTAINERS: [&[u8; 4]; 5] = [b"moov", b"trak", b"mdia", b"minf", b"stbl"];
 
+/// How many boxes one file may be walked for. A real MP4 holds a few hundred;
+/// a file that is not one but happens to contain the `ftyp` marker is read as
+/// boxes all the same, and a box can be as short as its 8-byte header, so an
+/// unbounded walk could read a whole large file 8 bytes at a time. Past this
+/// many boxes inspection refuses the file: falling through to the decoder
+/// would bypass the sample-table allocation guard for unexamined tables.
+const BOX_BUDGET: usize = 100_000;
+
+#[derive(Debug)]
+struct BoxBudgetExceeded;
+impl std::fmt::Display for BoxBudgetExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MP4 box inspection budget exceeded")
+    }
+}
+impl std::error::Error for BoxBudgetExceeded {}
+
 /// Refuses an MP4 file whose sample tables state more entries than the file
 /// holds. Any other file, and any MP4 that cannot be walked, passes: the
 /// decoder decides about those.
@@ -41,11 +58,19 @@ fn check<R: Read + Seek>(reader: &mut R, len: u64) -> Result<(), String> {
     let Ok(Some(start)) = find_ftyp(reader, len) else {
         return Ok(());
     };
-    match walk(reader, start, len, len, 0) {
+    let mut budget = BOX_BUDGET;
+    match walk(reader, start, len, len, 0, &mut budget) {
         Ok(true) => Err(
             "the file is damaged: its sample tables state more entries than the file holds"
                 .to_string(),
         ),
+        Err(error)
+            if error
+                .get_ref()
+                .is_some_and(|inner| inner.is::<BoxBudgetExceeded>()) =>
+        {
+            Err("the file exceeds the MP4 inspection budget".into())
+        }
         _ => Ok(()),
     }
 }
@@ -74,8 +99,13 @@ fn walk<R: Read + Seek>(
     end: u64,
     len: u64,
     depth: usize,
+    budget: &mut usize,
 ) -> io::Result<bool> {
     while pos + 8 <= end {
+        if *budget == 0 {
+            return Err(io::Error::other(BoxBudgetExceeded));
+        }
+        *budget -= 1;
         reader.seek(SeekFrom::Start(pos))?;
         let mut header = [0u8; 8];
         reader.read_exact(&mut header)?;
@@ -100,7 +130,7 @@ fn walk<R: Read + Seek>(
         // end of the file.
         let body_end = pos.saturating_add(box_len).min(len);
         if depth < CONTAINERS.len() && CONTAINERS.contains(&&kind) {
-            if walk(reader, body, body_end, len, depth + 1)? {
+            if walk(reader, body, body_end, len, depth + 1, budget)? {
                 return Ok(true);
             }
         } else if let Some(entry_len) = entry_len(&kind, reader)? {
@@ -227,5 +257,63 @@ mod tests {
     fn a_file_that_is_not_mp4_passes() {
         assert_eq!(checked(b"ID3\x04\0\0\0\0\0\0stsc\xff\xff\xff\xff"), Ok(()));
         assert_eq!(checked(b""), Ok(()));
+    }
+
+    // A file misread as boxes must not turn one open into a walk of the whole
+    // file: reaching the budget refuses inspection instead of handing unseen
+    // oversized sample tables to the decoder.
+    #[test]
+    fn the_walk_stops_at_its_budget() {
+        let mut children = Vec::new();
+        for _ in 0..10 {
+            children.extend(boxed(b"free", &[]));
+        }
+        children.extend(boxed(b"stco", &table(0x6f6f_7600, &[0; 12])));
+        let file = file_with(&children);
+
+        // Enough boxes for the containers and the first pair of fillers only.
+        let mut budget = 8;
+        let start = find_ftyp(&mut Cursor::new(&file), file.len() as u64)
+            .unwrap()
+            .unwrap();
+        let walked = walk(
+            &mut Cursor::new(&file),
+            start,
+            file.len() as u64,
+            file.len() as u64,
+            0,
+            &mut budget,
+        )
+        .unwrap_err();
+        assert!(walked
+            .get_ref()
+            .is_some_and(|inner| inner.is::<BoxBudgetExceeded>()));
+        assert_eq!(budget, 0);
+
+        // With the budget a real file gets, the oversized table is found.
+        let mut full = BOX_BUDGET;
+        assert!(
+            walk(
+                &mut Cursor::new(&file),
+                start,
+                file.len() as u64,
+                file.len() as u64,
+                0,
+                &mut full,
+            )
+            .unwrap(),
+            "the oversized table was missed"
+        );
+    }
+    #[test]
+    fn exhausted_inspection_cannot_bypass_the_sample_table_guard() {
+        let mut children = Vec::new();
+        for _ in 0..BOX_BUDGET {
+            children.extend(boxed(b"free", &[]));
+        }
+        children.extend(boxed(b"stco", &table(0x6f6f_7600, &[0; 12])));
+        assert!(checked(&file_with(&children))
+            .unwrap_err()
+            .contains("inspection budget"));
     }
 }

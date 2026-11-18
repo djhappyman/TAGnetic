@@ -1503,7 +1503,13 @@ fn player_seek(player: State<Player>, secs: f64) -> Result<(), ErrorDto> {
 
 #[tauri::command]
 fn player_set_volume(player: State<Player>, level: f64) -> Result<(), ErrorDto> {
-    player.set_volume(level as f32).map_err(shell_error)
+    // The slider is 0..1; a finite value beyond it is a request for quiet/loud
+    // rather than an error, so clamp before narrowing. Doing it in `f64` keeps a
+    // huge value from overflowing to an infinity the player would refuse, and a
+    // NaN still has no meaning and is still refused.
+    player
+        .set_volume(level.clamp(0.0, 1.0) as f32)
+        .map_err(shell_error)
 }
 
 #[tauri::command]
