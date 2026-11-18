@@ -13,6 +13,16 @@
 // `{name}` in a value is filled from the vars passed to `t`/`tn`; `{n}` is the
 // count `tn` was given.
 export const en = {
+  "workbench.resize": "Resize transformations table",
+  "workbench.chain": "Transformation chain",
+  "workbench.options": "Transformation options",
+  "workbench.transformations": "Transformations",
+  "workbench.add": "Add",
+  "workbench.addTransformation": "Add transformation",
+  "workbench.newTransformation": "New transformation…",
+  "workbench.advancedEditor": "Advanced editor…",
+  "workbench.emptyChain": "Add a transformation to get started.",
+
 
   "online.importFields": "Import fields",
   "online.importAction": "Import",
@@ -1402,7 +1412,20 @@ export const en = {
   "editor.clearField": "Clear {field}",
   "editor.clearFieldTitle": "Remove {field} from selected files",
   "editor.mixedValue": "Mixed values",
+  "workbench.mixedFields": "Mixed fields",
+  "workbench.order": "Enabled presets run from top to bottom.",
+  "workbench.enabledOnly": "Enabled only",
+  "workbench.new": "New",
+  "workbench.manage": "Manage",
+  "workbench.edit": "Edit",
+  "workbench.customize": "Customize",
+  "workbench.example": "Example",
+  "workbench.customSample": "Custom sample",
+  "workbench.sampleOnly": "Sample only",
+  "workbench.noResults": "No matching presets. Clear the search or turn off Enabled only.",
   "staging.heading": "Staged edits",
+  "staging.transformations": { one: "{n} transformation", other: "{n} transformations" },
+  "staging.tagChanges": { one: "{n} tag change", other: "{n} tag changes" },
   "staging.fileCount": '{files} staged',
   "staging.views": 'File views',
   "staging.files": 'Files',

@@ -37,7 +37,7 @@ async function open(page, theme = 'dark') {
   await page.locator('#root').press('Enter');
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(3);
 }
-const transforms = page => page.locator('#subtab-transformations');
+const transforms = page => page.locator('#transformation-pane');
 
 async function editor(page) {
   const compact = page.getByRole('tablist', { name: 'Workspace module' });
@@ -51,15 +51,16 @@ async function screenshot(page, file) {
 
 // These initial assertions were run against checkpoint719c96c's exact172-test
 // fixture build before the implementation build lease was released.
-test('Transformations is a fourth source tab at the top of the inspector', async ({page}) => {
+test('Transformations table sits above the editor fields without its own tab', async ({page}) => {
  await open(page);await openTagSource(page,'transformations');
  await expect(page.locator('#dock-module-transformations')).toHaveCount(0);
  await expect(transforms(page)).toBeVisible();
  await expect(page.locator('.manual-inspector-heading')).toHaveCount(0);
- const tab=await page.locator('.subtab[data-subtab="transformations"]').boundingBox(),pane=await page.locator('.mode-col').boundingBox();expect(tab.y-pane.y).toBeLessThan(16);
+ const tab=await page.locator('.subtab[data-subtab="editor"]').boundingBox(),pane=await page.locator('.mode-col').boundingBox();expect(tab.y-pane.y).toBeLessThan(16);
  await expect(page.locator('.mode-col .inspector-help')).toHaveCount(0);
- await expect(page.locator('#groups-menu .preset-section-heading').first()).toContainText('Your presets');
- await expect(page.locator('#groups-menu .preset-section-heading #presets-edit')).toBeVisible();
+ await expect(page.locator('.transform-heading h3')).toHaveText('Transformations');
+ await expect(page.locator('#transform-add')).toBeVisible();
+ await expect(page.locator('#presets-edit')).toBeHidden();
 });
 
 test('everyday fields stay open while More tags stays an accessible collapsible', async ({ page }) => {
@@ -157,9 +158,9 @@ for (const theme of ['dark', 'light']) for (const size of [{ width: 375, height:
     await open(page, theme);
     const compact = page.getByRole('tablist', { name: 'Workspace module' });
     await openTagSource(page,'transformations');
-    await expect(page.locator('.subtab[data-subtab="transformations"]')).toBeInViewport({ratio:1});
+    await expect(page.locator('.subtab[data-subtab="editor"]')).toBeInViewport({ratio:1});
     await expect(page.locator('.mode-col .inspector-help')).toHaveCount(0);
-    await expect(page.locator('#presets-edit')).toBeInViewport({ ratio: 1 });
+    await expect(page.locator('#transform-add')).toBeInViewport({ ratio: 1 });
     await editor(page);
     await page.locator('#editor-field-title').scrollIntoViewIfNeeded();
     await expect(page.locator('#editor-field-title')).toBeInViewport({ ratio: 1 });

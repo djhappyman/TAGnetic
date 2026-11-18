@@ -1,10 +1,16 @@
 //! Tag data model and the tag I/O engine facade.
 
+pub mod exact;
+pub mod native_patch;
+mod policy;
+pub(crate) use policy::recovery_active;
+#[cfg(target_os = "linux")]
+pub(crate) use policy::RecoveryPolicy;
+pub use policy::{ModelPolicy, PolicyScope};
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::RwLock;
 
 use encoding_rs::Encoding;
 use lofty::aac::AacFile;
@@ -33,13 +39,6 @@ use lofty::wavpack::WavPackFile;
 use lofty::TextEncoding;
 use thiserror::Error;
 
-/// Whether ID3v2 tags are written as v2.3 (`true`) or v2.4 (`false`, the
-/// default). App-wide preference (Settings › Tag defaults, #79). Kept as a
-/// process global rather than threaded through every `write` call because it is
-/// a rarely-changed, app-wide default; the app sets it from saved settings via
-/// [`set_write_id3v23`].
-static WRITE_ID3V23: AtomicBool = AtomicBool::new(false);
-
 /// The silent MPEG frame [`TagEngine::restore_id3v2_bytes`] pads a journaled
 /// ID3v2 chunk with, and how many of them. Enough audio for the backend to
 /// recognize the bytes as an MP3 and hand the tag back; never written to disk.
@@ -48,7 +47,7 @@ const SILENT_MPEG_FRAMES: usize = 5;
 
 /// Set the ID3v2 version future writes use (`true` = v2.3, `false` = v2.4).
 pub fn set_write_id3v23(v23: bool) {
-    WRITE_ID3V23.store(v23, Ordering::Relaxed);
+    policy::update_global(|state| state.write_id3v23 = v23);
 }
 
 /// The code pages Latin-1 text can be read in (#698), by the label the settings
@@ -69,23 +68,20 @@ pub const LEGACY_CODE_PAGES: [&str; 12] = [
     "euc-kr",
 ];
 
-/// The code page Latin-1 text is read in (#698), `None` for Latin-1 itself.
-/// App-wide and rarely changed, like the two preferences around it.
-static LEGACY_CODE_PAGE: RwLock<Option<&'static Encoding>> = RwLock::new(None);
+/// Revision of the active operation's metadata interpretation. A saturated or
+/// invalidated generation refuses exact IO and cache admission.
+pub fn read_policy_revision() -> u64 {
+    policy::capture().1
+}
 
 /// Set the code page future reads take Latin-1 text to be in (#698).
 pub fn set_legacy_code_page(label: &str) {
-    let page = LEGACY_CODE_PAGES
-        .contains(&label)
-        .then(|| Encoding::for_label(label.as_bytes()))
-        .flatten();
-    if let Ok(mut current) = LEGACY_CODE_PAGE.write() {
-        *current = page;
-    }
+    let page = policy::normalize_code_page(label);
+    policy::update_global(|state| state.code_page = page);
 }
 
 fn legacy_code_page() -> Option<&'static Encoding> {
-    LEGACY_CODE_PAGE.read().ok().and_then(|page| *page)
+    policy::current().code_page
 }
 
 /// The write options for an ID3v2 save, honoring the version preference.
@@ -99,16 +95,8 @@ fn write_options() -> WriteOptions {
 }
 
 fn id3_write_options() -> WriteOptions {
-    write_options().use_id3v23(WRITE_ID3V23.load(Ordering::Relaxed))
+    write_options().use_id3v23(policy::current().write_id3v23)
 }
-
-/// User-preferred order for choosing which tag block a multi-tag file is read
-/// from (Settings › Tag defaults › Read priority, #84). Empty (the default) =
-/// follow lofty's order: the primary tag, then the first present. App-wide,
-/// rarely changed, set from saved settings via [`set_read_priority`] — the same
-/// process-global model as [`WRITE_ID3V23`]. Held behind a lock rather than an
-/// atomic because it is an ordered list, not a flag.
-static READ_PRIORITY: RwLock<Vec<TagType>> = RwLock::new(Vec::new());
 
 /// Map a settings key to a lofty [`TagType`]. Unknown keys are ignored so a
 /// stale or partial setting can never break reading.
@@ -128,10 +116,11 @@ fn tag_type_from_key(key: &str) -> Option<TagType> {
 /// first listed tag block that is present in the file. An empty list restores
 /// the backend's default order.
 pub fn set_read_priority(order: &[String]) {
-    let mapped: Vec<TagType> = order.iter().filter_map(|k| tag_type_from_key(k)).collect();
-    if let Ok(mut guard) = READ_PRIORITY.write() {
-        *guard = mapped;
-    }
+    let mapped = order
+        .iter()
+        .filter_map(|key| tag_type_from_key(key))
+        .collect::<Vec<_>>();
+    policy::update_global(|state| state.read_priority = mapped.clone());
 }
 
 /// Choose which tag block to read from, given the tag types `present` in the
@@ -146,29 +135,16 @@ fn choose_priority_type(present: &[TagType], priority: &[TagType]) -> Option<Tag
 /// [`TagMap`] holds, and splits them apart again on write (#46).
 pub const DEFAULT_MULTI_VALUE_SEPARATOR: &str = "; ";
 
-/// The configured separator, empty until the app sets one. App-wide and rarely
-/// changed, the same process-global model as [`WRITE_ID3V23`] and
-/// [`READ_PRIORITY`], behind a lock because it is a string.
-static MULTI_VALUE_SEPARATOR: RwLock<String> = RwLock::new(String::new());
-
-/// Set the separator multi-value fields are joined with on read and split on
-/// write (#46). An empty string restores [`DEFAULT_MULTI_VALUE_SEPARATOR`].
+/// Set the standalone model separator. App sessions own a separate policy;
+/// explicit setters from an active operation callback invalidate that operation.
 pub fn set_multi_value_separator(separator: &str) {
-    if let Ok(mut guard) = MULTI_VALUE_SEPARATOR.write() {
-        *guard = separator.to_string();
-    }
+    let separator = policy::normalize_separator(separator);
+    policy::update_global(|state| state.separator = separator.clone());
 }
 
-/// The separator in force. Falls back to the default when unset, and — because
-/// splitting on an empty string would explode every value into characters —
-/// whenever the configured one is blank.
+/// Separator from the current operation, or standalone defaults outside a scope.
 pub fn multi_value_separator() -> String {
-    MULTI_VALUE_SEPARATOR
-        .read()
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(|s| s.clone())
-        .unwrap_or_else(|| DEFAULT_MULTI_VALUE_SEPARATOR.to_string())
+    policy::current().separator.clone()
 }
 
 /// Split a stored value back into the individual values to write (#46).
@@ -1258,7 +1234,7 @@ const OGG_CODEC_MAGICS: [&[u8]; 3] = [b"\x01vorbis", b"OpusHead", b"Speex   "];
 fn refuse_unsupported_ogg(path: &Path) -> Result<(), TagIoError> {
     use std::io::{Read, Seek, SeekFrom};
 
-    let mut file = std::fs::File::open(path)?;
+    let mut file = exact::source_file(path)?;
     let mut head = [0u8; 10];
     if file.read_exact(&mut head).is_err() {
         return Ok(());
@@ -1312,7 +1288,7 @@ fn refuse_unsupported_ogg(path: &Path) -> Result<(), TagIoError> {
 /// Only reached once every ordinary read has failed, so a file that reads costs
 /// nothing more.
 fn repaired_id3v2_source(path: &Path) -> Result<Option<TagSource>, TagIoError> {
-    let raw = std::fs::read(path)?;
+    let raw = exact::source_bytes(path)?;
     Ok(repair_undecodable_id3v2_frames(&raw).map(TagSource::memory))
 }
 
@@ -1754,7 +1730,7 @@ fn container_of(path: &Path) -> Result<Option<FileType>, TagIoError> {
 /// (#710), as a copy with that tag padded: it then finds the real one.
 fn buffered(path: &Path) -> Result<TagSource, TagIoError> {
     use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path)?;
+    let mut file = exact::source_file(path)?;
     let mut head = [0u8; 12];
     let read = file.read_exact(&mut head).is_ok();
     let leading = read && starts_with_id3v2_extended_header(&head[..10]);
@@ -1766,8 +1742,9 @@ fn buffered(path: &Path) -> Result<TagSource, TagIoError> {
     let misread = tail_is_ape_tag_misread_as_id3v1(&mut file)?;
     file.seek(SeekFrom::Start(0))?;
     if leading || chunk.is_some() || misread {
-        let mut raw = Vec::new();
-        file.read_to_end(&mut raw)?;
+        // Exact reads keep one source authority and bound whole-file repair;
+        // ordinary compatibility reads retain their existing fallback.
+        let raw = exact::source_bytes(path)?;
         let fixed = match chunk {
             Some((at, len)) => without_iff_id3_extended_header(&raw, at, len),
             None if leading => without_id3v2_extended_header(&raw),
@@ -2683,7 +2660,7 @@ fn leading_id3v2_revision(path: &Path) -> Result<Option<Id3v2Revision>, TagIoErr
 /// almost no MP3 has.
 fn mp3_surely_without_ape(path: &Path) -> Result<bool, TagIoError> {
     use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path)?;
+    let mut file = exact::source_file(path)?;
     let len = file.metadata()?.len();
     let mut head = [0u8; 10];
     let mut after_leading_tag = 0u64;
@@ -2708,6 +2685,7 @@ fn mp3_surely_without_ape(path: &Path) -> Result<bool, TagIoError> {
 impl TagEngine {
     /// Read tags from a file on disk.
     pub fn read(path: &Path) -> Result<TrackFile, TagIoError> {
+        let _request = exact::suspend_source();
         guarded(path, || Ok(Self::read_with_props(path)?.file))
     }
 
@@ -2720,6 +2698,96 @@ impl TagEngine {
     /// thousands of files by the number of questions asked of it.
     /// [`read`](Self::read) is this keeping only the first.
     pub fn read_with_props(path: &Path) -> Result<TrackRead, TagIoError> {
+        let _request = exact::suspend_source();
+        Self::read_selected(path).map(|(read, _, _)| read)
+    }
+
+    /// Read native ordered text before legacy scalar projection. This bounded
+    /// API never writes and cannot authorize a scalar or exact mutation.
+    pub fn read_exact(path: &Path) -> Result<exact::ExactTrackRead, exact::ExactReadError> {
+        Self::read_exact_with_cancel(path, || false)
+    }
+
+    /// Exact reads with cooperative checkpoints around parsing and while
+    /// scanning metadata envelopes. Existing parser/syscall work cannot be
+    /// interrupted internally; cancellation returns no partial snapshot.
+    pub fn read_exact_with_cancel(
+        path: &Path,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<exact::ExactTrackRead, exact::ExactReadError> {
+        Self::read_exact_using(path, cancelled, |cancelled| {
+            exact::prepare_input(path, cancelled)
+        })
+    }
+
+    /// Read exact and compatibility metadata from one owned, held regular File.
+    /// The logical path supplies its label and extension hint; it is never
+    /// reopened by this request, and need not exist. The caller owns path/root
+    /// authorization and must revalidate that binding before a later mutation.
+    /// Cloned File handles can share seek state: the caller must exclude
+    /// concurrent cursor access through its other clones. No File escapes in
+    /// the result. This read-only method does not authorize an exact write.
+    pub fn read_exact_file(
+        file: std::fs::File,
+        logical_path: &Path,
+    ) -> Result<exact::ExactTrackRead, exact::ExactReadError> {
+        Self::read_exact_file_with_cancel(file, logical_path, || false)
+    }
+
+    /// Held-source exact reading with the same bounded admission, policy,
+    /// cancellation and public-request isolation as path-based exact reads.
+    pub fn read_exact_file_with_cancel(
+        file: std::fs::File,
+        logical_path: &Path,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<exact::ExactTrackRead, exact::ExactReadError> {
+        if logical_path.as_os_str().len() > 4096 {
+            return Err(exact::ExactReadError::Limit);
+        }
+        Self::read_exact_using(logical_path, cancelled, |cancelled| {
+            exact::prepare_input_file(file, cancelled)
+        })
+    }
+
+    fn read_exact_using(
+        path: &Path,
+        cancelled: impl Fn() -> bool,
+        prepare: impl FnOnce(&dyn Fn() -> bool) -> Result<exact::Input, exact::ExactReadError>,
+    ) -> Result<exact::ExactTrackRead, exact::ExactReadError> {
+        let policy = read_policy_revision();
+        let read_policy = exact::ExactReadPolicy::capture();
+        if policy != read_policy.revision {
+            return Err(exact::ExactReadError::Changed);
+        }
+        let input = prepare(&cancelled)?;
+        let _source = input.bind_source(path);
+        if cancelled() {
+            return Err(exact::ExactReadError::Cancelled);
+        }
+        let (legacy, _, selected) = Self::read_selected(path)?;
+        if cancelled() {
+            return Err(exact::ExactReadError::Cancelled);
+        }
+        input.ensure_unchanged()?;
+        let text = exact::snapshot(
+            &input,
+            legacy.file.format,
+            selected.and_then(TagBlockKind::from_tag_type),
+            read_policy.clone(),
+        )?;
+        // User callbacks may change policy or the held source. Run the final
+        // cooperative checkpoint before the final publication witnesses.
+        if cancelled() {
+            return Err(exact::ExactReadError::Cancelled);
+        }
+        if policy == u64::MAX || exact::ExactReadPolicy::capture() != read_policy {
+            return Err(exact::ExactReadError::Changed);
+        }
+        input.ensure_unchanged()?;
+        exact::ExactTrackRead::new(legacy, text)
+    }
+
+    fn read_selected(path: &Path) -> Result<(TrackRead, FileType, Option<TagType>), TagIoError> {
         guarded(path, || {
             let mut tagged_file = probe_file(path)?;
             // The container the file actually parsed as — which after #204 is not
@@ -2749,10 +2817,7 @@ impl TagEngine {
                 || (present.contains(&TagType::Ape)
                     && read_ape_pictures(path, container)
                         .is_ok_and(|pictures| !pictures.is_empty()));
-            let priority_type = READ_PRIORITY
-                .read()
-                .ok()
-                .and_then(|order| choose_priority_type(&present, &order));
+            let priority_type = choose_priority_type(&present, &policy::current().read_priority);
 
             // The block is taken out of the file rather than borrowed from it: the
             // custom fields are read off its *concrete* form, and for ID3v2 and MP4
@@ -2839,16 +2904,20 @@ impl TagEngine {
                 })
                 .collect();
 
-            Ok(TrackRead {
-                file: TrackFile {
-                    path: path.to_path_buf(),
-                    format,
-                    tags,
+            Ok((
+                TrackRead {
+                    file: TrackFile {
+                        path: path.to_path_buf(),
+                        format,
+                        tags,
+                    },
+                    props,
+                    blocks,
+                    has_cover,
                 },
-                props,
-                blocks,
-                has_cover,
-            })
+                container,
+                chosen,
+            ))
         })
     }
 
@@ -2868,6 +2937,7 @@ impl TagEngine {
     /// Only [`plan::Executor`](crate::plan::Executor) is allowed to call this —
     /// see the crate-level invariant.
     pub fn write(file: &TrackFile) -> Result<(), TagIoError> {
+        let _request = exact::suspend_source();
         guarded(&file.path, || {
             ogg_safe_write(&file.path, || {
                 ensure_audio_after_tags(&file.path)?;
@@ -2921,6 +2991,7 @@ impl TagEngine {
     /// `Duration::ZERO` when the backend can't determine it. Used by the preview
     /// player for the seek bar / total time.
     pub fn read_duration(path: &Path) -> Result<std::time::Duration, TagIoError> {
+        let _request = exact::suspend_source();
         guarded(path, || {
             let tagged = probe_file(path)?;
             Ok(tagged.properties().duration())
@@ -2933,6 +3004,7 @@ impl TagEngine {
     /// placeholders (#147). One probe, so a mask asking for several of them
     /// costs no more than asking for one.
     pub fn read_audio_props(path: &Path) -> Result<AudioProps, TagIoError> {
+        let _request = exact::suspend_source();
         guarded(path, || {
             let tagged = probe_file(path)?;
             let props = tagged.properties();
@@ -2953,6 +3025,7 @@ impl TagEngine {
     /// it is actionable — a file in front of you, a conversion about to run —
     /// never per row of a library.
     pub fn id3v2_revision(path: &Path) -> Result<Option<Id3v2Revision>, TagIoError> {
+        let _request = exact::suspend_source();
         guarded(path, || {
             // An MP3's or an AAC's leading tag states its revision in its header.
             if let Some(revision) = leading_id3v2_revision(path)? {
@@ -2981,6 +3054,7 @@ impl TagEngine {
     /// artwork-heavy selection pay for its covers twice — once here and once
     /// there. [`restore_id3v2_bytes`](Self::restore_id3v2_bytes) puts them back.
     pub fn dump_id3v2(path: &Path) -> Result<Option<Vec<u8>>, TagIoError> {
+        let _request = exact::suspend_source();
         guarded(path, || {
             let Some(container) = container_of(path)? else {
                 return Ok(None);
@@ -3012,6 +3086,7 @@ impl TagEngine {
         covers: &[CoverArt],
         revision: Option<Id3v2Revision>,
     ) -> Result<(), TagIoError> {
+        let _request = exact::suspend_source();
         guarded(path, || {
             ensure_audio_after_tags(path)?;
             ensure_nothing_before_id3v2(path)?;
@@ -3061,6 +3136,7 @@ impl TagEngine {
     /// Pictures are left out, as in [`dump_id3v2`](Self::dump_id3v2): they
     /// travel beside this as [`TagBlockContent::covers`].
     pub fn dump_vorbis(path: &Path) -> Result<Option<Vec<u8>>, TagIoError> {
+        let _request = exact::suspend_source();
         guarded(path, || {
             let Some(container) = container_of(path)? else {
                 return Ok(None);
@@ -3080,6 +3156,7 @@ impl TagEngine {
         bytes: &[u8],
         covers: &[CoverArt],
     ) -> Result<(), TagIoError> {
+        let _request = exact::suspend_source();
         guarded(path, || {
             ogg_safe_write(path, || {
                 ensure_audio_after_tags(path)?;
@@ -3116,6 +3193,7 @@ impl TagEngine {
     ///
     /// Only [`Executor`](crate::plan::Executor) should call this.
     pub fn set_id3v2_revision(path: &Path, revision: Id3v2Revision) -> Result<bool, TagIoError> {
+        let _request = exact::suspend_source();
         guarded(path, || {
             ensure_audio_after_tags(path)?;
             ensure_nothing_before_id3v2(path)?;
@@ -3145,6 +3223,7 @@ impl TagEngine {
     /// as something else (#698), which
     /// [`id3v2_text_to_unicode`](Self::id3v2_text_to_unicode) would rewrite.
     pub fn has_legacy_id3v2_text(path: &Path) -> Result<bool, TagIoError> {
+        let _request = exact::suspend_source();
         guarded(path, || {
             let Some(page) = legacy_code_page() else {
                 return Ok(false);
@@ -3163,6 +3242,7 @@ impl TagEngine {
     /// the chosen code page reads as something else (#698). ID3v1 cannot hold
     /// Unicode, so such a file gets an ID3v2 tag to hold its text.
     pub fn has_legacy_id3v1_text_only(path: &Path) -> Result<bool, TagIoError> {
+        let _request = exact::suspend_source();
         guarded(path, || {
             let Some(page) = legacy_code_page() else {
                 return Ok(false);
@@ -3186,6 +3266,7 @@ impl TagEngine {
     ///
     /// Only [`Executor`](crate::plan::Executor) should call this.
     pub fn id3v2_text_to_unicode(path: &Path) -> Result<bool, TagIoError> {
+        let _request = exact::suspend_source();
         guarded(path, || {
             let Some(page) = legacy_code_page() else {
                 return Ok(false);
@@ -3220,6 +3301,7 @@ impl TagEngine {
         path: &Path,
         kind: TagBlockKind,
     ) -> Result<Option<TagBlockContent>, TagIoError> {
+        let _request = exact::suspend_source();
         guarded(path, || {
             let tagged = probe_file(path)?;
             let tag_type = kind.to_tag_type();
@@ -3257,6 +3339,7 @@ impl TagEngine {
     ///
     /// Only [`Executor`](crate::plan::Executor) should call this.
     pub fn remove_block(path: &Path, kind: TagBlockKind) -> Result<(), TagIoError> {
+        let _request = exact::suspend_source();
         guarded(path, || {
             ogg_safe_write(path, || {
                 ensure_audio_after_tags(path)?;
@@ -3293,6 +3376,7 @@ impl TagEngine {
         kind: TagBlockKind,
         content: &TagBlockContent,
     ) -> Result<(), TagIoError> {
+        let _request = exact::suspend_source();
         guarded(path, || Self::write_block(path, kind, None, content))
     }
 
@@ -3313,6 +3397,7 @@ impl TagEngine {
         revision: Option<Id3v2Revision>,
         content: &TagBlockContent,
     ) -> Result<(), TagIoError> {
+        let _request = exact::suspend_source();
         guarded(path, || {
             ogg_safe_write(path, || {
                 ensure_audio_after_tags(path)?;
@@ -3412,6 +3497,7 @@ impl TagEngine {
 
     /// Every image the file carries (#56), in the order the tag holds them.
     pub fn read_covers(path: &Path) -> Result<Vec<CoverArt>, TagIoError> {
+        let _request = exact::suspend_source();
         guarded(path, || {
             let tagged = probe_file(path)?;
             let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) else {
@@ -3432,6 +3518,7 @@ impl TagEngine {
     /// explicit front cover), if any — "the cover" as the rest of the app means
     /// it, over the set [`read_covers`](Self::read_covers) returns.
     pub fn read_cover(path: &Path) -> Result<Option<CoverArt>, TagIoError> {
+        let _request = exact::suspend_source();
         guarded(path, || {
             let covers = Self::read_covers(path)?;
             Ok(covers
@@ -3451,6 +3538,7 @@ impl TagEngine {
     ///
     /// Only [`Executor`](crate::plan::Executor) should call this.
     pub fn write_covers(path: &Path, covers: &[CoverArt]) -> Result<(), TagIoError> {
+        let _request = exact::suspend_source();
         guarded(path, || {
             ogg_safe_write(path, || {
                 ensure_audio_after_tags(path)?;
@@ -5126,7 +5214,7 @@ fn parse_id3v2(
 /// cover costs a few reads; only a 2.3 tag without a year gets here.
 fn lost_v23_year(path: &Path, container: FileType) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path).ok()?;
+    let mut file = exact::source_file(path).ok()?;
     let start = match container {
         FileType::Mpeg | FileType::Aac => 0,
         FileType::Aiff | FileType::Wav => {
@@ -5193,7 +5281,7 @@ fn is_timestamp_frame_id(id: &str) -> bool {
 /// seeking, so the audio is never loaded.
 fn raw_id3v2_block(path: &Path, container: FileType) -> Result<Option<Vec<u8>>, TagIoError> {
     use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path)?;
+    let mut file = exact::source_file(path)?;
     let mut header = [0u8; 12];
     match container {
         FileType::Mpeg | FileType::Aac => {

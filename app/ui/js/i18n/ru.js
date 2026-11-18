@@ -13,6 +13,16 @@
 // 2 трека, 5 треков; 21 is `one` again and 11 is `many`. `tn` asks
 // `Intl.PluralRules` rather than guessing, so a form is never picked by hand.
 export const ru = {
+  "workbench.resize": "Изменить размер таблицы преобразований",
+  "workbench.chain": "Цепочка преобразований",
+  "workbench.options": "Параметры преобразований",
+  "workbench.transformations": "Преобразования",
+  "workbench.add": "Добавить",
+  "workbench.addTransformation": "Добавить преобразование",
+  "workbench.newTransformation": "Новое преобразование…",
+  "workbench.advancedEditor": "Расширенный редактор…",
+  "workbench.emptyChain": "Добавьте преобразование, чтобы начать.",
+
 
   "online.importFields": "Поля импорта",
   "online.importAction": "Импортировать",
@@ -1408,6 +1418,19 @@ export const ru = {
   "editor.clearField": "Очистить {field}",
   "editor.clearFieldTitle": "Удалить {field} из выбранных файлов",
   "editor.mixedValue": "Разные значения",
+  "workbench.mixedFields": "Разные поля",
+  "workbench.order": "Включённые наборы выполняются сверху вниз.",
+  "workbench.enabledOnly": "Только включённые",
+  "workbench.new": "Создать",
+  "workbench.manage": "Управление",
+  "workbench.edit": "Изменить",
+  "workbench.customize": "Настроить",
+  "workbench.example": "Пример",
+  "workbench.customSample": "Свой пример",
+  "workbench.sampleOnly": "Только пример",
+  "workbench.noResults": "Нет подходящих наборов. Очистите поиск или отключите «Только включённые».",
+  "staging.transformations": {"one": "{n} преобразование", "few": "{n} преобразования", "many": "{n} преобразований", "other": "{n} преобразования"},
+  "staging.tagChanges": {"one": "{n} изменение тега", "few": "{n} изменения тегов", "many": "{n} изменений тегов", "other": "{n} изменения тегов"},
   "staging.heading": "Ожидающие изменения",
   "staging.fileCount": "{files} с изменениями",
   "staging.views": "Представления файлов",

@@ -9,6 +9,16 @@
 //
 // German selects between `one` and `other` for a count — 1 Track, 2 Tracks.
 export const de = {
+  "workbench.resize": "Größe der Transformationstabelle ändern",
+  "workbench.chain": "Transformationskette",
+  "workbench.options": "Transformationsoptionen",
+  "workbench.transformations": "Transformationen",
+  "workbench.add": "Hinzufügen",
+  "workbench.addTransformation": "Transformation hinzufügen",
+  "workbench.newTransformation": "Neue Transformation…",
+  "workbench.advancedEditor": "Erweiterter Editor…",
+  "workbench.emptyChain": "Fügen Sie eine Transformation hinzu, um zu beginnen.",
+
 
   "online.importFields": "Importfelder",
   "online.importAction": "Importieren",
@@ -1405,6 +1415,19 @@ export const de = {
   "editor.clearField": "{field} leeren",
   "editor.clearFieldTitle": "{field} aus den ausgewählten Dateien entfernen",
   "editor.mixedValue": "Verschiedene Werte",
+  "workbench.mixedFields": "Gemischte Felder",
+  "workbench.order": "Aktivierte Vorlagen werden von oben nach unten ausgeführt.",
+  "workbench.enabledOnly": "Nur aktivierte",
+  "workbench.new": "Neu",
+  "workbench.manage": "Verwalten",
+  "workbench.edit": "Bearbeiten",
+  "workbench.customize": "Anpassen",
+  "workbench.example": "Beispiel",
+  "workbench.customSample": "Eigenes Beispiel",
+  "workbench.sampleOnly": "Nur ein Beispiel",
+  "workbench.noResults": "Keine passenden Vorlagen. Suche leeren oder „Nur aktivierte“ ausschalten.",
+  "staging.transformations": {"one": "{n} Transformation", "other": "{n} Transformationen"},
+  "staging.tagChanges": {"one": "{n} Tag-Änderung", "other": "{n} Tag-Änderungen"},
   "staging.heading": "Vorgemerkte Änderungen",
   "staging.fileCount": "{files} vorgemerkt",
   "staging.views": "Dateiansichten",

@@ -1,3 +1,4 @@
+import { openTransformationEditor } from './navigation.js';
 import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
@@ -31,7 +32,7 @@ test('table-owned folder controls retain opening and refreshing while commands o
   expect(Math.abs(location.width - bounds.width)).toBeLessThan(2);
   await page.locator('#lib-refresh').click();
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(3);
-  await openTagSource(page,'transformations');await page.locator('#presets-edit').click();
+  await openTagSource(page,'transformations');await openTransformationEditor(page);
   await expect(page.locator('#pe-editor')).toBeVisible();
   await expect(page.locator('.pe-list-row')).not.toHaveCount(0);
   await page.keyboard.press('Escape');

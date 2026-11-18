@@ -1913,6 +1913,21 @@ fn incomplete_rollback_retains_recovery_batch_after_reopen() {
         saved: PathBuf,
     }
     impl UndoJournal for FailFinish {
+        fn prepare_move_stage(
+            &mut self,
+            id: BatchId,
+            stage: &tagrex_core::journal::MoveStage,
+        ) -> Result<(), tagrex_core::journal::JournalError> {
+            self.journal.prepare_move_stage(id, stage)
+        }
+        fn move_stages(
+            &self,
+            id: BatchId,
+        ) -> Result<Vec<tagrex_core::journal::MoveStage>, tagrex_core::journal::JournalError>
+        {
+            self.journal.move_stages(id)
+        }
+
         fn record(&mut self, b: &AppliedBatch) -> Result<BatchId, JournalError> {
             self.journal.record(b)
         }

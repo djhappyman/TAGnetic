@@ -1,3 +1,4 @@
+import { createTransformationWorkbench } from './transformation-workbench.js';
 import { nativeLiveFields, nativeRecompute, hasLiveInputs, hasStructuralLiveInputs, isLiveImportBusy, liveInputs, liveInputRevision, hasInvalidLiveFields, hasInvalidPreview, optimisticLivePlan } from "./live-preview.js";
 // The GENERATOR mode (#143 split it out of app.js).
 //
@@ -16,7 +17,7 @@ import { t, tn } from "./i18n.js";
 import { invoke } from "./invoke.js";
 import { hooks } from "./hooks.js";
 import { createPresetChecklist, renderAllGroupsMenus } from "./chain.js";
-import { onPresetsChanged, openPresetEditor } from "./presets.js";
+import { onPresetsChanged } from "./presets.js";
 import { currentFieldValue } from "./editor.js";
 import { groupKeyOf } from "./grouping.js";
 import { automaticStageScope } from './shared-stage.js';
@@ -84,6 +85,9 @@ export function setNativeStageSession(session, derivedFields = null, changes = [
   if(derivedFields){nativeDerivedFields.clear();for(const entry of derivedFields)nativeDerivedFields.set(entry.path+'\0'+entry.field,entry);}
   for(const entry of changes){const key=entry.path+'\0'+entry.field;if(entry.derived)nativeDerivedFields.set(key,{path:entry.path,field:entry.field});else if(entry.derived===false)nativeDerivedFields.delete(key);}
   if(nativeRecompute)for(const entry of nativeDerivedFields.values())nativeTransformPaths.add(entry.path);
+}
+export function isNativeTransformedTag(path, field) {
+  return nativeDerivedFields.has(path + '\0' + field);
 }
 function tagOnlyGroups(groups) {
   return groups.every(group => group.rules.every(rule => rule.enabled === false || !['filename','fileext'].includes(rule.scope ?? group.scope)));
@@ -655,7 +659,17 @@ function refreshTransformButton() {
 // The checklist inside the block (#392): which presets run. A tick takes effect
 // at once — the job's own read-out and any plan staged from it redo themselves
 // (#248), and the wand button's dot follows.
+const workbench = createTransformationWorkbench({
+  rerender: () => presetChecklist.render(),
+  isActive: group => isPresetActive(group, shownContext || 'generator'),
+  enable: group => { setPresetActive(group, true, shownContext || 'generator'); refreshTransformButton(); presetChecklist.render(); },
+});
 const presetChecklist = createPresetChecklist({
+  onInspect: workbench.inspect,
+  isInspected: workbench.isInspected,
+  matches: workbench.matches,
+  onRender: workbench.refresh,
+  renderDetails: workbench.renderDetails,
   menu: "groups-menu",
   context: () => shownContext || "generator",
   // The set of the job the checklist is showing (#555).
@@ -670,9 +684,6 @@ const presetChecklist = createPresetChecklist({
   // job's normal import/rename chain still filters its own applicable scopes.
   appliesTo: group => presetAppliesTo(group, 'generator'),
   ruleCount: group => presetRuleCount(group, 'generator'),
-  // › on a row opens that preset in the editor, over this window (#556).
-  onOpen: (group) => openPresetEditor(group.name),
-  onEdit: () => openPresetEditor(),
 });
 for (const context of ['generator', 'online', 'fromname', 'renamer']) {
   onChainChanged(context, scheduleAutomaticTransformPreview);

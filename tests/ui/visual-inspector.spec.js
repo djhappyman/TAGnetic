@@ -188,8 +188,10 @@ test('field groups keep one 24px separation and rows one 8px gap without doubled
     children: [...node.children].map((child) => ({ tag: child.className, top: child.getBoundingClientRect().top, bottom: child.getBoundingClientRect().bottom })),
   }));
   expect(number(scroll.gap)).toBe(0);
-  expect(scroll.children).toHaveLength(2);
-  const fieldsToCover = scroll.children[1].top - scroll.children[0].bottom;
+  expect(scroll.children).toHaveLength(3);
+  expect(scroll.children[0].tag).toContain('docked-transformations');
+  expect(scroll.children[1].top-scroll.children[0].bottom).toBeCloseTo(12,0);
+  const fieldsToCover = scroll.children[2].top - scroll.children[1].bottom;
   expect(fieldsToCover).toBeCloseTo(32, 0);
 });
 

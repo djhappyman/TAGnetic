@@ -247,7 +247,7 @@ function scheduleSample() {
   for (const error of el("pe-rules").querySelectorAll(".pe-rule-error")) error.hidden = true;
   for (const input of el("pe-rules").querySelectorAll("[aria-invalid]")) input.removeAttribute("aria-invalid");
   el("pe-sample-out").setAttribute("aria-busy", "true");
-  el("pe-preview-status").textContent = t("presets.previewUpdating");
+  el("pe-preview-status").textContent = "";
   sampleTimer = setTimeout(renderSample, 150);
 }
 
@@ -270,7 +270,7 @@ async function renderSample() {
     out.textContent = value;
     out.classList.remove("error");
     out.classList.toggle("same", value === text);
-    el("pe-preview-status").textContent = value === text ? t("presets.unchanged") : "";
+    el("pe-preview-status").textContent = "";
   } catch (error) {
     if (seq !== sampleSeq) return;
     out.textContent = t("presets.checkRule");
@@ -582,5 +582,7 @@ new MutationObserver(() => {
   // Cards added, removed or reordered change the result too (#394).
   scheduleSample();
 }).observe(el("pe-rules"), { childList: true });
+
+export function openNewPreset() { openPresetEditor(); newPreset(); }
 
 export { onPresetsChanged, openPresetEditor };

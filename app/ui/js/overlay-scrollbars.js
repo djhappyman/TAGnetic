@@ -151,7 +151,20 @@ export function initTableScrollbars(wrap, { host = null } = {}) {
   resize.observe(wrap);
   const contents = host ? [...wrap.children] : [wrap.querySelector('table')];
   for (const child of contents) if (child) resize.observe(child);
-  const content = new MutationObserver(() => schedule(true));
+  // Column drags can consume trailing fill without changing the table's
+  // outer size. Its fill width is also an input to the overlay's terminal
+  // scroll space, so observe it directly and rebind after header replacement.
+  let observedFill = null;
+  function observeFill() {
+    if (host) return;
+    const next = wrap.querySelector('th.table-fill');
+    if (next === observedFill) return;
+    if (observedFill) resize.unobserve(observedFill);
+    observedFill = next;
+    if (observedFill) resize.observe(observedFill);
+  }
+  observeFill();
+  const content = new MutationObserver(() => { observeFill(); schedule(true); });
   content.observe(host ? wrap : wrap.querySelector('table'),{childList:true,subtree:true,characterData:true});
   const visibility = new MutationObserver(() => schedule(true));
   const drawerFrame = wrap.closest('.dock-frame');
@@ -172,7 +185,7 @@ if (wrap) initTableScrollbars(wrap);
 // changes a field's width or the sidebar's usable height.
 const inspector = document.getElementById('mode-col');
 if (inspector) {
-  const ports = inspector.querySelectorAll('.editor-scroll, .from-name-scroll, .online-scroll, #groups-menu, :scope > .mode-panel:not(#panel-tagger)');
+  const ports = inspector.querySelectorAll('.editor-scroll, .from-name-scroll, .online-scroll, :scope > .mode-panel:not(#panel-tagger)');
   for (const [index, port] of [...ports].entries()) {
     if (!port.id) port.id = `inspector-scroll-${index}`;
     port.classList.add('overlay-scrollport');

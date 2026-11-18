@@ -4,6 +4,7 @@
 // shell.
 import { mockInvoke } from "./mock.js";
 import { message } from "./i18n.js";
+import { recordTransformationChanges } from './staging-summary.js';
 import { createPlanCodec } from "./plan-codec.js";
 
 export const TAURI = window.__TAURI__ ? window.__TAURI__.core : null;
@@ -37,6 +38,7 @@ export async function invoke(cmd, args) {
       request = { ...request, settings, expectedRevision: _revision };
     }
     const result = plans.accept(await (TAURI ? TAURI.invoke(cmd, request) : mockInvoke(cmd, request)));
+    recordTransformationChanges(cmd, args, result);
     if (TAURI && cmd === 'save_settings' && typeof result === 'string') {
       args.settings._revision = result;
       document.dispatchEvent(new CustomEvent('tagrex:settings-saved', { detail: { ...args.settings } }));

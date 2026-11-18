@@ -1077,10 +1077,12 @@ onlineScroll?.addEventListener("scroll", scheduleTracklistWindows, { passive: tr
 const inspectorScrollports = [...document.querySelectorAll('.mode-col .online-scroll, .mode-col .editor-scroll, .mode-col .from-name-scroll, .mode-col > .mode-panel:not(#panel-tagger)')];
 function updateScrollFades() {
   for (const port of inspectorScrollports) {
+    port.classList.toggle('can-scroll-up',port.clientHeight > 0 && port.scrollTop > 1);
     port.classList.toggle('can-scroll-down', port.clientHeight > 0 && port.scrollHeight - port.scrollTop - port.clientHeight > 1);
     const focus = document.activeElement;
     const bounds = port.getBoundingClientRect();
     const target = port.contains(focus) ? focus.getBoundingClientRect() : null;
+    port.toggleAttribute('data-fade-top-focus',!!target && target.top < bounds.top+8 && target.bottom > bounds.top);
     port.toggleAttribute('data-fade-focus', !!target && target.bottom > bounds.bottom - 24 && target.top < bounds.bottom);
   }
 }

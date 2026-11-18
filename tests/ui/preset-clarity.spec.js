@@ -1,3 +1,4 @@
+import { openTransformationEditor } from './navigation.js';
 import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
@@ -18,7 +19,7 @@ test.beforeEach(async ({ page }) => {
   await page.locator('#root').fill('/music');
   await page.locator('#root').press('Enter');
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(3);
-  await openTagSource(page,'transformations');await page.locator('#presets-edit').click();
+  await openTagSource(page,'transformations');await openTransformationEditor(page);
   await expect(page.locator('#pe-editor')).toBeVisible();
   await page.locator('#pe-editor').evaluate(async e=>{await Promise.all(e.getAnimations({subtree:true}).map(a=>a.finished.catch(()=>{})));});
 });
@@ -83,7 +84,7 @@ test('built-in menu offers Copy only, copy is editable and rename stays in sideb
   await page.locator('.is-expanded').getByRole('checkbox',{name:'Pattern matching',exact:true}).uncheck();
   await page.locator('#pe-sample-input').fill('Moon Moon');
   await expect(page.locator('#pe-sample-out')).toHaveText('Sun Sun');
-  await page.locator('#pe-save-close').click(); await expect(page.locator('#pe-editor')).toBeHidden(); await openTagSource(page,'transformations');await page.locator('#presets-edit').click();
+  await page.locator('#pe-save-close').click(); await expect(page.locator('#pe-editor')).toBeHidden(); await openTagSource(page,'transformations');await openTransformationEditor(page);
   await expect(page.locator('.pe-list-row.active .pe-list-name')).toHaveText('My cleanup');
   await page.locator('.pe-list-row').nth(1).click();
   await expect(page.locator('.pe-rule-title').first()).toHaveText('Remove repeated spaces');
@@ -365,7 +366,7 @@ test('preset changes are local until Save, including selection and search', asyn
   await page.locator('.pe-case-style').selectOption('lower');
   await page.locator('#pe-cancel').click();
   await expect(page.locator('#pe-editor')).toBeHidden();
-  await openTagSource(page,'transformations');await page.locator('#presets-edit').click();
+  await openTagSource(page,'transformations');await openTransformationEditor(page);
   await page.locator('.pe-rule-open').click();
   await expect(page.locator('.pe-case-style')).toHaveValue('upper');
 });
@@ -381,7 +382,7 @@ test('failed Save preserves the draft and supports retry without closing', async
   await page.evaluate(() => window.failPresetSave = false);
   await page.locator('#pe-save-close').click();
   await expect(page.locator('#pe-editor')).toBeHidden();
-  await openTagSource(page,'transformations');await page.locator('#presets-edit').click();
+  await openTagSource(page,'transformations');await openTransformationEditor(page);
   await expect(page.locator('.pe-list-row.active')).toContainText('Retry me');
 });
 
@@ -396,7 +397,7 @@ for (const close of ['button', 'escape', 'overlay']) test(`unsaved ${close} dism
   await expect(page.locator('.pe-list-row.active')).toContainText('Keep this draft');
   await page.locator('#pe-cancel').click();
   await expect(page.locator('#pe-editor')).toBeHidden();
-  await openTagSource(page,'transformations');await page.locator('#presets-edit').click();
+  await openTagSource(page,'transformations');await openTransformationEditor(page);
   await expect(page.locator('#pe-group-personal .pe-list-row')).toHaveCount(0);
 });
 

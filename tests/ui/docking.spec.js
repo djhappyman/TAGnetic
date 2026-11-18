@@ -152,10 +152,16 @@ test('fixed sidebar ignores boundary drags without repainting table rows or savi
   await test.info().attach('resize-performance', {body:JSON.stringify({rows:3000,steps:24,during,after,wallMs:Date.now()-started}),contentType:'application/json'});
 });
 
-test('Transformations uses the inspector height and its list scrolls to the last preset',async({page})=>{
+test('Transformation library floats over the editor and scrolls to the last preset',async({page})=>{
  await page.goto('http://tagrex.test/app/ui/index.html');await expect.poll(()=>page.evaluate(()=>!!window.tagrex)).toBe(true);await openTagSource(page,'transformations');
  await expect(page.locator('#dock-module-transformations')).toHaveCount(0);await expect(page.locator('#groups-menu')).toBeVisible();
- await page.locator('#groups-menu').evaluate(n=>n.scrollTop=n.scrollHeight);await expect(page.locator('#groups-menu .preset-check').last()).toBeInViewport();
+ await page.evaluate(async()=>{await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));await Promise.all(document.getAnimations().map(animation=>animation.finished.catch(()=>{})));});
+ const editor=await page.locator('#editor-field-title').boundingBox();
+ await page.locator('#transform-add').click();
+ await expect(page.locator('#transform-library')).toBeVisible();
+ expect(await page.locator('#editor-field-title').boundingBox()).toEqual(editor);
+ await page.locator('#transform-library-list').evaluate(n=>n.scrollTop=n.scrollHeight);
+ await expect(page.locator('#transform-library-list .transform-library-preset').last()).toBeInViewport();
 });
 
 

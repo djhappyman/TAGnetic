@@ -14,6 +14,16 @@
 // 2 треки, 5 треків; 21 is `one` again and 11 is `many`. `tn` asks
 // `Intl.PluralRules` rather than guessing, so a form is never picked by hand.
 export const uk = {
+  "workbench.resize": "Змінити розмір таблиці перетворень",
+  "workbench.chain": "Ланцюжок перетворень",
+  "workbench.options": "Параметри перетворень",
+  "workbench.transformations": "Перетворення",
+  "workbench.add": "Додати",
+  "workbench.addTransformation": "Додати перетворення",
+  "workbench.newTransformation": "Нове перетворення…",
+  "workbench.advancedEditor": "Розширений редактор…",
+  "workbench.emptyChain": "Додайте перетворення, щоб почати.",
+
 
   "online.importFields": "Поля імпорту",
   "online.importAction": "Імпортувати",
@@ -1409,6 +1419,19 @@ export const uk = {
   "editor.clearField": "Очистити {field}",
   "editor.clearFieldTitle": "Видалити {field} з вибраних файлів",
   "editor.mixedValue": "Різні значення",
+  "workbench.mixedFields": "Різні поля",
+  "workbench.order": "Увімкнені набори виконуються згори вниз.",
+  "workbench.enabledOnly": "Лише ввімкнені",
+  "workbench.new": "Створити",
+  "workbench.manage": "Керування",
+  "workbench.edit": "Змінити",
+  "workbench.customize": "Налаштувати",
+  "workbench.example": "Приклад",
+  "workbench.customSample": "Власний приклад",
+  "workbench.sampleOnly": "Лише приклад",
+  "workbench.noResults": "Немає відповідних наборів. Очистьте пошук або вимкніть «Лише ввімкнені».",
+  "staging.transformations": {"one": "{n} перетворення", "few": "{n} перетворення", "many": "{n} перетворень", "other": "{n} перетворення"},
+  "staging.tagChanges": {"one": "{n} зміна тегу", "few": "{n} зміни тегів", "many": "{n} змін тегів", "other": "{n} зміни тегів"},
   "staging.heading": "Очікувані зміни",
   "staging.fileCount": "{files} зі змінами",
   "staging.views": "Подання файлів",

@@ -5158,10 +5158,12 @@ dependencies = [
  "png",
  "regex",
  "rusqlite",
+ "rustix",
  "same-file",
  "sha2 0.10.9",
  "thiserror 2.0.21",
  "walkdir",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

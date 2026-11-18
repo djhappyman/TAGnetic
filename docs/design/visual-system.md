@@ -114,6 +114,9 @@ platform rasterization and OS scaling require separate evidence before claims.
 Keep one compact recessed **Staged edits** summary pinned at the inspector's
 bottom, aligned with the table bottom. It appears only while the actual plan
 contains changes and shows the unique file count plus an × to clear the draft.
+Below it, show non-zero counts of transformed tags and other tag changes. Each
+field counts once, with the final transformed value taking precedence. These
+counts describe pending field edits, not enabled presets or rule executions.
 Clear never erases file tags. Preview and Apply sit together in the footer;
 Apply is the sole primary save action and names its actual file scope.
 

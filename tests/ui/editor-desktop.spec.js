@@ -108,7 +108,7 @@ test('Preview opens pending-only comparison, edits stay attached until commit, a
   await openTagSource(page, 'editor');
   await page.locator('#editor-field-title').fill('New title');
   await expect(page.locator('#diff-apply')).toBeEnabled();
-  await expect(page.locator('#staged-count')).toHaveText('1 file staged');
+  await expect(page.locator('#staged-count')).toHaveText('1 file');
   const selection=await page.evaluate(()=>[...window.tagrex.selection]);
   await page.locator('#diff-preview').click();
   await expect(page.locator('#staged-tab')).toHaveAttribute('aria-selected','true');
@@ -136,7 +136,8 @@ test('staging stays pinned and Apply writes the complete pending draft', async (
   await selectAll(page);
   for(const [key,value] of [['title','New title'],['artist','New artist'],['album','New album'],['genre','Techno']]) await page.locator(`#editor-field-${key}`).fill(value);
   await expect(page.locator('#diff-apply')).toBeEnabled();
-  await expect(page.locator('#staged-count')).toHaveText('3 files staged');
+  await expect(page.locator('#staged-count')).toHaveText('3 files');
+  await expect(page.locator('#staged-tags')).toHaveText('12 tag changes');
   const before=await page.locator('#staged-edits').boundingBox();
   await page.locator('.editor-scroll').evaluate(node=>node.scrollTop=node.scrollHeight);
   const after=await page.locator('#staged-edits').boundingBox();expect(Math.abs(before.y-after.y)).toBeLessThan(1);
@@ -258,6 +259,7 @@ test('sidebar scroll indicators overlay, fade, and support keyboard without chan
   const scroller=page.locator('.editor-scroll'), id=await scroller.getAttribute('id');
   const rail=page.locator(`.inspector-scrollbar.is-vertical[aria-controls="${id}"]`);
   await expect(rail).toBeVisible();
+  await scroller.evaluate(n=>n.scrollTop=0);
   const field=page.locator('#editor-field-title'),before=await field.boundingBox();
   expect(await scroller.evaluate(n=>n.offsetWidth-n.clientWidth)).toBe(0);
   await scroller.evaluate(n=>n.scrollTop=100);

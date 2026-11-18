@@ -110,3 +110,25 @@ test('thumb dragging keeps the current raw cell mounted and editable',async({pag
   expect(await page.evaluate(()=>window.rawCell.isConnected&&document.activeElement===window.rawCell&&window.rawCell.isContentEditable&&window.rawCell.textContent==='Uncommitted raw text')).toBe(true);
   expect(await page.locator('#files-view').evaluate(n=>n.scrollTop)).toBeGreaterThan(0);
 });
+
+for(const width of [1280,1920])test(`resizing columns keeps the final column reachable beside the open sidebar at ${width}px`,async({page})=>{
+  await page.setViewportSize({width,height:800});
+  await expect(page.locator('.dock-frame')).toHaveAttribute('data-sidebar-closed','false');
+  const viewport=page.locator('#files-view');
+  const initialWidth=await viewport.evaluate(n=>n.clientWidth);
+  for(const targetWidth of [480,700,180,520]) {
+    await viewport.evaluate(n=>n.scrollLeft=0);
+    const header=page.locator('#tracks th[data-sort="file"]'),box=await header.boundingBox(),grip=await header.locator('.col-resize').boundingBox();
+    const x=grip.x+grip.width/2,y=grip.y+grip.height/2;
+    await page.mouse.move(x,y);await page.mouse.down();
+    await page.mouse.move(x+targetWidth-box.width,y,{steps:8});await page.mouse.up();
+    await expect.poll(()=>page.evaluate(()=>{
+      const view=document.getElementById('files-view');view.scrollLeft=view.scrollWidth;
+      const end=[...document.querySelectorAll('#tracks thead th[data-sort]')].at(-1).getBoundingClientRect().right;
+      return Math.round(end-document.querySelector('.dock-right').getBoundingClientRect().left);
+    })).toBeLessThanOrEqual(1);
+    expect(await viewport.evaluate(n=>n.clientWidth)).toBe(initialWidth);
+    const max=await viewport.evaluate(n=>n.scrollWidth-n.clientWidth);
+    if(max>0)await expect(page.getByRole('scrollbar',{name:'Scroll columns'})).toHaveAttribute('aria-valuemax',String(max));
+  }
+});

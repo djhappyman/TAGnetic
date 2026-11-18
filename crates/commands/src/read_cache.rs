@@ -36,6 +36,7 @@ impl Fingerprint {
 }
 
 struct Entry {
+    policy: u64,
     stamp: Fingerprint,
     read: Arc<TrackRead>,
     bytes: usize,
@@ -88,9 +89,11 @@ impl ReadCache {
         }
         self.clock += 1;
         let used_at = self.clock;
+        let policy = tagrex_core::model::read_policy_revision();
         let before = Fingerprint::of(path);
         if let Some(entry) = self.entries.get_mut(path) {
-            if before.as_ref() == Some(&entry.stamp) {
+            if policy != u64::MAX && policy == entry.policy && before.as_ref() == Some(&entry.stamp)
+            {
                 self.order.remove(&entry.used_at);
                 self.order.insert(used_at, path.to_path_buf());
                 entry.used_at = used_at;
@@ -106,7 +109,11 @@ impl ReadCache {
         // This does not detect every concurrent or same-size external edit: on
         // Windows, length + mtime can collide on coarse timestamp filesystems.
         // Executor staleness checks always re-read the file independently.
-        if let Some(stamp) = before.filter(|s| Some(s) == Fingerprint::of(path).as_ref()) {
+        if let Some(stamp) = before.filter(|s| {
+            policy != u64::MAX
+                && policy == tagrex_core::model::read_policy_revision()
+                && Some(s) == Fingerprint::of(path).as_ref()
+        }) {
             // Lookup, recency and the snapshot each own a path. Account for
             // retained capacities, not just visible text, with saturating sums.
             // Allocator overhead is estimated; this is not an RSS guarantee.
@@ -145,6 +152,7 @@ impl ReadCache {
                 self.entries.insert(
                     path.to_path_buf(),
                     Entry {
+                        policy,
                         stamp,
                         read: read.clone(),
                         bytes,
