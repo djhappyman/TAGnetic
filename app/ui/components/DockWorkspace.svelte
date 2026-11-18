@@ -8,6 +8,7 @@
   provideWorkspaceLayout(layout);
   let view = $state.raw(layout.snapshot());
   let canvas: HTMLElement;
+  let drawerClosed = $state(untrack(() => closed));
   let cancelResize: (() => void) | undefined;
   const topHost = (node: HTMLElement) => layout.host('top', node);
   const leftHost = (node: HTMLElement) => layout.host('left', node);
@@ -35,6 +36,38 @@
     queueMicrotask(() => layout.ready());
     return () => { unsubscribe(); media.removeEventListener('change', adapt); cancelResize?.(); };
   });
+  // WebKit's subtree-wide inert/visibility updates can consume several frames.
+  // Prepare before opening; retire controls only after the closing slide. Each
+  // attachment run cancels its predecessor, including a rapid direction change.
+  function drawerMotion(node: HTMLElement) {
+    const isDrawer = sidebarDrawer;
+    const targetClosed = closed;
+    let frame = 0;
+    let cancelled = false;
+    const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (!isDrawer || reduced) {
+      node.inert = isDrawer && targetClosed;
+      drawerClosed = targetClosed;
+    } else if (targetClosed) {
+      drawerClosed = true;
+      frame = requestAnimationFrame(() => {
+        const animations = node.getAnimations();
+        Promise.all(animations.map(animation => animation.finished.catch(() => {}))).then(() => {
+          if (!cancelled) node.inert = true;
+        });
+      });
+    } else {
+      const needsPreparation = node.inert;
+      node.inert = false;
+      // Allow the control subtree to update before moving its composited layer.
+      if (needsPreparation) {
+        frame = requestAnimationFrame(() => {
+          frame = requestAnimationFrame(() => { drawerClosed = false; });
+        });
+      } else drawerClosed = false;
+    }
+    return () => { cancelled = true; cancelAnimationFrame(frame); };
+  }
   function revealPane(id: string) {
     if (drawer && closed && id !== 'files') document.dispatchEvent(new CustomEvent('tagrex:reveal-module', {detail:id}));
     else layout.reveal(id);
@@ -91,7 +124,7 @@
   }
 </script>
 
-<div class="dock-frame" data-dock-compact={view.compact} data-sidebar-enabled={drawer} data-sidebar-drawer={sidebarDrawer} data-sidebar-closed={closed}>
+<div class="dock-frame" data-dock-compact={view.compact} data-sidebar-enabled={drawer} data-sidebar-drawer={sidebarDrawer} data-sidebar-closed={sidebarDrawer ? drawerClosed : closed}>
   <div class="dock-switcher" role="tablist" aria-label="Workspace module">
     {#each visibleModules as module, index (module.id)}
       <Button variant="ghost" size="sm" class="dock-module-tab" role="tab" aria-selected={view.active === module.id} tabindex={view.active === module.id ? 0 : -1} onkeydown={event => tabKey(event, index)} aria-controls={`dock-module-${module.id}`} onclick={() => revealPane(module.id)}>{module.title}</Button>
@@ -107,7 +140,7 @@
       {#if !drawer}
       <Button variant="ghost" class="dock-splitter dock-column-splitter" role="separator" aria-label="Resize workspace columns" aria-orientation="vertical" aria-valuemin={20} aria-valuemax={82} aria-valuenow={view.left} hidden={!has('left') || !has('right')} onpointerdown={event => resize(event, 'left')} onkeydown={event => resizeKey(event, 'left')} />
       {/if}
-      <div class="dock-area dock-right" inert={sidebarDrawer && closed} aria-hidden={sidebarDrawer && closed ? true : undefined} role="region" aria-label="Right dock area" data-dock-host="right" {@attach rightHost}></div>
+      <div class="dock-area dock-right" {@attach drawerMotion} aria-hidden={sidebarDrawer && closed ? true : undefined} role="region" aria-label="Right dock area" data-dock-host="right" {@attach rightHost}></div>
     </div>
     <Button variant="ghost" class="dock-splitter dock-bottom-splitter" role="separator" aria-label="Resize bottom modules" aria-orientation="horizontal" aria-valuemin={70} aria-valuemax={600} aria-valuenow={view.bottom} hidden={!areaResizable('bottom')} onpointerdown={event => resize(event, 'bottom')} onkeydown={event => resizeKey(event, 'bottom')} />
     <div class="dock-area dock-bottom" role="region" aria-label="Bottom dock area" data-dock-host="bottom" {@attach bottomHost}></div>

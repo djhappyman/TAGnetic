@@ -1,3 +1,4 @@
+import { openTransformationEditor } from './navigation.js';
 import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
@@ -60,7 +61,7 @@ for(const mode of ['light','dark']) test(`all ten theme presets retain shared UI
     await page.screenshot({path:testInfo.outputPath(`${id}-${mode}.png`),animations:'disabled'});
     await page.locator('#diff-discard').click();await page.locator('#files-tab').click();
     for(const panel of ['renamer','exporter','tagger']) { await page.locator(`.mode-tab[data-mode="${panel}"]`).click(); await expect(page.locator(`#panel-${panel}`)).toBeVisible(); }
-    await openTagSource(page,'transformations');await page.locator('#presets-edit').click();await expect(page.locator('#pe-editor')).toBeVisible();await page.keyboard.press('Escape');
+    await openTagSource(page,'transformations');await openTransformationEditor(page);await expect(page.locator('#pe-editor')).toBeVisible();await page.keyboard.press('Escape');
   }
 });
 test('theme dropdown is keyboard reachable in a narrow settings sheet',async({page})=>{

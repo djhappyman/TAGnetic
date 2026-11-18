@@ -183,19 +183,18 @@ body.resizing-dock .dock-module { transition:none!important; }
 body .dock-frame[data-sidebar-drawer='true'] .dock-workspace > .dock-middle { position:relative; grid-template-columns:minmax(0,1fr) 0 0; column-gap:0; }
 body .dock-frame[data-sidebar-drawer='true'] .dock-right {
   position:absolute; grid-area:auto; inset-block:0; inset-inline-end:0; width:var(--sidebar-width); z-index:4;
-  transform:translateX(0); visibility:visible;
-  transition:transform 240ms var(--workbench-ease),visibility 0s;
+  transform:translate3d(0,0,0); will-change:transform;
+  transition:transform var(--sidebar-duration) var(--sidebar-ease);
 }
 body .dock-frame[data-sidebar-drawer='true'][data-sidebar-closed='true'] .dock-right {
-  transform:translateX(calc(100% + 14px)); visibility:hidden; pointer-events:none;
-  transition:transform 240ms var(--workbench-ease),visibility 0s 240ms;
+  transform:translate3d(calc(100% + 14px),0,0); pointer-events:none;
 }
 body .dock-frame[data-sidebar-drawer='true'] { container-type:inline-size; }
 /* Animate the existing rounded boundary, keeping the native table viewport
    at its full fixed width inside it. Only the smaller surrounding controls reflow. */
 body .dock-frame[data-sidebar-drawer='true'] #dock-module-files > .dock-module-body > :is(.files-col,.ribbon-strip) {
   width:calc(100% - var(--sidebar-width));
-  transition:width 240ms var(--workbench-ease);
+  transition:width var(--sidebar-duration) var(--sidebar-ease);
 }
 body .dock-frame[data-sidebar-drawer='true'][data-sidebar-closed='true'] #dock-module-files > .dock-module-body > :is(.files-col,.ribbon-strip) { width:100%; }
 body .dock-frame[data-sidebar-drawer='true'] #files-view { width:100cqw; max-width:none; align-self:flex-start; }

@@ -1,3 +1,4 @@
+import { openTransformationEditor } from './navigation.js';
 import { openTagSource } from './navigation.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
@@ -240,7 +241,7 @@ test('narrow preset editor provides usable fields and separate rule actions', as
   await openApp(page);
   await openLibrary(page);
   await openTagSource(page,'transformations');
-  await openTagSource(page,'transformations');await page.locator('#presets-edit').click();
+  await openTagSource(page,'transformations');await openTransformationEditor(page);
   await expect(page.locator('#pe-editor')).toBeVisible();
   await page.locator('#pe-new').click();
   await page.locator('#pe-name').fill('Mobile case change');

@@ -90,7 +90,7 @@ test('mode and subtab arrow keys activate the existing controller panes', async 
   await page.keyboard.press('ArrowLeft');
   await expect(page.locator('#subtab-editor')).toBeVisible();
   await page.keyboard.press('End');
-  await expect(page.locator('#subtab-transformations')).toBeVisible();
+  await expect(page.locator('#subtab-fromtext')).toBeVisible();
   await page.keyboard.press('Home');
   await expect(page.locator('#subtab-editor')).toBeVisible();
 });
@@ -506,7 +506,7 @@ for (const viewport of [{ width: 375, height: 667 }, { width: 844, height: 390 }
   test(`every mode keeps its primary actions reachable at ${viewport.width}×${viewport.height}`, async ({ page }) => {
     await page.setViewportSize(viewport);
     const actions = {
-      tagger: ['presets-edit'], renamer: ['preview'],
+      tagger: ['transform-add'], renamer: ['preview'],
       exporter: ['export-run'],
     };
     for (const [mode, ids] of Object.entries(actions)) {
@@ -520,7 +520,7 @@ for (const viewport of [{ width: 375, height: 667 }, { width: 844, height: 390 }
       expect(box.x + box.width).toBeLessThanOrEqual(viewport.width + 1);
       expect(box.y + box.height).toBeLessThanOrEqual(viewport.height + 1);
       for (const id of ids) {
-        if (mode === 'tagger' && id === 'presets-edit') await page.getByRole('tab', { name: 'Transformations', exact: true }).click();
+        if (mode === 'tagger' && id === 'transform-add') await page.getByRole('tab', { name: 'Editor', exact: true }).click();
         const button = page.locator(`#${id}`);
         await button.scrollIntoViewIfNeeded();
         await expect(button).toBeInViewport({ ratio: 1 });

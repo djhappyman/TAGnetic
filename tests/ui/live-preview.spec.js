@@ -56,7 +56,7 @@ async function tick(page,on=true){
   const previous=await page.evaluate(()=>document.querySelector('.subtab.active')?.dataset.subtab || 'online');
   await openTagSource(page,'transformations');
   const row=page.locator('#groups-menu .preset-check').filter({has:page.locator('.preset-apply',{hasText:'Append once'})});
-  if(await row.locator('input.group-tick').isChecked()!==on)await row.locator('.preset-apply').click();
+  if(await row.locator('input.group-tick').isChecked()!==on)await row.getByRole('checkbox').click();
   if(previous!=='transformations')await openTagSource(page,previous);
 }
 async function releases(page){
@@ -88,6 +88,28 @@ test('transformations run after raw Editor values once and toggling never compou
   await expect(field(page,'title')).toHaveValue('Manual');
   await tick(page,false);await ready(page);await expect.poll(async()=>titleOf(await plan(page),path)).toBe('Manual');
   await tick(page,true);await ready(page);await expect.poll(async()=>titleOf(await plan(page),path)).toBe('Manual!');
+  expect(await calls(page,'apply_plan')).toBe(0);
+});
+
+for (const theme of ['dark','light']) test(`staged summary counts final transformed tags separately (${theme})`,async({page},info)=>{
+  await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
+  const path=await selected(page);
+  await field(page,'artist').fill('Manual artist');await ready(page);
+  await expect(page.locator('#staged-count')).toHaveText('1 file');
+  await expect(page.locator('#staged-tags')).toHaveText('1 tag change');
+  await expect(page.locator('#staged-transformations')).toBeHidden();
+  await tick(page);await field(page,'title').fill('Manual');await ready(page);
+  await expect.poll(async()=>titleOf(await plan(page),path)).toBe('Manual!');
+  await expect(page.locator('#staged-transformations')).toHaveText('1 transformation');
+  await expect(page.locator('#staged-tags')).toHaveText('1 tag change');
+  await page.locator('.mode-col').evaluate(node=>{node.style.width='320px';node.style.flex='0 0 320px';});
+  const summary=page.locator('#staged-edits');
+  expect(await summary.evaluate(node=>node.scrollWidth<=node.clientWidth)).toBe(true);
+  await summary.screenshot({path:info.outputPath(`staged-summary-${theme}.png`)});
+  await tick(page,false);await ready(page);
+  await expect(page.locator('#staged-transformations')).toBeHidden();
+  await expect(page.locator('#staged-tags')).toHaveText('2 tag changes');
+  await page.locator('#diff-discard').click();await expect(summary).toBeHidden();
   expect(await calls(page,'apply_plan')).toBe(0);
 });
 

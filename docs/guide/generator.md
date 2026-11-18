@@ -32,6 +32,24 @@ In GENERATOR the checklist sits in the panel, and **Preview changes** runs every
 ticked preset over the selection — or over a staged plan, revising it rather
 than adding a second one.
 
+### Transformations sidebar
+
+Use the checkbox to enable a preset. Select its name to inspect its ordered
+rules and targets without enabling it. Search filters the library, **Enabled
+only** shows the presets in use, and the group headings collapse their lists.
+Enabled presets run from top to bottom. **New** starts a draft preset; **Manage**
+opens the full preset editor.
+
+The pinned Before / After sample tries the inspected preset on a selected
+track. Choose a field, step between selected tracks, or type a custom example.
+The sample never stages or writes changes. Review the actual combined result in
+the Staged table before Apply.
+
+The **Staged edits** summary shows the affected files once, then counts
+**transformations** and other **tag changes** underneath. These count final tag
+fields, not enabled presets or rule executions. A manually edited field that is
+then transformed counts once under transformations. Zero counts stay hidden.
+
 ### Scope — what the rules act on
 
 **Apply to** decides what the chain sees:

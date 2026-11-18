@@ -102,3 +102,19 @@ for (const size of [20000, 50000, 100000]) test(`table-scale ${size} bounds scro
   expect(result.maxRows).toBeLessThan(120); expect(result.selected).toBe(size); expect(result.finalMounted).toBe(true);
   expect(result.pathIterations).toBe(0);
 });
+
+for (const size of [371, 1200]) test(`bottom scrolling settles without bouncing or clipping the final row (${size} tracks)`, async ({page}) => {
+  await open(page,size);
+  const result=await page.locator('#files-view').evaluate(async wrap=>{
+    const frames=async()=>{for(let i=0;i<5;i++)await new Promise(requestAnimationFrame);};
+    // Leave the top, then request the bottom exactly as End/thumb dragging does.
+    wrap.scrollTop=wrap.scrollHeight;await frames();
+    const top=wrap.scrollTop;
+    wrap.scrollTop=wrap.scrollHeight;const requested=wrap.scrollTop;await frames();
+    const last=[...wrap.querySelectorAll('tr[data-path]')].at(-1), bounds=wrap.getBoundingClientRect();
+    return {bounce:Math.abs(requested-wrap.scrollTop),top,finalTop:wrap.scrollTop,gap:bounds.bottom-last.getBoundingClientRect().bottom,lastPath:last.dataset.path,expected:window.tagrex.tracks.at(-1).path};
+  });
+  expect(result.bounce).toBeLessThanOrEqual(1);
+  expect(result.lastPath).toBe(result.expected);
+  expect(result.gap).toBeGreaterThanOrEqual(8);
+});

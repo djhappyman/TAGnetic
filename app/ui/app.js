@@ -1,7 +1,7 @@
 import { createLiveStageTransport } from './js/live-stage-transport.js';
 import { nativeLiveFields, setNativeLiveFields } from './js/live-preview.js';
 import { groupIcon } from './js/group-presentation.js';
-import { liveIntentOptions, setNativeStageSession } from './js/generator.js';
+import { liveIntentOptions, setNativeStageSession, isNativeTransformedTag } from './js/generator.js';
 import { workingField, patchCellText, retireRevertedRawFields } from './js/working-values.js';
 import { captureFileOrder, restoreFileOrder } from "./js/file-order.js";
 import { interpretQueryText } from './js/query-language.js';
@@ -1106,6 +1106,8 @@ const OVERSCAN_ROWS = 10;
 // Album-sized sets stay mounted: scrolling them requires no DOM work. Large
 // collections retain the bounded window instead of allocating a whole library.
 const MOUNTED_ROW_LIMIT = 512;
+// Keep the final row above the bottom fade and horizontal overlay thumb.
+const TABLE_END_SPACE = 20;
 
 function itemHeightAt(i) {
   const measured = itemHeights[i];
@@ -1304,7 +1306,7 @@ function setSpacerHeights() {
   }
   if (bottom && bottom.classList.contains("spacer")) {
     const below = itemOffsets.top(viewItems.length) - itemOffsets.top(Math.min(renderedLast + 1, viewItems.length));
-    bottom.firstElementChild.style.height = `${Math.max(0, Math.round(below))}px`;
+    bottom.firstElementChild.style.height = `${Math.max(0, Math.round(below + TABLE_END_SPACE))}px`;
   }
 }
 
@@ -1389,8 +1391,10 @@ function renderWindow({ force = false, refreshGrid = true, scrollOnly = false, p
   // will clamp the offset when it next lays the table out, so clamp it here
   // first: cutting the window for a position that is about to be corrected
   // leaves the rows built somewhere the eye isn't.
-  const maxTop = Math.max(0, headHeight + itemOffsets.top(viewItems.length) - viewportHeight);
-  if (tableWrap.scrollTop > maxTop) tableWrap.scrollTop = maxTop;
+  const maxTop = Math.max(0, Math.ceil(headHeight + itemOffsets.top(viewItems.length) + TABLE_END_SPACE - viewportHeight));
+  // Native scrolling owns its measured limit. Only clamp a rebuilt model;
+  // clamping ordinary scrolls to an estimate fights the thumb near the end.
+  if (!scrollOnly && tableWrap.scrollTop > maxTop) tableWrap.scrollTop = maxTop;
   const viewportTop = tableWrap.scrollTop;
   lastPaintedScrollTop = viewportTop;
   const windowed = viewItems.length > MOUNTED_ROW_LIMIT;
@@ -1467,7 +1471,7 @@ function renderWindow({ force = false, refreshGrid = true, scrollOnly = false, p
   const frag = document.createDocumentFragment();
   frag.appendChild(spacerRow(itemOffsets.top(first)));
   for (let i = first; i <= last; i++) frag.appendChild(buildItemRow(i));
-  frag.appendChild(spacerRow(itemOffsets.top(viewItems.length) - itemOffsets.top(Math.min(last + 1, viewItems.length))));
+  frag.appendChild(spacerRow(TABLE_END_SPACE + itemOffsets.top(viewItems.length) - itemOffsets.top(Math.min(last + 1, viewItems.length))));
   tracksBody.replaceChildren(frag);
   measureRenderedRows();
   if (refreshGrid) spreadsheet?.refresh({scrollOnly});
@@ -1891,7 +1895,7 @@ function renderPreview(plan, { preserveView = false, delta = null } = {}) {
     el('ab-locked').hidden = true;
     return;
   }
-  renderStaging(plan);
+  renderStaging(plan, isNativeTransformedTag, delta);
   if (!plan?.changes.length && tracksBody.querySelector('[contenteditable="true"]')) {
     setDiffByPath(new Map()); setApplySelection(new Set());
     stagedMembershipPending = true; updateDiffBar(); return;
@@ -3599,6 +3603,7 @@ el("export-kind").addEventListener("click", (e) => {
 // TAGGER sub-tabs: ONLINE (a metadata source), EDITOR (tag fields + cover),
 // FROM NAME (the file's own name, #139) — three ways to the same outcome.
 function setSubtab(name) {
+  if (name === "transformations") name = "editor";
   publishWorkspaceSubtab(name);
   requestAnimationFrame(() => {
     const tab = document.querySelector(`.subtab[data-subtab="${name}"]`);
@@ -4094,9 +4099,15 @@ initRowSelection({
     else if (!usingReviewSelection()) { rowSelectionSet().clear(); syncSelectionUI({deferPanels:true,refreshGrid:false}); }
     return before;
   },
-  onScroll: () => renderWindow(),
+  onScroll: () => renderWindow({scrollOnly:true}),
   onStart: () => spreadsheet?.clearRange(),
-  onChange: () => syncSelectionUI({ deferPanels: true, refreshGrid:false }),
+  onChange: () => {
+    // Drag feedback must not inspect tag blocks or rebuild toolbar state.
+    // The press invalidates stale editor controls; release publishes the scope.
+    paintRowSelection();
+    updateStatus(rowSelectionSet().size, false);
+    if (usingReviewSelection()) updateDiffBar();
+  },
   onCommit: ({ cancelled, beforePress, paths, startPath, focusPath }) => {
     if (cancelled && beforePress) {
       ({selAnchor,selBase,reviewAnchor,reviewBase} = beforePress);

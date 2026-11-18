@@ -132,10 +132,13 @@ for(const theme of ['dark','light'])test(`all four tabs fade overflow while fina
     await expect(port).toHaveClass(/can-scroll-down/);
     expect(await port.evaluate(node=>getComputedStyle(node).maskImage)).toContain('linear-gradient');
     await port.evaluate(node=>{node.scrollTop=node.scrollHeight;});await expect(port).not.toHaveClass(/can-scroll-down/);
-    expect(await port.evaluate(node=>getComputedStyle(node).maskImage)).toBe('none');
+    if(tab==='editor') {
+      await expect(port).toHaveClass(/can-scroll-up/);
+      expect(await port.evaluate(node=>getComputedStyle(node).getPropertyValue('--editor-fade-bottom'))).toBe('0px');
+    } else expect(await port.evaluate(node=>getComputedStyle(node).maskImage)).toBe('none');
     if(tab!=='online'){
       await port.evaluate(node=>{node.scrollTop=0;});await expect(port).toHaveClass(/can-scroll-down/);
-      const input=port.locator('input:not([hidden]):not(:disabled),textarea:not(:disabled)').first();if(await input.count())await input.focus();
+      const input=port.locator('input:visible:not(:disabled),textarea:visible:not(:disabled)').first();if(await input.count())await input.focus();
       await expect.poll(()=>port.evaluate(node=>getComputedStyle(node).maskImage)).toContain('linear-gradient');
     }
   }

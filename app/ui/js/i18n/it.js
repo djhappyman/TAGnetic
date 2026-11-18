@@ -13,6 +13,16 @@
 // `tn` asks `Intl.PluralRules`, so a form is never picked by hand, and a
 // missing key still falls back to English.
 export const it = {
+  "workbench.resize": "Ridimensiona la tabella delle trasformazioni",
+  "workbench.chain": "Catena di trasformazioni",
+  "workbench.options": "Opzioni di trasformazione",
+  "workbench.transformations": "Trasformazioni",
+  "workbench.add": "Aggiungi",
+  "workbench.addTransformation": "Aggiungi trasformazione",
+  "workbench.newTransformation": "Nuova trasformazione…",
+  "workbench.advancedEditor": "Editor avanzato…",
+  "workbench.emptyChain": "Aggiungi una trasformazione per iniziare.",
+
 
   "online.importFields": "Campi da importare",
   "online.importAction": "Importa",
@@ -1409,6 +1419,19 @@ export const it = {
   "editor.clearField": "Svuota {field}",
   "editor.clearFieldTitle": "Rimuovi {field} dai file selezionati",
   "editor.mixedValue": "Valori diversi",
+  "workbench.mixedFields": "Campi diversi",
+  "workbench.order": "I predefiniti attivi vengono eseguiti dall’alto verso il basso.",
+  "workbench.enabledOnly": "Solo attivi",
+  "workbench.new": "Nuovo",
+  "workbench.manage": "Gestisci",
+  "workbench.edit": "Modifica",
+  "workbench.customize": "Personalizza",
+  "workbench.example": "Esempio",
+  "workbench.customSample": "Esempio personalizzato",
+  "workbench.sampleOnly": "Solo un esempio",
+  "workbench.noResults": "Nessun predefinito corrispondente. Cancella la ricerca o disattiva «Solo attivi».",
+  "staging.transformations": {"one": "{n} trasformazione", "other": "{n} trasformazioni"},
+  "staging.tagChanges": {"one": "{n} modifica ai tag", "other": "{n} modifiche ai tag"},
   "staging.heading": "Modifiche in sospeso",
   "staging.fileCount": "{files} in sospeso",
   "staging.views": "Viste dei file",

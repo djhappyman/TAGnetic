@@ -10,6 +10,10 @@ export function initRowSelection(options) {
   let swallowClick = false;
   let swallowDoubleClick = false;
   let autoFrame = 0;
+  let paintFrame = 0;
+  function schedulePaint() {
+    if (!paintFrame) paintFrame = requestAnimationFrame(() => { paintFrame = 0; paint(); });
+  }
   const rectangle = document.createElement('div');
   rectangle.className = 'row-selection-rectangle';
   rectangle.hidden = true;
@@ -92,13 +96,16 @@ export function initRowSelection(options) {
       window.getSelection()?.removeAllRanges();
     }
     event.preventDefault();
-    paint();
+    schedulePaint();
     if (!autoFrame) autoFrame = requestAnimationFrame(autoScroll);
   }
 
   function finish(cancelled = false) {
     const ended = gesture;
     if (!ended) return;
+    cancelAnimationFrame(paintFrame);
+    paintFrame = 0;
+    if (ended.active && !cancelled) paint();
     gesture = null;
     cancelAnimationFrame(autoFrame);
     autoFrame = 0;
@@ -173,7 +180,7 @@ export function initRowSelection(options) {
     event.preventDefault();
     event.stopImmediatePropagation();
   }
-  function scrolled() { paint(); }
+  function scrolled() { schedulePaint(); }
   wrap.addEventListener('mousedown', pressed);
   wrap.addEventListener('click', clicked, true);
   wrap.addEventListener('dblclick', doubleClicked, true);

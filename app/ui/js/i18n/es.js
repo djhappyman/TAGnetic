@@ -11,6 +11,16 @@
 // Spanish selects between `one` and `other` for a count — 1 pista, 2 pistas.
 // (Its `many` form, for round millions, falls back to `other`.)
 export const es = {
+  "workbench.resize": "Cambiar el tamaño de la tabla de transformaciones",
+  "workbench.chain": "Cadena de transformaciones",
+  "workbench.options": "Opciones de transformación",
+  "workbench.transformations": "Transformaciones",
+  "workbench.add": "Añadir",
+  "workbench.addTransformation": "Añadir transformación",
+  "workbench.newTransformation": "Nueva transformación…",
+  "workbench.advancedEditor": "Editor avanzado…",
+  "workbench.emptyChain": "Añade una transformación para empezar.",
+
 
   "online.importFields": "Campos de importación",
   "online.importAction": "Importar",
@@ -1407,6 +1417,19 @@ export const es = {
   "editor.clearField": "Borrar {field}",
   "editor.clearFieldTitle": "Eliminar {field} de los archivos seleccionados",
   "editor.mixedValue": "Valores distintos",
+  "workbench.mixedFields": "Varios campos",
+  "workbench.order": "Los ajustes activos se ejecutan de arriba abajo.",
+  "workbench.enabledOnly": "Solo activos",
+  "workbench.new": "Nuevo",
+  "workbench.manage": "Gestionar",
+  "workbench.edit": "Editar",
+  "workbench.customize": "Personalizar",
+  "workbench.example": "Ejemplo",
+  "workbench.customSample": "Ejemplo personalizado",
+  "workbench.sampleOnly": "Solo un ejemplo",
+  "workbench.noResults": "No hay ajustes coincidentes. Borra la búsqueda o desactiva «Solo activos».",
+  "staging.transformations": {"one": "{n} transformación", "other": "{n} transformaciones"},
+  "staging.tagChanges": {"one": "{n} cambio de etiqueta", "other": "{n} cambios de etiquetas"},
   "staging.heading": "Cambios pendientes",
   "staging.fileCount": "{files} pendientes",
   "staging.views": "Vistas de archivos",

@@ -149,3 +149,21 @@ test('double-click tag editing still works and its text drag does not become a r
   await expect(cell).toHaveAttribute('contenteditable', 'true');
   await page.keyboard.press('Escape');
 });
+
+test('drag bursts coalesce visual feedback and defer expensive ribbon updates until release',async({page})=>{
+  await many(page,Array.from({length:371},(_,i)=>`/music/all/track-${String(i).padStart(4,'0')}.mp3`));
+  const result=await page.evaluate(async()=>{
+    const cells=[...document.querySelectorAll('#tracks-body td.file')],a=cells[0].getBoundingClientRect(),b=cells[12].getBoundingClientRect();
+    let updates=0;const listener=()=>updates++;document.addEventListener('tagrex:ribbon-state',listener);
+    cells[0].dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true,button:0,detail:1,clientX:a.x+80,clientY:a.y+a.height/2}));
+    updates=0;
+    for(let i=0;i<80;i++)document.dispatchEvent(new MouseEvent('mousemove',{bubbles:true,cancelable:true,buttons:1,clientX:b.x+90,clientY:a.y+a.height/2+(b.y-a.y)*(i+1)/80}));
+    await new Promise(requestAnimationFrame);
+    const during=updates;
+    document.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,button:0}));
+    document.removeEventListener('tagrex:ribbon-state',listener);
+    return {during,selected:window.tagrex.selection.size};
+  });
+  expect(result.during).toBe(0);
+  expect(result.selected).toBe(13);
+});

@@ -16,7 +16,7 @@ test.beforeEach(async({page})=>{
 });
 test.afterEach(async({page})=>expect(page.errors).toEqual([]));
 const box=(page,selector)=>page.locator(selector).boundingBox();
-async function settled(page){await page.evaluate(async()=>{await Promise.all(document.getAnimations().map(animation=>animation.finished.catch(()=>{})));});}
+async function settled(page){await page.evaluate(async()=>{await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));await Promise.all(document.getAnimations().map(animation=>animation.finished.catch(()=>{})));await new Promise(requestAnimationFrame);});}
 
 for(const theme of ['light','dark'])test(`${theme}: drawer overlays a stable table and address bar animates independently`,async({page},info)=>{
   await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
@@ -37,9 +37,9 @@ for(const theme of ['light','dark'])test(`${theme}: drawer overlays a stable tab
   });
   expect(middle.width).toBeGreaterThanOrEqual(address.width);
   expect(middle.width).toBeLessThan(1280);
-  expect(middle.transition).toContain('0.24s');
+  expect(middle.transition).toContain('0.2s');
   await settled(page);
-  await expect(page.locator('.dock-right')).toBeHidden();
+  await expect(page.locator('.dock-right')).not.toBeInViewport();
   const closed=await box(page,'.library-header');
   expect(closed.width).toBeCloseTo((await box(page,'#tracks')).width,0);
   expect((await box(page,'#tracks')).width).toBeGreaterThanOrEqual(table.width);
@@ -66,8 +66,8 @@ test('folding preserves staged values, selected files, and the mounted editor',a
   await expect(page.locator('#diff-apply')).toBeEnabled();
 });
 
-test('Transformations belongs to Tags as a source tab and retains its native checklist',async({page})=>{
- await openTagSource(page,'transformations');const panel=page.locator('#subtab-transformations');await expect(panel).toBeVisible();await page.locator('#groups-menu').evaluate(n=>window.keptChecklist=n);
+test('Transformations stays above the tag fields and retains its native checklist',async({page})=>{
+ await openTagSource(page,'transformations');const panel=page.locator('#transformation-pane');await expect(panel).toBeVisible();await page.locator('#groups-menu').evaluate(n=>window.keptChecklist=n);
  for(const mode of ['renamer','exporter']){await page.locator(`.mode-tab[data-mode="${mode}"]`).click();await expect(panel).toBeHidden();}
  await page.locator('.mode-tab[data-mode="tagger"]').click();await expect(panel).toBeVisible();expect(await page.locator('#groups-menu').evaluate(n=>n===window.keptChecklist)).toBe(true);
 });
@@ -97,7 +97,7 @@ test('collapse choice persists and reduced motion removes the slide',async({page
   expect(await page.locator('.dock-right').evaluate(node=>getComputedStyle(node).transitionDuration)).toBe('0s');
   await page.reload();
   await expect(page.locator('#panel-toggle')).toHaveAttribute('aria-expanded','false');
-  await expect(page.locator('.dock-right')).toBeHidden();
+  await expect(page.locator('.dock-right')).not.toBeInViewport();
   await page.locator('.mode-tab[data-mode="renamer"]').click();
   await expect(page.locator('#panel-toggle')).toHaveAttribute('aria-expanded','true');
   await expect(page.locator('#mask')).toBeVisible();
@@ -274,4 +274,47 @@ test('keyboard navigation reveals the final cell to the left of the open sidebar
   });
   expect(focused.field).toBe('length');expect(focused.right).toBeLessThanOrEqual(focused.edge+1);expect(focused.visible).toBe(true);
   expect(await page.locator('.files-col').evaluate(n=>getComputedStyle(n,'::after').content)).toBe('none');
+});
+
+test('sidebar accessibility work stays outside the slide and interrupted toggles settle correctly',async({page})=>{
+  await settled(page);
+  const closing=await page.evaluate(async()=>{
+    const drawer=document.querySelector('.dock-right');
+    document.getElementById('panel-toggle').click();
+    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+    return {moving:drawer.getAnimations().some(a=>a.transitionProperty==='transform'),inert:drawer.inert};
+  });
+  expect(closing.moving).toBe(true);
+  expect(closing.inert).toBe(false);
+  await settled(page);
+  await expect(page.locator('.dock-right')).toHaveJSProperty('inert',true);
+  await page.evaluate(async()=>{
+    const toggle=document.getElementById('panel-toggle');
+    toggle.click();await new Promise(requestAnimationFrame);toggle.click();
+  });
+  await settled(page);
+  await expect(page.locator('.dock-right')).toHaveJSProperty('inert',true);
+  await page.locator('#panel-toggle').click();
+  await expect(page.locator('.dock-frame')).toHaveAttribute('data-sidebar-closed','false');
+  await settled(page);
+  await expect(page.locator('.dock-right')).toHaveJSProperty('inert',false);
+  await expect(page.locator('.dock-right')).toBeVisible();
+});
+
+for(const theme of ['light','dark'])test(`${theme}: every workspace reverses the slide without replacing table rows`,async({page})=>{
+  await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
+  for(const mode of ['tagger','online','renamer','deduplicator','exporter']){
+    await page.locator(`.mode-tab[data-mode="${mode}"]`).click();
+    await settled(page);
+    const result=await page.evaluate(async()=>{
+      const view=document.getElementById('files-view'),width=view.clientWidth;
+      const rows=[...document.querySelectorAll('#tracks-body tr[data-path]')];
+      const toggle=document.getElementById('panel-toggle');
+      toggle.click();await new Promise(resolve=>setTimeout(resolve,70));toggle.click();
+      await new Promise(resolve=>setTimeout(resolve,320));
+      return {same:rows.every(row=>row.isConnected),widthStable:width===view.clientWidth,inert:document.querySelector('.dock-right').inert};
+    });
+    expect(result).toEqual({same:true,widthStable:true,inert:false});
+    await expect(page.locator('#panel-toggle')).toHaveAttribute('aria-expanded','true');
+  }
 });

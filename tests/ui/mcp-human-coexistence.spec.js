@@ -45,7 +45,7 @@ async function nativeTransforms(page) {
     document.dispatchEvent(new CustomEvent('tagrex:settings-saved',{detail:{...settings,action_groups:[{name:'Append once',scope:'title',rules:[{kind:'replace',scope:'title',from:'$',to:'!',regex:true,style:''}]}]}}));
   });
   await expect.poll(()=>page.evaluate(()=>window.mcpFixture.state.calls.includes('mcp_shared_stage_delta'))).toBe(true);
-  const preset=page.locator('#groups-menu .preset-apply').filter({hasText:'Append once'});
+  const preset=page.locator('#groups-menu .preset-row').filter({hasText:'Append once'}).getByRole('checkbox');
   return {async click(){
     const previous=await page.evaluate(()=>document.querySelector('.subtab.active')?.dataset.subtab || 'editor');
     await openTagSource(page,'transformations');await preset.click();
@@ -329,8 +329,12 @@ test('native preset composition retains earlier raw fields and the final toggle-
   await page.locator('#editor-field-artist').fill('Another human field');
   await expect(page.locator('#tracks-body td[data-field="artist"]').first()).toContainText('Another human field');
   await expect(page.locator('#tracks-body td[data-field="title"]').first()).toHaveText('Raw human title!');
+  await expect(page.locator('#staged-transformations')).toHaveText('1 transformation');
+  await expect(page.locator('#staged-tags')).toHaveText('1 tag change');
   await preset.click();
   await expect(page.locator('#tracks-body td[data-field="title"]').first()).toHaveText('Raw human title');
+  await expect(page.locator('#staged-transformations')).toBeHidden();
+  await expect(page.locator('#staged-tags')).toHaveText('2 tag changes');
   const requests=await page.evaluate(()=>window.mcpFixture.state.intentRequests);
   expect(requests.some(request=>request.recompute && request.groups.length===0)).toBe(true);
   expect(requests.every(request=>request.session==='fixture')).toBe(true);
