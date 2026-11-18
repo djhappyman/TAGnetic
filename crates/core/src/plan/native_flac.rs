@@ -44,11 +44,11 @@ impl IoPhase {
             if cancel.load(Ordering::SeqCst) {
                 return Err(PlanError::Cancelled);
             }
-            if IO_PHASES
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                    (used < capacity).then_some(used + 1)
-                })
-                .is_ok()
+            let used = IO_PHASES.load(Ordering::Acquire);
+            if used < capacity
+                && IO_PHASES
+                    .compare_exchange(used, used + 1, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
             {
                 IO_PHASE_HELD.with(|held| held.set(true));
                 return Ok(Self(std::marker::PhantomData));

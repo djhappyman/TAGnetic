@@ -424,7 +424,6 @@ impl Authority {
         Ok(file)
     }
     fn rename(&mut self, from: &Path, to: &Path) -> io::Result<()> {
-        use std::os::unix::fs::MetadataExt;
         let (source, source_name) = self.parent(from)?;
         let (destination, destination_name) = self.parent(to)?;
         if from == to {
@@ -449,8 +448,10 @@ impl Authority {
             ));
         }
         if let Some(expected) = self.step_files.get(&absolute(from)?) {
-            let metadata = expected.metadata()?;
-            if (metadata.dev(), metadata.ino()) != (before.st_dev, before.st_ino) {
+            // Compare native stat fields on both sides: Darwin's dev_t is
+            // signed and differs from std's cross-Unix u64 representation.
+            let expected = rustix::fs::fstat(expected)?;
+            if (expected.st_dev, expected.st_ino) != (before.st_dev, before.st_ino) {
                 return Err(changed());
             }
         }
