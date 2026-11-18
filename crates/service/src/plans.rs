@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashSet;
 use tagrex_commands::{ActionGroupDto, ImportSelectionDto, TagEditDto, TransformRuleDto};
 
 #[cfg(windows)]
@@ -294,7 +295,7 @@ impl Service {
                 // A retry of the same direct intent is resolved before creating a
                 // new snapshot/plan (which would otherwise change its digest).
                 let key = required(args, "idempotency_key")?;
-                let intent_digest = hash(&serde_json::to_vec(&intent)?);
+                let intent_digest = super::json_accounting::digest(&intent)?;
                 if let Some(existing) = self.find_operation(principal, key, &intent_digest)? {
                     return Ok(existing);
                 }
@@ -479,7 +480,13 @@ impl Service {
                         note: String::new(),
                     }]
                 };
-                let mut plan = if let Some(previous) = &previous {
+                let mut plan = if tagrex_commands::has_field_rules(&groups) {
+                    app.preview_field_groups(
+                        &paths,
+                        &groups,
+                        previous.as_ref().map(|p| &p.plan).or(working.as_ref()),
+                    )?
+                } else if let Some(previous) = &previous {
                     app.preview_transform_over_plan(&previous.plan, &groups)?
                 } else {
                     let saved = app.preview_transform_groups(&paths, &groups)?;
@@ -573,19 +580,86 @@ impl Service {
                 )?
             }
             "draft.from_text" => {
-                let mask = required(args, "mask")?;
-                let text = required(args, "text")?;
-                let probe = app.probe_text_lines(mask, text, &paths)?;
-                for line in probe.lines {
-                    if let Some(path) = line.path {
-                        for (field, value) in line.fields {
-                            if !value.is_empty() {
-                                intent.tag(&path, &field);
-                            }
+                let mode = args
+                    .get("mode")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()?
+                    .unwrap_or_default();
+                let result = app.preview_text_import(
+                    &paths,
+                    required(args, "text")?,
+                    &tagrex_commands::TextImportOptions {
+                        pattern: required(args, "mask")?.into(),
+                        mode,
+                    },
+                    previous.as_ref().map(|p| &p.plan).or(working.as_ref()),
+                )?;
+                for row in &result.rows {
+                    if let Some(path) = &row.path {
+                        for field in &row.fields {
+                            intent.tag(path, field);
                         }
                     }
                 }
-                app.preview_tags_from_text(mask, text, &paths)?
+                // Native row diagnostics remain visible to clients in the plan.
+                let mut plan = result.plan;
+                if !result.unmatched_files.is_empty() {
+                    plan.unrendered.push(tagrex_commands::UnrenderedDto {
+                        field: "text import: no matching row".into(),
+                        files: result.unmatched_files.len(),
+                        paths: result.unmatched_files,
+                    });
+                }
+                for row in result
+                    .rows
+                    .iter()
+                    .filter(|row| row.status != tagrex_commands::TextImportStatus::Matched)
+                {
+                    plan.unrendered.push(tagrex_commands::UnrenderedDto {
+                        field: format!("text row {}: {:?}", row.line, row.status),
+                        files: 0,
+                        paths: Vec::new(),
+                    });
+                }
+                plan
+            }
+            "draft.from_sidecars" => {
+                let read_grant = self.grant(principal, "read")?;
+                for path in &paths {
+                    permitted(
+                        &read_grant,
+                        path.parent().ok_or_else(|| {
+                            ServiceError::invalid("Audio file has no parent folder")
+                        })?,
+                        false,
+                    )?;
+                }
+                let field = required(args, "field")?;
+                let plan = app.preview_text_sidecars(
+                    &paths,
+                    &tagrex_commands::TextSidecarOptions {
+                        field: field.into(),
+                        filename: required(args, "pattern")?.into(),
+                        skip_missing: flag(args, "skip_missing"),
+                    },
+                    previous.as_ref().map(|p| &p.plan).or(working.as_ref()),
+                )?;
+                let missing: HashSet<&str> = plan
+                    .unrendered
+                    .iter()
+                    .filter(|row| row.field == "text sidecar")
+                    .flat_map(|row| row.paths.iter().map(String::as_str))
+                    .collect();
+                let target = tagrex_core::model::TagField::from_name(field)
+                    .ok_or_else(|| ServiceError::invalid("Expected a tag field"))?
+                    .to_storage_key();
+                for path in &paths {
+                    if !missing.contains(path.to_string_lossy().as_ref()) {
+                        intent.tag(&path.to_string_lossy(), &target);
+                    }
+                }
+                plan
             }
             "draft.clear_tags" => {
                 intent
@@ -620,55 +694,59 @@ impl Service {
             }
             "draft.fix_encoding" => app.preview_fix_encoding(&paths)?,
             "draft.number" => {
-                let start = number(args, "start", 1);
-                let step = number(args, "step", 1);
-                let total = number(args, "total", paths.len());
-                let width = number(args, "width", 0).min(12);
-                if start > u32::MAX as usize || step > u32::MAX as usize {
-                    return Err(ServiceError::invalid(
-                        "Numbering values exceed supported range",
-                    ));
-                }
-                let mut edits = Vec::new();
-                for (index, path) in paths.iter().enumerate() {
-                    let number = start
-                        .checked_add(
-                            index
-                                .checked_mul(step)
-                                .ok_or_else(|| ServiceError::invalid("Numbering overflow"))?,
-                        )
-                        .ok_or_else(|| ServiceError::invalid("Numbering overflow"))?;
-                    edits.push(TagEditDto {
-                        path: path.to_string_lossy().into_owned(),
-                        field: "track".into(),
-                        value: Some(format!("{number:0width$}")),
-                    });
-                    if flag(args, "write_total") {
-                        edits.push(TagEditDto {
-                            path: path.to_string_lossy().into_owned(),
-                            field: "tracktotal".into(),
-                            value: Some(total.to_string()),
-                        });
+                let names = [
+                    "start",
+                    "step",
+                    "total",
+                    "width",
+                    "write_total",
+                    "disc",
+                    "disc_width",
+                    "disc_total",
+                    "write_disc_total",
+                    "next_disc_on",
+                    "reset_disc_on",
+                    "reset_track_on",
+                    "reset_track_on_disc",
+                    "keep_vinyl",
+                ];
+                let values = names
+                    .into_iter()
+                    .filter_map(|name| {
+                        args.get(name)
+                            .map(|value| (name.to_string(), value.clone()))
+                    })
+                    .collect::<serde_json::Map<_, _>>();
+                let options: tagrex_commands::NumberingOptions =
+                    serde_json::from_value(Value::Object(values))?;
+                let plan = app.preview_numbering(
+                    &paths,
+                    &options,
+                    previous.as_ref().map(|p| &p.plan).or(working.as_ref()),
+                )?;
+                let skipped: HashSet<&str> = plan
+                    .unrendered
+                    .iter()
+                    .filter(|row| row.field == "preserved vinyl position")
+                    .flat_map(|row| row.paths.iter().map(String::as_str))
+                    .collect();
+                for path in &paths {
+                    if skipped.contains(path.to_string_lossy().as_ref()) {
+                        continue;
                     }
-                    if let Some(disc) = args.get("disc").and_then(Value::as_u64) {
-                        edits.push(TagEditDto {
-                            path: path.to_string_lossy().into_owned(),
-                            field: "disc".into(),
-                            value: Some(disc.to_string()),
-                        });
+                    let path = path.to_string_lossy();
+                    intent.tag(&path, "track");
+                    if options.write_total {
+                        intent.tag(&path, "tracktotal");
                     }
-                    if let Some(total) = args.get("disc_total").and_then(Value::as_u64) {
-                        edits.push(TagEditDto {
-                            path: path.to_string_lossy().into_owned(),
-                            field: "disctotal".into(),
-                            value: Some(total.to_string()),
-                        });
+                    if options.disc.is_some() {
+                        intent.tag(&path, "disc");
+                        if options.write_disc_total || options.disc_total.is_some() {
+                            intent.tag(&path, "disctotal");
+                        }
                     }
                 }
-                for edit in &edits {
-                    intent.tag(&edit.path, &edit.field);
-                }
-                app.preview_tag_edits(&edits)?
+                plan
             }
             "draft.import" => {
                 let mut per_file_totals = None;
@@ -865,7 +943,11 @@ impl Service {
                 );
             }
         }
-        let plan = if tool == "draft.transform" && previous.is_some() {
+        let plan = if matches!(
+            tool,
+            "draft.transform" | "draft.from_text" | "draft.from_sidecars" | "draft.number"
+        ) && previous.is_some()
+        {
             plan
         } else if let Some(mut previous) = previous {
             intent.clear_previous(&mut previous.plan);
@@ -917,16 +999,37 @@ impl Service {
             .iter()
             .map(|key| json!({"path":key.path,"field":key.field}))
             .collect::<Vec<_>>();
+        // The budget covers what the sealed draft retains, not just the JSON
+        // plan: the identity map and scope keys are owned and can outlive an
+        // almost-empty live projection.
+        let overhead = retained_overhead(
+            identities
+                .iter()
+                .map(|(key, identity)| (key.as_str(), identity.canonical.as_path())),
+            &scope,
+        );
+        let size_bytes = super::json_accounting::size(&plan)?.saturating_add(overhead);
         let digest = if publish {
-            hash(&serde_json::to_vec(
+            super::json_accounting::digest(
                 &json!({"intent":"apply_current_shared_stage","scope":scope_fields,"root":library_root,"principal":principal.id,"epoch":self.0.epoch}),
-            )?)
+            )?
         } else {
-            hash(&serde_json::to_vec(
-                &json!({"plan":plan,"identities":identities,"principal":principal.id,"epoch":self.0.epoch}),
-            )?)
+            // Borrow every authorization input instead of constructing a second
+            // owned JSON tree. Digests are opaque, server-created handles.
+            #[derive(Serialize)]
+            struct DraftDigest<'a> {
+                epoch: &'a str,
+                identities: &'a BTreeMap<String, Identity>,
+                plan: &'a PlanDto,
+                principal: &'a str,
+            }
+            super::json_accounting::digest(&DraftDigest {
+                epoch: &self.0.epoch,
+                identities: &identities,
+                plan: &plan,
+                principal: &principal.id,
+            })?
         };
-        let size_bytes = serde_json::to_vec(&plan)?.len();
         let mut sealed = SealedPlan {
             owner: principal.id.clone(),
             id: id.clone(),
@@ -943,7 +1046,7 @@ impl Service {
         quota(state.plans.len())?;
         let retained_bytes: usize = state.plans.values().map(|p| p.size_bytes).sum();
         let new_bytes = sealed.size_bytes;
-        if retained_bytes.saturating_add(new_bytes) > 128 * 1024 * 1024 {
+        if retained_bytes.saturating_add(new_bytes) > super::json_accounting::MAX_DRAFT_BYTES {
             return Err(ServiceError::new(
                 "quota",
                 "Sealed draft budget is 128 MiB; discard unused drafts",
@@ -969,8 +1072,20 @@ impl Service {
         };
         result["protected_fields"] = json!(excluded);
         if publish {
+            let locked_skipped = std::mem::take(&mut sealed.plan.locked_skipped);
+            let unrendered = std::mem::take(&mut sealed.plan.unrendered);
             sealed.plan = super::staging::filtered(&sealed.plan, |_| false);
-            sealed.size_bytes = serde_json::to_vec(&sealed.plan)?.len();
+            sealed.plan.locked_skipped = locked_skipped;
+            sealed.plan.unrendered = unrendered;
+            let retained = retained_overhead(
+                sealed
+                    .identities
+                    .iter()
+                    .map(|(key, identity)| (key.as_str(), identity.canonical.as_path())),
+                &sealed.scope,
+            );
+            sealed.size_bytes =
+                super::json_accounting::size(&sealed.plan)?.saturating_add(retained);
         }
         state.plans.insert(id, sealed);
         drop(state);
@@ -1311,15 +1426,18 @@ impl Service {
                     return Err(ServiceError::conflict("This move would orphan other pending fields on the same file; include those fields in the shared scope or apply them first"));
                 }
             }
-            let (accepted_digest, accepted_id) = {
-                let record = lock(&operation.record)?;
-                (
-                    hash(&serde_json::to_vec(
-                        &json!({"scope_digest":descriptor.digest,"plan":accepted,"identities":descriptor.identities}),
-                    )?),
-                    record.plan_id.clone(),
-                )
-            };
+            #[derive(Serialize)]
+            struct AcceptedDigest<'a> {
+                identities: &'a BTreeMap<String, Identity>,
+                plan: &'a PlanDto,
+                scope_digest: &'a str,
+            }
+            let accepted_digest = super::json_accounting::digest(&AcceptedDigest {
+                identities: &descriptor.identities,
+                plan: &accepted,
+                scope_digest: &descriptor.digest,
+            })?;
+            let accepted_id = lock(&operation.record)?.plan_id.clone();
             accepted.description = format!(
                 "{} · MCP draft {}",
                 accepted
@@ -1649,6 +1767,29 @@ impl Service {
         Ok(result)
     }
 }
+/// Conservative retained-memory estimate for the identity map and live scope a
+/// sealed draft keeps alongside its serialized plan. Both are owned per key and
+/// survive even when a live projection's plan is filtered to nothing, so the
+/// 128 MiB draft budget would otherwise miss them.
+fn retained_overhead<'a>(
+    identity_paths: impl Iterator<Item = (&'a str, &'a Path)>,
+    scope: &BTreeSet<super::staging::StageKey>,
+) -> usize {
+    let identities = identity_paths.fold(0usize, |total, (key, canonical)| {
+        total
+            .saturating_add(key.len())
+            .saturating_add(canonical.as_os_str().len())
+            .saturating_add(std::mem::size_of::<Identity>())
+            .saturating_add(64)
+    });
+    let scoped = scope.iter().fold(0usize, |total, key| {
+        total
+            .saturating_add(key.path.len())
+            .saturating_add(key.field.len())
+            .saturating_add(64)
+    });
+    identities.saturating_add(scoped)
+}
 fn persist_operations(directory: &Path, state: &State) -> ServiceResult<()> {
     let records = state
         .operations
@@ -1723,6 +1864,8 @@ pub(super) fn describe_live(
         .map(|plan| super::staging::filtered(plan, |key| scope.scope.contains(key)))
         .unwrap_or_else(|| super::staging::filtered(&scope.plan, |_| false));
     current.plan.description = scope.plan.description.clone();
+    current.plan.locked_skipped = scope.plan.locked_skipped.clone();
+    current.plan.unrendered = scope.plan.unrendered.clone();
     let mut result = describe(&current, offset, limit);
     result["scope_digest"] = json!(scope.digest);
     result["live_revision"] = json!(state.manual_revision);
@@ -2616,5 +2759,123 @@ mod composition_tests {
             .unwrap();
         assert!(preset.description.contains("preset={query:"));
         assert!(preset.description.contains("SHARED"));
+    }
+    #[test]
+    fn native_field_recipe_uses_shared_working_values_across_different_scopes() {
+        let f = Fixture::new();
+        f.draft(json!({"title":"Current / 日本語"}));
+        let result=f.call("draft.transform",json!({"paths":[f.paths[0]],"groups":[{"name":"Copy current title","scope":"comment","rules":[{"kind":"format","to":"%title%"}]}]}));
+        assert_eq!(
+            field(&result, &f.paths[0], "comment").unwrap()["new"],
+            "Current / 日本語"
+        );
+        assert_eq!(
+            field(&result, &f.paths[0], "title").unwrap()["new"],
+            "Current / 日本語"
+        );
+    }
+    #[test]
+    fn native_text_import_and_numbering_can_restore_saved_values_without_losing_other_intent() {
+        let f = Fixture::new();
+        let draft = f.draft(json!({"title":"Pending", "comment":"Keep", "track":"9"}));
+        let imported = f.call("draft.from_text", json!({"paths":[f.paths[0]],"draft":draft["draft"],"mask":"%_filename_ext%|%title%","mode":"filename","text":"0.wav|Saved"}));
+        assert!(field(&imported, &f.paths[0], "title").is_none());
+        assert_eq!(
+            field(&imported, &f.paths[0], "comment").unwrap()["new"],
+            "Keep"
+        );
+        let numbered = f.call(
+            "draft.number",
+            json!({"paths":[f.paths[0]],"draft":imported["draft"],"start":1}),
+        );
+        assert!(field(&numbered, &f.paths[0], "track").is_none());
+        assert_eq!(
+            field(&numbered, &f.paths[0], "comment").unwrap()["new"],
+            "Keep"
+        );
+    }
+    #[test]
+    fn native_import_diagnostics_and_invalid_number_arguments_are_visible() {
+        let f = Fixture::new();
+        let imported = f.call("draft.from_text",json!({"paths":f.paths,"mode":"filename","mask":"%_filename_ext%|%title%","text":"missing.wav|Skip\n1.wav|Matched\nBad row"}));
+        assert_eq!(
+            field(&imported, &f.paths[1], "title").unwrap()["new"],
+            "Matched"
+        );
+        assert!(field(&imported, &f.paths[0], "title").is_none());
+        assert!(imported["unrendered"].as_array().unwrap().len() >= 3);
+        for value in [json!(-1), json!(1.5), json!(4294967296u64), json!("2")] {
+            assert!(f
+                .service
+                .call(
+                    &f.principal,
+                    "draft.number",
+                    json!({"paths":[f.paths[0]],"start":value})
+                )
+                .is_err());
+        }
+    }
+    #[test]
+    fn native_sidecar_import_requires_a_folder_read_grant_and_preserves_other_staging() {
+        let f = Fixture::new();
+        fs::write(f.paths[0].parent().unwrap().join("0.txt"), "日本語\nNotes").unwrap();
+        let draft = f.draft(json!({"comment":"Keep"}));
+        let imported=f.call("draft.from_sidecars",json!({"paths":[f.paths[0]],"draft":draft["draft"],"field":"custom:LYRICS","pattern":"%filename%.txt"}));
+        assert_eq!(
+            field(&imported, &f.paths[0], "custom:LYRICS").unwrap()["new"],
+            "日本語\nNotes"
+        );
+        assert_eq!(
+            field(&imported, &f.paths[0], "comment").unwrap()["new"],
+            "Keep"
+        );
+        let pair = f
+            .service
+            .pair_client(
+                "Stage only".into(),
+                Grant {
+                    roots: vec![f.paths[0].parent().unwrap().to_path_buf()],
+                    actions: ["stage"].into_iter().map(String::from).collect(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let principal = f.service.authenticate(&pair.credential).unwrap();
+        assert!(f
+            .service
+            .call(
+                &principal,
+                "draft.from_sidecars",
+                json!({"paths":[f.paths[0]],"field":"comment","pattern":"0.txt"})
+            )
+            .is_err());
+    }
+    #[test]
+    fn native_extract_and_list_rules_run_through_the_shared_service() {
+        let f = Fixture::new();
+        f.draft(json!({"title":"Björk / 日本語 - Track"}));
+        let result=f.call("draft.transform",json!({"paths":[f.paths[0]],"groups":[{"name":"Extract credits","scope":"tags","rules":[{"kind":"extract","from":"%title%","to":"%artist% - %title%"},{"kind":"split_values","scope":"artist","from":" / "},{"kind":"format","scope":"comment","to":"%artist%: %title%"}]}]}));
+        assert_eq!(
+            field(&result, &f.paths[0], "artist").unwrap()["new"],
+            "Björk; 日本語"
+        );
+        assert_eq!(
+            field(&result, &f.paths[0], "comment").unwrap()["new"],
+            "Björk; 日本語: Track"
+        );
+    }
+    #[test]
+    fn draft_retention_includes_scope_and_identity_overhead() {
+        use super::super::staging::StageKey;
+        let scope = (0..100)
+            .map(|i| StageKey::special(&format!("/music/track-{i}.flac"), "filename"))
+            .collect::<BTreeSet<_>>();
+        assert!(retained_overhead(std::iter::empty(), &scope) >= 100 * 64);
+        let path = "/music/track.flac";
+        assert!(
+            retained_overhead(std::iter::once((path, Path::new(path))), &BTreeSet::new())
+                >= std::mem::size_of::<Identity>() + 2 * path.len()
+        );
+        assert_eq!(retained_overhead(std::iter::empty(), &BTreeSet::new()), 0);
     }
 }

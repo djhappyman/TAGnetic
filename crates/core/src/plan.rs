@@ -472,15 +472,19 @@ impl Executor {
         // recorded so undo can put them back.
         // Observe only after all tag writes and transfers, before pruning can
         // remove a directory needed by error rollback.
-        for fingerprint in block_fingerprints {
-            let change = plan
-                .changes
-                .iter()
-                .find(|change| change.path == fingerprint.path)
-                .expect("fingerprint belongs to this plan");
-            fingerprint.after = Some(file_fingerprint(
-                effective_rename(change).unwrap_or(&change.path),
-            )?);
+        if !block_fingerprints.is_empty() {
+            let mut by_path = HashMap::new();
+            for change in &plan.changes {
+                by_path.entry(change.path.as_path()).or_insert(change);
+            }
+            for fingerprint in block_fingerprints {
+                let change = by_path
+                    .get(fingerprint.path.as_path())
+                    .expect("fingerprint belongs to this plan");
+                fingerprint.after = Some(file_fingerprint(
+                    effective_rename(change).unwrap_or(&change.path),
+                )?);
+            }
         }
         Ok(if plan.prune_empty_dirs {
             prune_emptied_dirs(pruning_intent, roots, &written.created_dirs)
@@ -556,6 +560,18 @@ impl Executor {
         // destination must both sit within a root.
         // A transfer that is already undone — by an earlier attempt that stopped
         // half-way (#604) — has nothing left to check or do.
+        // Copy stamps and ID3v2 revisions are indexed once: Undo checks them per
+        // change, and a linear scan of either made a large batch quadratic.
+        let mut copy_stamps = HashMap::new();
+        for stamp in &batch.copy_stamps {
+            copy_stamps.entry(stamp.path.as_path()).or_insert(stamp);
+        }
+        let mut revisions = HashMap::new();
+        for file in &batch.id3v2_revisions {
+            revisions
+                .entry(file.path.as_path())
+                .or_insert(file.revision);
+        }
         for change in &batch.plan.changes {
             match effective_rename(change) {
                 Some(target) if is_untransferred(target, &change.path, change.copy) => {
@@ -564,7 +580,13 @@ impl Executor {
                 Some(target) => {
                     ensure_within_roots(target, &roots)?;
                     resolve_target_within_roots(&change.path, &roots)?;
-                    ensure_untransfer_safe(target, &change.path, change.copy, &batch)?;
+                    ensure_untransfer_safe(
+                        target,
+                        &change.path,
+                        change.copy,
+                        &copy_stamps,
+                        batch.interrupted,
+                    )?;
                 }
                 None => ensure_within_roots(&change.path, &roots)?,
             }
@@ -577,7 +599,7 @@ impl Executor {
                 }
                 ensure_within_roots(to, &roots)?;
                 resolve_target_within_roots(from, &roots)?;
-                ensure_untransfer_safe(to, from, change.copy, &batch)?;
+                ensure_untransfer_safe(to, from, change.copy, &copy_stamps, batch.interrupted)?;
             }
         }
 
@@ -651,7 +673,7 @@ impl Executor {
             let restorable = without_kept_fields(change, index, &changed, mode);
             write_tag_changes(&change.path, &restorable, Direction::Undo)?;
             apply_cover_change(&change.path, change, Direction::Undo)?;
-            restore_revision(&change.path, &batch.id3v2_revisions)?;
+            restore_revision(&change.path, &revisions)?;
             steps.done();
         }
 
@@ -891,6 +913,12 @@ impl Written {
     /// done nothing to undo. Returns the paths that are still not as they were.
     fn roll_back(&self, plan: &ChangePlan, removed_dirs: &[PathBuf]) -> Vec<PathBuf> {
         let mut failed = Vec::new();
+        let mut revisions = HashMap::new();
+        for file in &self.revisions {
+            revisions
+                .entry(file.path.as_path())
+                .or_insert(file.revision);
+        }
         for dir in removed_dirs {
             let _ = std::fs::create_dir_all(dir);
             if !dir.is_dir() {
@@ -924,7 +952,7 @@ impl Written {
             if steps >= 2 {
                 let _ = apply_cover_change(&change.path, change, Direction::Undo);
             }
-            let _ = restore_revision(&change.path, &self.revisions);
+            let _ = restore_revision(&change.path, &revisions);
             // The file holds the values the plan recorded as `old` again, or it
             // does not.
             if ensure_not_stale(change).is_err() {
@@ -1029,21 +1057,24 @@ fn ensure_target_free(from: &Path, to: &Path, copy: bool) -> Result<(), PlanErro
 /// path is still the copy as the batch left it; a batch recorded before stamps
 /// existed has none, and its copies are removed as before. An interrupted
 /// batch has no such legacy exemption: no stamp means no proof of ownership.
+///
+/// `stamps` is indexed once per Undo so checking a large batch stays linear.
 fn ensure_untransfer_safe(
     target: &Path,
     original: &Path,
     copy: bool,
-    batch: &AppliedBatch,
+    stamps: &HashMap<&Path, &CopyStamp>,
+    interrupted: bool,
 ) -> Result<(), PlanError> {
     if copy {
-        let Some(stamp) = batch.copy_stamps.iter().find(|stamp| stamp.path == target) else {
-            return if batch.interrupted {
+        let Some(stamp) = stamps.get(target) else {
+            return if interrupted {
                 Err(PlanError::Stale(target.to_path_buf()))
             } else {
                 Ok(())
             };
         };
-        if CopyStamp::of(target).as_ref() == Some(stamp) {
+        if CopyStamp::of(target).as_ref() == Some(*stamp) {
             Ok(())
         } else {
             Err(PlanError::Stale(target.to_path_buf()))
@@ -1074,12 +1105,11 @@ fn id3v2_revisions(plan: &ChangePlan) -> Vec<FileRevision> {
 /// that restore its values save in the revision the app is set to, which need
 /// not be the one the file was in. A 2.2 file stays as they left it: the backend
 /// does not write 2.2.
-fn restore_revision(path: &Path, revisions: &[FileRevision]) -> Result<(), PlanError> {
-    let Some(recorded) = revisions
-        .iter()
-        .find(|file| file.path == path)
-        .map(|file| file.revision)
-    else {
+fn restore_revision(
+    path: &Path,
+    revisions: &HashMap<&Path, Id3v2Revision>,
+) -> Result<(), PlanError> {
+    let Some(&recorded) = revisions.get(path) else {
         return Ok(());
     };
     if !Id3v2Revision::WRITABLE.contains(&recorded) {
@@ -1245,13 +1275,15 @@ fn capture_block_fingerprints(plan: &ChangePlan) -> Result<Vec<BlockFingerprint>
 /// whole blocks. Already-restored files need no metadata rewrite on retry.
 fn ensure_block_undo_safe(batch: &AppliedBatch) -> Result<HashSet<PathBuf>, PlanError> {
     let mut restored = HashSet::new();
+    if batch.block_fingerprints.is_empty() {
+        return Ok(restored);
+    }
+    let mut by_path = HashMap::new();
+    for change in &batch.plan.changes {
+        by_path.entry(change.path.as_path()).or_insert(change);
+    }
     for fingerprint in &batch.block_fingerprints {
-        let Some(change) = batch
-            .plan
-            .changes
-            .iter()
-            .find(|change| change.path == fingerprint.path)
-        else {
+        let Some(change) = by_path.get(fingerprint.path.as_path()) else {
             return Err(PlanError::ChangedSinceApplied(fingerprint.path.clone()));
         };
         let current_path = match effective_rename(change) {
@@ -1274,17 +1306,18 @@ fn ensure_block_undo_safe(batch: &AppliedBatch) -> Result<HashSet<PathBuf>, Plan
 /// provide both possible safe states; interrupted intent alone proves only the
 /// already-restored state.
 fn ensure_covers_undo_safe(batch: &AppliedBatch) -> Result<(), PlanError> {
+    let block_paths = batch
+        .block_fingerprints
+        .iter()
+        .map(|fingerprint| fingerprint.path.as_path())
+        .collect::<HashSet<_>>();
     for change in &batch.plan.changes {
         if change.copy {
             continue;
         }
         // A successful whole-file fingerprint check already includes covers,
         // including normalized/combined block writes.
-        if batch
-            .block_fingerprints
-            .iter()
-            .any(|fingerprint| fingerprint.path == change.path)
-        {
+        if block_paths.contains(change.path.as_path()) {
             continue;
         }
         let Some(covers) = &change.cover_change else {
@@ -1346,6 +1379,7 @@ fn untransfer(target: &Path, original: &Path, copy: bool) -> Result<(), PlanErro
 /// are excluded; containment is verified while the parents still exist.
 fn pruning_candidates(plan: &ChangePlan, roots: &[PathBuf], created: &[PathBuf]) -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
+    let mut seen = HashSet::new();
     for change in &plan.changes {
         if change.copy || effective_rename(change).is_none() {
             continue;
@@ -1367,7 +1401,7 @@ fn pruning_candidates(plan: &ChangePlan, roots: &[PathBuf], created: &[PathBuf])
                 if !is_prunable_parent(current, roots) {
                     break;
                 }
-                if !candidates.contains(&owned) {
+                if seen.insert(owned.clone()) {
                     candidates.push(owned);
                 }
                 dir = current.parent();
@@ -1433,35 +1467,83 @@ pub fn is_os_junk(path: &Path) -> bool {
 /// Delete `dir`'s OS bookkeeping files if that is all it holds, recursing into
 /// subfolders that hold nothing else either, and report whether `dir` is empty
 /// now. A folder with anything real in it is left exactly as it was.
+///
+/// Links are entries of their own and are never followed: a self-referential or
+/// escaping directory symlink left in a folder must not turn this into an
+/// repeated walk through link targets. Since such a link is not
+/// ordinary OS bookkeeping, its presence also keeps the folder.
 fn clear_os_junk(dir: &Path) -> bool {
-    fn only_junk(dir: &Path) -> bool {
-        let Ok(entries) = std::fs::read_dir(dir) else {
+    clear_os_junk_after_scan(dir, || {})
+}
+
+fn clear_os_junk_after_scan(dir: &Path, after_scan: impl FnOnce()) -> bool {
+    /// Bounded like the rest of the executor: deeper nesting is not a folder
+    /// this cleanup should be responsible for, so it stays.
+    const MAX_DEPTH: usize = 64;
+    fn only_junk(dir: &Path, depth: usize) -> bool {
+        if depth == 0 {
+            return false;
+        }
+        let Ok(mut entries) = std::fs::read_dir(dir) else {
             return false;
         };
-        entries.flatten().all(|entry| {
+        entries.all(|entry| {
+            let Ok(entry) = entry else {
+                return false;
+            };
             let path = entry.path();
-            if path.is_dir() {
-                only_junk(&path)
+            let Ok(kind) = entry.file_type() else {
+                return false;
+            };
+            if kind.is_symlink() {
+                false
+            } else if kind.is_dir() {
+                only_junk(&path, depth - 1)
             } else {
                 is_os_junk(&path)
             }
         })
     }
-    if !only_junk(dir) {
+    if !only_junk(dir, MAX_DEPTH) {
         return false;
     }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            std::fs::remove_dir_all(&path).ok();
-        } else {
-            std::fs::remove_file(&path).ok();
+    after_scan();
+    fn remove_junk(dir: &Path, depth: usize) -> bool {
+        if depth == 0
+            || !std::fs::symlink_metadata(dir)
+                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        {
+            return false;
         }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        let mut empty = true;
+        for entry in entries {
+            let Ok(entry) = entry else {
+                empty = false;
+                continue;
+            };
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() && !kind.is_symlink() => {
+                    // Never bulk-delete a directory validated earlier: another
+                    // process may have added real contents since that scan.
+                    if !remove_junk(&path, depth - 1) || std::fs::remove_dir(&path).is_err() {
+                        empty = false;
+                    }
+                }
+                Ok(kind) if kind.is_file() && is_os_junk(&path) => {
+                    if std::fs::remove_file(&path).is_err() {
+                        empty = false;
+                    }
+                }
+                _ => empty = false,
+            }
+        }
+        empty
     }
-    true
+    remove_junk(dir, MAX_DEPTH)
 }
 
 /// Resolve `path` (following symlinks, collapsing `..`) and require the result
@@ -1917,5 +1999,56 @@ mod tests {
         assert!(removed.is_empty());
         assert!(library.is_dir(), "an allowed root must never be pruned");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pruning_does_not_follow_a_directory_symlink_cycle() {
+        let dir = temp_dir("junk-symlink-cycle");
+        let album = dir.join("album");
+        std::fs::create_dir_all(&album).unwrap();
+        std::fs::write(album.join(".DS_Store"), b"junk").unwrap();
+        std::os::unix::fs::symlink(&album, album.join("loop")).unwrap();
+
+        // Following `loop` would recurse through the same folder forever; the
+        // link is not ordinary bookkeeping, so the folder simply stays.
+        assert!(!clear_os_junk(&album));
+        assert!(album.is_dir());
+        assert!(album.join(".DS_Store").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn os_bookkeeping_still_clears_an_otherwise_empty_folder() {
+        let dir = temp_dir("junk-cleared");
+        let album = dir.join("album");
+        std::fs::create_dir_all(&album).unwrap();
+        std::fs::write(album.join(".DS_Store"), b"finder").unwrap();
+        std::fs::write(album.join("Thumbs.db"), b"explorer").unwrap();
+
+        assert!(clear_os_junk(&album));
+        assert_eq!(std::fs::read_dir(&album).unwrap().count(), 0);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn pruning_preserves_real_files_added_after_the_initial_junk_scan() {
+        let dir = temp_dir("junk-concurrent-real-file");
+        let nested = dir.join("album/nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join(".DS_Store"), b"junk").unwrap();
+        let album = dir.join("album");
+        assert!(!clear_os_junk_after_scan(&album, || {
+            std::fs::write(album.join("new.txt"), b"new root contents").unwrap();
+            std::fs::write(nested.join("new.flac"), b"new audio contents").unwrap();
+        }));
+        assert_eq!(
+            std::fs::read(album.join("new.txt")).unwrap(),
+            b"new root contents"
+        );
+        assert_eq!(
+            std::fs::read(nested.join("new.flac")).unwrap(),
+            b"new audio contents"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -3523,18 +3523,29 @@ connectRibbonActions(async (action, options) => {
     }
     return {dialog:'ribbon-remove-dialog'};
   } else if (action === 'format-values') {
-    const values = await invoke('render_column', {pattern:options.pattern, paths});
+    const inputRevision = liveInputRevision();
+    const inputPlan = previewPlan;
+    const plan = await invoke('preview_field_operations', {
+      paths, operations: [{kind:'format', field:options.field, pattern:options.pattern}],
+      working: inputPlan,
+    });
+    if (inputRevision !== liveInputRevision() || inputPlan !== previewPlan) throw new Error('The staged values changed. Try again.');
     if (!isSelectionCurrent(subject)) throw new Error('The selection changed. Try again.');
     if (options.mode === 'write') {
-      const edits = paths.map((path,index) => ({path, field:options.field, value:values[index] || ''}));
-      const plan = await invoke('preview_tag_edits', {edits, paths, cover:null});
-      if (!isSelectionCurrent(subject)) throw new Error('The selection changed. Try again.');
-      await writeQuickPlan(plan);
+      // Preserve the shared stage: immediate Write saves only this operation's
+      // target field, while its expression still reads current staged inputs.
+      const selected = new Set(paths);
+      const changes = plan.changes.filter(change => selected.has(change.path)).map(change => ({
+        ...change, rename_to:null, cover_change:null, block_changes:[], sidecar_renames:[],
+        copy:false, folder_extras:[], tag_changes:change.tag_changes.filter(edit => edit.field === options.field),
+      }));
+      await writeQuickPlan({...plan, changes});
     } else {
-      // Adopt first so returning a later field to its base cannot resurrect a
-      // previous staged value when the complete batch is announced.
       adoptTagOnlyPreview();
-      recordLiveFields(paths.map((path,index) => ({path, field:options.field, value:values[index] || ''})));
+      const values = new Map(plan.changes.map(change => [change.path, change.tag_changes.find(edit => edit.field === options.field)]));
+      recordLiveFields(paths.map(path => ({path, field:options.field,
+        value:values.has(path) && values.get(path) ? values.get(path).new ?? '' : trackAt(path)?.tags?.[options.field] ?? '',
+      })));
     }
     return {dialog:'ribbon-format-dialog'};
   } else if (action === 'import-artwork') {

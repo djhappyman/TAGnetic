@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Native field recipes for formatting/copying tag values, removing selected
+  fields and keeping an allowlist. Steps compile once and compose over current
+  staged values through the existing plan, field-lock and Undo machinery.
+- Explicit custom-field patterns such as `%custom:Venue%` in naming, extraction,
+  reports and field formatting, while preserving existing placeholder errors.
+- Saved native field rules available through MCP, with bounded pattern work,
+  cancellation support in the native API and stale-plan checks.
+
+### Changed
+
+- Format values uses a single Rust preview call, preserves punctuation and line
+  breaks, reads pending values and refuses late results after working edits change.
+- Keep-only field recipes retain artwork by default. Artwork removal requires
+  an explicit `COVER` or `PICTURE` removal selector.
+
 ## [1.4.9] - 2026-11-16
 
 **Tagnetic 1.4.9**: clearer navigation, grouping and a faster fixed sidebar.

@@ -13,6 +13,18 @@
 //! keys use [`TagField`]'s lossless storage-key codec.
 
 mod cover_encoding;
+mod field_operations;
+pub use field_operations::{has_field_rules, validate_field_groups, FieldOperation};
+mod native_batch;
+mod playlist_load;
+pub use native_batch::{
+    NumberBoundary, NumberingOptions, TextImportMode, TextImportOptions, TextImportPreview,
+    TextImportRow, TextImportStatus, TextSidecarOptions,
+};
+pub use playlist_load::{
+    PlaylistIssue, PlaylistIssueKind, PlaylistLoadOptions, PlaylistLoadPreview,
+};
+mod bounded_cache;
 pub mod duplicates;
 mod import_matching;
 mod output;
@@ -989,6 +1001,9 @@ fn error_message(error: &AppError) -> MessageDto {
     use tagrex_core::transform::TransformError;
 
     match error {
+        // Backend-only additions use the existing English fallback until their
+        // interface catalogue entries are delivered together.
+        AppError::ExportLimit(_) => MessageDto::default(),
         AppError::TagIo(inner) => match inner {
             TagIoError::UnsupportedFormat(what) => {
                 coded("error.tag.unsupportedFormat", arg("format", what))
@@ -1708,7 +1723,8 @@ pub struct ImportSelectionDto {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TransformRuleDto {
     /// `replace`, `case`, `diacritics`, `transliterate`, `untransliterate` or
-    /// `key`.
+    /// `key`. Native field recipes also accept `format`, `remove_fields` and
+    /// `keep_fields`; see `docs/guide/field-recipes.md` for their parameter contract.
     pub kind: String,
     #[serde(default)]
     pub from: String,
@@ -2528,7 +2544,7 @@ impl App {
     fn read_snapshot(
         &self,
         path: &Path,
-    ) -> Result<tagrex_core::model::TrackRead, tagrex_core::model::TagIoError> {
+    ) -> Result<std::sync::Arc<tagrex_core::model::TrackRead>, tagrex_core::model::TagIoError> {
         self.read_cache.borrow_mut().read(path)
     }
 
@@ -2537,7 +2553,7 @@ impl App {
         &self,
         path: &Path,
     ) -> Result<tagrex_core::model::TrackFile, tagrex_core::model::TagIoError> {
-        self.read_snapshot(path).map(|read| read.file)
+        self.read_snapshot(path).map(|read| read.file.clone())
     }
 
     /// Build a table row from one probe: tags, playing time (#172) and tag
@@ -2550,7 +2566,7 @@ impl App {
                 tag_blocks: read.blocks.iter().map(TagBlockDto::from).collect(),
                 compilation_field: read.compilation_field().map(|field| field.to_storage_key()),
                 has_cover: read.has_cover,
-                ..TrackDto::from(read.file)
+                ..TrackDto::from(read.file.clone())
             },
             Err(error) => TrackDto::unreadable(path, ErrorDto::from(AppError::TagIo(error))),
         }
@@ -2891,6 +2907,7 @@ impl App {
         let read = self.read_snapshot(Path::new(&track.path)).ok();
         let props = read.as_ref().map(|read| read.props);
         let metadata = std::fs::metadata(&track.path).ok();
+        row.set_source_metadata(metadata.as_ref());
         row.set_technical(
             metadata.as_ref().map(|m| m.len()),
             props.as_ref().and_then(|p| p.bitrate_kbps),
@@ -2978,7 +2995,7 @@ impl App {
     /// require exact membership; directory sessions use the scanner's supported
     /// regular-file boundary, with no symlink traversal below the chosen root.
     pub fn read_track(&self, path: &Path) -> Result<TrackDto, AppError> {
-        self.read_track_rows(std::slice::from_ref(&path.to_path_buf()))
+        self.read_track_rows_inner(std::slice::from_ref(&path.to_path_buf()), true)
             .map(|mut rows| rows.remove(0))
     }
 
@@ -3024,6 +3041,14 @@ impl App {
     /// The whole request is validated before any snapshot is taken, so a path
     /// outside the library fails before a partial batch is returned.
     pub fn read_track_rows(&self, paths: &[PathBuf]) -> Result<Vec<TrackDto>, AppError> {
+        self.read_track_rows_inner(paths, false)
+    }
+
+    fn read_track_rows_inner(
+        &self,
+        paths: &[PathBuf],
+        force_refresh: bool,
+    ) -> Result<Vec<TrackDto>, AppError> {
         self.validate_track_paths(paths)?;
         let mut rows = Vec::with_capacity(paths.len());
         let tracks = paths
@@ -3037,12 +3062,21 @@ impl App {
         let previous = self.query_index.borrow().clone();
         let pending = self.query_pending.borrow_mut().take();
         if let Some(previous) = previous {
-            *self.query_index.borrow_mut() = Some(std::sync::Arc::new(previous.with_updates(rows)));
+            let updated = if force_refresh {
+                Some(previous.with_updates(rows))
+            } else {
+                previous.with_updates_if_changed(rows)
+            };
+            if let Some(updated) = updated {
+                *self.query_index.borrow_mut() = Some(std::sync::Arc::new(updated));
+            }
         } else if let Some(mut pending) = pending {
             for path in paths {
                 pending.paths.remove(path);
             }
-            pending.index = std::sync::Arc::new(pending.index.with_updates(rows));
+            if let Some(updated) = pending.index.with_updates_if_changed(rows) {
+                pending.index = std::sync::Arc::new(updated);
+            }
             if pending.paths.is_empty() {
                 *self.query_index.borrow_mut() = Some(pending.index);
             } else {
@@ -3070,7 +3104,7 @@ impl App {
             let Ok(read) = self.read_snapshot(&path) else {
                 continue;
             };
-            let track = read.file;
+            let track = &read.file;
             let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
             let props = Some(read.props);
             let duration = props.map(|p| p.duration_secs).unwrap_or(0);
@@ -3970,6 +4004,9 @@ impl App {
         groups: &[ActionGroupDto],
     ) -> Result<PlanDto, AppError> {
         let _encoding_scope = cover_encoding::Scope::new();
+        if field_operations::has_field_rules(groups) {
+            return self.preview_field_groups(paths, groups, None);
+        }
         // Build every chain up front: a malformed rule should be an error before
         // anything is previewed, not halfway through the file list.
         let chains = groups
@@ -4107,6 +4144,14 @@ impl App {
         groups: &[ActionGroupDto],
     ) -> Result<PlanDto, AppError> {
         let _encoding_scope = cover_encoding::Scope::new();
+        if field_operations::has_field_rules(groups) {
+            let paths = plan
+                .changes
+                .iter()
+                .map(|change| PathBuf::from(&change.path))
+                .collect::<Vec<_>>();
+            return self.preview_field_groups(&paths, groups, Some(plan));
+        }
         plan.validate_cover_assets()?;
         // Same as the on-disk runner: build every chain up front so a malformed
         // rule is an error before anything is revised.
@@ -5761,7 +5806,12 @@ impl App {
         let target = self.export_target(file_name)?;
         let root = std::fs::canonicalize(&self.library_root)?;
         let entries = self.playlist_entries(&root, paths);
-        self.write_output(&target, export::m3u(&entries).as_bytes())?;
+        self.write_output(
+            &target,
+            export::Format::M3u(&entries)
+                .render_bounded(64 * 1024 * 1024)?
+                .as_bytes(),
+        )?;
         Ok(target.to_string_lossy().into_owned())
     }
 
@@ -5861,12 +5911,15 @@ impl App {
         let mut outputs: Vec<(PathBuf, Vec<u8>)> = Vec::with_capacity(order.len());
         let mut written = Vec::with_capacity(order.len());
         let mut taken: HashSet<String> = HashSet::new();
+        let mut remaining = 64 * 1024 * 1024;
         for key in order {
             let members = &groups[&key];
             let name = self.playlist_name(&mask, &members[0], &mut taken)?;
             let target = self.export_target(&name)?;
             let entries = self.playlist_entries(&root, members);
-            outputs.push((target.clone(), export::m3u(&entries).into_bytes()));
+            let text = export::Format::M3u(&entries).render_bounded(remaining)?;
+            remaining -= text.len();
+            outputs.push((target.clone(), text.into_bytes()));
             written.push(target.to_string_lossy().into_owned());
         }
         output::write_batch(&self.library_root, &outputs, true)?;
@@ -5970,7 +6023,12 @@ impl App {
                 })
             })
             .collect();
-        self.write_output(&target, export::cue(&entries).as_bytes())?;
+        self.write_output(
+            &target,
+            export::Format::Cue(&entries)
+                .render_bounded(64 * 1024 * 1024)?
+                .as_bytes(),
+        )?;
         Ok(target.to_string_lossy().into_owned())
     }
 
@@ -5978,7 +6036,12 @@ impl App {
     pub fn export_csv(&self, paths: &[PathBuf], file_name: &str) -> Result<String, AppError> {
         let target = self.export_target(file_name)?;
         let tracks = read_tracks(paths);
-        self.write_output(&target, export::csv(&tracks).as_bytes())?;
+        self.write_output(
+            &target,
+            export::Format::Csv(&tracks)
+                .render_bounded(64 * 1024 * 1024)?
+                .as_bytes(),
+        )?;
         Ok(target.to_string_lossy().into_owned())
     }
 
@@ -5986,7 +6049,12 @@ impl App {
     pub fn export_html(&self, paths: &[PathBuf], file_name: &str) -> Result<String, AppError> {
         let target = self.export_target(file_name)?;
         let tracks = read_tracks(paths);
-        self.write_output(&target, export::html(&tracks).as_bytes())?;
+        self.write_output(
+            &target,
+            export::Format::Html(&tracks)
+                .render_bounded(64 * 1024 * 1024)?
+                .as_bytes(),
+        )?;
         Ok(target.to_string_lossy().into_owned())
     }
 
@@ -5994,7 +6062,12 @@ impl App {
     pub fn export_xml(&self, paths: &[PathBuf], file_name: &str) -> Result<String, AppError> {
         let target = self.export_target(file_name)?;
         let tracks = read_tracks(paths);
-        self.write_output(&target, export::xml(&tracks).as_bytes())?;
+        self.write_output(
+            &target,
+            export::Format::Xml(&tracks)
+                .render_bounded(64 * 1024 * 1024)?
+                .as_bytes(),
+        )?;
         Ok(target.to_string_lossy().into_owned())
     }
 
@@ -6009,7 +6082,12 @@ impl App {
         let target = self.export_target(file_name)?;
         let mask = Mask::parse(mask_pattern)?;
         let tracks = read_tracks(paths);
-        self.write_output(&target, export::report(&tracks, &mask).as_bytes())?;
+        self.write_output(
+            &target,
+            export::Format::Report(&tracks, &mask)
+                .render_bounded(64 * 1024 * 1024)?
+                .as_bytes(),
+        )?;
         Ok(target.to_string_lossy().into_owned())
     }
 
@@ -7829,22 +7907,23 @@ pub fn read_text_list(path: &Path) -> Result<String, AppError> {
     if !metadata.is_file() || metadata.len() > TEXT_LIST_MAX_BYTES {
         return Err(not_text());
     }
+    decode_text_file(file, path)
+}
+
+fn decode_text_file(file: std::fs::File, path: &Path) -> Result<String, AppError> {
+    let not_text = || AppError::NotATextList(path.display().to_string());
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > TEXT_LIST_MAX_BYTES {
+        return Err(not_text());
+    }
     let bytes = read_text_list_bytes(file, path)?;
-    let utf16 = |rest: &[u8], unit: fn([u8; 2]) -> u16| {
-        let units: Vec<u16> = rest
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| unit(*pair))
-            .collect();
-        String::from_utf16_lossy(&units)
+    let encoding = match bytes.as_slice() {
+        [0xff, 0xfe, ..] => tagrex_core::text_codec::TextEncoding::Utf16Le,
+        [0xfe, 0xff, ..] => tagrex_core::text_codec::TextEncoding::Utf16Be,
+        _ => tagrex_core::text_codec::TextEncoding::Utf8,
     };
-    let text = match bytes.as_slice() {
-        [0xFF, 0xFE, rest @ ..] => utf16(rest, u16::from_le_bytes),
-        [0xFE, 0xFF, rest @ ..] => utf16(rest, u16::from_be_bytes),
-        [0xEF, 0xBB, 0xBF, rest @ ..] => String::from_utf8_lossy(rest).into_owned(),
-        rest => String::from_utf8_lossy(rest).into_owned(),
-    };
+    let text = tagrex_core::text_codec::decode(&bytes, encoding, 2 * TEXT_LIST_MAX_BYTES as usize)
+        .map_err(|_| not_text())?;
     if text.contains('\0') {
         return Err(not_text());
     }
@@ -7990,6 +8069,9 @@ pub struct PlaceholderDto {
 pub fn mask_placeholders() -> Vec<PlaceholderDto> {
     tagrex_core::mask::placeholder_reference()
         .into_iter()
+        // The explicit custom namespace is implemented by the native parser.
+        // Its reference control/catalogues belong to the pending UI delivery.
+        .filter(|doc| doc.name != "custom")
         .map(|doc| PlaceholderDto {
             token: doc.token,
             name: doc.name.to_string(),
@@ -8128,6 +8210,13 @@ pub fn transform_sample(
     text: &str,
     target: &str,
 ) -> Result<String, AppError> {
+    if field_operations::has_field_rules(std::slice::from_ref(group)) {
+        validate_field_groups(std::slice::from_ref(group))?;
+        return Err(MaskError::BadArgument(
+            "Field recipes require a file selection preview, not a single text sample.".into(),
+        )
+        .into());
+    }
     let file_target = target == "filename";
     let mut out = text.to_string();
     for (scope, chain) in build_segments(group)? {
@@ -8206,6 +8295,9 @@ impl LiveSeed<'_> {
 
 /// The scopes the given groups run as, asked without building their chains.
 fn live_seed(groups: &[ActionGroupDto]) -> LiveSeed<'_> {
+    if field_operations::has_field_rules(groups) {
+        return LiveSeed::All;
+    }
     let mut fields = HashSet::new();
     for group in groups {
         for rule in &group.rules {
@@ -8816,6 +8908,8 @@ impl From<&tagrex_core::provider::Release> for ReleaseDto {
 
 #[derive(Debug, Error)]
 pub enum AppError {
+    #[error(transparent)]
+    ExportLimit(#[from] tagrex_core::export::OutputLimit),
     #[error(transparent)]
     TagIo(#[from] tagrex_core::model::TagIoError),
     #[error(transparent)]
@@ -18035,4 +18129,7 @@ mod tests {
             "Windows refuses the raw name"
         );
     }
+    include!("field_operations_tests.rs");
+    include!("native_batch_tests.rs");
+    include!("playlist_load_tests.rs");
 }

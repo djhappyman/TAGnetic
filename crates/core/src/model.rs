@@ -367,6 +367,59 @@ impl TagField {
         }
     }
 
+    /// Resolve a public field name without changing its stored spelling.
+    /// Standard names and aliases are case-insensitive; `custom:` forces a
+    /// custom field when its name would otherwise name a standard field.
+    pub fn from_name(name: &str) -> Option<Self> {
+        let name = name.trim();
+        let explicit = name
+            .get(..7)
+            .is_some_and(|s| s.eq_ignore_ascii_case("custom:"));
+        let custom = if explicit { &name[7..] } else { name };
+        if custom.is_empty()
+            || custom.len() > 256
+            || custom
+                .chars()
+                .any(|c| c.is_control() || "%[]$;=".contains(c))
+            || (!explicit && custom.starts_with('_'))
+        {
+            return None;
+        }
+        if explicit {
+            return Some(Self::Custom(custom.to_string()));
+        }
+        Some(match name.to_ascii_lowercase().as_str() {
+            "artist" => Self::Artist,
+            "title" => Self::Title,
+            "album" => Self::Album,
+            "albumartist" | "album artist" => Self::AlbumArtist,
+            "track" | "tracknumber" => Self::TrackNumber,
+            "tracktotal" | "totaltracks" => Self::TrackTotal,
+            "disc" | "discnumber" => Self::DiscNumber,
+            "disctotal" | "totaldiscs" => Self::DiscTotal,
+            "year" => Self::Year,
+            "genre" => Self::Genre,
+            "comment" => Self::Comment,
+            "composer" => Self::Composer,
+            "publisher" | "label" => Self::Publisher,
+            "bpm" => Self::Bpm,
+            "isrc" => Self::Isrc,
+            "key" | "initialkey" => Self::InitialKey,
+            "catalognumber" => Self::CatalogNumber,
+            "url" => Self::Url,
+            "media" | "mediatype" => Self::MediaType,
+            _ => Self::Custom(name.to_string()),
+        })
+    }
+
+    /// Compare logical fields while retaining the original custom-name spelling.
+    pub fn same_name(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Custom(a), Self::Custom(b)) => a.eq_ignore_ascii_case(b),
+            _ => self == other,
+        }
+    }
+
     /// Whether this field genuinely holds several values (#46).
     ///
     /// A track can have two artists and three genres, and both ID3v2.4 (several
