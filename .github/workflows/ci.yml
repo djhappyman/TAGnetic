@@ -77,7 +77,7 @@ jobs:
         run: cargo build --workspace
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
 
       # The Linux media session (#516) exports MPRIS on the session bus; its
       # tests are ignored by default because a plain `cargo test` has no bus.
@@ -117,7 +117,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
 
   # The same on macOS (#704), for the same reason: code behind `cfg(target_os)`
   # and a dependency's platform features are otherwise first built on a release
@@ -148,7 +148,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
 
   advisories:
     uses: ./.github/workflows/audit.yml

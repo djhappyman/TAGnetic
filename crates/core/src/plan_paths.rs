@@ -967,6 +967,8 @@ mod cleanup_index_tests {
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir(&root).unwrap();
+        // Match public Executor admission before entering this private scope.
+        let root = std::fs::canonicalize(root).unwrap();
         struct Fixture(PathBuf);
         impl Drop for Fixture {
             fn drop(&mut self) {
