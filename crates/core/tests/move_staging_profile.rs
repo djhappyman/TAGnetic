@@ -144,7 +144,11 @@ fn actual_journal_and_directory_layout_costs() {
         for cache in ["data-advised", "warm-repeat"] {
             if cache == "data-advised" {
                 for change in &plan.changes {
-                    let file = std::fs::File::open(&change.path).unwrap();
+                    let file = std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&change.path)
+                        .unwrap();
                     file.sync_all().unwrap();
                     #[cfg(target_os = "linux")]
                     rustix::fs::fadvise(&file, 0, None, rustix::fs::Advice::DontNeed).unwrap();
