@@ -408,6 +408,7 @@ fn policy_generations_keep_historical_pages_and_refuse_obsolete_query_indexes() 
     let fixture = Fixture::new(2, "literal separators ; / 尾");
     let full = fixture.full();
     let scoped = fixture.scoped("approved-c");
+    let peer = Fixture::new(1, "independent policy owner");
     let original = tagrex_core::model::multi_value_separator();
     let mut previous_separator = original.clone();
     let mut previous = fixture.snapshot(&full);
@@ -417,7 +418,41 @@ fn policy_generations_keep_historical_pages_and_refuse_obsolete_query_indexes() 
             old_page["rows"][0]["tags"]["artist"],
             format!("One{previous_separator}Two")
         );
+        // Standalone defaults and another App cannot invalidate this owner.
         tagrex_core::model::set_multi_value_separator(separator);
+        peer.app
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .apply_settings(&tagrex_commands::SettingsDto {
+                multi_value_separator: separator.into(),
+                ..Default::default()
+            });
+        let unchanged = fixture
+            .service
+            .call(
+                &full,
+                "files.query",
+                json!({"snapshot":previous["snapshot"],"query":all_query(),"fields":["artist"]}),
+            )
+            .unwrap();
+        assert_eq!(unchanged["matched"], 6);
+        assert_eq!(
+            unchanged["rows"][0]["tags"]["artist"],
+            old_page["rows"][0]["tags"]["artist"]
+        );
+        fixture.release(&full, &unchanged["selection"]);
+        fixture
+            .app
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .apply_settings(&tagrex_commands::SettingsDto {
+                multi_value_separator: separator.into(),
+                ..Default::default()
+            });
         let cancelled = fixture
             .service
             .call(

@@ -814,15 +814,66 @@ impl Directory {
             }
         }
     }
-    fn actual_path(&self) -> PathBuf {
+    #[cfg(unix)]
+    fn verified_path(&self, path: PathBuf) -> io::Result<PathBuf> {
+        use rustix::fs::{fstat, open, Mode, OFlags};
+        // A path is a locator, never authority. Check its current name against
+        // the live descriptor before advertising any recovery evidence.
+        let current = open(
+            &path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        let expected = fstat(&self.fd)?;
+        let actual = fstat(&current)?;
+        if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "Held output directory path changed",
+            ));
+        }
+        Ok(path)
+    }
+    fn actual_path(&self) -> io::Result<PathBuf> {
         #[cfg(target_os = "linux")]
         {
             use std::os::fd::AsRawFd;
             if let Ok(path) = std::fs::read_link(format!("/proc/self/fd/{}", self.fd.as_raw_fd())) {
-                return path;
+                return self.verified_path(path);
             }
         }
-        self.path.clone()
+        #[cfg(target_vendor = "apple")]
+        {
+            use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+            // F_GETPATH follows the held vnode after a directory rename. The
+            // original pathname may now name a foreign file or directory.
+            let mut buffer = [0u8; libc::MAXPATHLEN as usize];
+            // SAFETY: fd remains owned by self; buffer is writable for Apple's
+            // required MAXPATHLEN bytes and fcntl retains neither pointer.
+            let result = unsafe {
+                libc::fcntl(self.fd.as_raw_fd(), libc::F_GETPATH, buffer.as_mut_ptr())
+            };
+            if result == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            let end = buffer
+                .iter()
+                .position(|byte| *byte == 0)
+                .filter(|end| *end != 0)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "Invalid held output directory path")
+                })?;
+            let path = PathBuf::from(OsStr::from_bytes(&buffer[..end]));
+            self.verified_path(path)
+        }
+        #[cfg(all(unix, not(target_vendor = "apple")))]
+        {
+            self.verified_path(self.path.clone())
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(self.path.clone())
+        }
     }
 }
 struct Private {
@@ -836,7 +887,11 @@ struct Private {
     guard: std::sync::Mutex<Option<same_file::Handle>>,
 }
 impl Private {
-    fn create(parent: Arc<Directory>, orphaned: &mut Vec<PathBuf>) -> io::Result<Self> {
+    fn create(
+        parent: Arc<Directory>,
+        orphaned: &mut Vec<PathBuf>,
+        unlocated_orphan: &mut bool,
+    ) -> io::Result<Self> {
         for _ in 0..100 {
             let name = nonce(".tagrex-output-private-")?;
             let mut created = false;
@@ -861,7 +916,10 @@ impl Private {
                 Err(error) if created => {
                     // No Drop guesses ownership of a directory whose pinning
                     // failed after mkdir. Keep its exact name for inspection.
-                    orphaned.push(parent.actual_path().join(&name));
+                    match parent.actual_path() {
+                        Ok(path) => orphaned.push(path.join(&name)),
+                        Err(_) => *unlocated_orphan = true,
+                    }
                     return Err(error);
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
@@ -870,7 +928,7 @@ impl Private {
         }
         Err(io::ErrorKind::AlreadyExists.into())
     }
-    fn path(&self) -> PathBuf {
+    fn path(&self) -> io::Result<PathBuf> {
         self.dir.actual_path()
     }
     fn remember(&self, parent: bool, name: &OsStr) {
@@ -890,11 +948,11 @@ impl Private {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .iter()
-            .map(|(parent, name)| {
+            .filter_map(|(parent, name)| {
                 if *parent {
-                    self.parent.actual_path().join(name)
+                    self.parent.actual_path().ok().map(|path| path.join(name))
                 } else {
-                    self.path().join(name)
+                    self.path().ok().map(|path| path.join(name))
                 }
             })
             .collect()
@@ -972,7 +1030,7 @@ impl Private {
                 }
                 Err(io::Error::other(format!(
                     "output cleanup captured changed object {} (proof {:?}); restoration {:?}",
-                    self.path().join(&captured).display(),
+                    self.path()?.join(&captured).display(),
                     failure,
                     restored
                 )))
@@ -980,7 +1038,7 @@ impl Private {
         }
     }
     fn remove_empty(&self) -> io::Result<()> {
-        observe!(Event::BeforePrivateRemove, self.path());
+        observe!(Event::BeforePrivateRemove, self.path()?);
         #[cfg(windows)]
         self.guard.lock().unwrap_or_else(|p| p.into_inner()).take();
         let captured = nonce(".tagrex-output-empty-")?;
@@ -1081,7 +1139,7 @@ impl Entry {
         self.baseline_current()?;
         if !self.proof.at(&self.private.dir, &self.candidate, true)? {
             return Err(OutputError::Changed(
-                self.private.path().join(&self.candidate),
+                self.private.path()?.join(&self.candidate),
             ));
         }
         // Seal the candidate's known name into a fresh private capture before
@@ -1092,7 +1150,7 @@ impl Entry {
         self.candidate = captured.clone();
         observe!(
             Event::CandidateCaptured,
-            self.private.path().join(&captured)
+            self.private.path()?.join(&captured)
         );
         match self.proof.at(&self.private.dir, &captured, false) {
             Ok(true) => self.proof.refresh()?,
@@ -1109,7 +1167,7 @@ impl Entry {
         if let Some(before) = &mut self.before {
             let backup = self.private.capture(&self.parent, &self.name)?;
             self.backup = Some(backup.clone());
-            observe!(Event::BackupCaptured, self.private.path().join(&backup));
+            observe!(Event::BackupCaptured, self.private.path()?.join(&backup));
             if !before.at(&self.private.dir, &backup, false)? {
                 return Err(OutputError::Changed(self.target.clone()));
             }
@@ -1150,13 +1208,13 @@ impl Entry {
             self.published = false;
         }
         if let Some(prior) = self.backup.clone() {
-            observe!(Event::BeforeRestore, self.private.path().join(&prior));
+            observe!(Event::BeforeRestore, self.private.path()?.join(&prior));
             // A backup name can be replaced after the initial rollback check.
             // Capture it again and verify the captured object before giving it
             // a public name; a foreign replacement remains private evidence.
             let backup = self.private.capture(&self.private.dir, &prior)?;
             self.backup = Some(backup.clone());
-            observe!(Event::RestoreCaptured, self.private.path().join(&backup));
+            observe!(Event::RestoreCaptured, self.private.path()?.join(&backup));
             if !self.before.as_ref().is_some_and(|before| {
                 before
                     .at(&self.private.dir, &backup, false)
@@ -1182,6 +1240,34 @@ impl Entry {
         Ok(())
     }
 }
+fn native_path(path: &Path) -> serde_json::Value {
+    use base64::Engine as _;
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        serde_json::json!({
+            "encoding": "unix-bytes-base64",
+            "data": base64::engine::general_purpose::STANDARD.encode(path.as_os_str().as_bytes())
+        })
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let bytes: Vec<_> = path
+            .as_os_str()
+            .encode_wide()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        serde_json::json!({
+            "encoding": "windows-utf16le-base64",
+            "data": base64::engine::general_purpose::STANDARD.encode(bytes)
+        })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        serde_json::Value::Null
+    }
+}
 fn recovery(
     entries: &[Entry],
     privates: &[Arc<Private>],
@@ -1196,6 +1282,11 @@ fn recovery(
         }
         reason.truncate(end);
         reason.push('…');
+    }
+    if privates.iter().any(|private| {
+        !private.removed.load(Ordering::Acquire) && private.path().is_err()
+    }) {
+        reason.push_str("; a retained directory has no verified recovery pathname");
     }
     // Recovery manifests are evidence for a live failed batch, not a claim that
     // a future process may replay or delete their paths automatically.
@@ -1225,30 +1316,45 @@ fn recovery(
         .iter()
         .filter(|private| !private.removed.load(Ordering::Acquire))
     {
+        // Paths were preflight-bounded to 4096 encoded bytes each / 256 KiB
+        // aggregate. Base64 adds at most 4/3 (Unix) or 8/3 (UTF-16LE) per
+        // source byte; no per-byte JSON value allocation is introduced. The
+        // existing path reservation covers these bounded evidence strings.
         let records:Vec<_>=entries.iter().filter(|entry|Arc::ptr_eq(&entry.private,private)).map(|entry|serde_json::json!({
-            "target":entry.target,"candidate":entry.candidate.to_string_lossy(),"backup":entry.backup.as_ref().map(|name|name.to_string_lossy()),"published":entry.published,
+            "target":entry.target.to_string_lossy(),"target_native":native_path(&entry.target),"candidate":entry.candidate.to_string_lossy(),"backup":entry.backup.as_ref().map(|name|name.to_string_lossy()),"published":entry.published,
             "before":entry.before.as_ref().map(|proof|serde_json::json!({"bytes":proof.image.len,"sha256":hex(&proof.image.hash)})),
             "candidate_bytes":entry.proof.image.len,"candidate_sha256":hex(&entry.proof.image.hash),"candidate_owned":entry.candidate_owned
         })).collect();
         if let Ok(mut file) = private.dir.open_regular(OsStr::new("recovery.json"), true) {
-            if let Ok(bytes) = serde_json::to_vec(
+            // Stream the manifest to the held file; a full serialized buffer
+            // need not coexist with the display/native evidence strings.
+            if serde_json::to_writer(
+                &mut file,
                 &serde_json::json!({"version":1,"automatic_recovery":false,"phase":phase,"cause":reason,"outputs":records}),
-            ) {
-                let _ = file.write_all(&bytes).and_then(|_| file.sync_all());
+            )
+            .is_ok()
+            {
+                let _ = file.sync_all();
             }
         }
     }
     let mut paths: Vec<_> = privates
         .iter()
         .filter(|private| !private.removed.load(Ordering::Acquire))
-        .map(|private| private.path())
+        .filter_map(|private| private.path().ok())
         .collect();
     paths.extend(privates.iter().flat_map(|private| private.retained_paths()));
     paths.extend(
         entries
             .iter()
             .filter(|entry| entry.published || entry.backup.is_some())
-            .map(|entry| entry.parent.actual_path().join(&entry.name)),
+            .filter_map(|entry| {
+                entry
+                    .parent
+                    .actual_path()
+                    .ok()
+                    .map(|path| path.join(&entry.name))
+            }),
     );
     // Do not report retired public/capture slots as retained files. Keep
     // inaccessible paths: absence is the only definite reason to omit one.
@@ -1466,22 +1572,21 @@ fn perform_batch(
     for (_, _, _, before) in &mut planned {
         let proof = before.take().map(Proof::read).transpose()?;
         if let Some(proof) = &proof {
-            if proofs
-                .iter()
-                .flatten()
-                .any(|previous: &Proof| previous.file == proof.file)
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "duplicate hard-linked output originals",
-                )
-                .into());
+            for previous in proofs.iter().flatten() {
+                if same_handles(&previous.file, &proof.file)? {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "duplicate hard-linked output originals",
+                    )
+                    .into());
+                }
             }
         }
         proofs.push(proof);
     }
     let mut privates = Vec::<Arc<Private>>::new();
     let mut orphaned = Vec::new();
+    let mut unlocated_orphan = false;
     let mut parent_private = HashMap::<PathBuf, Arc<Private>>::new();
     let mut entries = Vec::new();
     let staged: Result<(), OutputError> = (|| {
@@ -1491,7 +1596,11 @@ fn perform_batch(
             let private = match parent_private.get(&parent.path) {
                 Some(private) => private.clone(),
                 None => {
-                    let private = Arc::new(Private::create(parent.clone(), &mut orphaned)?);
+                    let private = Arc::new(Private::create(
+                        parent.clone(),
+                        &mut orphaned,
+                        &mut unlocated_orphan,
+                    )?);
                     privates.push(private.clone());
                     parent_private.insert(parent.path.clone(), private.clone());
                     private
@@ -1551,22 +1660,22 @@ fn perform_batch(
             }
             observe!(
                 Event::BeforeSync,
-                entry.private.path().join(&entry.candidate)
+                entry.private.path()?.join(&entry.candidate)
             );
             file.sync_all()?;
             entry.proof.refresh()?;
-            observe!(Event::Staged, entry.private.path().join(&entry.candidate));
+            observe!(Event::Staged, entry.private.path()?.join(&entry.candidate));
         }
         Ok(())
     })();
     if let Err(cause) = staged {
-        if !orphaned.is_empty() {
+        if !orphaned.is_empty() || unlocated_orphan {
             let cleanup = cleanup(&mut entries, &privates);
             let mut error = recovery(
                 &entries,
                 &privates,
                 "private directory pinning incomplete",
-                format!("{cause}; cleanup {cleanup:?}"),
+                format!("{cause}; cleanup {cleanup:?}; unlocated private directory: {unlocated_orphan}"),
             );
             if let OutputError::RecoveryRequired { paths, .. } = &mut error {
                 paths.extend(orphaned);
@@ -1592,7 +1701,7 @@ fn perform_batch(
             entry.baseline_current()?;
             if !entry.proof.at(&entry.private.dir, &entry.candidate, true)? {
                 return Err(OutputError::Changed(
-                    entry.private.path().join(&entry.candidate),
+                    entry.private.path()?.join(&entry.candidate),
                 ));
             }
         }
@@ -1606,7 +1715,7 @@ fn perform_batch(
                 }
             });
         }
-        observe!(Event::BeforeCommit, root_pin.actual_path());
+        observe!(Event::BeforeCommit, root_pin.actual_path()?);
         for entry in &entries {
             if !entry.parent.logical_current(&entry.root).unwrap_or(false) {
                 return Err(OutputError::Changed(entry.parent.path.clone()));
@@ -1618,7 +1727,7 @@ fn perform_batch(
                 if !entry.before.as_ref().is_some_and(|proof| {
                     proof.at(&entry.private.dir, backup, true).unwrap_or(false)
                 }) {
-                    return Err(OutputError::Changed(entry.private.path().join(backup)));
+                    return Err(OutputError::Changed(entry.private.path()?.join(backup)));
                 }
             }
         }
@@ -1652,7 +1761,7 @@ fn perform_batch(
     // All members were verified; publication is committed. Cleanup failure may
     // retain backups, but must never undo a batch after deleting an earlier one.
     #[cfg(test)]
-    if let Err(error) = observe(Event::BeforeCleanup, &root_pin.actual_path()) {
+    if let Err(error) = root_pin.actual_path().and_then(|path| observe(Event::BeforeCleanup, &path)) {
         return Err(recovery(
             &entries,
             &privates,
@@ -1662,4 +1771,29 @@ fn perform_batch(
     }
     cleanup(&mut entries, &privates)
         .map_err(|error| recovery(&entries, &privates, "published; cleanup incomplete", error))
+}
+
+#[cfg(all(test, any(target_os = "linux", target_vendor = "apple")))]
+mod locator_tests {
+    use super::*;
+
+    #[test]
+    fn held_directory_locator_follows_renames_and_refuses_a_reused_deleted_name() {
+        let root = std::env::temp_dir().join(nonce("tagrex-output-locator-").unwrap());
+        std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let original = root.join("original");
+        let moved = root.join("moved");
+        std::fs::create_dir(&original).unwrap();
+        let held = Directory::open(&root, &original).unwrap();
+        std::fs::rename(&original, &moved).unwrap();
+        std::fs::create_dir(&original).unwrap();
+        assert!(held.verified_path(original.clone()).is_err());
+        assert_eq!(held.actual_path().unwrap(), moved);
+        std::fs::remove_dir(&moved).unwrap();
+        std::fs::create_dir(&moved).unwrap();
+        assert!(held.actual_path().is_err());
+        drop(held);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

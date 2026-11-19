@@ -849,6 +849,8 @@ export const en = {
   "placeholder.math.round": "$round(x[,n]): to a whole number, or to n decimals",
   // ---- failures, composed in Rust (#268) ----
   "error.io": "File error: {detail}",
+  "error.resourceBusy": "The app is busy. Wait for current work to finish, then try again.",
+  "error.resourceLimit": "This operation exceeds a resource limit. Try fewer files or smaller inputs.",
   "error.journal": "Undo history error: {detail}",
   "error.journal.unknownBatch": "Unknown undo batch: {id}",
   "error.journal.notRollbackable": "Cannot undo that batch: {detail}",
@@ -925,6 +927,8 @@ export const en = {
   "plan.carryingExtras": { one: "carrying {n} extra file", other: "carrying {n} extra files" },
   "plan.cleanedUp": "cleaned up",
   "plan.coverNotShrunk": { one: "{n} image too large to shrink goes in at full size", other: "{n} images too large to shrink go in at full size" },
+  "plan.coverSizeUncheckedBusy": { one: "Could not check the size of {n} image because artwork processing is busy", other: "Could not check the sizes of {n} images because artwork processing is busy" },
+  "plan.coverSizeUnknown": { one: "Could not read the dimensions of {n} image", other: "Could not read the dimensions of {n} images" },
   "plan.interrupted": "interrupted before it finished",
   // ---- the settings sheet ----
   "settings.discogs.token": "Personal token",

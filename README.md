@@ -100,6 +100,10 @@ from the destination filesystem. Unconfirmed or unsupported macOS destinations
 refuse before staging;
 this does not affect their read-only library use. Hosted validation is pending.
 
+The additional platform source review found and corrected policy, recovery
+locator, native-path evidence and resource-error gaps. Combined runtime
+verification remains pending; see [the review summary](docs/performance/backend-platform-review.md).
+
 The incomplete stress runner and portable legacy metadata-preservation canary
 remain preserved in a recovery checkpoint. Windows stress process supervision,
 general exact-value integration and full programme validation remain open. See

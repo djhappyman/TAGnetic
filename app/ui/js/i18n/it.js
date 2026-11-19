@@ -727,6 +727,8 @@ export const it = {
   "placeholder.math.round": "$round(x[,n]) — a intero, o a n decimali",
   // ---- failures, composed in Rust (#268) ----
   "error.io": "Errore I/O: {detail}",
+  "error.resourceBusy": "L’app è occupata. Attendi il completamento delle operazioni in corso e riprova.",
+  "error.resourceLimit": "Questa operazione supera un limite di risorse. Seleziona meno file o riduci la dimensione dei dati in ingresso.",
   "error.journal": "Errore journal: {detail}",
   "error.journal.unknownBatch": "Id operazione sconosciuto: {id}",
   "error.journal.notRollbackable": "Quell'operazione non può essere annullata: {detail}",
@@ -804,6 +806,8 @@ export const it = {
   "plan.carryingExtras": { one: "portando {n} file extra", other: "portando {n} file extra" },
   "plan.cleanedUp": "pulito",
   "plan.coverNotShrunk": { one: "{n} immagine troppo grande per essere ridotta viene incorporata a dimensione piena", other: "{n} immagini troppo grandi per essere ridotte vengono incorporate a dimensione piena" },
+  "plan.coverSizeUncheckedBusy": { one: "Impossibile controllare le dimensioni di {n} immagine perché l’elaborazione delle immagini è occupata", other: "Impossibile controllare le dimensioni di {n} immagini perché l’elaborazione delle immagini è occupata" },
+  "plan.coverSizeUnknown": { one: "Impossibile leggere le dimensioni di {n} immagine", other: "Impossibile leggere le dimensioni di {n} immagini" },
   "plan.interrupted": "interrotto prima della fine",
   // ---- the settings sheet ----
   "settings.discogs.token": "Token personale",

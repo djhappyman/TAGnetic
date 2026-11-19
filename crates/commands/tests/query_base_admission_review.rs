@@ -361,6 +361,55 @@ fn policy_change_during_native_listing_cannot_publish_mixed_generation_rows() {
     for n in 0..16 {
         fixture.wav(&format!("{n:02}.wav"));
     }
+    let app = Rc::new(fixture.app());
+    let before = app.query_snapshot().unwrap();
+    let calls = Rc::new(Cell::new(0));
+    let probe = calls.clone();
+    let owner = app.clone();
+    let outcome = with_preview_cancellation(
+        move || {
+            let n = probe.get() + 1;
+            probe.set(n);
+            if n == 20 {
+                owner.apply_settings(&tagrex_commands::SettingsDto {
+                    multi_value_separator: " / ".into(),
+                    ..Default::default()
+                });
+            }
+            false
+        },
+        || app.list_tracks(),
+    );
+    assert!(calls.get() >= 20);
+    assert!(
+        matches!(outcome, Err(tagrex_commands::AppError::Io(ref error)) if error.kind()==std::io::ErrorKind::Interrupted)
+    );
+    assert_eq!(
+        app.query_snapshot_id(),
+        None,
+        "failed mixed-policy listing was published"
+    );
+    assert!(
+        !before.is_current(),
+        "old interpretation cannot be queried after policy change"
+    );
+    let current = app.query_snapshot().unwrap();
+    assert_ne!(current.id, before.id);
+    assert!(current.is_current());
+    assert_eq!(current.rows.len(), 16);
+}
+
+#[test]
+fn standalone_policy_callback_aborts_listing_without_changing_its_app_owner() {
+    if isolated("standalone_policy_callback_aborts_listing_without_changing_its_app_owner") {
+        return;
+    }
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let fixture = Fixture::new();
+    for n in 0..16 {
+        fixture.wav(&format!("{n:02}.wav"));
+    }
     let app = fixture.app();
     let before = app.query_snapshot().unwrap();
     let calls = Rc::new(Cell::new(0));
@@ -380,17 +429,9 @@ fn policy_change_during_native_listing_cannot_publish_mixed_generation_rows() {
     assert!(
         matches!(outcome, Err(tagrex_commands::AppError::Io(ref error)) if error.kind()==std::io::ErrorKind::Interrupted)
     );
-    assert_eq!(
-        app.query_snapshot_id(),
-        Some(before.id),
-        "failed mixed-policy listing was published"
-    );
-    assert!(
-        !before.is_current(),
-        "old interpretation cannot be queried after policy change"
-    );
-    let current = app.query_snapshot().unwrap();
-    assert_ne!(current.id, before.id);
-    assert!(current.is_current());
-    assert_eq!(current.rows.len(), 16);
+    // A standalone setter in this callback invalidates the active operation;
+    // it does not reconfigure the App or its previously admitted generation.
+    assert_eq!(app.query_snapshot_id(), Some(before.id));
+    assert!(before.is_current());
+    assert!(Arc::ptr_eq(&before, &app.query_snapshot().unwrap()));
 }

@@ -79,7 +79,7 @@ fn reversed_overlapping_public_batches_leave_a_coherent_committed_pair_or_no_pai
 
 #[cfg(unix)]
 #[test]
-fn later_symlink_and_hardlink_aliases_refuse_before_staging_or_overwriting_any_output() {
+fn later_symlink_aliases_refuse_before_staging_or_overwriting_any_output() {
     let f = Fixture::new();
     let old = f.0.join("original.txt");
     let alias = f.0.join("alias.txt");
@@ -103,7 +103,16 @@ fn later_symlink_and_hardlink_aliases_refuse_before_staging_or_overwriting_any_o
             .is_symlink());
         assert_eq!(fs::read(&old).unwrap(), b"original content");
     }
-    fs::remove_file(&alias).unwrap();
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn later_hardlink_aliases_refuse_before_staging_or_overwriting_any_output() {
+    let f = Fixture::new();
+    let old = f.0.join("original.txt");
+    let alias = f.0.join("alias.txt");
+    let fresh = f.0.join("new.txt");
+    fs::write(&old, b"original content").unwrap();
     fs::hard_link(&old, &alias).unwrap();
     let result = publish_confined_outputs(
         &f.0,
@@ -128,10 +137,17 @@ fn later_symlink_and_hardlink_aliases_refuse_before_staging_or_overwriting_any_o
 #[cfg(unix)]
 #[test]
 fn native_byte_names_and_distinct_nested_names_publish_without_lossy_collisions() {
+    #[cfg(not(target_vendor = "apple"))]
     use std::{ffi::OsString, os::unix::ffi::OsStringExt};
     let f = Fixture::new();
+    #[cfg(not(target_vendor = "apple"))]
     let a = f.0.join(OsString::from_vec(b"report-\xff.txt".to_vec()));
+    #[cfg(not(target_vendor = "apple"))]
     let b = f.0.join(OsString::from_vec(b"report-\xfe.txt".to_vec()));
+    #[cfg(target_vendor = "apple")]
+    let a = f.0.join("report-α.txt");
+    #[cfg(target_vendor = "apple")]
+    let b = f.0.join("report-β.txt");
     let sub = f.0.join("尾 ; quotes \" spaces");
     fs::create_dir(&sub).unwrap();
     let c = sub.join("report-ß.txt");
@@ -149,4 +165,66 @@ fn native_byte_names_and_distinct_nested_names_publish_without_lossy_collisions(
     assert_eq!(fs::read(b).unwrap(), b"two");
     assert_eq!(fs::read(c).unwrap(), b"three");
     assert_eq!(fs::read_dir(&f.0).unwrap().count(), 3);
+}
+
+#[cfg(target_vendor = "apple")]
+#[test]
+fn unrepresentable_byte_names_refuse_without_publication_or_staging() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+    let f = Fixture::new();
+    let original = f.0.join("original.txt");
+    let fresh = f.0.join("new.txt");
+    fs::write(&original, b"original").unwrap();
+    for byte in [0xff, 0xfe] {
+        let invalid = f.0.join(OsString::from_vec(vec![b'x', byte]));
+        for overwrite in [false, true] {
+            let error = publish_confined_outputs(
+                &f.0,
+                &[
+                    (fresh.clone(), b"new".to_vec()),
+                    (invalid.clone(), b"invalid".to_vec()),
+                ],
+                overwrite,
+            )
+            .unwrap_err();
+            assert!(matches!(
+                &error,
+                tagrex_commands::OutputError::Io(error)
+                    if error.raw_os_error() == Some(libc::EILSEQ)
+            ));
+            assert!(error.recovery_paths().is_empty());
+            assert_eq!(fs::read(&original).unwrap(), b"original");
+            assert!(!fresh.exists());
+            assert_eq!(fs::read_dir(&f.0).unwrap().count(), 1);
+        }
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+#[test]
+fn normalized_unicode_aliases_share_one_original_and_refuse_duplicate_outputs() {
+    let f = Fixture::new();
+    let nfc = f.0.join("report-é.txt");
+    let nfd = f.0.join("report-e\u{301}.txt");
+    fs::write(&nfc, b"original").unwrap();
+    assert_eq!(fs::read(&nfd).unwrap(), b"original");
+    publish_confined_outputs(&f.0, &[(nfd.clone(), b"updated".to_vec())], true).unwrap();
+    assert_eq!(fs::read(&nfc).unwrap(), b"updated");
+    let fresh = f.0.join("new.txt");
+    let error = publish_confined_outputs(
+        &f.0,
+        &[
+            (fresh.clone(), b"new".to_vec()),
+            (nfc.clone(), b"one".to_vec()),
+            (nfd.clone(), b"two".to_vec()),
+        ],
+        true,
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(error.recovery_paths().is_empty());
+    assert_eq!(fs::read(&nfc).unwrap(), b"updated");
+    assert_eq!(fs::read(&nfd).unwrap(), b"updated");
+    assert!(!fresh.exists());
+    assert_eq!(fs::read_dir(&f.0).unwrap().count(), 1);
 }

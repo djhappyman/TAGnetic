@@ -91,22 +91,39 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Build
+        id: backend_build
         run: cargo build --workspace
 
       - name: Test
         run: cargo test --workspace --no-fail-fast
 
       - name: Backend decoder, import and resource-pressure probes
+        if: ${{ !cancelled() && steps.backend_build.outcome == 'success' }}
         run: |
-          cargo test -p tagrex-player actual_decoders_acknowledge_seeks_after_converter_metadata_and_midstream_reads -- --ignored --nocapture
-          cargo test -p tagrex-player decoded_source_control_throughput_probe -- --ignored --nocapture
-          cargo test -p tagrex-commands --lib tabular:: -- --include-ignored --nocapture
-          cargo test -p tagrex-commands --lib shared_resource_cache_pressure_benchmark -- --ignored --nocapture
+          backend_probe_exit=0
+          cargo test -p tagrex-player actual_decoders_acknowledge_seeks_after_converter_metadata_and_midstream_reads -- --ignored --nocapture || backend_probe_exit=1
+          cargo test -p tagrex-player decoded_source_control_throughput_probe -- --ignored --nocapture || backend_probe_exit=1
+          cargo test -p tagrex-commands --lib tabular:: -- --include-ignored --nocapture || backend_probe_exit=1
+          cargo test -p tagrex-commands --lib shared_resource_cache_pressure_benchmark -- --ignored --nocapture || backend_probe_exit=1
+          exit "$backend_probe_exit"
+
+      - name: Independent artwork pixels and report-consumer readback
+        if: ${{ !cancelled() && steps.backend_build.outcome == 'success' }}
+        run: |
+          backend_oracle_exit=0
+          cargo test -p tagrex-core --test artwork_pipeline independent_encoded_pixels_and_original_bytes_roundtrip -- --exact --ignored --nocapture || backend_oracle_exit=1
+          cargo test -p tagrex-core --test artwork_pipeline_adversarial every_exif_orientation_keeps_exact_eight_and_sixteen_bit_channel_coordinates -- --exact --ignored --nocapture || backend_oracle_exit=1
+          cargo test -p tagrex-core --test artwork_exif_fresh_recheck little_endian_duplicate_orientation_pixels_match_an_independent_decoder -- --exact --ignored --nocapture || backend_oracle_exit=1
+          cargo test -p tagrex-core --test report_template independent_csv_and_xml_consumers_read_utf8_and_utf16_reports -- --exact --ignored --nocapture || backend_oracle_exit=1
+          cargo test -p tagrex-core --test report_template_adversarial xml_consumer_retains_cr_lf_tabs_and_unicode_across_supported_unicode_encodings -- --exact --ignored --nocapture || backend_oracle_exit=1
+          cargo test -p tagrex-core --test report_template_adversarial csv_consumer_preserves_embedded_delimiters_newlines_and_control_scalars -- --exact --ignored --nocapture || backend_oracle_exit=1
+          exit "$backend_oracle_exit"
 
       # The Linux media session (#516) exports MPRIS on the session bus; its
       # tests are ignored by default because a plain `cargo test` has no bus.
       # dbus-run-session gives this step a private one.
       - name: Test the media session on a private D-Bus
+        if: ${{ !cancelled() && steps.backend_build.outcome == 'success' }}
         run: dbus-run-session -- cargo test -p tagrex mpris -- --ignored
 
       - name: Enforce formatting gate

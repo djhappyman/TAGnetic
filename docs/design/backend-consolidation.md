@@ -184,3 +184,14 @@ Existing successful APFS publication/rollback tests remain unchanged and catch
 blanket refusal. Unknown capability reporting and confirmed absence now have
 distinct user-facing errors. No FAT32 output-support claim follows from green
 refusal coverage; actual hosted results on the new head remain required.
+
+## Three-platform review batch
+
+After `59ce27e3` failed ordinary Windows/macOS runtime tests, the owner requested
+one meticulous agent per platform in the same worktree. All three completed
+source reviews, implemented assigned corrections and handed back ranked reports.
+The orchestrator read the reports and combined diffs; no local workloads ran.
+See [the published review summary](../performance/backend-platform-review.md)
+for production findings, corrected test contracts, remaining P3 filename limits
+and required hosted evidence. Independent pixel/EXIF and CSV/XML consumer probes
+are now explicit hosted gates rather than ignored historical-only evidence.

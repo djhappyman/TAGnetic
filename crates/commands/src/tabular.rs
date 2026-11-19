@@ -105,6 +105,7 @@ impl From<TabularImportError> for ErrorDto {
     fn from(error: TabularImportError) -> Self {
         match error {
             TabularImportError::Native(inner) => inner.into(),
+            TabularImportError::Resource(inner) => AppError::Resource(inner).into(),
             other => Self::plain(other.to_string()),
         }
     }
@@ -315,9 +316,18 @@ impl App {
         working: Option<&PlanDto>,
         cancelled: impl Fn() -> bool,
     ) -> Result<TextImportPreview, TabularImportError> {
+        let _policy = self.model_policy.enter();
+        let policy_revision = tagrex_core::model::read_policy_revision();
         let check_cancel = || -> Result<(), TabularImportError> {
             if cancelled() {
                 Err(AppError::from(tagrex_core::plan::PlanError::Cancelled).into())
+            } else if policy_revision == u64::MAX
+                || tagrex_core::model::read_policy_revision() != policy_revision
+            {
+                Err(invalid(
+                    "Metadata settings changed during the table import; preview it again.",
+                )
+                .into())
             } else {
                 Ok(())
             }
@@ -919,6 +929,141 @@ mod tests {
             ..Default::default()
         }
     }
+    #[test]
+    fn table_callbacks_cannot_publish_after_owning_app_policy_changes() {
+        let dir = Fixture::new();
+        let paths = [dir.wav("first.wav"), dir.wav("second.wav")];
+        let original: Vec<_> = paths
+            .iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect();
+        let app = dir.app();
+        let text = b"Title\nFirst import\nSecond import";
+        let calls = Cell::new(0usize);
+        let baseline = app
+            .preview_tabular_import_with_cancel(&paths, text, &options(), None, || {
+                calls.set(calls.get() + 1);
+                false
+            })
+            .unwrap();
+        assert_eq!(baseline.plan.changes.len(), 2);
+        // Sweep every public callback boundary, including callbacks between
+        // saved-row reads and the final callback immediately before return.
+        for change_at in 1..=calls.get() {
+            let visited = Cell::new(0usize);
+            let changed = Cell::new(false);
+            let result = app.preview_tabular_import_with_cancel(
+                &paths,
+                text,
+                &options(),
+                None,
+                || {
+                    visited.set(visited.get() + 1);
+                    if visited.get() == change_at {
+                        app.apply_settings(&SettingsDto {
+                            multi_value_separator: format!(" / {change_at} / "),
+                            ..Default::default()
+                        });
+                        changed.set(true);
+                    }
+                    false
+                },
+            );
+            assert!(changed.get(), "callback {change_at} was not reached");
+            let error = result.expect_err("an obsolete interpretation must not publish a plan");
+            assert!(error.to_string().contains("Metadata settings changed"));
+        }
+        for (path, bytes) in paths.iter().zip(original) {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn table_callbacks_keep_peer_app_policy_changes_isolated() {
+        let dir = Fixture::new();
+        let paths = [dir.wav("first.wav"), dir.wav("second.wav")];
+        let original: Vec<_> = paths
+            .iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect();
+        let app = dir.app();
+        let peer_dir = Fixture::new();
+        let peer = peer_dir.app();
+        let calls = Cell::new(0usize);
+        let preview = app
+            .preview_tabular_import_with_cancel(
+                &paths,
+                b"Title\nFirst import\nSecond import",
+                &options(),
+                None,
+                || {
+                    calls.set(calls.get() + 1);
+                    peer.apply_settings(&SettingsDto {
+                        multi_value_separator: format!(" / peer {} / ", calls.get()),
+                        ..Default::default()
+                    });
+                    false
+                },
+            )
+            .unwrap();
+        assert!(calls.get() > 2);
+        for ((path, expected), bytes) in paths
+            .iter()
+            .zip(["First import", "Second import"])
+            .zip(original)
+        {
+            let change = preview
+                .plan
+                .changes
+                .iter()
+                .find(|row| Path::new(&row.path) == path)
+                .unwrap();
+            let title = change
+                .tag_changes
+                .iter()
+                .find(|field| field.field == "title")
+                .unwrap();
+            assert_eq!(title.old.as_deref(), Some("Saved"));
+            assert_eq!(title.new.as_deref(), Some(expected));
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn direct_field_recipe_pins_its_owner_across_saved_row_callbacks() {
+        let dir = Fixture::new();
+        let path = dir.wav("recipe.wav");
+        let original = std::fs::read(&path).unwrap();
+        let app = dir.app();
+        let operations = [FieldOperation::Format {
+            field: "title".into(),
+            pattern: "Imported".into(),
+        }];
+        let calls = Cell::new(0usize);
+        let result = app.preview_field_operations_with_cancel(
+            std::slice::from_ref(&path),
+            &operations,
+            None,
+            || {
+                calls.set(calls.get() + 1);
+                // The first row has been read when its operation is polled.
+                if calls.get() == 2 {
+                    app.apply_settings(&SettingsDto {
+                        multi_value_separator: " / changed / ".into(),
+                        ..Default::default()
+                    });
+                }
+                false
+            },
+        );
+        assert_eq!(calls.get(), 2);
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Metadata settings changed"));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
     #[test]
     fn import_matches_rows_and_preserves_staged_edits_apply_and_restart_undo() {
         let dir = Fixture::new();

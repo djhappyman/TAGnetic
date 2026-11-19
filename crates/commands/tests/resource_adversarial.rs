@@ -108,7 +108,7 @@ fn dead_encoding_weak_entries_do_not_retain_large_uncharged_allocations() {
 #[test]
 fn field_recipe_rejects_a_policy_change_between_files() {
     use std::{cell::Cell, path::PathBuf, sync::mpsc, time::Duration};
-    use tagrex_commands::{App, FieldOperation};
+    use tagrex_commands::{App, FieldOperation, SettingsDto};
     use tagrex_core::model::{set_multi_value_separator, TagEngine, TagField};
     let name = "field_recipe_rejects_a_policy_change_between_files";
     if std::env::var("TAGREX_POLICY_REVIEW_CHILD").as_deref() != Ok("1") {
@@ -163,6 +163,10 @@ fn field_recipe_rejects_a_policy_change_between_files() {
         })
         .collect();
     let app = App::open(&fixture.0, &fixture.0.join("journal.sqlite")).unwrap();
+    app.apply_settings(&SettingsDto {
+        multi_value_separator: "; ".into(),
+        ..Default::default()
+    });
     let baseline: Vec<_> = paths
         .iter()
         .map(|path| std::fs::read(path).unwrap())
@@ -170,7 +174,7 @@ fn field_recipe_rejects_a_policy_change_between_files() {
     let (begin, received) = mpsc::channel();
     let (done, changed) = mpsc::channel();
     let probes = Cell::new(0);
-    let result = std::thread::scope(|scope| {
+    let peer_result = std::thread::scope(|scope| {
         scope.spawn(move || {
             received.recv_timeout(Duration::from_secs(5)).unwrap();
             set_multi_value_separator(" / ");
@@ -193,6 +197,35 @@ fn field_recipe_rejects_a_policy_change_between_files() {
             },
         )
     });
+    let peer_plan = peer_result.expect("standalone peer settings cannot invalidate the owning App");
+    assert_eq!(peer_plan.changes.len(), paths.len());
+    for change in &peer_plan.changes {
+        let comment = change
+            .tag_changes
+            .iter()
+            .find(|field| field.field == "comment")
+            .unwrap();
+        assert_eq!(comment.new.as_deref(), Some("First; Second"));
+    }
+    let probes = Cell::new(0);
+    let result = app.preview_field_operations_with_cancel(
+        &paths,
+        &[FieldOperation::Format {
+            field: "comment".into(),
+            pattern: "%artist%".into(),
+        }],
+        None,
+        || {
+            probes.set(probes.get() + 1);
+            if probes.get() == 3 {
+                app.apply_settings(&SettingsDto {
+                    multi_value_separator: " / owner / ".into(),
+                    ..Default::default()
+                });
+            }
+            false
+        },
+    );
     for (path, bytes) in paths.iter().zip(baseline) {
         assert_eq!(std::fs::read(path).unwrap(), bytes);
     }

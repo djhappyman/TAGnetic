@@ -723,6 +723,8 @@ export const de = {
   "placeholder.math.round": "$round(x[,n]) — auf eine ganze Zahl oder auf n Nachkommastellen",
   // ---- failures, composed in Rust (#268) ----
   "error.io": "E/A-Fehler: {detail}",
+  "error.resourceBusy": "Die App ist ausgelastet. Warte, bis die laufenden Vorgänge abgeschlossen sind, und versuche es erneut.",
+  "error.resourceLimit": "Dieser Vorgang überschreitet ein Ressourcenlimit. Wähle weniger Dateien oder kleinere Eingabedaten.",
   "error.journal": "Journalfehler: {detail}",
   "error.journal.unknownBatch": "Unbekannte Stapel-ID: {id}",
   "error.journal.notRollbackable": "Dieser Stapel lässt sich nicht zurücknehmen: {detail}",
@@ -800,6 +802,8 @@ export const de = {
   "plan.carryingExtras": { one: "mit {n} zusätzlichen Datei", other: "mit {n} zusätzlichen Dateien" },
   "plan.cleanedUp": "aufgeräumt",
   "plan.coverNotShrunk": { one: "{n} Bild ist zu groß zum Verkleinern und wird in voller Größe eingebettet", other: "{n} Bilder sind zu groß zum Verkleinern und werden in voller Größe eingebettet" },
+  "plan.coverSizeUncheckedBusy": { one: "Die Größe von {n} Bild konnte nicht geprüft werden, weil die Bildverarbeitung ausgelastet ist", other: "Die Größe von {n} Bildern konnte nicht geprüft werden, weil die Bildverarbeitung ausgelastet ist" },
+  "plan.coverSizeUnknown": { one: "Die Abmessungen von {n} Bild konnten nicht gelesen werden", other: "Die Abmessungen von {n} Bildern konnten nicht gelesen werden" },
   "plan.interrupted": "vor dem Abschluss unterbrochen",
   // ---- the settings sheet ----
   "settings.discogs.token": "Persönlicher Token",

@@ -622,15 +622,9 @@ impl Service {
                         tagrex_commands::TabularImportError::Native(error) => {
                             ServiceError::from(error)
                         }
-                        tagrex_commands::TabularImportError::Resource(error) => ServiceError::new(
-                            match error {
-                                tagrex_core::resources::AdmissionError::Busy => "busy",
-                                tagrex_core::resources::AdmissionError::TooLarge => {
-                                    "resource_limit"
-                                }
-                            },
-                            error.to_string(),
-                        ),
+                        tagrex_commands::TabularImportError::Resource(error) => {
+                            ServiceError::from(tagrex_commands::AppError::Resource(error))
+                        }
                         error => ServiceError::new("invalid_table", error.to_string()),
                     })?
                 } else {
@@ -2887,6 +2881,69 @@ mod composition_tests {
             field(&imported, &f.paths[0], "title").unwrap()["new"],
             "Björk 🎵"
         );
+    }
+
+    #[test]
+    fn native_table_resource_pressure_preserves_staging_and_retries_with_canonical_error() {
+        const ENV: &str = "TAGREX_TABLE_SERVICE_PRESSURE_CHILD";
+        if std::env::var_os(ENV).is_none() {
+            let module = module_path!().split_once("::").unwrap().1;
+            let case = format!("{module}::native_table_resource_pressure_preserves_staging_and_retries_with_canonical_error");
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &case, "--nocapture"])
+                .env(ENV, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+                "the isolated pressure regression must execute exactly one test"
+            );
+            return;
+        }
+        let f = Fixture::new();
+        f.draft(json!({"title":"Pending", "comment":"Keep"}));
+        let before = f.call("staging.get", json!({}));
+        let bytes = fs::read(&f.paths[0]).unwrap();
+        let args = json!({
+            "paths":[f.paths[0]],
+            "text":"Title\nImported",
+            "table":{"mappings":[{"column":{"kind":"header","name":"Title"},"field":"title"}]}
+        });
+        let budget = tagrex_core::resources::Budget::process();
+        let baseline = budget.usage().0;
+        let pressure = budget
+            .try_acquire(tagrex_core::resources::Charge {
+                jobs: 8,
+                ..Default::default()
+            })
+            .unwrap();
+        let error = f
+            .service
+            .call(&f.principal, "draft.from_table", args.clone())
+            .unwrap_err();
+        assert_eq!(error.code, "resource_busy");
+        assert_eq!(f.call("staging.get", json!({})), before);
+        assert_eq!(fs::read(&f.paths[0]).unwrap(), bytes);
+        assert_eq!(budget.usage().0.transient, baseline.transient);
+        drop(pressure);
+        let imported = f.call("draft.from_table", args);
+        assert_eq!(
+            field(&imported, &f.paths[0], "title").unwrap()["new"],
+            "Imported"
+        );
+        assert_eq!(
+            field(&imported, &f.paths[0], "comment").unwrap()["new"],
+            "Keep"
+        );
+        assert_eq!(fs::read(&f.paths[0]).unwrap(), bytes);
+        assert_eq!(budget.usage().0.transient, baseline.transient);
+        assert_eq!(budget.usage().0.jobs, baseline.jobs);
     }
 
     #[test]

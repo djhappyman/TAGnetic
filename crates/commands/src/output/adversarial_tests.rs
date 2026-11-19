@@ -259,6 +259,49 @@ fn foreign_regular_file_at_private_directory_slot_is_restored_after_capture_refu
     );
     assert_eq!(fs::read(target).unwrap(), b"new output");
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn non_unicode_target_recovery_retains_native_path_and_foreign_evidence() {
+    use base64::Engine as _;
+    use std::{
+        ffi::OsString,
+        os::unix::ffi::{OsStrExt, OsStringExt},
+    };
+    if isolated("non_unicode_target_recovery_retains_native_path_and_foreign_evidence") {
+        return;
+    }
+    let f = Fixture::new();
+    let target = f.0.join(OsString::from_vec(b"report-\xff.txt".to_vec()));
+    fs::write(&target, b"saved original").unwrap();
+    ownership::set_observer(Some(Box::new(move |event, path| {
+        if event == Event::BackupCaptured {
+            fs::rename(path, path.with_extension("saved")).unwrap();
+            fs::write(path, b"foreign backup replacement").unwrap();
+        }
+        Ok(())
+    })));
+    let error = write_batch(&f.0, &[(target.clone(), b"new output".to_vec())], true).unwrap_err();
+    let paths = recovery(&error);
+    assert!(!target.exists());
+    assert!(exists_bytes(&f.0, b"saved original"));
+    assert!(exists_bytes(&f.0, b"foreign backup replacement"));
+    let manifest = paths
+        .iter()
+        .filter(|path| path.is_dir())
+        .map(|path| path.join("recovery.json"))
+        .find(|path| path.is_file())
+        .unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(&fs::read(manifest).unwrap()).unwrap();
+    assert_eq!(manifest["automatic_recovery"], false);
+    let output = &manifest["outputs"][0];
+    assert_eq!(output["target"], target.to_string_lossy().as_ref());
+    assert_eq!(output["target_native"]["encoding"], "unix-bytes-base64");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(output["target_native"]["data"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(bytes, target.as_os_str().as_bytes());
+}
 #[cfg(unix)]
 #[test]
 fn moved_parent_and_replacement_symlink_cannot_redirect_batch_publication() {

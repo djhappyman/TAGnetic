@@ -307,6 +307,7 @@ impl App {
         working: Option<&PlanDto>,
         cancelled: impl Fn() -> bool,
     ) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         let _encoding_scope = cover_encoding::Scope::new();
         let policy_revision = tagrex_core::model::read_policy_revision();
         let check_policy = || {

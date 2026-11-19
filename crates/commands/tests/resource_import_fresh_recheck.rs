@@ -162,9 +162,11 @@ fn tabular_busy_refusal_releases_all_transient_admission_and_retry_keeps_values(
                 )
                 .unwrap_err();
             assert!(matches!(
-                error,
+                &error,
                 TabularImportError::Resource(AdmissionError::Busy)
             ));
+            let dto: tagrex_commands::ErrorDto = error.into();
+            assert_eq!(dto.message.code, "error.resourceBusy");
             assert_eq!(budget.usage().0.transient, baseline.transient);
             drop(pressure);
             let preview = app
