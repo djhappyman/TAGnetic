@@ -17,11 +17,16 @@ use std::{fs::File, io, sync::Arc};
 // exhaust all worker slots before their children can run. Component leases and
 // byte/job ceilings remain authoritative and unchanged.
 static IO_PHASES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static IO_COMPLETED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static IO_LONGEST_MICROS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 thread_local! { static IO_PHASE_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 pub(super) fn private_phase_active() -> bool {
     IO_PHASE_HELD.with(|held| held.get())
 }
-struct IoPhase(std::marker::PhantomData<std::rc::Rc<()>>);
+struct IoPhase(
+    std::time::Instant,
+    std::marker::PhantomData<std::rc::Rc<()>>,
+);
 fn io_capacity(limits: crate::resources::Limits) -> usize {
     let bytes = native_patch::WORKING_BYTES + media::WORKING_BYTES;
     (limits.jobs / 2)
@@ -43,6 +48,7 @@ impl IoPhase {
             return Err(error(crate::resources::AdmissionError::TooLarge));
         }
         let start = std::time::Instant::now();
+        let completed_before = IO_COMPLETED.load(Ordering::Acquire);
         loop {
             if cancel.load(Ordering::SeqCst) {
                 return Err(PlanError::Cancelled);
@@ -54,15 +60,19 @@ impl IoPhase {
                     .is_ok()
             {
                 IO_PHASE_HELD.with(|held| held.set(true));
-                return Ok(Self(std::marker::PhantomData));
+                return Ok(Self(std::time::Instant::now(), std::marker::PhantomData));
             }
             if !wait_busy(start, cancel) {
                 return Err(if cancel.load(Ordering::SeqCst) {
                     PlanError::Cancelled
                 } else {
                     error(format!(
-                        "native I/O admission deadline: {}",
-                        crate::resources::AdmissionError::Busy
+                        "native I/O admission deadline: {}; completed while waiting: {}; active: {}/{}; longest completed phase: {}us",
+                        crate::resources::AdmissionError::Busy,
+                        IO_COMPLETED.load(Ordering::Acquire).wrapping_sub(completed_before),
+                        IO_PHASES.load(Ordering::Acquire),
+                        capacity,
+                        IO_LONGEST_MICROS.load(Ordering::Acquire),
                     ))
                 });
             }
@@ -72,7 +82,12 @@ impl IoPhase {
 impl Drop for IoPhase {
     fn drop(&mut self) {
         IO_PHASE_HELD.with(|held| held.set(false));
+        IO_LONGEST_MICROS.fetch_max(
+            self.0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
+            Ordering::AcqRel,
+        );
         IO_PHASES.fetch_sub(1, Ordering::AcqRel);
+        IO_COMPLETED.fetch_add(1, Ordering::AcqRel);
     }
 }
 
