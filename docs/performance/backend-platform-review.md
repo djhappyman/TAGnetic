@@ -72,3 +72,17 @@ Full lane reports and exact logs are retained in the workspace checkpoint
 `checkpoints/backend-consolidation-2026-11-19/reviews/` and its `evidence/`
 directory. Shared backend work remains eligible for curated upstream main after
 compatible foundations, preserving upstream inline journal images/waveform APIs.
+
+## Hosted behavior verification after review
+
+On `52a845b8`, Windows, macOS, advisories and all three native filesystem jobs
+passed. Linux completed frontend checks/build/UI tests, Clippy, workspace build,
+workspace tests, decoder/import/cache-pressure probes, all six independent
+artwork/report consumer oracles, and private D-Bus tests successfully. The final
+Linux job failed only its enforced formatting gate. Its hosted formatter patch
+was downloaded and applied; no formatter ran locally. These behavior results
+were collected after the runner applied that patch to its workspace.
+
+[Linux evidence](https://github.com/djhappyman/TAGnetic/actions/runs/44501793692/job/135483311999).
+The formatting correction still needs the full matrix on the final pushed head
+before merge; consult PR #55 for that authoritative current delivery gate.

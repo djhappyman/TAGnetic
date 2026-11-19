@@ -850,9 +850,8 @@ impl Directory {
             let mut buffer = [0u8; libc::MAXPATHLEN as usize];
             // SAFETY: fd remains owned by self; buffer is writable for Apple's
             // required MAXPATHLEN bytes and fcntl retains neither pointer.
-            let result = unsafe {
-                libc::fcntl(self.fd.as_raw_fd(), libc::F_GETPATH, buffer.as_mut_ptr())
-            };
+            let result =
+                unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_GETPATH, buffer.as_mut_ptr()) };
             if result == -1 {
                 return Err(io::Error::last_os_error());
             }
@@ -861,7 +860,10 @@ impl Directory {
                 .position(|byte| *byte == 0)
                 .filter(|end| *end != 0)
                 .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "Invalid held output directory path")
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Invalid held output directory path",
+                    )
                 })?;
             let path = PathBuf::from(OsStr::from_bytes(&buffer[..end]));
             self.verified_path(path)
@@ -1283,9 +1285,10 @@ fn recovery(
         reason.truncate(end);
         reason.push('…');
     }
-    if privates.iter().any(|private| {
-        !private.removed.load(Ordering::Acquire) && private.path().is_err()
-    }) {
+    if privates
+        .iter()
+        .any(|private| !private.removed.load(Ordering::Acquire) && private.path().is_err())
+    {
         reason.push_str("; a retained directory has no verified recovery pathname");
     }
     // Recovery manifests are evidence for a live failed batch, not a claim that
@@ -1675,7 +1678,9 @@ fn perform_batch(
                 &entries,
                 &privates,
                 "private directory pinning incomplete",
-                format!("{cause}; cleanup {cleanup:?}; unlocated private directory: {unlocated_orphan}"),
+                format!(
+                    "{cause}; cleanup {cleanup:?}; unlocated private directory: {unlocated_orphan}"
+                ),
             );
             if let OutputError::RecoveryRequired { paths, .. } = &mut error {
                 paths.extend(orphaned);
@@ -1761,7 +1766,10 @@ fn perform_batch(
     // All members were verified; publication is committed. Cleanup failure may
     // retain backups, but must never undo a batch after deleting an earlier one.
     #[cfg(test)]
-    if let Err(error) = root_pin.actual_path().and_then(|path| observe(Event::BeforeCleanup, &path)) {
+    if let Err(error) = root_pin
+        .actual_path()
+        .and_then(|path| observe(Event::BeforeCleanup, &path))
+    {
         return Err(recovery(
             &entries,
             &privates,

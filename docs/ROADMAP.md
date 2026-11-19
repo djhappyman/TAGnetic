@@ -1,6 +1,7 @@
 > Backend consolidation resumed on 19 November: commit and merge achieved work,
 > attach development to main, and retire working branches. Integration and hosted
-> gates are pending; see [the consolidation record](design/backend-consolidation.md).
+> gates are tracked in [PR #55](https://github.com/djhappyman/TAGnetic/pull/55);
+> see [the consolidation record](design/backend-consolidation.md).
 
 # Preliminary roadmap
 

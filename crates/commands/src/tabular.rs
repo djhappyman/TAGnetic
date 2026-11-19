@@ -324,10 +324,10 @@ impl App {
             } else if policy_revision == u64::MAX
                 || tagrex_core::model::read_policy_revision() != policy_revision
             {
-                Err(invalid(
-                    "Metadata settings changed during the table import; preview it again.",
+                Err(
+                    invalid("Metadata settings changed during the table import; preview it again.")
+                        .into(),
                 )
-                .into())
             } else {
                 Ok(())
             }
@@ -952,12 +952,8 @@ mod tests {
         for change_at in 1..=calls.get() {
             let visited = Cell::new(0usize);
             let changed = Cell::new(false);
-            let result = app.preview_tabular_import_with_cancel(
-                &paths,
-                text,
-                &options(),
-                None,
-                || {
+            let result =
+                app.preview_tabular_import_with_cancel(&paths, text, &options(), None, || {
                     visited.set(visited.get() + 1);
                     if visited.get() == change_at {
                         app.apply_settings(&SettingsDto {
@@ -967,8 +963,7 @@ mod tests {
                         changed.set(true);
                     }
                     false
-                },
-            );
+                });
             assert!(changed.get(), "callback {change_at} was not reached");
             let error = result.expect_err("an obsolete interpretation must not publish a plan");
             assert!(error.to_string().contains("Metadata settings changed"));

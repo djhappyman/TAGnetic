@@ -506,12 +506,18 @@ mod tests {
         let capability = dir.ensure_exclusive_rename();
         let native_supported = match native {
             Ok(()) => {
-                assert_eq!(std::fs::read(root.join(probe_name)).unwrap(), b"transport probe");
+                assert_eq!(
+                    std::fs::read(root.join(probe_name)).unwrap(),
+                    b"transport probe"
+                );
                 dir.remove(probe_name);
                 true
             }
             Err(error) if error.kind() == io::ErrorKind::Unsupported => {
-                assert_eq!(std::fs::read(root.join(&temporary)).unwrap(), b"transport probe");
+                assert_eq!(
+                    std::fs::read(root.join(&temporary)).unwrap(),
+                    b"transport probe"
+                );
                 assert!(!root.join(probe_name).exists());
                 dir.remove(&temporary);
                 false
