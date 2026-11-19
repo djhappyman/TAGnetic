@@ -53,7 +53,7 @@ export function hideTooltip() {
 }
 
 function ribbonButton(target) {
-  return target instanceof Element ? target.closest('.command-ribbon button.ribbon-command, #query-mode-toggle') : null;
+  return target instanceof Element ? target.closest('.command-ribbon button.ribbon-command, #query-mode-toggle, [data-tooltip]') : null;
 }
 function revealRibbonHint(button, delay) {
   if (!button || ribbonAnchor === button) return;
@@ -61,9 +61,9 @@ function revealRibbonHint(button, delay) {
   ribbonAnchor = button;
   ribbonTimer = setTimeout(() => {
     if (ribbonAnchor !== button || !button.isConnected || button.closest('[hidden], [inert]')) return;
-    const text = button.getAttribute('aria-description') || button.getAttribute('aria-label');
+    const text = button.getAttribute('data-tooltip') || button.getAttribute('aria-description') || button.getAttribute('aria-label');
     if (text) showControllerTooltip(button, text, '');
-  }, delay);
+  }, delay === 0 ? 0 : Number(button.getAttribute('data-tooltip-delay')) || delay);
 }
 
 export function initTooltips() {

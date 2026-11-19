@@ -35,6 +35,7 @@ test('Format Values announces the complete staged batch once and preserves selec
       window.__formatBatchEvents.push(structuredClone(window.tagrex.previewPlan));
     });
   });
+  await expect(page.locator('#ribbon-format-stage')).toBeEnabled();
   await page.locator('#ribbon-format-stage').focus();
   await page.keyboard.press('Enter');
   await expect(page.locator('#ribbon-format-dialog')).toBeHidden();

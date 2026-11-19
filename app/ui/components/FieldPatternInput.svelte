@@ -1,14 +1,14 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
   import { placeFloating } from '../js/popup-position.js';
-  import { patternParts, fieldSuggestions } from '../js/field-pattern.js';
+  import { patternParts, fieldSuggestions, fieldHue } from '../js/field-pattern.js';
   type Field = { key: string; label: string };
   let { id, label, value = '', fields = [], disabled = false, invalid = false,
     placeholder = 'Type a tag name', onchange }: {
     id: string; label: string; value?: string; fields?: Field[]; disabled?: boolean;
     invalid?: boolean; placeholder?: string; onchange: (value: string) => void;
   } = $props();
-  let editor: HTMLDivElement;
+  let editor = $state<HTMLDivElement>(null!);
   let choices = $state<Field[]>([]);
   let active = $state(0);
   let queryText = $state('');
@@ -61,7 +61,8 @@
         // Text nodes on both sides make atomic chips navigable in WebKit too.
         if (!nodes.length || nodes.at(-1)?.nodeType !== Node.TEXT_NODE) nodes.push(document.createTextNode(''));
         const chip = document.createElement('span');
-        chip.className = 'field-pattern-chip'; chip.contentEditable = 'false';
+        chip.className = 'field-pattern-chip field-token-tone'; chip.contentEditable = 'false';
+        chip.style.setProperty('--field-hue', String(fieldHue(part.field.key)));
         chip.dataset.pattern = part.text; chip.textContent = part.field.label;
         nodes.push(chip, document.createTextNode(''));
       } else nodes.push(document.createTextNode(part.text));
@@ -175,7 +176,7 @@
   <div {id} class="field-pattern-editor" role="combobox" aria-label={label}
     aria-autocomplete="list" aria-haspopup="listbox" aria-expanded={choices.length > 0}
     aria-controls={listId} aria-activedescendant={choices.length ? `${listId}-${active}` : undefined}
-    aria-invalid={invalid} aria-disabled={disabled} aria-describedby={`${id}-hint`}
+    aria-invalid={invalid} aria-disabled={disabled}
     contenteditable={!disabled} tabindex={disabled ? -1 : 0} spellcheck="false" data-placeholder={placeholder}
     {@attach connect} oninput={input} onkeydown={keydown} onpaste={paste}
     ondrop={event => { event.preventDefault(); }}
@@ -187,31 +188,30 @@
     <div id={listId} class="field-pattern-suggestions" {@attach placeSuggestions} role="listbox" aria-label="Tag suggestions">
       {#each choices as field, index (field.key)}
         {@const parts = highlight(field.label)}
-        <div id={`${listId}-${index}`} role="option" aria-label={field.label} aria-selected={active === index} tabindex="-1"
+        <div id={`${listId}-${index}`} role="option" class="field-token-tone" style:--field-hue={fieldHue(field.key)} aria-label={field.label} aria-selected={active === index} tabindex="-1"
           onpointerenter={() => { active = index; }}
           onpointerdown={event => { event.preventDefault(); void choose(field); }}
           onkeydown={event => { if (event.key === 'Enter') void choose(field); }}>
-          <span>{parts[0]}{#if parts[1]}<mark>{parts[1]}</mark>{/if}{parts[2]}</span><small>{field.key.startsWith('custom:') ? 'Custom Tag' : 'Tag'}</small>
+          <span class="field-suggestion-label">{parts[0]}{#if parts[1]}<mark>{parts[1]}</mark>{/if}{parts[2]}</span><small>{field.key.startsWith('custom:') ? 'Custom Tag' : 'Tag'}</small>
         </div>
       {/each}
     </div>
   {/if}
 </div>
-<span id={`${id}-hint`} class="field-pattern-hint">Type a tag name, then Enter. Add text between tags.</span>
 
 <style>
   .field-pattern-control { position:relative; min-width:0; background:var(--panel); border-radius:var(--input-radius,10px); color:var(--text); }
   .field-pattern-control:focus-within { outline:2px solid var(--accent); outline-offset:1px; }
   .field-pattern-invalid { outline:2px solid var(--error); }
   .field-pattern-disabled { opacity:.55; }
-  .field-pattern-editor { min-height:36px; max-height:144px; overflow:auto; padding:6px 10px; box-sizing:border-box; outline:none; white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.8; cursor:text; caret-color:var(--accent); font:inherit; }
+  .field-pattern-editor { height:36px; overflow-x:auto; overflow-y:hidden; padding:6px 10px; box-sizing:border-box; outline:none; white-space:pre; font:inherit; line-height:24px; cursor:text; caret-color:var(--accent); scrollbar-width:thin; }
   .field-pattern-editor:empty::before { content:attr(data-placeholder); color:var(--muted); pointer-events:none; }
   .field-pattern-editor::selection, .field-pattern-editor :global(::selection) { background:var(--accent); color:var(--on-accent,#fff); }
-  .field-pattern-editor :global(.field-pattern-chip) { display:inline; padding:2px 7px; margin:0 1px; border-radius:var(--r-compact,8px); color:var(--text); background:color-mix(in srgb,var(--accent) 18%,var(--panel)); box-decoration-break:clone; -webkit-box-decoration-break:clone; font-weight:500; white-space:nowrap; }
-  .field-pattern-hint { color:var(--muted); font-size:var(--text-xs); line-height:1.5; }
+  .field-pattern-editor :global(.field-pattern-chip) { display:inline-flex; align-items:center; justify-content:center; height:24px; vertical-align:top; padding:0 8px; margin-inline:1px; border-radius:var(--r-compact,8px); color:var(--field-ink); background:color-mix(in srgb,var(--field-ink) 12%,var(--panel)); font-weight:500; line-height:1; white-space:nowrap; }
   .field-pattern-suggestions { position:absolute; z-index:20; max-height:224px; overflow:auto; overscroll-behavior:contain; padding:7px; border:1px solid var(--border); border-radius:var(--r-menu,16px); background:var(--panel); box-shadow:0 8px 24px #0003; }
   .field-pattern-suggestions [role=option] { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:32px; padding:4px 8px; box-sizing:border-box; border-radius:var(--r-menu-item,8px); cursor:pointer; }
-  .field-pattern-suggestions [role=option]:hover, .field-pattern-suggestions [aria-selected=true] { background:var(--hover); }
-  .field-pattern-suggestions mark { color:var(--text); background:color-mix(in srgb,var(--accent) 24%,transparent); border-radius:3px; font-weight:600; }
+  .field-pattern-suggestions [role=option]:hover, .field-pattern-suggestions [aria-selected=true] { background:var(--row-hover); }
+  .field-suggestion-label { color:var(--field-ink); }
+  .field-pattern-suggestions mark { color:inherit; background:color-mix(in srgb,var(--field-ink) 12%,transparent); border-radius:3px; font-weight:600; }
   .field-pattern-suggestions small { font-size:var(--text-xs); color:var(--muted); }
 </style>

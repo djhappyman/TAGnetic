@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { patternParts, fieldSuggestions, fieldOperation, operationFields } from '../../app/ui/js/field-pattern.js';
+import { patternParts, fieldSuggestions, fieldOperation, operationFields, fieldHue } from '../../app/ui/js/field-pattern.js';
 import { titleCaseTagLabel } from '../../app/ui/js/tag-labels.js';
 const fields = [{key:'artist',label:'Artist'}, {key:'albumartist',label:'Album Artist'}, {key:'title',label:'Title'}, {key:'custom:VENUE',label:'Venue'}];
 test('chips round-trip punctuation, Unicode, custom fields and unknown native syntax exactly', () => {
@@ -22,4 +22,11 @@ test('Build and Extract use the existing native operations and canonical destina
   const op = fieldOperation('extract','comment','title','%artist% - %title% [%custom:VENUE%]');
   assert.deepEqual(op,{kind:'extract',source:'%title%',pattern:'%artist% - %title% [%custom:VENUE%]'});
   assert.deepEqual(operationFields(op,fields),['artist','title','custom:VENUE']);
+});
+
+test('field colours stay consistent across input and preview and distinguish adjacent tags', () => {
+  assert.equal(fieldHue('artist'),255);
+  assert.notEqual(fieldHue('artist'),fieldHue('albumartist'));
+  assert.notEqual(fieldHue('artist'),fieldHue('album'));
+  assert.equal(fieldHue('custom:Venue'),fieldHue('custom:VENUE'));
 });

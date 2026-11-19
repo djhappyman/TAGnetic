@@ -47,3 +47,18 @@ body .settings-search input[data-slot='input']:not([aria-invalid='true']) {
 body :is(.settings-body,.ribbon-dialog-fields) :is(input[data-slot='input'], button.app-select-trigger):not([aria-invalid='true']) {
   border-color:transparent; background:var(--panel);
 }
+
+/* Shared field-token palette. Canonical field keys choose their stable hue;
+   chips, suggestion matches and preview labels use this same presentation. */
+.field-token-tone { --field-hue:255; --field-ink:light-dark(oklch(42% .12 var(--field-hue)),oklch(78% .11 var(--field-hue))); }
+
+/* Footer actions float on their surface throughout the app. Keyboard focus
+   remains an explicit outline rather than depending on a button border. */
+body :is(footer, [data-slot='dialog-footer'], [data-slot='alert-dialog-footer'], .modal-actions, .ribbon-tool-footer, .pe-footer-actions, .settings-foot, .panel-actions, .diff-actionbar, .import-fields-footer) :is(button, .btn, [data-slot='button']) {
+  border:0;
+  box-shadow:none;
+}
+body :is(footer, [data-slot='dialog-footer'], [data-slot='alert-dialog-footer'], .modal-actions, .ribbon-tool-footer, .pe-footer-actions, .settings-foot, .panel-actions, .diff-actionbar, .import-fields-footer) :is(button, .btn, [data-slot='button']):focus-visible {
+  outline:2px solid var(--accent);
+  outline-offset:2px;
+}

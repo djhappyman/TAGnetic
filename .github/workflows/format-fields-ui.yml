@@ -1,6 +1,13 @@
 name: Format fields UI
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'app/ui/**'
+      - 'tests/ui/**'
+      - 'tests/unit/**'
+      - '.github/workflows/format-fields-ui.yml'
   pull_request:
     paths:
       - 'app/ui/**'
@@ -27,7 +34,8 @@ jobs:
       - run: npm run lint
       - run: npm run test:unit
       - run: npx playwright install --with-deps chromium
-      - run: npm run test:ui
+      - run: npx vite build --config tests/ui/vite.config.js
+      - run: npx playwright test tests/ui/field-format-chips.spec.js tests/ui/format-values-batch.spec.js tests/ui/command-ribbon.spec.js tests/ui/selection-edges.spec.js
       - uses: actions/upload-artifact@v7
         if: always()
         with:

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { fieldHue } from '../js/field-pattern.js';
+  import { toast } from '../js/dom.js';
   import { X } from '@lucide/svelte';
   import ControllerDialog from './ControllerDialog.svelte';
   import FieldPatternInput from './FieldPatternInput.svelte';
@@ -25,6 +27,12 @@
   const canStage = $derived(!!result && !result.invalid && !loading && !working && !busy && selected > 0 && result.unmatched < result.total);
 
   function close() { if (!working) root.hidden = true; }
+  function switchTab(event: KeyboardEvent, other: string) {
+    if (working || !['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
+    event.preventDefault();
+    kind = event.key === 'Home' ? 'build' : event.key === 'End' ? 'extract' : other;
+    document.getElementById(kind === 'build' ? 'format-build-tab' : 'format-extract-tab')?.focus();
+  }
   function connect(node: HTMLElement) {
     root = node.closest('.controller-dialog-root')!;
     const guard = (event: Event) => { if (working) event.preventDefault(); };
@@ -69,7 +77,7 @@
     try {
       await runRibbonAction(mode === 'write' ? 'field-format-write' : 'field-format-stage', {token});
       root.hidden = true;
-    } catch (reason) { root.hidden = false; error = String(reason); result = null; }
+    } catch (reason) { root.hidden = false; error = String(reason); result = null; toast(error, true); }
     finally { working = false; }
   }
 </script>
@@ -80,12 +88,14 @@
       <h2 id="ribbon-format-title">Format fields</h2>
       <Button variant="ghost" size="icon-sm" disabled={working} aria-label="Close dialog" onclick={close}><X size={17}/></Button>
     </div>
-    <div class="format-mode-switch" role="group" aria-label="Format operation">
-      <Button variant="ghost" aria-pressed={kind === 'build'} disabled={working} onclick={() => { kind = 'build'; }}>Build a field</Button>
-      <Button variant="ghost" aria-pressed={kind === 'extract'} disabled={working} onclick={() => { kind = 'extract'; }}>Extract fields</Button>
+    <div class="format-mode-switch" role="tablist" aria-label="Format operation">
+      <button id="format-build-tab" type="button" role="tab" aria-selected={kind === 'build'} aria-controls="format-fields-panel" tabindex={kind === 'build' ? 0 : -1} disabled={working}
+        onclick={() => { kind = 'build'; }} onkeydown={event => switchTab(event, 'extract')}>Build a field</button>
+      <button id="format-extract-tab" type="button" role="tab" aria-selected={kind === 'extract'} aria-controls="format-fields-panel" tabindex={kind === 'extract' ? 0 : -1} disabled={working}
+        onclick={() => { kind = 'extract'; }} onkeydown={event => switchTab(event, 'build')}>Extract fields</button>
     </div>
-    <div class="ribbon-dialog-fields format-fields-content">
-      <label class="ribbon-field">{kind === 'build' ? 'Put into' : 'Read from'}
+    <div id="format-fields-panel" class="ribbon-dialog-fields format-fields-content" role="tabpanel" aria-labelledby={kind === 'build' ? 'format-build-tab' : 'format-extract-tab'}>
+      <label class="ribbon-field">{kind === 'build' ? 'Apply to' : 'Pull from'}
         {#if kind === 'build'}
           <NativeSelect id="ribbon-format-field" bind:value={field} disabled={working}>
             {#each fields as item (item.key)}<NativeSelectOption value={item.key}>{item.label}</NativeSelectOption>{/each}
@@ -99,7 +109,7 @@
       <div class="ribbon-field">
         <label for="ribbon-format-pattern" onpointerdown={() => document.getElementById('ribbon-format-pattern')?.focus()}>{kind === 'build' ? 'Values' : 'Pattern'}</label>
         {#key kind}
-          <FieldPatternInput id="ribbon-format-pattern" label={kind === 'build' ? 'Values' : 'Pattern'} value={pattern} {fields} disabled={working}
+          <FieldPatternInput id="ribbon-format-pattern" label={kind === 'build' ? 'Values' : 'Pattern'} value={pattern} {fields} disabled={working || !opened}
             invalid={!!error} onchange={value => { if (kind === 'build') buildPattern = value; else extractPattern = value; }}/>
         {/key}
       </div>
@@ -113,38 +123,46 @@
               {#if kind === 'extract'}<p class="format-source-value">{row.source || '(empty)'}</p>{/if}
               {#if row.unmatched}<p class="format-result-empty">Doesn’t match this pattern. Kept unchanged.</p>
               {:else}{#each row.values as item (item.field)}
-                <div class="format-result-value"><span>{item.label}</span><span class="format-result-text">{item.value || '(empty)'}</span></div>
+                <div class="format-result-value"><span class="field-token-tone format-result-title" style:--field-hue={fieldHue(item.field)}>{item.label}</span><span class="format-result-text">{item.value || '(empty)'}</span></div>
               {/each}{/if}
             </div>
           {/each}
         {:else if !error}<p class="format-result-empty">Add tags or text to see the result.</p>{/if}
       </div>
-      {#if result?.unmatched}<p class="ribbon-field-help" role="status">{result.unmatched} of {result.total} files don’t match and will stay unchanged.</p>{/if}
-      {#if result?.locked.length}<p class="ribbon-field-help">Locked fields kept unchanged: {result.locked.join(', ')}.</p>{/if}
-      {#if result?.invalid}<p class="ribbon-tool-error" role="alert">Some values aren’t supported by these files. Change the pattern before staging.</p>{/if}
-      {#if error}<p class="ribbon-tool-error" role="alert">{error}</p>{/if}
+      <div class="format-status" aria-live="polite">
+        {#if result?.unmatched}<span>{result.unmatched} of {result.total} files don’t match.</span>{/if}
+        {#if result?.locked.length}<span>Locked: {result.locked.join(', ')}.</span>{/if}
+      </div>
     </div>
     <div class="ribbon-tool-footer">
       <Button variant="ghost" disabled={working} onclick={close}>Cancel</Button>
-      <div><Button id="ribbon-format-write" variant="ghost" disabled={!canStage} onclick={() => submit('write')}>Write now</Button><Button id="ribbon-format-stage" disabled={!canStage} onclick={() => submit('stage')}>Add to Staged</Button></div>
+      <div><Button id="ribbon-format-write" variant="ghost" data-tooltip="Bypass staging and write changes immediately." data-tooltip-delay="1200" aria-description="Bypass staging and write changes immediately." disabled={!canStage} onclick={() => submit('write')}>Write</Button><Button id="ribbon-format-stage" data-tooltip="Add these changes to Staged. Review them before using Apply to save your files." data-tooltip-delay="1600" aria-description="Add these changes to Staged. Review them before using Apply to save your files." disabled={!canStage} onclick={() => submit('stage')}>Stage Edits</Button></div>
     </div>
   </div>
 </ControllerDialog>
 
 <style>
-  .format-fields-dialog { --controller-modal-width:560px; }
-  .format-mode-switch { display:flex; gap:4px; padding:4px; background:var(--bg); border-radius:var(--input-radius,10px); }
-  .format-mode-switch :global(button) { flex:1; border-radius:var(--r-compact,8px); }
-  .format-mode-switch :global(button[aria-pressed=true]) { background:var(--panel); color:var(--text); }
-  .format-fields-content { gap:var(--sp-4); }
-  .format-result { display:flex; flex-direction:column; gap:var(--sp-2); min-height:64px; }
+  .format-fields-dialog.modal { --controller-modal-width:560px; height:min(470px,calc(100dvh - 48px)); gap:0; overflow:hidden; }
+  .ribbon-tool-header { flex:none; margin-bottom:var(--sp-4); }
+  .format-mode-switch { display:flex; flex:none; gap:4px; }
+  .format-mode-switch button { flex:1; min-height:38px; padding:8px 12px; border:0; border-radius:var(--r-inset) var(--r-inset) 0 0; background:transparent; color:var(--muted); font:inherit; font-weight:500; cursor:pointer; }
+  .format-mode-switch button[aria-selected=true] { background:var(--bg); color:var(--text); }
+  .format-mode-switch button:hover:not(:disabled) { color:var(--text); }
+  .format-mode-switch button:focus-visible { outline:2px solid var(--accent); outline-offset:-3px; }
+  .format-fields-content { flex:1; min-height:0; gap:var(--sp-3); border-radius:0 0 var(--r-inset) var(--r-inset); }
+  .format-fields-content > .ribbon-field { flex:none; }
+  .format-result { display:flex; flex:1; flex-direction:column; gap:var(--sp-2); min-height:0; overflow:auto; overscroll-behavior:contain; scrollbar-width:thin; }
   .format-result-label { font-size:var(--text-xs); color:var(--muted); }
   .format-result-row { display:flex; flex-direction:column; gap:var(--sp-1); min-width:0; }
   .format-result-row + .format-result-row { margin-top:var(--sp-2); }
   .format-result-file { font-size:var(--text-xs); color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .format-result-value { display:grid; grid-template-columns:minmax(76px,1fr) minmax(0,3fr); gap:var(--sp-3); }
-  .format-result-value > span:first-child { color:var(--muted); }
+  .format-result-title { color:color-mix(in srgb,var(--field-ink) 72%,var(--muted)); }
+  .format-result-text { color:var(--text); font-weight:400; }
   .format-result-text, .format-source-value { white-space:pre-wrap; overflow-wrap:anywhere; }
-  .format-source-value { margin:0 0 var(--sp-1); }
-  .format-result-empty { margin:0; color:var(--muted); }
+  .format-source-value { margin:0 0 var(--sp-1); color:var(--muted); }
+  .format-result-empty { margin:0; color:var(--muted); font-weight:400; }
+  .format-status { display:flex; flex:none; gap:var(--sp-2); min-height:16px; color:var(--muted); font-size:var(--text-xs); }
+  .ribbon-tool-footer { flex:none; padding-top:var(--sp-4); }
+  @media (max-height:480px) { .format-fields-dialog { padding:var(--sp-3); } .ribbon-tool-header { margin-bottom:var(--sp-2); } .ribbon-tool-footer { padding-top:var(--sp-2); } }
 </style>

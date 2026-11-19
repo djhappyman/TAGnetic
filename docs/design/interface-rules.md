@@ -20,6 +20,8 @@ iterating on the personal interface; older design briefs are historical context.
   surface gives enough contrast. Retain clear hover, focus and error states.
 - Shadows represent depth and use dark translucent colours in both themes.
   Never derive a shadow from the text colour, which creates a pale dark-mode glow.
+- Footer action buttons have no borders or inset shadows. Retain visible keyboard
+  focus outlines, clear primary actions and disabled states.
 - Keep a quiet border around the outer dialog to separate it from the app.
   Inset a recessed content area from the outer edge and round its corners. Avoid
   combining that surface change with a redundant separator line.

@@ -38,3 +38,15 @@ export function operationFields(operation, fields) {
   if (operation.kind === 'format') return [operation.field];
   return [...new Set(patternParts(operation.pattern, fields).flatMap(part => part.field ? [part.field.key] : []))];
 }
+
+// Keep a tag's colour stable across chips, suggestions and result labels.
+// Familiar fields follow the same hue families as the library search chips.
+export function fieldHue(key) {
+  const hues = {artist:255, albumartist:295, title:85, album:210, genre:150,
+    year:45, track:255, tracktotal:255, disc:295, disctotal:295,
+    comment:345, composer:170, publisher:45, bpm:150, key:295};
+  if (Object.hasOwn(hues, key)) return hues[key];
+  let hash = 0;
+  for (const character of key.toLowerCase()) hash = (hash * 31 + character.codePointAt(0)) >>> 0;
+  return [255,295,85,210,150,45,345][hash % 7];
+}
