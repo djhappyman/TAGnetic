@@ -337,3 +337,14 @@ on the exact publication head; historical local pass counts are not reused.
 records the 14 frozen source hashes, nine witness and five private-authority probe
 functions, reciprocal review and hosted-only verification gate. Source acceptance
 is permission to run the candidate in CI, not a passing runtime result.
+
+
+## Hosted platform results and formatter-only follow-up
+
+On code head `63102f9c`, Windows and macOS completed successfully. Documentation
+head `22cbfbf4` reached the Linux formatter and failed on wrapping/layout in six
+Rust files. The exact hosted formatter diff was applied without invoking a local
+formatter; all non-whitespace source characters are unchanged. Included-module
+duplicate hunks were applied once. Current-head hosted gates must run again;
+the previous Windows/macOS greens do not automatically verify the new head.
+No local build, test, formatter or benchmark ran.

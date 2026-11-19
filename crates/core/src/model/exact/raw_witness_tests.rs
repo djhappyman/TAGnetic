@@ -100,7 +100,10 @@ fn equal_stamp_text_header_and_picture_changes_refuse_named_and_held_sources() {
             // for two byte states. The original Windows public-API canaries
             // supply the actual platform failure; this is collision emulation.
             input.stamp = Stamp::from_file(&input.source).unwrap();
-            assert!(matches!(input.ensure_unchanged(), Err(ExactReadError::Changed)));
+            assert!(matches!(
+                input.ensure_unchanged(),
+                Err(ExactReadError::Changed)
+            ));
             assert_eq!(fs::read(path).unwrap(), changed);
         }
     }
@@ -214,7 +217,10 @@ fn equal_stamp_id3v1_and_ape_tail_changes_are_refused() {
                 fs::write(&path, &changed).unwrap();
                 assert!(!input.witness.matches(&input.source).unwrap());
                 input.stamp = Stamp::from_file(&input.source).unwrap();
-                assert!(matches!(input.ensure_unchanged(), Err(ExactReadError::Changed)));
+                assert!(matches!(
+                    input.ensure_unchanged(),
+                    Err(ExactReadError::Changed)
+                ));
                 assert_eq!(fs::read(path).unwrap(), changed);
             }
         }
@@ -235,7 +241,10 @@ fn ape_before_audio_is_witnessed_and_lyrics3_is_refused() {
     fs::write(&path, &bytes).unwrap();
     input.stamp = Stamp::from_file(&input.source).unwrap();
     assert!(!input.witness.matches(&input.source).unwrap());
-    assert!(matches!(input.ensure_unchanged(), Err(ExactReadError::Changed)));
+    assert!(matches!(
+        input.ensure_unchanged(),
+        Err(ExactReadError::Changed)
+    ));
     drop(input);
 
     let mut lyrics = mpeg();
@@ -243,7 +252,9 @@ fn ape_before_audio_is_witnessed_and_lyrics3_is_refused() {
     let path = fixture.put("lyrics.mp3", &lyrics);
     assert!(matches!(
         Input::prepare(&path, &|| false),
-        Err(ExactReadError::Unavailable(UnavailableReason::UnsupportedLayout))
+        Err(ExactReadError::Unavailable(
+            UnavailableReason::UnsupportedLayout
+        ))
     ));
 }
 
@@ -283,7 +294,10 @@ fn observed_work_is_admitted_before_reading_past_its_limit() {
         at += WITNESS_CHUNK as u64;
     }
     assert!(matches!(builder.admit(1), Err(ExactReadError::Limit)));
-    assert!(matches!(builder.observe(at, &[0]), Err(ExactReadError::Limit)));
+    assert!(matches!(
+        builder.observe(at, &[0]),
+        Err(ExactReadError::Limit)
+    ));
     assert_eq!(builder.finish().unwrap().spans.len(), 1);
 }
 

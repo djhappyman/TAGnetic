@@ -435,11 +435,7 @@ impl Authority {
         // The parent descriptor still comes from the no-follow directory walk.
         #[cfg(target_vendor = "apple")]
         let flags = OFlags::RDONLY | OFlags::SYMLINK | OFlags::CLOEXEC | OFlags::NONBLOCK;
-        #[cfg(not(any(
-            target_os = "linux",
-            target_os = "android",
-            target_vendor = "apple"
-        )))]
+        #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
         let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
         let file = File::from(openat(parent.as_ref(), &name, flags, Mode::empty())?);
         let kind = file.metadata()?.file_type();

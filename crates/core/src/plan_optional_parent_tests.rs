@@ -70,7 +70,9 @@ fn unplanned_missing_parent_does_not_borrow_optional_authority() {
     )
     .unwrap();
     assert_eq!(
-        entry(&f.root.join("unplanned/file.bin")).unwrap_err().kind(),
+        entry(&f.root.join("unplanned/file.bin"))
+            .unwrap_err()
+            .kind(),
         io::ErrorKind::NotFound
     );
     assert!(validate().is_err());
@@ -154,7 +156,9 @@ fn retiring_directory_removes_only_matching_optional_descendants() {
         assert!(authority.optional.contains(&f.root.join("aa/missing")));
     });
     assert_eq!(
-        entry(&f.root.join("aa/missing/file.bin")).unwrap_err().kind(),
+        entry(&f.root.join("aa/missing/file.bin"))
+            .unwrap_err()
+            .kind(),
         io::ErrorKind::NotFound
     );
     validate().unwrap();
