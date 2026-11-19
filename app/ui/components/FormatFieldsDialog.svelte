@@ -59,12 +59,12 @@
     void contextRevision;
     if (!opened || working || !fields.length) return;
     const id = ++request;
-    result = null; error = ''; loading = !!pattern.trim();
-    if (!pattern.trim()) return;
+    error = ''; loading = !!pattern.trim();
+    if (!pattern.trim()) { result = null; return; }
     const timer = setTimeout(() => {
       void runRibbonAction('field-format-preview', options).then(data => {
         if (opened && request === id) { result = data; loading = false; }
-      }).catch(reason => { if (opened && request === id) { error = String(reason); loading = false; } });
+      }).catch(reason => { if (opened && request === id) { error = String(reason); result = null; loading = false; } });
     }, 250);
     return () => { clearTimeout(timer); };
   });
@@ -93,8 +93,8 @@
       <button id="format-extract-tab" type="button" role="tab" aria-selected={kind === 'extract'} aria-controls="format-fields-panel" tabindex={kind === 'extract' ? 0 : -1} disabled={working}
         onclick={() => { kind = 'extract'; }} onkeydown={event => switchTab(event, 'build')}>Extract fields</button>
     </div>
-    <div id="format-fields-panel" class="ribbon-dialog-fields format-fields-content" role="tabpanel" aria-labelledby={kind === 'build' ? 'format-build-tab' : 'format-extract-tab'}>
-      <label class="ribbon-field">{kind === 'build' ? 'Apply to' : 'Pull from'}
+    <div id="format-fields-panel" class="ribbon-dialog-fields format-fields-content" data-format-kind={kind} role="tabpanel" aria-labelledby={kind === 'build' ? 'format-build-tab' : 'format-extract-tab'}>
+      <label class="ribbon-field"><span>{kind === 'build' ? 'Apply to' : 'Pull from'}</span>
         {#if kind === 'build'}
           <NativeSelect id="ribbon-format-field" bind:value={field} disabled={working}>
             {#each fields as item (item.key)}<NativeSelectOption value={item.key}>{item.label}</NativeSelectOption>{/each}
@@ -114,8 +114,7 @@
       </div>
       <div class="format-result" aria-busy={loading} aria-live="polite">
         <span class="format-result-label">Preview{result?.total > 1 ? ` · First ${result.rows.length} of ${result.total}` : ''}</span>
-        {#if loading}<p class="format-result-empty">Preparing preview…</p>
-        {:else if result}
+        {#if result}
           {#each result.rows as row (row.path)}
             <div class="format-result-row">
               {#if result.total > 1}<span class="format-result-file" title={row.path}>{row.path.split(/[\\/]/).pop()}</span>{/if}
@@ -126,7 +125,7 @@
               {/each}{/if}
             </div>
           {/each}
-        {:else if !error}<p class="format-result-empty">Add tags or text to see the result.</p>{/if}
+        {/if}
       </div>
       <div class="format-status" aria-live="polite">
         {#if result?.unmatched}<span>{result.unmatched} of {result.total} files don’t match.</span>{/if}
@@ -146,11 +145,17 @@
   .format-fields-dialog.modal { --controller-modal-width:560px; height:min(470px,calc(100dvh - 48px)); gap:0; overflow:hidden; }
   .ribbon-tool-header { flex:none; margin-bottom:var(--sp-4); }
   .format-mode-switch { display:flex; flex:none; gap:4px; }
-  .format-mode-switch button { flex:1; min-height:38px; padding:8px 12px; border:0; border-radius:var(--r-inset) var(--r-inset) 0 0; background:transparent; color:var(--muted); font:inherit; font-weight:500; cursor:pointer; }
+  .format-mode-switch button { position:relative; flex:1; min-height:38px; padding:8px 12px; border:0; border-radius:var(--r-inset) var(--r-inset) 0 0; background:transparent; color:var(--muted); font:inherit; font-weight:500; cursor:pointer; }
   .format-mode-switch button[aria-selected=true] { background:var(--bg); color:var(--text); }
+  #format-build-tab[aria-selected=true]::after, #format-extract-tab[aria-selected=true]::before { content:''; position:absolute; bottom:0; width:var(--r-inset); height:var(--r-inset); pointer-events:none; }
+  #format-build-tab[aria-selected=true]::after { right:calc(-1 * var(--r-inset)); background:radial-gradient(circle at 100% 0,transparent calc(var(--r-inset) - .5px),var(--bg) var(--r-inset)); }
+  #format-extract-tab[aria-selected=true]::before { left:calc(-1 * var(--r-inset)); background:radial-gradient(circle at 0 0,transparent calc(var(--r-inset) - .5px),var(--bg) var(--r-inset)); }
+  .format-mode-switch button[aria-selected=false] { border-radius:var(--r-inset); }
   .format-mode-switch button:hover:not(:disabled) { color:var(--text); }
   .format-mode-switch button:focus-visible { outline:2px solid var(--accent); outline-offset:-3px; }
   .format-fields-content { flex:1; min-height:0; gap:var(--sp-3); border-radius:0 0 var(--r-inset) var(--r-inset); }
+  .format-fields-content[data-format-kind=build] { border-top-right-radius:var(--r-inset); }
+  .format-fields-content[data-format-kind=extract] { border-top-left-radius:var(--r-inset); }
   .format-fields-content > .ribbon-field { flex:none; }
   .format-result { display:flex; flex:1; flex-direction:column; gap:var(--sp-2); min-height:0; overflow:auto; overscroll-behavior:contain; scrollbar-width:thin; }
   .format-result-label { font-size:var(--text-xs); color:var(--muted); }
@@ -158,7 +163,8 @@
   .format-result-row + .format-result-row { margin-top:var(--sp-2); }
   .format-result-file { font-size:var(--text-xs); color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .format-result-value { display:grid; grid-template-columns:minmax(76px,1fr) minmax(0,3fr); gap:var(--sp-3); }
-  .format-result-title { color:color-mix(in srgb,var(--field-ink) 72%,var(--muted)); }
+  .format-result-title { justify-self:start; display:inline-flex; align-items:center; align-self:start; min-height:24px; padding:0 8px; border-radius:var(--r-compact); color:color-mix(in srgb,var(--field-ink) 76%,var(--muted)); background:color-mix(in srgb,var(--field-ink) 8%,transparent); font-weight:500; }
+  .format-result-value { align-items:center; }
   .format-result-text { color:var(--text); font-weight:400; }
   .format-result-text, .format-source-value { white-space:pre-wrap; overflow-wrap:anywhere; }
   .format-source-value { margin:0 0 var(--sp-1); color:var(--muted); }

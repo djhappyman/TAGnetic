@@ -68,3 +68,18 @@ regression explicitly waits for native preview validity before pressing Enter.
 The original run passed 659 browser tests; its three failures remain archived.
 New hosted probes verify stable geometry, popup overlay, shared hues, centring,
 footer border/focus, connected tabs, delayed help and quiet invalid states.
+
+### Atomic caret and quiet preview refinement
+
+WebKit needs a real text position beside noneditable inline-flex chips. Marked
+zero-width caret stops are now supplied at empty boundaries; their marker is
+removed during canonical pattern serialization and copy/cut. Literal pattern
+text, including real invisible characters, is otherwise retained. Clicks snap
+to a chip edge, arrows cross a tag atomically, and both keyboard deletion and
+beforeinput deletion remove one whole tag. No caret is left inside a chip.
+
+Preview labels are muted field-colour chips, with plain result values beside
+them. The last result remains while a new preview runs silently; actions remain
+disabled until the new result is accepted. Loading prose is absent. The content
+corner beneath the inactive Build/Extract tab is rounded in either mode.
+Hosted caret/clipboard/geometry contracts now run in WebKit as well as Chromium.

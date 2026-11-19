@@ -137,3 +137,59 @@ test('footer actions explain direct Write and staging only after the longer hove
   await page.locator('#ribbon-format-write').hover();
   await expect(page.locator('#controller-tooltip-content')).toContainText('Bypass staging and write changes immediately.',{timeout:4000});
 });
+
+test('caret stays outside chips on click and commit, and Backspace deletes the whole tag',async({page})=>{
+  const chip=editor(page).locator('.field-pattern-chip');
+  await expect(chip).toHaveText('Artist');
+  const box=await chip.boundingBox();
+  await chip.click({position:{x:box.width-3,y:box.height/2}});
+  const position=await editor(page).evaluate(node=>{
+    const selection=window.getSelection(),range=selection.getRangeAt(0),chip=node.querySelector('[data-pattern]');
+    return {inside:!!selection.anchorNode.parentElement.closest('[data-pattern]'),caret:range.getBoundingClientRect().x,right:chip.getBoundingClientRect().right};
+  });
+  expect(position.inside).toBe(false);expect(position.caret).toBeGreaterThanOrEqual(position.right-.5);
+  await page.keyboard.type(' - ');
+  await expect(chip).toHaveText('Artist');
+  await expect(editor(page)).toContainText(' - ');
+  await page.keyboard.press('Backspace');await page.keyboard.press('Backspace');await page.keyboard.press('Backspace');
+  await expect(chip).toHaveCount(1);
+  await page.keyboard.press('Backspace');await expect(chip).toHaveCount(0);
+  await editor(page).fill('');await choose(page,'artist','Artist');
+  expect(await editor(page).evaluate(()=>!!window.getSelection().anchorNode.parentElement.closest('[data-pattern]'))).toBe(false);
+  await page.keyboard.press('Backspace');await expect(chip).toHaveCount(0);
+});
+
+test('adjacent chips navigate atomically and caret markers never leak to clipboard or patterns',async({page})=>{
+  await editor(page).focus();await page.keyboard.press('ControlOrMeta+a');
+  await editor(page).evaluate(node=>{
+    const data=new DataTransfer();data.setData('text/plain','%artist%%title%');node.dispatchEvent(new ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true}));
+  });
+  await expect(editor(page).locator('.field-pattern-chip')).toHaveText(['Artist','Title']);
+  await page.keyboard.press('ControlOrMeta+a');
+  const copied=await editor(page).evaluate(node=>{
+    const data=new DataTransfer();node.dispatchEvent(new ClipboardEvent('copy',{clipboardData:data,bubbles:true,cancelable:true}));return data.getData('text/plain');
+  });
+  expect(copied).toBe('%artist%%title%');
+  await page.keyboard.press('End');await page.keyboard.press('Backspace');
+  await expect(editor(page).locator('.field-pattern-chip')).toHaveText('Artist');
+  await page.keyboard.press('ArrowLeft');await page.keyboard.press('Delete');
+  await expect(editor(page).locator('.field-pattern-chip')).toHaveCount(0);
+  await editor(page).fill('');await choose(page,'album','Album');
+  await editor(page).evaluate(node=>node.dispatchEvent(new InputEvent('beforeinput',{inputType:'deleteContentBackward',bubbles:true,cancelable:true})));
+  await expect(editor(page).locator('.field-pattern-chip')).toHaveCount(0);
+});
+
+test('preview is silent, its field labels are chips, and the inactive corner stays rounded',async({page})=>{
+  const title=page.locator('.format-result-title').first();
+  await expect(title).toBeVisible();
+  const shape=await title.evaluate(node=>({display:getComputedStyle(node).display,background:getComputedStyle(node).backgroundColor,radius:parseFloat(getComputedStyle(node).borderRadius)}));
+  expect(shape.display).toBe('inline-flex');expect(shape.background).not.toBe('rgba(0, 0, 0, 0)');expect(shape.radius).toBeGreaterThan(0);
+  await editor(page).fill('example');
+  await expect(page.locator('#ribbon-format-dialog')).not.toContainText('Preparing preview');
+  await page.getByRole('tab',{name:'Extract fields'}).click();
+  const extractCorner=await page.locator('#format-fields-panel').evaluate(node=>parseFloat(getComputedStyle(node).borderTopLeftRadius));
+  expect(extractCorner).toBeGreaterThan(0);
+  await page.getByRole('tab',{name:'Build a field'}).click();
+  const buildCorner=await page.locator('#format-fields-panel').evaluate(node=>parseFloat(getComputedStyle(node).borderTopRightRadius));
+  expect(buildCorner).toBeGreaterThan(0);
+});
