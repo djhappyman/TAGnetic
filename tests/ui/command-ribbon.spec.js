@@ -232,7 +232,7 @@ test('Cancel discards dialog values and number display preferences without touch
   await page.locator('#ribbon-format-pattern').fill('Discard me');
   await page.getByRole('button',{name:'Cancel',exact:true}).click();
   await page.locator('#ribbon-format-values').click();
-  await expect(page.locator('#ribbon-format-pattern')).toHaveValue('%artist%');
+  await expect(page.locator('#ribbon-format-pattern')).toHaveText('Artist');
   await page.keyboard.press('Escape');
   await page.locator('#ribbon-autonumber').click();
   await page.locator('#autonum-track-format-control').click();

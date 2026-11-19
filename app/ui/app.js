@@ -1,3 +1,4 @@
+import { createFieldFormatActions } from './js/field-format-actions.js';
 import { createLiveStageTransport } from './js/live-stage-transport.js';
 import { nativeLiveFields, setNativeLiveFields } from './js/live-preview.js';
 import { groupIcon } from './js/group-presentation.js';
@@ -3479,8 +3480,15 @@ async function writeQuickPlan(plan) {
 }
 
 document.addEventListener('tagrex:number-format', () => renderTracks());
+const fieldFormatActions = createFieldFormatActions({
+  invoke, captureSelection, isSelectionCurrent, getPlan:() => previewPlan, inputRevision:liveInputRevision,
+  workingField, trackAt, isFieldLocked, adoptTagOnlyPreview, recordLiveFields, writeQuickPlan,
+  fieldCatalogue:() => EXTENDED_FIELDS.map(([key]) => ({key,label:fieldLabel(key)})), labelField:fieldLabel,
+});
 connectRibbonActions(async (action, options) => {
+  if (action === 'field-format-cancel') return fieldFormatActions(action, options);
   if (applying || undoing) throw new Error('Wait for the current operation to finish.');
+  if (action.startsWith('field-format-')) return fieldFormatActions(action, options);
   if (action === 'artwork-settings') {
     await openSettings();
     const groups = [...document.querySelectorAll('.settings-group')];

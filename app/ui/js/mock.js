@@ -1403,7 +1403,7 @@ function mockInvoke(cmd, args) {
     // substitutes plain placeholders; Rust tests verify the real recipe engine.
     case "preview_field_operations": {
       const operation = args.operations?.[0];
-      if (operation?.kind !== 'format') return Promise.reject('This browser fixture supports only Format values.');
+      if (!['format', 'extract'].includes(operation?.kind)) return Promise.reject('This browser fixture supports only field formatting and extraction.');
       const working = new Map((args.working?.changes || []).map(change => [change.path, change]));
       const tracks = s.tracks.map(track => {
         const tags = {...track.tags};
@@ -1412,11 +1412,34 @@ function mockInvoke(cmd, args) {
         }
         return {...track, tags};
       });
-      return renderMockColumn({pattern:operation.pattern, paths:args.paths}, tracks).then(values => ({
-        ...args.working, description:'Format values', changes:(args.paths || []).map((path,index) => ({
-          path, rename_to:null, cover_change:null, block_changes:[], sidecar_renames:[], copy:false, folder_extras:[],
-          tag_changes:[{field:operation.field, old:s.tracks.find(track=>track.path===path)?.tags?.[operation.field] ?? null, new:values[index] || null}],
-        })),
+      const unrendered = [...(args.working?.unrendered || [])];
+      const targets = [...String(operation.pattern).matchAll(/%([^%]+)%/g)].map(match => match[1]);
+      // Fixture-only delimiter matching. Native Rust owns the actual grammar.
+      const escape = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      let expression = '^', at = 0;
+      for (const match of String(operation.pattern).matchAll(/%([^%]+)%/g)) {
+        expression += escape(operation.pattern.slice(at, match.index)) + '(.*?)';
+        at = match.index + match[0].length;
+      }
+      expression += escape(operation.pattern.slice(at)) + '$';
+      const renderPattern = operation.kind === 'extract' ? operation.source : operation.pattern;
+      return renderMockColumn({pattern:renderPattern, paths:args.paths}, tracks).then(values => ({
+        ...args.working, description:'Format fields', changes:(args.paths || []).map((path,index) => {
+          const track = s.tracks.find(track => track.path === path);
+          let assignments;
+          if (operation.kind === 'format') assignments = [[operation.field, values[index]]];
+          else {
+            const match = values[index].match(new RegExp(expression));
+            if (!match) { unrendered.push({field:'extraction pattern',files:1,paths:[path]}); assignments = []; }
+            else assignments = targets.flatMap((field, index) => match[index + 1] ? [[field, match[index + 1]]] : []);
+          }
+          const edits = new Map((working.get(path)?.tag_changes || []).map(edit => [edit.field, edit]));
+          for (const [field, value] of assignments) {
+            if (mockLockedFields.has(field)) continue;
+            edits.set(field, {field,old:track?.tags?.[field] ?? null,new:value || null});
+          }
+          return { ...working.get(path), path, rename_to:null, cover_change:null, block_changes:[], sidecar_renames:[], copy:false, folder_extras:[], tag_changes:[...edits.values()] };
+        }), unrendered,
       }));
     }
     case "render_columns":

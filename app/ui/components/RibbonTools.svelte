@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Eraser, FolderPen, TextCursorInput, ListOrdered, ImagePlus, ImageUp, Image as ImageIcon, SlidersHorizontal, FileMusic, X } from '@lucide/svelte';
   import ControllerDialog from './ControllerDialog.svelte';
+  import FormatFieldsDialog from './FormatFieldsDialog.svelte';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
   import NativeCheckbox from './controls/NativeCheckbox.svelte';
@@ -14,8 +15,6 @@
   let pattern = $state('folder.jpg');
   let firstImage = $state(false);
   let replaceArtwork = $state(false);
-  let destinationField = $state('albumartist');
-  let valuePattern = $state('%artist%');
   let removeKind = $state('text');
   let trackWidth = $state(String(numberWidth('track')));
   let discWidth = $state(String(numberWidth('disc')));
@@ -36,7 +35,7 @@
     if (working) return;
     error = '';
     pattern = 'folder.jpg'; firstImage = false; replaceArtwork = false;
-    destinationField = 'albumartist'; valuePattern = '%artist%'; removeKind = 'text';
+    removeKind = 'text';
     trackWidth = String(numberWidth('track')); discWidth = String(numberWidth('disc'));
     if (name === 'number') {
       (document.getElementById('autonum-start') as HTMLInputElement).value = '1';
@@ -64,7 +63,7 @@
 <div class="ribbon-group" role="group" aria-label="Tag tools" {@attach attachState}>
   <Button id="ribbon-remove-tags" variant="ghost" size="icon-sm" class="icon ribbon-command" disabled={!selected || busy || working} title="Remove tags from selected files" aria-label="Remove tags" onclick={() => open('remove')}><Eraser class="ico" size={17} strokeWidth={1.7}/></Button>
   <Button id="ribbon-rename-folder" variant="ghost" size="icon-sm" class="icon ribbon-command" disabled={!selected || busy || working} title="Rename folders using tag values" aria-label="Rename folders" onclick={() => perform('rename')}><FolderPen class="ico" size={17} strokeWidth={1.7}/></Button>
-  <Button id="ribbon-format-values" variant="ghost" size="icon-sm" class="icon ribbon-command" disabled={!selected || busy || working} title="Format a field using other tag values" aria-label="Format values" onclick={() => open('format')}><TextCursorInput class="ico" size={17} strokeWidth={1.7}/></Button>
+  <Button id="ribbon-format-values" variant="ghost" size="icon-sm" class="icon ribbon-command" disabled={!selected || busy || working} title="Build or extract tag fields" aria-label="Format fields" onclick={() => open('format')}><TextCursorInput class="ico" size={17} strokeWidth={1.7}/></Button>
 </div>
 <span class="ribbon-divider" aria-hidden="true"></span>
 <div class="ribbon-group" role="group" aria-label="Numbering">
@@ -137,20 +136,4 @@
     <div class="ribbon-tool-footer"><span>Stage to review. Write saves now.</span><div><Button variant="ghost" disabled={working} onclick={() => close('remove')}>Cancel</Button><Button id="ribbon-remove-stage" variant="secondary" disabled={working || !selected} onclick={() => perform('remove-tags', {kind:removeKind, mode:'stage'})}>Stage</Button><Button id="ribbon-remove-write" disabled={working || !selected} onclick={() => perform('remove-tags', {kind:removeKind, mode:'write'})}>Write</Button></div></div>
   </div>
 </ControllerDialog>
-<ControllerDialog id="ribbon-format-dialog" labelledby="ribbon-format-title">
-  <div class="modal ribbon-tool-body" {@attach attachDialog}>
-    <div class="ribbon-tool-header">
-      <div><h2 id="ribbon-format-title">Format values</h2><p class="ribbon-tool-description">Fill a field using tags and text.</p></div>
-      <Button variant="ghost" size="icon-sm" disabled={working} aria-label="Close dialog" onclick={() => close('format')}><X size={17}/></Button>
-    </div>
-    <div class="ribbon-dialog-fields">
-      <div class="ribbon-form-grid">
-        <label class="ribbon-field">Destination field<NativeSelect id="ribbon-format-field" bind:value={destinationField}>{#each ['artist','title','album','albumartist','genre','comment','composer','publisher'] as field (field)}<NativeSelectOption value={field}>{field === 'albumartist' ? 'Album artist' : field.charAt(0).toUpperCase() + field.slice(1)}</NativeSelectOption>{/each}</NativeSelect></label>
-        <label class="ribbon-field" for="ribbon-format-pattern">Value pattern<Input id="ribbon-format-pattern" bind:value={valuePattern} placeholder="%artist%" spellcheck="false"/></label>
-      </div>
-      <p class="ribbon-field-help">Example: %artist% — %title% combines both values.</p>
-    </div>
-    {#if error}<p class="ribbon-tool-error" role="alert">{error}</p>{/if}
-    <div class="ribbon-tool-footer"><span>Stage to review. Write saves now.</span><div><Button variant="ghost" disabled={working} onclick={() => close('format')}>Cancel</Button><Button id="ribbon-format-stage" variant="secondary" disabled={working || !selected || !valuePattern.trim()} onclick={() => perform('format-values', {field:destinationField, pattern:valuePattern, mode:'stage'})}>Stage</Button><Button id="ribbon-format-write" disabled={working || !selected || !valuePattern.trim()} onclick={() => perform('format-values', {field:destinationField, pattern:valuePattern, mode:'write'})}>Write</Button></div></div>
-  </div>
-</ControllerDialog>
+<FormatFieldsDialog {selected} {busy} />
