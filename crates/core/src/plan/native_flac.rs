@@ -59,8 +59,8 @@ impl IoPhase {
         }
         let limits = Budget::process().limits();
         // Queue memory is bounded by the existing expensive-job ceiling. A
-        // departure ahead renews the 500 ms stall allowance; later arrivals
-        // cannot barge or extend an older request's wait.
+        // departure or completed admitted work ahead renews the 500 ms idle
+        // allowance; later arrivals cannot barge or prolong an older wait.
         let permit = IO_ADMISSION
             .enter(io_capacity(limits), limits.jobs, cancel)
             .map_err(|failure| match failure.cause {

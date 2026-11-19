@@ -1,9 +1,11 @@
 //! Bounded FIFO admission for the executor's private synchronous I/O phase.
 //!
-//! A queued request gets 500 ms without advancing toward the front. Only the
-//! departure of a request ahead of it renews that allowance; later arrivals and
-//! unrelated activity cannot extend its wait. With at most `max_waiters`
-//! requests queued, admission remains bounded even when holders stop progressing.
+//! A queued request gets 500 ms without completed work by an admitted
+//! predecessor or advancement toward the front. Completed writes, copies,
+//! durable states and acknowledgements renew that allowance; starting work,
+//! later arrivals and unrelated activity do not. Queue size and each admitted
+//! operation's size/target-bounded work remain finite. Total queue latency is
+//! not fixed: slow operations may complete many steps before releasing a slot.
 use crate::resources::AdmissionError;
 use std::{
     collections::VecDeque,
@@ -36,6 +38,20 @@ pub(super) enum Stage {
     Native(crate::model::native_patch::Event),
     Checkpoint(crate::media_mutation::Phase, bool),
 }
+impl Stage {
+    fn completed_work(self) -> bool {
+        use crate::{media_mutation::Event as Media, model::native_patch::Event as Native};
+        matches!(
+            self,
+            Self::Media(Media::Synced(_) | Media::StateDurable(_) | Media::CopyFinished(_))
+                | Self::Native(Native::Verified)
+                | Self::Checkpoint(_, true)
+        ) || matches!(
+            self,
+            Self::Media(Media::Copied(_, bytes)) | Self::Native(Native::Written(bytes)) if bytes > 0
+        )
+    }
+}
 
 struct Holder {
     slot: usize,
@@ -50,7 +66,7 @@ struct RefusalContext {
     rank: Option<usize>,
     queued: usize,
     active: usize,
-    rank_idle: Option<Duration>,
+    progress_idle: Option<Duration>,
 }
 
 struct Waiter {
@@ -72,18 +88,19 @@ impl State {
             rank,
             queued: self.waiting.len(),
             active: self.active,
-            rank_idle: rank.map(|rank| now.saturating_duration_since(self.waiting[rank].advanced)),
+            progress_idle: rank
+                .map(|rank| now.saturating_duration_since(self.waiting[rank].advanced)),
         }
     }
     fn failure(&self, cause: Refusal, context: RefusalContext, now: Instant) -> Failure {
         use std::fmt::Write;
         let mut diagnostic = format!(
-            "reason={}; rank={:?}; queued={}; active={}; rank_idle_us={:?}; holders=[",
+            "reason={}; rank={:?}; queued={}; active={}; progress_idle_us={:?}; holders=[",
             context.reason,
             context.rank,
             context.queued,
             context.active,
-            context.rank_idle.map(|age| age.as_micros()),
+            context.progress_idle.map(|age| age.as_micros()),
         );
         for (index, holder) in self.holders.iter().enumerate() {
             if index != 0 {
@@ -126,6 +143,21 @@ impl State {
             stage: Stage::Work("admitted"),
         });
         slot
+    }
+    fn observe(&mut self, thread: std::thread::ThreadId, stage: Stage, now: Instant) -> bool {
+        if let Some(holder) = self.holders.iter_mut().rev().find(|h| h.thread == thread) {
+            holder.stage = stage;
+            holder.stage_started = now;
+            if stage.completed_work() {
+                // FIFO ensures every active holder precedes every queued
+                // request. Only actual completed work renews their allowance.
+                for waiter in &mut self.waiting {
+                    waiter.advanced = now;
+                }
+                return true;
+            }
+        }
+        false
     }
     fn enqueue(&mut self, maximum: usize, now: Instant) -> Result<u64, Refusal> {
         if self.waiting.len() >= maximum {
@@ -265,10 +297,9 @@ impl Gate {
     pub(super) fn stage(&self, stage: Stage) {
         let thread = std::thread::current().id();
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(holder) = state.holders.iter_mut().rev().find(|h| h.thread == thread) {
-            holder.stage = stage;
-            holder.stage_started = Instant::now();
-        }
+        state.observe(thread, stage, Instant::now());
+        // Progress cannot free a slot. Avoid waking every queued request on
+        // each copied buffer; admission/departure already notifies waiters.
     }
 }
 pub(super) struct Permit<'a>(&'a Gate, usize);
@@ -421,7 +452,7 @@ mod tests {
             assert!(failure
                 .diagnostic
                 .contains("reason=stalled; rank=Some(0); queued=1; active=1"));
-            assert!(failure.diagnostic.contains("rank_idle_us=Some(500000)"));
+            assert!(failure.diagnostic.contains("progress_idle_us=Some(500000)"));
             assert!(failure.diagnostic.contains("stage=Work(controlled sync)"));
             assert!(state.waiting.is_empty());
             assert_eq!(state.holders.len(), 1);
@@ -446,5 +477,162 @@ mod tests {
         assert_eq!(state.active, 0);
         assert!(state.holders.is_empty());
         assert!(state.waiting.is_empty());
+    }
+    #[test]
+    fn completed_predecessor_work_renews_stall_beyond_arrival_but_not_after_progress_stops() {
+        let now = Instant::now();
+        let mut state = state();
+        state.holder(now);
+        let ticket = state.enqueue(8, now).unwrap();
+        let thread = std::thread::current().id();
+        for millis in [400, 800] {
+            assert!(state.observe(
+                thread,
+                Stage::Media(crate::media_mutation::Event::Synced(
+                    crate::media_mutation::SyncKind::Directory,
+                )),
+                now + Duration::from_millis(millis),
+            ));
+            assert_eq!(
+                state.poll(ticket, 1, false, now + Duration::from_millis(millis + 100)),
+                Ok(false)
+            );
+        }
+        assert_eq!(
+            state.poll(ticket, 1, false, now + Duration::from_millis(1300)),
+            Err(Refusal::Resource(AdmissionError::Busy))
+        );
+        assert!(state.waiting.is_empty());
+    }
+    #[test]
+    fn only_positive_completed_events_from_an_active_holder_renew_waiters() {
+        use crate::media_mutation::{CopyKind, Event, Phase, SyncKind};
+        use crate::model::native_patch::Event as Native;
+        let now = Instant::now();
+        let thread = std::thread::current().id();
+        let mut state = state();
+        let ticket = state.enqueue(8, now).unwrap();
+        let completed = [
+            Stage::Media(Event::Synced(SyncKind::Directory)),
+            Stage::Media(Event::StateDurable(Phase::Prepared)),
+            Stage::Media(Event::Copied(CopyKind::Preimage, 1)),
+            Stage::Media(Event::CopyFinished(CopyKind::Preimage)),
+            Stage::Native(Native::Written(1)),
+            Stage::Native(Native::Verified),
+            Stage::Checkpoint(Phase::Prepared, true),
+        ];
+        for stage in completed {
+            assert!(stage.completed_work());
+            assert!(!state.observe(thread, stage, now + Duration::from_millis(450)));
+            assert_eq!(state.waiting[0].advanced, now);
+        }
+        state.holder(now);
+        for stage in [
+            Stage::Work("starting work"),
+            Stage::Media(Event::BeforeSync(SyncKind::Directory)),
+            Stage::Media(Event::CopyStarted(CopyKind::Preimage)),
+            Stage::Media(Event::Copied(CopyKind::Preimage, 0)),
+            Stage::Media(Event::BeforeCallback(Phase::Prepared)),
+            Stage::Native(Native::Written(0)),
+            Stage::Native(Native::ReadChunk),
+            Stage::Native(Native::Moved),
+            Stage::Native(Native::Scan),
+            Stage::Checkpoint(Phase::Prepared, false),
+        ] {
+            assert!(!stage.completed_work());
+            assert!(!state.observe(thread, stage, now + Duration::from_millis(450)));
+            assert_eq!(state.waiting[0].advanced, now);
+        }
+        assert_eq!(
+            state.poll(ticket, 1, false, now + STALL),
+            Err(Refusal::Resource(AdmissionError::Busy))
+        );
+    }
+    #[test]
+    fn cancellation_still_wins_after_completed_work_and_at_stall_deadline() {
+        let now = Instant::now();
+        let mut state = state();
+        state.holder(now);
+        let ticket = state.enqueue(8, now).unwrap();
+        assert!(state.observe(
+            std::thread::current().id(),
+            Stage::Checkpoint(crate::media_mutation::Phase::Prepared, true),
+            now + Duration::from_millis(400),
+        ));
+        assert_eq!(
+            state.poll(ticket, 1, true, now + Duration::from_millis(900)),
+            Err(Refusal::Cancelled)
+        );
+        assert!(state.waiting.is_empty());
+    }
+}
+
+// BEGIN completed-work regression
+#[cfg(test)]
+mod progress_regression {
+    use super::*;
+
+    #[test]
+    fn completed_work_keeps_a_queued_request_until_its_turn() {
+        let gate = Gate::new();
+        let cancel = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            // This permit is owned inside the scope closure so unwinding drops
+            // it before the scoped worker is joined, even if an assertion fails.
+            let holder = gate.enter(1, 8, &cancel).unwrap();
+            let (finished, result) = std::sync::mpsc::channel();
+            let worker_gate = &gate;
+            let worker_cancel = &cancel;
+            let worker = scope.spawn(move || {
+                let outcome = worker_gate
+                    .enter(1, 8, worker_cancel)
+                    .map(drop)
+                    .map_err(|failure| format!("{:?}: {}", failure.cause, failure.diagnostic));
+                let _ = finished.send(outcome);
+            });
+            let end = Instant::now() + Duration::from_secs(2);
+            let mut state = gate.state.lock().unwrap();
+            while state.waiting.is_empty() && Instant::now() < end {
+                state = gate.changed.wait_timeout(state, CANCEL_POLL).unwrap().0;
+            }
+            let arrived = state.waiting.len() == 1;
+            drop(state);
+            let mut early = None;
+            if arrived {
+                for _ in 0..5 {
+                    std::thread::sleep(Duration::from_millis(150));
+                    gate.stage(Stage::Media(crate::media_mutation::Event::Synced(
+                        crate::media_mutation::SyncKind::Directory,
+                    )));
+                    if let Ok(outcome) = result.try_recv() {
+                        early = Some(outcome);
+                        break;
+                    }
+                }
+            }
+            drop(holder);
+            let returned_early = early.is_some();
+            let outcome = early.unwrap_or_else(|| {
+                result
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("queued worker must finish after holder release")
+            });
+            cancel.store(true, Ordering::SeqCst);
+            gate.changed.notify_all();
+            worker.join().unwrap();
+            assert!(
+                arrived,
+                "queued request must reach the controlled rendezvous"
+            );
+            assert!(
+                outcome.is_ok(),
+                "completed work did not preserve the queued request: {outcome:?}"
+            );
+            assert!(!returned_early, "queued work entered before holder release");
+            let state = gate.state.lock().unwrap();
+            assert_eq!(state.active, 0);
+            assert!(state.waiting.is_empty());
+            assert!(state.holders.is_empty());
+        });
     }
 }

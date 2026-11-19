@@ -50,10 +50,46 @@ jobs:
           grep -F 'test result: FAILED.' "$evidence_dir/result.log"
           grep -E 'no-effect admission refusal must not require file recovery:.*Undo rollback material missing' "$evidence_dir/result.log"
           echo "Confirmed regression fails on the original no-effect rollback error"
+      - name: Prove completed-work regression detects premature queue expiry
+        if: matrix.profile == 'normal'
+        run: |
+          set -euo pipefail
+          source_path=crates/core/src/plan/native_admission.rs
+          evidence_dir="$(mktemp -d "${TMPDIR:-/tmp}/tagnetic-native-progress-red.XXXXXX")"
+          cp "$source_path" "$evidence_dir/candidate.rs"
+          cleanup() {
+            cp "$evidence_dir/candidate.rs" "$source_path"
+            rm -rf -- "$evidence_dir"
+          }
+          trap cleanup EXIT
+          baseline=efec0533988e020cf4f34928455ecfd1ec8399ab
+          git fetch --no-tags --depth=1 origin "$baseline"
+          git show "$baseline:$source_path" > "$evidence_dir/baseline.rs"
+          python3 - "$source_path" "$evidence_dir" <<'PY'
+          from pathlib import Path
+          import sys
+          source, evidence = Path(sys.argv[1]), Path(sys.argv[2])
+          candidate = (evidence / 'candidate.rs').read_text()
+          marker = '// BEGIN completed-work regression'
+          assert candidate.count(marker) == 1, 'expected one complete regression module'
+          source.write_text((evidence / 'baseline.rs').read_text() + '\n' + candidate[candidate.index(marker):])
+          PY
+          if cargo test --locked -p tagrex-core --lib progress_regression::completed_work_keeps_a_queued_request_until_its_turn -- --nocapture > "$evidence_dir/result.log" 2>&1; then
+            cat "$evidence_dir/result.log"
+            echo "Regression unexpectedly passed against rank-only queue progress" >&2
+            exit 1
+          fi
+          cat "$evidence_dir/result.log"
+          grep -F 'test result: FAILED.' "$evidence_dir/result.log"
+          grep -F 'completed work did not preserve the queued request' "$evidence_dir/result.log"
+          echo "Confirmed completed-work regression fails against the old queue policy"
       - name: Build focused fixture
         run: cargo test --locked -p tagrex-commands --test native_policy_admission --no-run
-      - name: Deterministic FIFO and bounded stall rules
-        run: cargo test --locked -p tagrex-core --lib plan::native_flac::admission::tests -- --nocapture
+      - name: Focused native lint
+        run: cargo clippy --locked -p tagrex-core -p tagrex-commands --all-targets -- -D warnings
+      - name: FIFO completion progress and bounded stall rules
+        run: |
+          cargo test --locked -p tagrex-core --lib plan::native_flac::admission:: -- --nocapture
       - name: Repeated concurrent Apply Undo Redo
         env:
           PROBE_PROFILE: ${{ matrix.profile }}
@@ -89,7 +125,9 @@ jobs:
           fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
           try:
               block = bytes(1024 * 1024)
-              end = time.monotonic() + 120
+              # Keep pressure active for all 25 trials even when fair queued
+              # work legitimately takes longer. Parent cleanup stops it early.
+              end = time.monotonic() + 600
               index = 0
               while time.monotonic() < end:
                   os.pwrite(fd, block, (index % 64) * len(block))

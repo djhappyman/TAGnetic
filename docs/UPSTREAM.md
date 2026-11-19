@@ -255,18 +255,29 @@ phases while a single-CPU waiter expired, demonstrating starvation; the disk
 profile also recorded 352 ms completed phases. The candidate replaces polling
 competition with FIFO admission, preserving the derived two active slots and
 all component byte/job ceilings. At most eight requests wait, derived from the
-existing process job limit. The queue's 500 ms allowance measures no advancement
-toward the front; only departure of a predecessor renews it. Later arrivals and
-departures behind a waiter cannot prolong its wait. Total queued time can thus
-exceed 500 ms while earlier work advances. Capture, native-resource and journal
-resource waits retain their existing deadlines; public Store/Budget admission
+existing process job limit. The initial rank-only queue still expired during
+progressing I/O: `efec0533` captured active phases aged 500–866 ms whose last
+directory/manifest sync or journal-confirmation boundary was only 5–36 ms old.
+The revised 500 ms allowance measures no completed admitted work or departure
+ahead. Successful sync/copy/native-write/verification/checkpoint completions
+renew it; before-work hooks, scans, reads, work labels and timers do not. Only
+admitted holders can report this progress, and FIFO makes them predecessors of
+every queued request. Later arrivals and departures behind a waiter cannot
+prolong its wait. Source size, target and copy limits bound the work; queue size
+is bounded, but there is no fixed total wait or wall-clock completion promise.
+A single stalled syscall exceeding 500 ms can still cause refusal. Capture,
+native-resource and journal resource waits retain their existing deadlines;
+public Store/Budget admission
 remains nonblocking. Slow or stalled holders can still cause an explicit refusal.
 
 Undo acquires private admission before recording an attempted file, and rollback
 ignores an unchanged Apply generation when Undo never durably began. Controlled
 disposable-fixture regressions cover gate denial, pre-begin failure, unchanged
-media/history and successful retry. Deterministic queue rules and the unchanged
-eight-session Apply/Undo/Redo canary accompany the fix. Source review is complete;
-hosted red/green regression, pressure profiles and full current-head platform
+media/history and successful retry. The focused workflow also proves a queued
+request must survive repeated completed work for more than 500 ms total, using
+the prior queue implementation as the failing baseline. Deterministic queue
+rules and the unchanged eight-session Apply/Undo/Redo canary accompany the fix.
+Source review is complete; hosted red/green regression, pressure profiles and
+full current-head platform
 gates remain required. This candidate is not yet a published release or an
 accepted upstream contribution.
