@@ -1294,7 +1294,7 @@ fn perform_batch(
         };
         planned.push((parent, name, target.clone(), before));
     }
-    let mut proofs = Vec::with_capacity(planned.len());
+    let mut proofs = Vec::<Option<Proof>>::with_capacity(planned.len());
     for (_, _, _, before) in &mut planned {
         let proof = before.take().map(Proof::read).transpose()?;
         if let Some(proof) = &proof {

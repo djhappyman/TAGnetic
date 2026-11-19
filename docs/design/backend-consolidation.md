@@ -74,3 +74,13 @@ policy checks cover both peer isolation and owning-App settings invalidation.
 The first hosted candidate `98f6951f` failed formatting. Its hosted formatter
 patch was downloaded and applied without running a local formatter; further
 combined checks remain pending on the next head.
+
+## Hosted compile follow-up
+
+Head `736ddb61` reached Windows Clippy and exposed an unnecessary tail `return`
+in the Windows fingerprint branch. macOS CI and both native FAT32/exFAT output
+jobs exposed unconstrained type inference for the optional original-proof vector.
+Remove the redundant return and explicitly type `Vec<Option<Proof>>`; retain the
+whole-batch duplicate-identity checks and every runtime assertion. These are
+source corrections awaiting the next hosted execution, not test passes. Logs
+are retained in the consolidation checkpoint's `evidence/736ddb61/` directory.

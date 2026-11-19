@@ -60,7 +60,7 @@ impl Fingerprint {
                 }
                 let basic = basic.assume_init();
                 let identity = identity.assume_init();
-                return Some(Self {
+                Some(Self {
                     len: metadata.len(),
                     modified: metadata.modified().ok()?,
                     identity: (
@@ -69,7 +69,7 @@ impl Fingerprint {
                         basic.ChangeTime,
                     ),
                     policy_revision,
-                });
+                })
             }
         }
         #[cfg(not(windows))]
