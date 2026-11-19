@@ -521,7 +521,7 @@ fn a_batch_is_journaled_before_its_first_write() {
 /// #659: a batch the process never finished is still there at the next start,
 /// marked, and undoing it puts back what it reached and skips what it did not.
 #[test]
-fn an_interrupted_batch_can_be_undone_after_a_restart() {
+fn legacy_interrupted_moves_without_identity_refuse_automatic_recovery() {
     let dir = TempDir::new("interrupted");
     let reached = dir.flac("reached.flac");
     let moved = dir.path().join("moved.flac");
@@ -551,6 +551,7 @@ fn an_interrupted_batch_can_be_undone_after_a_restart() {
     SqliteJournal::open(&dir.db())
         .unwrap()
         .record(&AppliedBatch {
+            native_tags: false,
             id: BatchId(0),
             description: plan.description.clone(),
             message: None,
@@ -558,7 +559,9 @@ fn an_interrupted_batch_can_be_undone_after_a_restart() {
             plan,
             created_dirs: Vec::new(),
             removed_dirs: Vec::new(),
-            allowed_roots: roots(dir.path()),
+            // Match the canonical roots persisted by public Apply; retain the
+            // raw caller path below to exercise public Undo normalization.
+            allowed_roots: vec![std::fs::canonicalize(dir.path()).unwrap()],
             copy_stamps: Vec::new(),
             applied_values: Vec::new(),
             block_fingerprints: Vec::new(),
@@ -571,27 +574,24 @@ fn an_interrupted_batch_can_be_undone_after_a_restart() {
     let batches = journal.batches().unwrap();
     assert_eq!(batches.len(), 1);
     assert!(batches[0].interrupted);
-    // An initial interrupted record has intent, but no observed outcome. The
-    // reached field is ambiguous until explicitly restored; no transfers run.
-    assert!(matches!(
-        Executor::undo(&mut journal, batches[0].id, &roots(dir.path())),
-        Err(tagrex_core::plan::PlanError::ChangedSinceApplied(_))
-    ));
-    assert!(moved.exists() && !reached.exists());
-    let mut file = TagEngine::read(&moved).unwrap();
-    file.tags.remove(&TagField::Artist);
-    TagEngine::write(&file).unwrap();
-    Executor::undo(&mut journal, batches[0].id, &roots(dir.path())).unwrap();
-
-    assert!(reached.exists() && !moved.exists());
-    assert!(unreached.exists() && !never_moved.exists());
-    for path in [&reached, &unreached] {
-        assert!(!TagEngine::read(path)
-            .unwrap()
-            .tags
-            .contains_key(&TagField::Artist));
+    // Legacy intent lacks native move ownership. Even manually restoring its
+    // field cannot prove that a named output is the original transferred inode.
+    for restored in [false, true] {
+        if restored {
+            let mut file = TagEngine::read(&moved).unwrap();
+            file.tags.remove(&TagField::Artist);
+            TagEngine::write(&file).unwrap();
+        }
+        let before = std::fs::read(&moved).unwrap();
+        assert!(matches!(
+            Executor::undo(&mut journal, batches[0].id, &roots(dir.path())),
+            Err(tagrex_core::plan::PlanError::Stale(_))
+        ));
+        assert_eq!(std::fs::read(&moved).unwrap(), before);
+        assert!(moved.exists() && !reached.exists());
+        assert!(unreached.exists() && !never_moved.exists());
+        assert_eq!(journal.batches().unwrap().len(), 1);
     }
-    assert!(journal.batches().unwrap().is_empty());
 }
 
 /// #666: the revision each file was in survives a restart, recorded once even
@@ -610,6 +610,7 @@ fn the_id3v2_revisions_survive_a_restart() {
         },
     ];
     let mut batch = AppliedBatch {
+        native_tags: false,
         id: BatchId(0),
         description: "edit".to_string(),
         message: None,
@@ -920,11 +921,37 @@ fn image_pool_checks_bytes_on_hash_collision_and_keeps_other_batch_references() 
 }
 
 /// Stop at the transaction boundary without running Apply's error rollback.
-/// Unwinding here models process termination; reopening SQLite reads only the
-/// durable write-ahead record, rather than the in-memory completed batch.
+/// Exit the disposable child without unwinding, so no automatic rollback runs.
+/// Reopening SQLite reads the actual durable write-ahead record.
 struct StopBeforeFinish(SqliteJournal);
 
 impl UndoJournal for StopBeforeFinish {
+    fn supports_copy_checkpoints(&self) -> bool {
+        self.0.supports_copy_checkpoints()
+    }
+    fn checkpoint_copy(
+        &mut self,
+        id: BatchId,
+        stamp: &tagrex_core::journal::CopyStamp,
+        previous: Option<&tagrex_core::journal::CopyStamp>,
+    ) -> Result<(), tagrex_core::journal::JournalError> {
+        self.0.checkpoint_copy(id, stamp, previous)
+    }
+
+    fn prepare_move_stage(
+        &mut self,
+        id: BatchId,
+        stage: &tagrex_core::journal::MoveStage,
+    ) -> Result<(), tagrex_core::journal::JournalError> {
+        self.0.prepare_move_stage(id, stage)
+    }
+    fn move_stages(
+        &self,
+        id: BatchId,
+    ) -> Result<Vec<tagrex_core::journal::MoveStage>, tagrex_core::journal::JournalError> {
+        self.0.move_stages(id)
+    }
+
     fn record(
         &mut self,
         batch: &AppliedBatch,
@@ -939,24 +966,141 @@ impl UndoJournal for StopBeforeFinish {
         _: BatchId,
         _: &AppliedBatch,
     ) -> Result<(), tagrex_core::journal::JournalError> {
-        panic!("simulated termination before finish")
+        std::process::exit(73)
     }
     fn rollback(&mut self, id: BatchId) -> Result<(), tagrex_core::journal::JournalError> {
         self.0.rollback(id)
     }
 }
 
+// A separate disposable SQLite database transports plan changes using the real
+// journal codec, including cover/block bytes. Pruning is Apply-only and therefore
+// travels separately. The seed database is never execution history.
+fn exit_child_at(dir: &TempDir, plan: &ChangePlan, progress_done: Option<usize>) {
+    let seed_dir = dir.path().join("crash-plan-seed");
+    std::fs::create_dir(&seed_dir).unwrap();
+    let mut seed = SqliteJournal::open(&seed_dir.join("plan.sqlite")).unwrap();
+    seed.record(&AppliedBatch {
+        native_tags: false,
+        id: BatchId(0),
+        description: plan.description.clone(),
+        message: plan.message.clone(),
+        applied_at: 0,
+        plan: plan.clone(),
+        allowed_roots: roots(dir.path()),
+        created_dirs: Vec::new(),
+        removed_dirs: Vec::new(),
+        copy_stamps: Vec::new(),
+        applied_values: Vec::new(),
+        block_fingerprints: Vec::new(),
+        interrupted: true,
+        id3v2_revisions: Vec::new(),
+    })
+    .unwrap();
+    drop(seed);
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "sqlite_interruption_process_child",
+            "--nocapture",
+        ])
+        .env("TAGREX_SQLITE_CRASH_ROOT", dir.path())
+        .env(
+            "TAGREX_SQLITE_CRASH_PRUNE",
+            plan.prune_empty_dirs.to_string(),
+        )
+        .env(
+            "TAGREX_SQLITE_CRASH_DONE",
+            progress_done.map_or_else(|| "finish".into(), |done| done.to_string()),
+        );
+    let log_path = seed_dir.join("child.log");
+    let log = std::fs::File::create(&log_path).unwrap();
+    let mut child = command
+        .stdout(log.try_clone().unwrap())
+        .stderr(log)
+        .spawn()
+        .unwrap();
+    drop(command); // release parent log handles before Windows fixture cleanup
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < std::time::Duration::from_secs(30) => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            result => {
+                let _ = child.kill();
+                let reaped = child.wait();
+                panic!(
+                    "child timed out or wait failed: {result:?}; reaped={reaped:?}\n{}",
+                    String::from_utf8_lossy(&std::fs::read(&log_path).unwrap())
+                );
+            }
+        }
+    };
+    assert_eq!(
+        status.code(),
+        Some(73),
+        "child missed the requested durable boundary: {}",
+        String::from_utf8_lossy(&std::fs::read(&log_path).unwrap())
+    );
+    std::fs::remove_dir_all(seed_dir).unwrap();
+}
+
+/// Dispatch only: the parent tests assert exit73 and the reopened recovery state.
+#[test]
+fn sqlite_interruption_process_child() {
+    let Some(root) = std::env::var_os("TAGREX_SQLITE_CRASH_ROOT") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let seed = SqliteJournal::open(&root.join("crash-plan-seed/plan.sqlite")).unwrap();
+    let mut plan = seed.batches().unwrap().remove(0).plan;
+    plan.prune_empty_dirs = std::env::var("TAGREX_SQLITE_CRASH_PRUNE")
+        .unwrap()
+        .parse()
+        .unwrap();
+    drop(seed);
+    let boundary = std::env::var("TAGREX_SQLITE_CRASH_DONE").unwrap();
+    let mut journal = SqliteJournal::open(&root.join("journal.sqlite")).unwrap();
+    if boundary == "finish" {
+        Executor::apply(&plan, &mut StopBeforeFinish(journal), &roots(&root)).unwrap();
+    } else {
+        let done: usize = boundary.parse().unwrap();
+        Executor::apply_with(
+            &plan,
+            &mut journal,
+            &roots(&root),
+            &mut |progress| {
+                if progress.done == done {
+                    std::process::exit(73);
+                }
+            },
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+    }
+    panic!("child did not reach its requested interruption boundary");
+}
+
 fn interrupt_before_finish(dir: &TempDir, plan: &ChangePlan) -> AppliedBatch {
-    let mut journal = StopBeforeFinish(SqliteJournal::open(&dir.db()).unwrap());
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        Executor::apply(plan, &mut journal, &roots(dir.path())).unwrap();
-    }))
-    .is_err());
-    drop(journal);
+    exit_child_at(dir, plan, None);
+    // Explicit historical/missing-proof fixture: new execution checkpoints
+    // completed copies before finish, unlike the older journal being tested.
+    let conn = rusqlite::Connection::open(dir.db()).unwrap();
+    conn.execute("DELETE FROM copy_stamps WHERE moved=0", [])
+        .unwrap();
+    drop(conn);
     let reopened = SqliteJournal::open(&dir.db()).unwrap();
     let batch = reopened.batches().unwrap().remove(0);
     assert!(batch.interrupted);
-    assert!(batch.copy_stamps.is_empty());
+    // This historical fixture keeps move identities, but deliberately drops
+    // completed-copy outcomes to exercise unproved older journal history.
+    assert!(batch
+        .copy_stamps
+        .iter()
+        .all(|stamp| stamp.moved && stamp.identity.is_some() && stamp.sha256.is_none()));
     batch
 }
 
@@ -1024,27 +1168,42 @@ fn interrupted_unstamped_copies_and_sidecars_are_never_deleted() {
 }
 
 #[test]
-fn completed_legacy_unstamped_copies_remain_undoable() {
-    let dir = TempDir::new("legacy-copy");
-    let source = dir.flac("source.flac");
-    let target = dir.path().join("target.flac");
-    let plan = ChangePlan {
-        changes: vec![FileChange {
-            path: source.clone(),
-            rename_to: Some(target.clone()),
-            copy: true,
-            ..FileChange::default()
-        }],
-        ..ChangePlan::default()
-    };
-    let mut batch = interrupt_before_finish(&dir, &plan);
-    batch.interrupted = false;
-    let mut journal = SqliteJournal::open(&dir.db()).unwrap();
-    journal.finish(batch.id, &batch).unwrap();
-    drop(journal);
-    let mut journal = SqliteJournal::open(&dir.db()).unwrap();
-    Executor::undo(&mut journal, batch.id, &roots(dir.path())).unwrap();
-    assert!(source.exists() && !target.exists());
+fn completed_legacy_unstamped_copies_refuse_unproved_deletion() {
+    for weak_stamp in [false, true] {
+        let dir = TempDir::new(if weak_stamp {
+            "legacy-weak-copy"
+        } else {
+            "legacy-copy"
+        });
+        let source = dir.flac("source.flac");
+        let target = dir.path().join("target.flac");
+        let plan = ChangePlan {
+            changes: vec![FileChange {
+                path: source.clone(),
+                rename_to: Some(target.clone()),
+                copy: true,
+                ..FileChange::default()
+            }],
+            ..ChangePlan::default()
+        };
+        let mut batch = interrupt_before_finish(&dir, &plan);
+        batch.interrupted = false;
+        if weak_stamp {
+            let mut stamp = CopyStamp::of(&target).unwrap();
+            stamp.sha256 = None;
+            batch.copy_stamps.push(stamp);
+        }
+        let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+        journal.finish(batch.id, &batch).unwrap();
+        drop(journal);
+        let mut journal = SqliteJournal::open(&dir.db()).unwrap();
+        assert!(matches!(
+            Executor::undo(&mut journal, batch.id, &roots(dir.path())),
+            Err(tagrex_core::plan::PlanError::Stale(_))
+        ));
+        assert!(source.exists() && target.exists());
+        assert!(journal.batch(batch.id).unwrap().is_some());
+    }
 }
 
 #[test]
@@ -1175,7 +1334,6 @@ fn interrupted_missing_field_outcomes_refuse_later_edits_in_every_mode() {
 
 #[test]
 fn interrupted_pruning_restores_authorized_source_parents_and_sidecars() {
-    use std::sync::atomic::AtomicBool;
     for stop_before_transfer in [false, true] {
         let dir = TempDir::new("prune-recovery");
         let parent = dir.path().join("artist/album");
@@ -1198,23 +1356,7 @@ fn interrupted_pruning_restores_authorized_source_parents_and_sidecars() {
             ..ChangePlan::default()
         };
         let batch = if stop_before_transfer {
-            let mut journal = SqliteJournal::open(&dir.db()).unwrap();
-            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                Executor::apply_with(
-                    &plan,
-                    &mut journal,
-                    &roots(dir.path()),
-                    &mut |progress| {
-                        if progress.done == 1 {
-                            panic!("stop before first transfer");
-                        }
-                    },
-                    &AtomicBool::new(false),
-                )
-                .unwrap();
-            }))
-            .is_err());
-            drop(journal);
+            exit_child_at(&dir, &plan, Some(1));
             SqliteJournal::open(&dir.db())
                 .unwrap()
                 .batches()
@@ -1336,7 +1478,6 @@ fn later_cover_sets_survive_undo_refusal_and_allow_retry() {
 
 #[test]
 fn interrupted_field_recovery_at_each_tag_write_boundary() {
-    use std::sync::atomic::AtomicBool;
     use tagrex_core::plan::PlanError;
     for completed_files in 0..=2 {
         let dir = TempDir::new("tag-write-boundary");
@@ -1352,23 +1493,7 @@ fn interrupted_field_recovery_at_each_tag_write_boundary() {
                 .collect(),
             ..ChangePlan::default()
         };
-        let mut journal = SqliteJournal::open(&dir.db()).unwrap();
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Executor::apply_with(
-                &plan,
-                &mut journal,
-                &roots(dir.path()),
-                &mut |progress| {
-                    if progress.done == 2 + completed_files {
-                        panic!("simulated termination at tag boundary");
-                    }
-                },
-                &AtomicBool::new(false),
-            )
-            .unwrap();
-        }))
-        .is_err());
-        drop(journal);
+        exit_child_at(&dir, &plan, Some(2 + completed_files));
         let mut journal = SqliteJournal::open(&dir.db()).unwrap();
         let id = journal.batches().unwrap()[0].id;
         let after: Vec<_> = tracks
@@ -1404,7 +1529,6 @@ fn interrupted_field_recovery_at_each_tag_write_boundary() {
 
 #[test]
 fn interrupted_move_recovers_after_each_pruned_parent() {
-    use std::sync::atomic::AtomicBool;
     for pruned in 0..=3 {
         let dir = TempDir::new("pruning-boundary");
         let parents = [
@@ -1429,23 +1553,7 @@ fn interrupted_move_recovers_after_each_pruned_parent() {
             }],
             ..ChangePlan::default()
         };
-        let mut journal = SqliteJournal::open(&dir.db()).unwrap();
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Executor::apply_with(
-                &plan,
-                &mut journal,
-                &roots(dir.path()),
-                &mut |progress| {
-                    if progress.done == 1 {
-                        panic!("stop after initial record");
-                    }
-                },
-                &AtomicBool::new(false),
-            )
-            .unwrap();
-        }))
-        .is_err());
-        drop(journal);
+        exit_child_at(&dir, &plan, Some(1));
         // Deterministic filesystem states at the three deletion boundaries,
         // backed by the real production write-ahead record.
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();

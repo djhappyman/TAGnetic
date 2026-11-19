@@ -8,7 +8,7 @@
 //! of plans. **No module writes tags or renames files directly; all writes go
 //! through [`Executor`].** This is an invariant, not a preference.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,7 +17,7 @@ use thiserror::Error;
 
 use crate::journal::{
     AppliedBatch, AppliedValue, BatchId, BlockFingerprint, CopyStamp, FileRevision, JournalError,
-    UndoJournal,
+    MoveStage, NativeIdentity, UndoJournal,
 };
 use crate::model::{
     is_storable_custom_name_at, CoverArt, Id3v2Revision, TagBlockContent, TagBlockKind, TagEngine,
@@ -207,6 +207,24 @@ pub trait PlanSource {
 /// both.
 pub struct Executor;
 
+#[cfg(target_os = "linux")]
+mod native_flac;
+#[path = "plan_paths.rs"]
+mod pinned_paths;
+
+#[cfg(test)]
+#[path = "plan_copy_removal_tests.rs"]
+mod copy_removal_tests;
+#[cfg(test)]
+#[path = "plan_descriptor_io_tests.rs"]
+mod descriptor_io_tests;
+#[cfg(test)]
+#[path = "plan_move_metrics.rs"]
+pub(crate) mod move_metrics;
+#[cfg(test)]
+#[path = "plan_move_staging_tests.rs"]
+mod move_staging_tests;
+
 impl Executor {
     /// Apply a plan's tag changes and renames to disk, then record the batch
     /// so it can be rolled back.
@@ -252,7 +270,49 @@ impl Executor {
         progress: &mut dyn FnMut(&ApplyProgress),
         cancel: &AtomicBool,
     ) -> Result<AppliedBatch, PlanError> {
+        if crate::model::recovery_active() {
+            return Err(JournalError::NotRollbackable(
+                "new user operations are refused during exact rollback".into(),
+            )
+            .into());
+        }
+        #[cfg(target_os = "linux")]
+        if native_flac::private_phase_active() {
+            return Err(JournalError::NotRollbackable(
+                "native IO reentry is refused before callbacks".into(),
+            )
+            .into());
+        }
+        let _policy = crate::model::OperationPolicy::enter().ok_or_else(policy_changed)?;
+        let rollback_policy = crate::model::RecoveryPolicy::capture().ok_or_else(policy_changed)?;
+        ensure_operation_policy()?;
+        ensure_unicode_plan(plan, allowed_roots)?;
+        if plan.changes.iter().any(|change| {
+            change.copy
+                && (effective_rename(change).is_some() || !change.sidecar_renames.is_empty())
+        }) && !journal.supports_copy_checkpoints()
+        {
+            return Err(JournalError::NotRollbackable(
+                "journal does not support completed-copy checkpoints".into(),
+            )
+            .into());
+        }
+        ensure_operation_policy()?;
         let roots = canonical_roots(allowed_roots)?;
+        let _paths = pinned_paths::Scope::enter(&roots, operation_paths(plan, &[]))
+            .map_err(PlanError::Io)?;
+
+        // Keep native move identities from before any public callback. A later
+        // row's preflight callback cannot endorse a replacement of an earlier row.
+        let move_proofs = capture_move_stamps(plan, cancel)?;
+        #[cfg(target_os = "linux")]
+        let native_capture = if journal.native_tags().is_some() {
+            native_flac::capture(plan, &roots, cancel)?
+        } else {
+            None
+        };
+
+        ensure_operation_policy()?;
 
         // Pre-flight: validate the WHOLE plan before touching disk. Rename
         // targets are collected so two files can't be planned onto the same
@@ -266,12 +326,16 @@ impl Executor {
             if cancel.load(Ordering::SeqCst) {
                 return Err(PlanError::Cancelled);
             }
+            ensure_within_roots(&change.path, &roots)?;
+            let _step = pinned_paths::Step::enter(std::iter::once(change.path.clone()))
+                .map_err(PlanError::Io)?;
             progress(&ApplyProgress {
                 done: index,
                 total,
                 path: change.path.clone(),
                 completed: None,
             });
+            ensure_operation_policy()?;
             ensure_within_roots(&change.path, &roots)?;
             ensure_not_stale(change)?;
             ensure_storable_custom_names(change)?;
@@ -297,6 +361,13 @@ impl Executor {
             }
         }
 
+        #[cfg(target_os = "linux")]
+        if let Some(captured) = &native_capture {
+            native_flac::revalidate(plan, captured, cancel)?;
+        }
+
+        ensure_operation_policy()?;
+
         // Everything below touches disk. A failure part-way must not leave the
         // library half-applied with nothing in the journal for Undo to find
         // (#441), so what was done is tracked and put back before the error goes
@@ -307,6 +378,7 @@ impl Executor {
         // process stop part-way, the next start finds it there to undo. A
         // journal that cannot record it means nothing is written at all.
         let mut batch = AppliedBatch {
+            native_tags: false,
             // Placeholder: the journal assigns the real id on record so ids
             // stay unique across restarts.
             id: BatchId(0),
@@ -324,62 +396,116 @@ impl Executor {
                 Vec::new()
             },
             allowed_roots: roots.clone(),
-            copy_stamps: Vec::new(),
+            copy_stamps: move_proofs,
             applied_values: Vec::new(),
             block_fingerprints: capture_block_fingerprints(plan)?,
             interrupted: true,
             id3v2_revisions: id3v2_revisions(plan),
         };
+        #[cfg(target_os = "linux")]
+        if let Some(captured) = native_capture {
+            let driver = journal.native_tags().ok_or_else(|| {
+                JournalError::NotRollbackable("native journal capability disappeared".into())
+            })?;
+            ensure_operation_policy()?;
+            return native_flac::apply(batch, captured, driver, progress, cancel);
+        }
+        let mut move_context = MoveContext::compile(BatchId(0), plan, &batch.copy_stamps, &roots)?;
+        ensure_operation_policy()?;
         batch.id = journal.record(&batch)?;
+        move_context.id = batch.id;
+        let _move_context = MoveContextScope::activate(move_context);
 
         let mut written = Written::new(plan.changes.len());
+        written.copy_stamps.extend(
+            batch
+                .copy_stamps
+                .iter()
+                .map(|stamp| (stamp.path.clone(), stamp.clone())),
+        );
+        written.block_baselines.extend(
+            batch
+                .block_fingerprints
+                .iter()
+                .map(|item| (item.path.clone(), item.before.clone())),
+        );
         written.revisions.clone_from(&batch.id3v2_revisions);
         let mut steps = Steps::new(total, progress, cancel);
         steps.done = plan.changes.len();
-        let removed_dirs = match Self::write_phase(
-            plan,
-            &roots,
-            &batch.removed_dirs,
-            &mut batch.block_fingerprints,
-            &mut written,
-            &mut steps,
-        ) {
-            Ok(removed_dirs) => removed_dirs,
-            Err(error) => {
-                let error = written.roll_back_after(plan, &[], error);
-                if !matches!(error, PlanError::RollbackIncomplete { .. }) {
-                    let _ = journal.rollback(batch.id);
-                } else {
-                    batch.created_dirs.clone_from(&written.created_dirs);
-                    batch.applied_values = merge_applied_values(
-                        &written.applied_values,
-                        applied_values(plan, &written),
-                    );
-                    batch.copy_stamps = copy_stamps(plan);
-                    let _ = journal.retain_interrupted(batch.id, &batch);
-                }
-                return Err(error);
+        let phase = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ensure_operation_policy()?;
+            Self::write_phase(
+                plan,
+                &roots,
+                &batch.removed_dirs,
+                &mut batch.block_fingerprints,
+                &mut written,
+                &mut steps,
+                journal,
+                batch.id,
+            )
+        }));
+        let removed_dirs = match phase {
+            Ok(Ok(removed_dirs)) => removed_dirs,
+            Ok(Err(error)) => {
+                return Err(rollback_failed_apply(
+                    plan,
+                    &mut batch,
+                    &mut written,
+                    journal,
+                    &rollback_policy,
+                    error,
+                    false,
+                ))
+            }
+            Err(payload) => {
+                let _ = rollback_failed_apply(
+                    plan,
+                    &mut batch,
+                    &mut written,
+                    journal,
+                    &rollback_policy,
+                    JournalError::Storage("Apply callback unwound".into()).into(),
+                    false,
+                );
+                std::panic::resume_unwind(payload)
             }
         };
         batch.created_dirs = std::mem::take(&mut written.created_dirs);
         batch.removed_dirs = removed_dirs;
-        batch.copy_stamps = copy_stamps(plan);
-        batch.applied_values =
-            merge_applied_values(&written.applied_values, applied_values(plan, &written));
+        batch.copy_stamps = written.copy_stamps.values().cloned().collect();
+        batch.applied_values = merge_applied_values(&written.applied_values, Vec::new());
         batch.interrupted = false;
-        if let Err(error) = journal.finish(batch.id, &batch) {
-            written.created_dirs.clone_from(&batch.created_dirs);
-            let error = written.roll_back_after(plan, &batch.removed_dirs, error.into());
-            if !matches!(error, PlanError::RollbackIncomplete { .. }) {
-                let _ = journal.rollback(batch.id);
-            } else {
-                batch.interrupted = true;
-                batch.applied_values =
-                    merge_applied_values(&batch.applied_values, applied_values(plan, &written));
-                batch.copy_stamps = copy_stamps(plan);
-                let _ = journal.retain_interrupted(batch.id, &batch);
+        let finish = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ensure_operation_policy()?;
+            journal.finish(batch.id, &batch)?;
+            ensure_operation_policy()
+        }));
+        match finish {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                return Err(rollback_failed_apply(
+                    plan,
+                    &mut batch,
+                    &mut written,
+                    journal,
+                    &rollback_policy,
+                    error,
+                    true,
+                ))
             }
-            return Err(error);
+            Err(payload) => {
+                let _ = rollback_failed_apply(
+                    plan,
+                    &mut batch,
+                    &mut written,
+                    journal,
+                    &rollback_policy,
+                    JournalError::Storage("Apply completion unwound".into()).into(),
+                    true,
+                );
+                std::panic::resume_unwind(payload)
+            }
         }
         Ok(batch)
     }
@@ -388,6 +514,7 @@ impl Executor {
     /// sidecars, then the tags of copies. Progress is recorded in `written` as it
     /// goes — before each step is attempted, so a step that fails half-way is
     /// still covered by the rollback. Returns the directories pruned afterwards.
+    #[allow(clippy::too_many_arguments)]
     fn write_phase(
         plan: &ChangePlan,
         roots: &[PathBuf],
@@ -395,7 +522,13 @@ impl Executor {
         block_fingerprints: &mut [BlockFingerprint],
         written: &mut Written,
         steps: &mut Steps,
+        journal: &mut dyn UndoJournal,
+        batch_id: BatchId,
     ) -> Result<Vec<PathBuf>, PlanError> {
+        let before_blocks: HashMap<_, _> = block_fingerprints
+            .iter()
+            .map(|item| (item.path.as_path(), item.before.as_slice()))
+            .collect();
         // Tags first, at each file's original path — but only for the changes
         // that move. A copy must not touch its source at all (#153), so its tag
         // changes wait and are written to the copy below.
@@ -403,25 +536,62 @@ impl Executor {
             if change.copy || !writes_in_place(change) {
                 continue;
             }
+            let _step = pinned_paths::Step::enter(std::iter::once(change.path.clone()))
+                .map_err(PlanError::Io)?;
             steps.begin(&change.path)?;
-            written.tag_steps[index] = 1;
-            write_tag_changes(&change.path, change, Direction::Apply)?;
-            written.tag_steps[index] = 2;
-            apply_cover_change(&change.path, change, Direction::Apply)?;
-            written.tag_steps[index] = 3;
-            write_blocks(&change.path, change, Direction::Apply)?;
+            with_bound_path(&change.path, true, |path| {
+                if let Some(target) = effective_rename(change) {
+                    if !written
+                        .copy_stamps
+                        .get(target)
+                        .is_some_and(|stamp| stamp.matches_identity(path))
+                    {
+                        return Err(PlanError::Stale(change.path.clone()));
+                    }
+                }
+                ensure_not_stale_at(change, path)?;
+                if let Some(before) = before_blocks.get(change.path.as_path()) {
+                    if file_fingerprint(path)?.as_slice() != *before {
+                        return Err(PlanError::Stale(change.path.clone()));
+                    }
+                }
+                written.tag_steps[index] = 1;
+                write_tag_changes(path, change, Direction::Apply)?;
+                written
+                    .applied_values
+                    .extend(applied_values_at(change, path));
+                written.tag_steps[index] = 2;
+                apply_cover_change(path, change, Direction::Apply)?;
+                if change.cover_change.is_some() {
+                    written.cover_outcomes.insert(
+                        change.path.clone(),
+                        cover_digest(&TagEngine::read_covers(path)?),
+                    );
+                }
+                written.tag_steps[index] = 3;
+                write_blocks(path, change, Direction::Apply)?;
+                if !change.block_changes.is_empty() {
+                    written
+                        .block_outcomes
+                        .insert(change.path.clone(), file_fingerprint(path)?);
+                }
+                Ok(())
+            })?;
             // Keep observations before progress can hand control to a caller or
             // a later step can make this path temporarily unreadable.
             written
                 .applied_values
                 .extend(applied_values_at(change, &change.path));
             steps.complete(&change.path, ApplyStep::Tags);
+            ensure_operation_policy()?;
         }
         // ...then the moves and copies, creating any folders the targets need.
         // Directories are created here rather than in the pre-flight so a
         // validation failure can't leave empty folders behind.
         for (index, change) in plan.changes.iter().enumerate() {
             if let Some(target) = effective_rename(change) {
+                let _step = pinned_paths::Step::enter([change.path.clone(), target.to_path_buf()])
+                    .map_err(PlanError::Io)?;
                 steps.begin(&change.path)?;
                 if let Some(parent) = target.parent() {
                     written.created_dirs.extend(create_dirs_recording(parent)?);
@@ -429,23 +599,93 @@ impl Executor {
                 // Checked before the transfer is recorded: a file found there is
                 // not this batch's, and rolling back must not move it (#605).
                 ensure_target_free(&change.path, target, change.copy)?;
-                written.transferred.push(index);
-                transfer(&change.path, target, change.copy)?;
+                if !change.copy
+                    && !written
+                        .copy_stamps
+                        .get(target)
+                        .is_some_and(|stamp| stamp.matches_identity(&change.path))
+                {
+                    return Err(PlanError::Stale(change.path.clone()));
+                }
+                let mut created = false;
+                let mut stamp = None;
+                let result = if change.copy {
+                    copy_file(&change.path, target, &mut created, &mut stamp)
+                } else {
+                    let proof = written
+                        .copy_stamps
+                        .get(target)
+                        .ok_or_else(|| PlanError::Stale(change.path.clone()))?;
+                    staged_move(journal, batch_id, proof, &change.path, target, &mut created)
+                };
+                if created {
+                    written.transferred.push(index);
+                }
+                if let Some(stamp) = stamp {
+                    written.copy_stamps.insert(target.to_path_buf(), stamp);
+                }
+                result?;
+                if change.copy {
+                    let stamp = written
+                        .copy_stamps
+                        .get(target)
+                        .ok_or_else(|| PlanError::Stale(target.to_path_buf()))?;
+                    journal.checkpoint_copy(batch_id, stamp, None)?;
+                    ensure_operation_policy()?;
+                }
                 steps.complete(&change.path, ApplyStep::Transfer);
+                ensure_operation_policy()?;
             }
         }
         // Sidecars follow their file, the same way (#58), after the main
         // transfers so their target directories already exist.
         for change in &plan.changes {
             for (from, to) in &change.sidecar_renames {
+                let _step = pinned_paths::Step::entries([from.clone(), to.clone()])
+                    .map_err(PlanError::Io)?;
+                steps.begin(from)?;
                 if let Some(parent) = to.parent() {
                     written.created_dirs.extend(create_dirs_recording(parent)?);
                 }
                 ensure_target_free(from, to, change.copy)?;
-                written
-                    .sidecars
-                    .push((from.clone(), to.clone(), change.copy));
-                transfer(from, to, change.copy)?;
+                if !change.copy
+                    && !written
+                        .copy_stamps
+                        .get(to)
+                        .is_some_and(|stamp| stamp.matches_identity(from))
+                {
+                    return Err(PlanError::Stale(from.clone()));
+                }
+                let mut created = false;
+                let mut stamp = None;
+                let result = if change.copy {
+                    copy_file(from, to, &mut created, &mut stamp)
+                } else {
+                    let proof = written
+                        .copy_stamps
+                        .get(to)
+                        .ok_or_else(|| PlanError::Stale(from.clone()))?;
+                    staged_move(journal, batch_id, proof, from, to, &mut created)
+                };
+                if created {
+                    written
+                        .sidecars
+                        .push((from.clone(), to.clone(), change.copy));
+                }
+                if let Some(stamp) = stamp {
+                    written.copy_stamps.insert(to.clone(), stamp);
+                }
+                result?;
+                if change.copy {
+                    let stamp = written
+                        .copy_stamps
+                        .get(to)
+                        .ok_or_else(|| PlanError::Stale(to.clone()))?;
+                    journal.checkpoint_copy(batch_id, stamp, None)?;
+                    ensure_operation_policy()?;
+                }
+                steps.complete(from, ApplyStep::Transfer);
+                ensure_operation_policy()?;
             }
         }
         // Now that the source is a copy of its own, the copy gets the tag
@@ -460,11 +700,54 @@ impl Executor {
             if !writes_in_place(change) {
                 continue;
             }
+            let _step = pinned_paths::Step::enter(std::iter::once(target.to_path_buf()))
+                .map_err(PlanError::Io)?;
             steps.begin(target)?;
-            write_tag_changes(target, change, Direction::Apply)?;
-            apply_cover_change(target, change, Direction::Apply)?;
-            write_blocks(target, change, Direction::Apply)?;
+            if !written
+                .copy_stamps
+                .get(target)
+                .is_some_and(|stamp| stamp.matches(target))
+            {
+                return Err(PlanError::Stale(target.to_path_buf()));
+            }
+            let previous = written
+                .copy_stamps
+                .get(target)
+                .cloned()
+                .ok_or_else(|| PlanError::Stale(target.to_path_buf()))?;
+            let original_copy = same_file::Handle::from_file(
+                open_bound_file(target, false, false).map_err(PlanError::Io)?,
+            )
+            .map_err(PlanError::Io)?;
+            with_bound_path(target, true, |path| {
+                if original_copy
+                    != same_file::Handle::from_file(
+                        open_bound_file(path, false, false).map_err(PlanError::Io)?,
+                    )
+                    .map_err(PlanError::Io)?
+                {
+                    return Err(PlanError::Stale(target.to_path_buf()));
+                }
+                ensure_not_stale_at(change, path)?;
+                write_tag_changes(path, change, Direction::Apply)?;
+                apply_cover_change(path, change, Direction::Apply)?;
+                write_blocks(path, change, Direction::Apply)?;
+                let mut current = open_bound_file(path, true, false).map_err(PlanError::Io)?;
+                current.sync_all().map_err(PlanError::Io)?;
+                let mut stamp = CopyStamp::from_file(path, &mut current)
+                    .ok_or_else(|| PlanError::Stale(target.to_path_buf()))?;
+                stamp.path = target.to_path_buf();
+                written.copy_stamps.insert(target.to_path_buf(), stamp);
+                Ok(())
+            })?;
+            let stamp = written
+                .copy_stamps
+                .get(target)
+                .ok_or_else(|| PlanError::Stale(target.to_path_buf()))?;
+            journal.checkpoint_copy(batch_id, stamp, Some(&previous))?;
+            ensure_operation_policy()?;
             steps.complete(&change.path, ApplyStep::Tags);
+            ensure_operation_policy()?;
         }
 
         // A move can leave the folder it emptied behind (#153). Removing those
@@ -481,16 +764,25 @@ impl Executor {
                 let change = by_path
                     .get(fingerprint.path.as_path())
                     .expect("fingerprint belongs to this plan");
-                fingerprint.after = Some(file_fingerprint(
-                    effective_rename(change).unwrap_or(&change.path),
-                )?);
+                let observed = written
+                    .block_outcomes
+                    .get(&change.path)
+                    .ok_or_else(|| PlanError::Stale(change.path.clone()))?;
+                if file_fingerprint(effective_rename(change).unwrap_or(&change.path))? != *observed
+                {
+                    return Err(PlanError::ChangedSinceApplied(change.path.clone()));
+                }
+                fingerprint.after = Some(observed.clone());
             }
         }
-        Ok(if plan.prune_empty_dirs {
+        ensure_operation_policy()?;
+        let pruned = if plan.prune_empty_dirs {
             prune_emptied_dirs(pruning_intent, roots, &written.created_dirs)
         } else {
             Vec::new()
-        })
+        };
+        pinned_paths::validate().map_err(PlanError::Io)?;
+        Ok(pruned)
     }
 
     /// Roll a previously applied batch back: move every renamed file back to
@@ -543,10 +835,37 @@ impl Executor {
         mode: UndoMode,
         progress: &mut dyn FnMut(&ApplyProgress),
     ) -> Result<UndoReport, PlanError> {
+        if crate::model::recovery_active() {
+            return Err(JournalError::NotRollbackable(
+                "new user operations are refused during exact rollback".into(),
+            )
+            .into());
+        }
+        #[cfg(target_os = "linux")]
+        if native_flac::private_phase_active() {
+            return Err(JournalError::NotRollbackable(
+                "native IO reentry is refused before callbacks".into(),
+            )
+            .into());
+        }
+        let _policy = crate::model::OperationPolicy::enter().ok_or_else(policy_changed)?;
+        ensure_operation_policy()?;
         let mut report = UndoReport::default();
         let batch = journal
             .batch(batch_id)?
             .ok_or(PlanError::Journal(JournalError::UnknownBatch(batch_id)))?;
+        ensure_operation_policy()?;
+        ensure_unicode_plan(&batch.plan, allowed_roots)?;
+        // Ambiguous persisted ownership must refuse before move recovery or
+        // any earlier copy can be removed. Never silently choose one row.
+        let mut copy_stamps = HashMap::new();
+        for stamp in &batch.copy_stamps {
+            if copy_stamps.insert(stamp.path.as_path(), stamp).is_some() {
+                return Err(PlanError::Journal(JournalError::NotRollbackable(
+                    "duplicate transfer ownership evidence".into(),
+                )));
+            }
+        }
 
         let mut roots = canonical_roots(allowed_roots)?;
         for root in &batch.allowed_roots {
@@ -554,6 +873,42 @@ impl Executor {
                 roots.push(root.clone());
             }
         }
+        let _move_context =
+            MoveContextScope::enter(batch.id, &batch.plan, &batch.copy_stamps, &roots)?;
+        let move_stages = journal.move_stages(batch_id)?;
+        ensure_operation_policy()?;
+        let _paths = pinned_paths::Scope::enter(
+            &roots,
+            operation_paths(&batch.plan, &batch.copy_stamps).chain(
+                move_stages
+                    .iter()
+                    .flat_map(|stage| [stage.from.clone(), stage.to.clone(), stage.path.clone()]),
+            ),
+        )
+        .map_err(PlanError::Io)?;
+        if batch.native_tags {
+            if !batch.copy_stamps.is_empty() || !move_stages.is_empty() {
+                return Err(JournalError::NotRollbackable(
+                    "native history contains transfer recovery".into(),
+                )
+                .into());
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let driver = journal.native_tags().ok_or_else(|| {
+                    JournalError::NotRollbackable("native journal capability unavailable".into())
+                })?;
+                ensure_operation_policy()?;
+                return native_flac::undo(&batch, driver, mode, progress, false);
+            }
+            #[cfg(not(target_os = "linux"))]
+            return Err(JournalError::NotRollbackable(
+                "native history requires Linux recovery".into(),
+            )
+            .into());
+        }
+        ensure_operation_policy()?;
+        recover_move_stages(&move_stages)?;
 
         // Validate before touching disk: the file's current location (rename
         // target if it was renamed, else its path) and the restore
@@ -562,10 +917,6 @@ impl Executor {
         // half-way (#604) — has nothing left to check or do.
         // Copy stamps and ID3v2 revisions are indexed once: Undo checks them per
         // change, and a linear scan of either made a large batch quadratic.
-        let mut copy_stamps = HashMap::new();
-        for stamp in &batch.copy_stamps {
-            copy_stamps.entry(stamp.path.as_path()).or_insert(stamp);
-        }
         let mut revisions = HashMap::new();
         for file in &batch.id3v2_revisions {
             revisions
@@ -574,11 +925,16 @@ impl Executor {
         }
         for change in &batch.plan.changes {
             match effective_rename(change) {
-                Some(target) if is_untransferred(target, &change.path, change.copy) => {
+                Some(target)
+                    if transfer_undone(target, &change.path, change.copy, &copy_stamps) =>
+                {
                     resolve_target_within_roots(&change.path, &roots)?;
                 }
                 Some(target) => {
-                    ensure_within_roots(target, &roots)?;
+                    ensure_within_roots(
+                        current_copy_path(target, change.copy, &copy_stamps),
+                        &roots,
+                    )?;
                     resolve_target_within_roots(&change.path, &roots)?;
                     ensure_untransfer_safe(
                         target,
@@ -593,18 +949,25 @@ impl Executor {
             // A sidecar currently lives at its `to`; it must go back to `from`,
             // and both must sit within a root (#58).
             for (from, to) in &change.sidecar_renames {
-                if is_untransferred(to, from, change.copy) {
+                if transfer_undone(to, from, change.copy, &copy_stamps) {
                     resolve_target_within_roots(from, &roots)?;
                     continue;
                 }
-                ensure_within_roots(to, &roots)?;
+                if change.copy {
+                    ensure_within_roots(current_copy_path(to, true, &copy_stamps), &roots)?;
+                } else {
+                    // A recorded sidecar move transports the link entry itself,
+                    // never its referent. The referent may disappear after Apply.
+                    resolve_target_within_roots(to, &roots)?;
+                    std::fs::symlink_metadata(to).map_err(PlanError::Io)?;
+                }
                 resolve_target_within_roots(from, &roots)?;
                 ensure_untransfer_safe(to, from, change.copy, &copy_stamps, batch.interrupted)?;
             }
         }
 
-        let changed = changed_since_applied(&batch)?;
-        let restored_blocks = ensure_block_undo_safe(&batch)?;
+        let mut changed = changed_since_applied(&batch)?;
+        ensure_block_undo_safe(&batch)?;
         ensure_covers_undo_safe(&batch)?;
         match mode {
             UndoMode::Strict => {
@@ -627,9 +990,10 @@ impl Executor {
 
         // Put back the folders the batch emptied, before anything moves: a file
         // has to have a directory to move back into (#153).
+        ensure_operation_policy()?;
         for dir in &batch.removed_dirs {
             if resolve_target_within_roots(dir, &roots).is_ok() {
-                std::fs::create_dir_all(dir).map_err(PlanError::Io)?;
+                pinned_paths::create_all(dir).map_err(PlanError::Io)?;
             }
         }
 
@@ -637,19 +1001,43 @@ impl Executor {
         // at its original path. Undoing a copy means removing the copy — the
         // source was never touched, so there is nothing else to put back.
         let never = AtomicBool::new(false);
+        let expected = expected_fields(&batch.applied_values);
+        let block_expected: HashMap<_, _> = batch
+            .block_fingerprints
+            .iter()
+            .map(|item| (item.path.as_path(), item))
+            .collect();
         let mut steps = Steps::new(count_undo_steps(&batch.plan), progress, &never);
         for change in &batch.plan.changes {
             if let Some(target) = effective_rename(change) {
+                let _step = pinned_paths::Step::enter([target.to_path_buf(), change.path.clone()])
+                    .map_err(PlanError::Io)?;
                 steps.begin(target)?;
-                if !is_untransferred(target, &change.path, change.copy) {
-                    untransfer(target, &change.path, change.copy)?;
+                if !transfer_undone(target, &change.path, change.copy, &copy_stamps) {
+                    if change.copy {
+                        remove_recorded_copy(journal, batch_id, target, &copy_stamps)?;
+                    } else {
+                        untransfer_owned_move(
+                            journal,
+                            batch_id,
+                            target,
+                            &change.path,
+                            &copy_stamps,
+                        )?;
+                    }
                 }
                 steps.done();
             }
             for (from, to) in &change.sidecar_renames {
+                let _step = pinned_paths::Step::entries([to.clone(), from.clone()])
+                    .map_err(PlanError::Io)?;
                 steps.begin(to)?;
-                if !is_untransferred(to, from, change.copy) {
-                    untransfer(to, from, change.copy)?;
+                if !transfer_undone(to, from, change.copy, &copy_stamps) {
+                    if change.copy {
+                        remove_recorded_copy(journal, batch_id, to, &copy_stamps)?;
+                    } else {
+                        untransfer_owned_move(journal, batch_id, to, from, &copy_stamps)?;
+                    }
                 }
                 steps.done();
             }
@@ -660,20 +1048,67 @@ impl Executor {
             if change.copy || !writes_in_place(change) {
                 continue;
             }
+            let _step = pinned_paths::Step::enter(std::iter::once(change.path.clone()))
+                .map_err(PlanError::Io)?;
             steps.begin(&change.path)?;
-            if restored_blocks.contains(&change.path) {
-                steps.done();
-                continue;
-            }
             // Blocks come back before the field and image values are restored,
             // mirroring apply in reverse. It matters when the block that was
             // stripped is the one the app reads from: put it back first and the
             // restoring writes land on the same block they were taken from.
-            write_blocks(&change.path, change, Direction::Undo)?;
-            let restorable = without_kept_fields(change, index, &changed, mode);
-            write_tag_changes(&change.path, &restorable, Direction::Undo)?;
-            apply_cover_change(&change.path, change, Direction::Undo)?;
-            restore_revision(&change.path, &revisions)?;
+            with_bound_path(&change.path, true, |path| {
+                if let Some(target) = effective_rename(change) {
+                    ensure_move_identity(target, path, &copy_stamps)?;
+                }
+                if let Some(fingerprint) = block_expected.get(change.path.as_path()) {
+                    let current = file_fingerprint(path)?;
+                    if current == fingerprint.before {
+                        return Ok(());
+                    }
+                    if fingerprint.after.as_ref() != Some(&current) {
+                        return Err(PlanError::ChangedSinceApplied(change.path.clone()));
+                    }
+                } else if let Some(cover) = &change.cover_change {
+                    let current = TagEngine::read_covers(path)?;
+                    if current != cover.old && (batch.interrupted || current != cover.new) {
+                        return Err(PlanError::ChangedSinceApplied(change.path.clone()));
+                    }
+                }
+                for field in field_restore_gate(path, change, &expected, batch.interrupted, mode)? {
+                    if !changed
+                        .iter()
+                        .any(|(at, item)| *at == index && item.field == field)
+                    {
+                        changed.push((
+                            index,
+                            KeptField {
+                                path: change.path.clone(),
+                                field: field.clone(),
+                            },
+                        ));
+                        report.kept.push(KeptField {
+                            path: change.path.clone(),
+                            field,
+                        });
+                    }
+                }
+                write_blocks(path, change, Direction::Undo)?;
+                let restorable = without_kept_fields(change, index, &changed, mode);
+                write_tag_changes_with_gate(
+                    path,
+                    &restorable,
+                    Direction::Undo,
+                    Some(FieldGate {
+                        expected: &expected,
+                        interrupted: batch.interrupted,
+                        mode,
+                    }),
+                )?;
+                apply_cover_change(path, change, Direction::Undo)?;
+                if let Some(&recorded) = revisions.get(change.path.as_path()) {
+                    restore_revision_value(path, recorded)?;
+                }
+                Ok(())
+            })?;
             steps.done();
         }
 
@@ -682,10 +1117,22 @@ impl Executor {
         // directory stays and rollback is still considered successful.
         for dir in batch.created_dirs.iter().rev() {
             if ensure_within_roots(dir, &roots).is_ok() {
-                std::fs::remove_dir(dir).ok();
+                pinned_paths::remove(dir, true).ok();
             }
         }
 
+        for stamp in &batch.copy_stamps {
+            if let Some(directory) = stamp.undo_path.as_deref().and_then(Path::parent) {
+                if ensure_within_roots(directory, &roots).is_ok() {
+                    let _ = pinned_paths::remove(directory, true);
+                }
+            }
+        }
+
+        pinned_paths::validate().map_err(PlanError::Io)?;
+        ensure_operation_policy()?;
+        // Successful terminal removal is the commit boundary. An arbitrary
+        // adapter's post-delete callback cannot be uncommitted by this API.
         journal.rollback(batch_id)?;
         Ok(report)
     }
@@ -744,14 +1191,15 @@ fn without_kept_fields(
 /// How far a running [`Executor::apply_with`] has got (#437). `total` counts the
 /// preflight reads plus write steps (tags of a file, a move or copy, a sidecar),
 /// `done` those finished. `completed` distinguishes a successful write from a
-/// preflight/step-start notification. Completion paths use the original plan key.
+/// preflight/step-start notification. Media completions use the original plan
+/// key; sidecar completions use the sidecar's original source path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplyProgress {
     pub done: usize,
     pub total: usize,
     pub path: PathBuf,
-    /// A successful write at the plan's original path. Never emitted for a
-    /// failed step; the enclosing batch may still roll back afterwards.
+    /// A successful write at its original source path (media or sidecar).
+    /// Never emitted for a failed step; the enclosing batch may still roll back.
     pub completed: Option<ApplyStep>,
 }
 
@@ -759,6 +1207,61 @@ pub struct ApplyProgress {
 pub enum ApplyStep {
     Tags,
     Transfer,
+}
+
+fn policy_changed() -> PlanError {
+    JournalError::NotRollbackable("metadata operation policy changed".into()).into()
+}
+fn ensure_operation_policy() -> Result<(), PlanError> {
+    if crate::model::operation_policy_valid() {
+        Ok(())
+    } else {
+        Err(policy_changed())
+    }
+}
+fn rollback_failed_apply(
+    plan: &ChangePlan,
+    batch: &mut AppliedBatch,
+    written: &mut Written,
+    journal: &mut dyn UndoJournal,
+    policy: &crate::model::RecoveryPolicy,
+    cause: PlanError,
+    after_write_phase: bool,
+) -> PlanError {
+    let _recovery = policy.enter();
+    if after_write_phase {
+        written.created_dirs.clone_from(&batch.created_dirs);
+    }
+    batch.interrupted = true;
+    batch.copy_stamps = written.copy_stamps.values().cloned().collect();
+    batch.applied_values = merge_applied_values(&written.applied_values, Vec::new());
+    for fingerprint in &mut batch.block_fingerprints {
+        fingerprint.after = written.block_outcomes.get(&fingerprint.path).cloned();
+    }
+    // A copy rollback may first reserve/move material. Keep its strong witness
+    // durable before invoking the existing ownership-checked restoration.
+    let _ = journal.retain_interrupted(batch.id, batch);
+    let dirs = if after_write_phase {
+        batch.removed_dirs.as_slice()
+    } else {
+        &[]
+    };
+    let error = written.roll_back_after(plan, dirs, cause, journal, batch.id);
+    if !matches!(
+        error,
+        PlanError::RollbackIncomplete { .. } | PlanError::RecoveryRequired { .. }
+    ) {
+        let _ = journal.rollback(batch.id);
+    } else {
+        batch.created_dirs.clone_from(&written.created_dirs);
+        batch.applied_values = merge_applied_values(&written.applied_values, Vec::new());
+        for fingerprint in &mut batch.block_fingerprints {
+            fingerprint.after = written.block_outcomes.get(&fingerprint.path).cloned();
+        }
+        retain_copy_removal_paths(batch, journal);
+        let _ = journal.retain_interrupted(batch.id, batch);
+    }
+    error
 }
 
 /// Counts the steps of the write phase and is the one place it asks whether to
@@ -789,12 +1292,14 @@ impl<'a> Steps<'a> {
         if self.cancel.load(Ordering::SeqCst) {
             return Err(PlanError::Cancelled);
         }
+        ensure_operation_policy()?;
         (self.progress)(&ApplyProgress {
             done: self.done,
             total: self.total,
             path: path.to_path_buf(),
             completed: None,
         });
+        ensure_operation_policy()?;
         Ok(())
     }
 
@@ -869,6 +1374,10 @@ struct Written {
     revisions: Vec<FileRevision>,
     /// Observed field outcomes of completed in-place writes, before rollback.
     applied_values: Vec<AppliedValue>,
+    copy_stamps: BTreeMap<PathBuf, CopyStamp>,
+    cover_outcomes: HashMap<PathBuf, Vec<u8>>,
+    block_outcomes: HashMap<PathBuf, Vec<u8>>,
+    block_baselines: HashMap<PathBuf, Vec<u8>>,
 }
 
 impl Written {
@@ -880,6 +1389,10 @@ impl Written {
             created_dirs: Vec::new(),
             revisions: Vec::new(),
             applied_values: Vec::new(),
+            copy_stamps: BTreeMap::new(),
+            cover_outcomes: HashMap::new(),
+            block_outcomes: HashMap::new(),
+            block_baselines: HashMap::new(),
         }
     }
 
@@ -888,12 +1401,14 @@ impl Written {
     /// [`PlanError::RollbackIncomplete`], so the user is told the library needs a
     /// look instead of only that the write failed.
     fn roll_back_after(
-        &self,
+        &mut self,
         plan: &ChangePlan,
         removed_dirs: &[PathBuf],
         cause: PlanError,
+        journal: &mut dyn UndoJournal,
+        id: BatchId,
     ) -> PlanError {
-        let mut failed = self.roll_back(plan, removed_dirs);
+        let mut failed = self.roll_back(plan, removed_dirs, journal, id);
         if failed.is_empty() {
             return cause;
         }
@@ -911,31 +1426,71 @@ impl Written {
     /// back is decided by looking at the disk afterwards, not by the result of
     /// the undo call — the step that failed usually fails to undo too, having
     /// done nothing to undo. Returns the paths that are still not as they were.
-    fn roll_back(&self, plan: &ChangePlan, removed_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    fn roll_back(
+        &mut self,
+        plan: &ChangePlan,
+        removed_dirs: &[PathBuf],
+        journal: &mut dyn UndoJournal,
+        id: BatchId,
+    ) -> Vec<PathBuf> {
         let mut failed = Vec::new();
+        match journal.move_stages(id) {
+            Ok(stages) => {
+                let validated = match validate_move_stages(&stages) {
+                    Ok(validated) => validated,
+                    Err(error) => return vec![recovery_path(&error).unwrap_or_default()],
+                };
+                if let Err(error) = recover_validated_move_stages(validated) {
+                    failed.push(recovery_path(&error).unwrap_or_default());
+                }
+            }
+            Err(_) => {
+                return vec![plan
+                    .changes
+                    .first()
+                    .map(|change| change.path.clone())
+                    .unwrap_or_default()]
+            }
+        }
+        let mut restored_fields = Vec::new();
+        let mut restored_blocks = Vec::new();
         let mut revisions = HashMap::new();
+        let expected = expected_fields(&self.applied_values);
+        let stamps: HashMap<_, _> = self
+            .copy_stamps
+            .iter()
+            .map(|(path, stamp)| (path.as_path(), stamp))
+            .collect();
         for file in &self.revisions {
             revisions
                 .entry(file.path.as_path())
                 .or_insert(file.revision);
         }
         for dir in removed_dirs {
-            let _ = std::fs::create_dir_all(dir);
+            let _ = pinned_paths::create_all(dir);
             if !dir.is_dir() {
                 failed.push(dir.clone());
             }
         }
         for (from, to, copy) in self.sidecars.iter().rev() {
-            let _ = untransfer(to, from, *copy);
-            if !is_untransferred(to, from, *copy) {
+            let _ = if *copy {
+                remove_recorded_copy(journal, id, to, &stamps)
+            } else {
+                untransfer_owned_move(journal, id, to, from, &stamps)
+            };
+            if !transfer_undone(to, from, *copy, &stamps) {
                 failed.push(from.clone());
             }
         }
         for &index in self.transferred.iter().rev() {
             let change = &plan.changes[index];
             if let Some(target) = effective_rename(change) {
-                let _ = untransfer(target, &change.path, change.copy);
-                if !is_untransferred(target, &change.path, change.copy) {
+                let _ = if change.copy {
+                    remove_recorded_copy(journal, id, target, &stamps)
+                } else {
+                    untransfer_owned_move(journal, id, target, &change.path, &stamps)
+                };
+                if !transfer_undone(target, &change.path, change.copy, &stamps) {
                     failed.push(change.path.clone());
                 }
             }
@@ -945,23 +1500,66 @@ impl Written {
             if change.copy || steps == 0 {
                 continue;
             }
-            if steps >= 3 {
-                let _ = write_blocks(&change.path, change, Direction::Undo);
-            }
-            let _ = write_tag_changes(&change.path, change, Direction::Undo);
-            if steps >= 2 {
-                let _ = apply_cover_change(&change.path, change, Direction::Undo);
-            }
-            let _ = restore_revision(&change.path, &revisions);
+            let restored = with_bound_path(&change.path, true, |path| {
+                if let Some(target) = effective_rename(change) {
+                    ensure_move_identity(target, path, &stamps)?;
+                }
+                field_restore_gate(path, change, &expected, true, UndoMode::Strict)?;
+                if let Some(cover) = &change.cover_change {
+                    let current = TagEngine::read_covers(path)?;
+                    if current != cover.old
+                        && self.cover_outcomes.get(&change.path) != Some(&cover_digest(&current))
+                    {
+                        return Err(PlanError::ChangedSinceApplied(change.path.clone()));
+                    }
+                }
+                if steps >= 3 && !change.block_changes.is_empty() {
+                    let current = file_fingerprint(path)?;
+                    if self.block_baselines.get(&change.path) == Some(&current) {
+                        return Ok(applied_values_at(change, path));
+                    }
+                    if self.block_outcomes.get(&change.path) != Some(&current) {
+                        return Err(PlanError::ChangedSinceApplied(change.path.clone()));
+                    }
+                    write_blocks(path, change, Direction::Undo)?;
+                }
+                write_tag_changes_with_gate(
+                    path,
+                    change,
+                    Direction::Undo,
+                    Some(FieldGate {
+                        expected: &expected,
+                        interrupted: true,
+                        mode: UndoMode::Strict,
+                    }),
+                )?;
+                if steps >= 2 {
+                    apply_cover_change(path, change, Direction::Undo)?;
+                }
+                if let Some(&recorded) = revisions.get(change.path.as_path()) {
+                    restore_revision_value(path, recorded)?;
+                }
+                Ok(applied_values_at(change, path))
+            });
             // The file holds the values the plan recorded as `old` again, or it
             // does not.
-            if ensure_not_stale(change).is_err() {
+            if restored.is_err() || ensure_not_stale(change).is_err() {
                 failed.push(change.path.clone());
+            }
+            if let Ok(fields) = restored {
+                restored_fields.extend(fields);
+                if !change.block_changes.is_empty() {
+                    if let Ok(hash) = file_fingerprint(&change.path) {
+                        restored_blocks.push((change.path.clone(), hash));
+                    }
+                }
             }
         }
         for dir in self.created_dirs.iter().rev() {
-            let _ = std::fs::remove_dir(dir);
+            let _ = pinned_paths::remove(dir, true);
         }
+        self.applied_values.extend(restored_fields);
+        self.block_outcomes.extend(restored_blocks);
         failed
     }
 }
@@ -969,10 +1567,17 @@ impl Written {
 /// Whether one [`transfer`] is undone: a move is back at `original` with nothing
 /// left at `target`, a copy is gone from `target`.
 fn is_untransferred(target: &Path, original: &Path, copy: bool) -> bool {
+    // Entry existence must not follow a sidecar link. Other I/O errors are
+    // unknown, not evidence that transport/rollback completed successfully.
+    let absent = |path: &Path| {
+        matches!(std::fs::symlink_metadata(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    };
     if copy {
-        !target.exists()
+        absent(target)
     } else {
-        original.exists() && (!target.exists() || folds_onto(original, target))
+        std::fs::symlink_metadata(original).is_ok()
+            && (absent(target) || folds_onto(original, target))
     }
 }
 
@@ -1033,6 +1638,918 @@ fn canonical_roots(allowed_roots: &[PathBuf]) -> Result<Vec<PathBuf>, PlanError>
     }
 }
 
+fn ensure_unicode_plan(plan: &ChangePlan, roots: &[PathBuf]) -> Result<(), PlanError> {
+    if roots
+        .iter()
+        .map(PathBuf::as_path)
+        .chain(plan.changes.iter().flat_map(|change| {
+            std::iter::once(change.path.as_path())
+                .chain(change.rename_to.as_deref())
+                .chain(
+                    change
+                        .sidecar_renames
+                        .iter()
+                        .flat_map(|(from, to)| [from.as_path(), to.as_path()]),
+                )
+        }))
+        .any(|path| path.to_str().is_none())
+    {
+        return Err(PlanError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Paths must be Unicode until the durable journal supports lossless native path storage",
+        )));
+    }
+    Ok(())
+}
+
+fn operation_paths<'a>(
+    plan: &'a ChangePlan,
+    stamps: &'a [CopyStamp],
+) -> impl Iterator<Item = PathBuf> + 'a {
+    plan.changes
+        .iter()
+        .flat_map(|change| {
+            std::iter::once(change.path.clone())
+                .chain(change.rename_to.iter().cloned())
+                .chain(
+                    change
+                        .sidecar_renames
+                        .iter()
+                        .flat_map(|(from, to)| [from.clone(), to.clone()]),
+                )
+        })
+        .chain(stamps.iter().filter_map(|stamp| stamp.undo_path.clone()))
+}
+
+pub(crate) fn open_bound_entry(path: &Path) -> std::io::Result<std::fs::File> {
+    if metadata_identity(path).is_some() {
+        return open_bound_file(path, false, false);
+    }
+    pinned_paths::entry(path)
+}
+
+fn capture_move_stamps(
+    plan: &ChangePlan,
+    cancel: &AtomicBool,
+) -> Result<Vec<CopyStamp>, PlanError> {
+    let mut stamps = Vec::new();
+    for change in &plan.changes {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(PlanError::Cancelled);
+        }
+        if change.copy {
+            // Copying link targets would escape link-entry semantics. Refuse
+            // before journaling or any mutation until link copying is supported.
+            for (from, _) in &change.sidecar_renames {
+                if open_bound_entry(from)
+                    .map_err(PlanError::Io)?
+                    .metadata()
+                    .map_err(PlanError::Io)?
+                    .file_type()
+                    .is_symlink()
+                {
+                    return Err(PlanError::Stale(from.clone()));
+                }
+            }
+            continue;
+        }
+        if let Some(target) = effective_rename(change) {
+            stamps.push(CopyStamp::for_move(&change.path, target)?);
+        }
+        for (from, to) in &change.sidecar_renames {
+            if cancel.load(Ordering::SeqCst) {
+                return Err(PlanError::Cancelled);
+            }
+            stamps.push(CopyStamp::for_move(from, to)?);
+        }
+    }
+    Ok(stamps)
+}
+
+fn ensure_move_identity(
+    target: &Path,
+    actual: &Path,
+    stamps: &HashMap<&Path, &CopyStamp>,
+) -> Result<(), PlanError> {
+    if stamps
+        .get(target)
+        .is_some_and(|stamp| stamp.matches_identity(actual))
+    {
+        Ok(())
+    } else {
+        Err(PlanError::Stale(actual.to_path_buf()))
+    }
+}
+fn untransfer_owned_move(
+    journal: &mut dyn UndoJournal,
+    id: BatchId,
+    target: &Path,
+    original: &Path,
+    stamps: &HashMap<&Path, &CopyStamp>,
+) -> Result<(), PlanError> {
+    let proof = stamps
+        .get(target)
+        .ok_or_else(|| PlanError::Stale(target.to_path_buf()))?;
+    let mut attempted = false;
+    staged_move(journal, id, proof, target, original, &mut attempted)
+}
+
+#[derive(Clone)]
+struct MoveIntent {
+    from: PathBuf,
+    to: PathBuf,
+    allow_link: bool,
+    identity: Option<Vec<u8>>,
+}
+struct MoveContext {
+    id: BatchId,
+    roots: Vec<PathBuf>,
+    intents: HashMap<PathBuf, MoveIntent>,
+    seen_stages: HashSet<PathBuf>,
+    stage_counts: HashMap<PathBuf, usize>,
+    stage_bytes: usize,
+}
+thread_local! { static MOVE_CONTEXT: std::cell::RefCell<Option<MoveContext>> = const { std::cell::RefCell::new(None) }; }
+struct MoveContextScope(Option<MoveContext>);
+impl Drop for MoveContextScope {
+    fn drop(&mut self) {
+        MOVE_CONTEXT.with(|slot| {
+            slot.replace(self.0.take());
+        });
+    }
+}
+impl MoveContextScope {
+    fn activate(context: MoveContext) -> Self {
+        Self(MOVE_CONTEXT.with(|slot| slot.replace(Some(context))))
+    }
+    fn enter(
+        id: BatchId,
+        plan: &ChangePlan,
+        stamps: &[CopyStamp],
+        roots: &[PathBuf],
+    ) -> Result<Self, PlanError> {
+        let context = MoveContext::compile(id, plan, stamps, roots)?;
+        Ok(Self(MOVE_CONTEXT.with(|slot| slot.replace(Some(context)))))
+    }
+}
+fn normalized_absolute(path: &Path) -> Result<PathBuf, PlanError> {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().map_err(PlanError::Io)?.join(path)
+    };
+    if path
+        .components()
+        .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(recovery_required(
+            &path,
+            "parent traversal is not a sealed recovery path",
+        ));
+    }
+    Ok(path.components().collect())
+}
+impl MoveContext {
+    fn compile(
+        id: BatchId,
+        plan: &ChangePlan,
+        stamps: &[CopyStamp],
+        roots: &[PathBuf],
+    ) -> Result<Self, PlanError> {
+        let mut intents = HashMap::new();
+        let mut sources = HashSet::new();
+        for change in &plan.changes {
+            if change.copy {
+                continue;
+            }
+            let audio = effective_rename(change).map(|target| (&change.path, target, false));
+            for (from, to, allow_link) in audio.into_iter().chain(
+                change
+                    .sidecar_renames
+                    .iter()
+                    .map(|(from, to)| (from, to.as_path(), true)),
+            ) {
+                if !sources.insert(normalized_absolute(from)?) || intents.contains_key(to) {
+                    return Err(recovery_required(
+                        from,
+                        "conflicting immutable move intents",
+                    ));
+                }
+                resolve_target_within_roots(from, roots)
+                    .map_err(|error| recovery_required(from, error.to_string()))?;
+                resolve_target_within_roots(to, roots)
+                    .map_err(|error| recovery_required(to, error.to_string()))?;
+                intents.insert(
+                    to.to_path_buf(),
+                    MoveIntent {
+                        from: from.clone(),
+                        to: to.to_path_buf(),
+                        allow_link,
+                        identity: None,
+                    },
+                );
+            }
+        }
+        let mut proved = HashSet::new();
+        for stamp in stamps {
+            if !stamp.moved {
+                continue;
+            }
+            let Some(intent) = intents.get_mut(&stamp.path) else {
+                return Err(recovery_required(
+                    &stamp.path,
+                    "move proof has no immutable plan intent",
+                ));
+            };
+            if stamp.path.as_os_str() != intent.to.as_os_str()
+                || !proved.insert(stamp.path.clone())
+                || stamp.sha256.is_some()
+                || stamp.undo_path.is_some()
+            {
+                return Err(recovery_required(&stamp.path, "ambiguous typed move proof"));
+            }
+            let identity = stamp
+                .identity
+                .as_ref()
+                .and_then(|bytes| NativeIdentity::decode(bytes));
+            if !identity.is_some_and(|identity| {
+                identity.current_platform() && identity.file_role(intent.allow_link)
+            }) {
+                return Err(recovery_required(
+                    &stamp.path,
+                    "invalid typed native move identity",
+                ));
+            }
+            intent.identity.clone_from(&stamp.identity);
+        }
+        Ok(Self {
+            id,
+            roots: roots.to_vec(),
+            intents,
+            seen_stages: HashSet::new(),
+            stage_counts: HashMap::new(),
+            stage_bytes: 0,
+        })
+    }
+    fn check_additional_budget(&self, stages: &[MoveStage]) -> Result<(), PlanError> {
+        let mut new_paths = HashSet::new();
+        let mut counts = HashMap::new();
+        let mut bytes = 0usize;
+        for stage in stages {
+            if self.seen_stages.contains(&stage.path) || !new_paths.insert(stage.path.as_path()) {
+                continue;
+            }
+            bytes = bytes.saturating_add(crate::journal::move_stage_bytes(stage));
+            let count = counts.entry(stage.target.as_path()).or_insert(0usize);
+            *count += 1;
+            if self
+                .stage_counts
+                .get(&stage.target)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(*count)
+                > 64
+                || self.seen_stages.len().saturating_add(new_paths.len())
+                    > crate::journal::MAX_MOVE_STAGE_ROWS
+                || self.stage_bytes.saturating_add(bytes) > crate::journal::MAX_MOVE_STAGE_BYTES
+            {
+                return Err(recovery_required(
+                    &stage.path,
+                    "move staging would exceed its recovery budget",
+                ));
+            }
+        }
+        Ok(())
+    }
+    fn remember_stages(&mut self, stages: &[MoveStage]) -> Result<(), PlanError> {
+        self.check_additional_budget(stages)?;
+        for stage in stages {
+            if self.seen_stages.insert(stage.path.clone()) {
+                *self.stage_counts.entry(stage.target.clone()).or_default() += 1;
+                self.stage_bytes = self
+                    .stage_bytes
+                    .saturating_add(crate::journal::move_stage_bytes(stage));
+            }
+        }
+        Ok(())
+    }
+    fn validate_metadata(&self, stages: &[MoveStage]) -> Result<(), PlanError> {
+        if stages.len() > crate::journal::MAX_MOVE_STAGE_ROWS {
+            return Err(recovery_required(
+                Path::new(""),
+                "move recovery collection exceeds its row budget",
+            ));
+        }
+        let mut paths = HashSet::new();
+        let mut directories = HashSet::new();
+        let mut counts = HashMap::new();
+        let mut bytes = 0usize;
+        for stage in stages {
+            bytes = bytes.saturating_add(crate::journal::move_stage_bytes(stage));
+            if bytes > crate::journal::MAX_MOVE_STAGE_BYTES {
+                return Err(recovery_required(
+                    &stage.path,
+                    "move recovery collection exceeds its byte budget",
+                ));
+            }
+            let Some(intent) = self.intents.get(&stage.target) else {
+                return Err(recovery_required(
+                    &stage.path,
+                    "staged target has no immutable plan intent",
+                ));
+            };
+            let exact = |a: &Path, b: &Path| a.as_os_str() == b.as_os_str();
+            if !exact(&stage.target, &intent.to)
+                || !((exact(&stage.from, &intent.from) && exact(&stage.to, &intent.to))
+                    || (exact(&stage.from, &intent.to) && exact(&stage.to, &intent.from)))
+            {
+                return Err(recovery_required(
+                    &stage.path,
+                    "staged endpoints disagree with immutable plan intent",
+                ));
+            }
+            if intent.identity.as_ref() != Some(&stage.identity)
+                || !NativeIdentity::decode(&stage.identity).is_some_and(|identity| {
+                    identity.current_platform() && identity.file_role(intent.allow_link)
+                })
+            {
+                return Err(recovery_required(
+                    &stage.path,
+                    "staged identity disagrees with typed persisted ownership",
+                ));
+            }
+            if !NativeIdentity::decode(&stage.directory_identity)
+                .is_some_and(|identity| identity.current_platform() && identity.directory_role())
+            {
+                return Err(recovery_required(
+                    &stage.path,
+                    "invalid native private-directory identity",
+                ));
+            }
+            let normalized = normalized_absolute(&stage.path)?;
+            let directory = stage
+                .path
+                .parent()
+                .ok_or_else(|| recovery_required(&stage.path, "missing private directory"))?;
+            let parent = directory
+                .parent()
+                .ok_or_else(|| recovery_required(directory, "missing private parent"))?;
+            let source_parent = stage
+                .from
+                .parent()
+                .ok_or_else(|| recovery_required(&stage.from, "missing staged source parent"))?;
+            let prefix = format!(".tagrex-move-{}-", self.id.0);
+            let suffix = directory
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_prefix(&prefix));
+            let valid_name = suffix.is_some_and(|suffix| {
+                let parts = suffix.split('-').collect::<Vec<_>>();
+                parts.len() == 3
+                    && parts[0]
+                        .parse::<u128>()
+                        .is_ok_and(|value| value.to_string() == parts[0])
+                    && parts[1]
+                        .parse::<u64>()
+                        .is_ok_and(|value| value.to_string() == parts[1])
+                    && parts[2]
+                        .parse::<u8>()
+                        .is_ok_and(|value| value < 128 && value.to_string() == parts[2])
+            });
+            if !stage.path.is_absolute()
+                || stage.path.as_os_str() != normalized.as_os_str()
+                || stage.path.file_name() != Some(std::ffi::OsStr::new("entry"))
+                || !valid_name
+                || normalized_absolute(parent)? != normalized_absolute(source_parent)?
+            {
+                return Err(recovery_required(
+                    &stage.path,
+                    "private path is not a canonical reservation for its planned source",
+                ));
+            }
+            resolve_target_within_roots(&stage.path, &self.roots)
+                .map_err(|error| recovery_required(&stage.path, error.to_string()))?;
+            if !paths.insert(normalized) || !directories.insert(stage.directory_identity.as_slice())
+            {
+                return Err(recovery_required(
+                    &stage.path,
+                    "duplicate or conflicting private recovery reservations",
+                ));
+            }
+            let count = counts.entry(stage.target.as_path()).or_insert(0usize);
+            *count += 1;
+            if *count > 64 {
+                return Err(recovery_required(
+                    &stage.path,
+                    "move recovery retry budget exceeded",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+struct ValidatedMoveStages<'a>(&'a [MoveStage]);
+fn validate_move_stages(stages: &[MoveStage]) -> Result<ValidatedMoveStages<'_>, PlanError> {
+    if stages.is_empty() {
+        return Ok(ValidatedMoveStages(stages));
+    }
+    MOVE_CONTEXT.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let context = slot.as_mut().ok_or_else(|| {
+            recovery_required(Path::new(""), "missing immutable move recovery context")
+        })?;
+        context.validate_metadata(stages)?;
+        let mut pending = HashSet::new();
+        // All directory seals and collection conflicts are checked before the
+        // first restore or cleanup, including rows whose usual entry is absent.
+        for stage in stages {
+            let directory = stage
+                .path
+                .parent()
+                .ok_or_else(|| recovery_required(&stage.path, "missing private directory"))?;
+            if entry_present(directory)? {
+                stage_directory_matches(stage)?;
+            }
+            if entry_present(&stage.path)? {
+                // Native capture can encounter a directory swapped in after
+                // the final stat. It must not cause earlier valid reservations
+                // to be restored before this unsupported payload is refused.
+                let _entry = open_bound_entry(&stage.path)
+                    .map_err(|error| recovery_required(&stage.path, error.to_string()))?;
+            }
+            if entry_present(&stage.path)? && !pending.insert(stage.target.as_path()) {
+                return Err(recovery_required(
+                    &stage.path,
+                    "multiple pending captures for one move intent",
+                ));
+            }
+        }
+        context.remember_stages(stages)?;
+        Ok(ValidatedMoveStages(stages))
+    })
+}
+
+fn recovery_path(error: &PlanError) -> Option<PathBuf> {
+    match error {
+        PlanError::RecoveryRequired { path, .. } => Some(path.clone()),
+        _ => None,
+    }
+}
+fn recovery_required(path: &Path, reason: impl Into<String>) -> PlanError {
+    PlanError::RecoveryRequired {
+        path: path.to_path_buf(),
+        reason: reason.into(),
+    }
+}
+fn entry_present(path: &Path) -> Result<bool, PlanError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(PlanError::Io(error)),
+    }
+}
+fn stage_directory_matches(stage: &MoveStage) -> Result<(), PlanError> {
+    #[cfg(test)]
+    let _timer = move_metrics::Timer::new(move_metrics::Phase::Proof);
+    let directory = stage
+        .path
+        .parent()
+        .ok_or_else(|| recovery_required(&stage.path, "missing private directory"))?;
+    let file = pinned_paths::directory(directory)
+        .map_err(|error| recovery_required(directory, error.to_string()))?;
+    if crate::journal::native_identity(&file).as_ref() != Some(&stage.directory_identity) {
+        return Err(recovery_required(
+            directory,
+            "private directory identity changed",
+        ));
+    }
+    Ok(())
+}
+fn stage_object_matches(stage: &MoveStage, path: &Path) -> bool {
+    #[cfg(test)]
+    let _timer = move_metrics::Timer::new(move_metrics::Phase::Proof);
+    open_bound_entry(path)
+        .ok()
+        .is_some_and(|file| crate::journal::native_file_matches(&stage.identity, &file))
+}
+
+fn cleanup_move_directory(stage: &MoveStage) -> Result<(), PlanError> {
+    #[cfg(test)]
+    let _timer = move_metrics::Timer::new(move_metrics::Phase::Cleanup);
+    let directory = stage
+        .path
+        .parent()
+        .ok_or_else(|| recovery_required(&stage.path, "missing private directory"))?;
+    if !entry_present(directory)? {
+        return Ok(());
+    }
+    stage_directory_matches(stage)?;
+    pinned_paths::remove(directory, true).map_err(|error| {
+        recovery_required(
+            directory,
+            format!("private recovery directory could not be removed empty: {error}"),
+        )
+    })?;
+    if let Some(parent) = directory.parent() {
+        sync_directory(parent).map_err(|error| recovery_required(parent, error.to_string()))?;
+    }
+    Ok(())
+}
+/// Return private material to the recorded pre-staging endpoint. This never
+/// deletes payloads or overwrites a name; a mismatched object remains foreign.
+fn recover_move_stages(stages: &[MoveStage]) -> Result<(), PlanError> {
+    recover_validated_move_stages(validate_move_stages(stages)?)
+}
+fn recover_validated_move_stages(stages: ValidatedMoveStages<'_>) -> Result<(), PlanError> {
+    for stage in stages.0 {
+        if !entry_present(&stage.path)? {
+            cleanup_move_directory(stage)?;
+            continue;
+        }
+        stage_directory_matches(stage)?;
+        let owned = stage_object_matches(stage, &stage.path);
+        {
+            let _step = pinned_paths::Step::entries([stage.path.clone(), stage.from.clone()])
+                .map_err(|error| recovery_required(&stage.path, error.to_string()))?;
+            rename_noreplace(&stage.path, &stage.from).map_err(|error| {
+                recovery_required(
+                    &stage.path,
+                    format!("cannot restore pre-staging path: {error}"),
+                )
+            })?;
+            sync_transfer_parents(&stage.path, &stage.from)
+                .map_err(|error| recovery_required(&stage.from, error.to_string()))?;
+            if !owned || !stage_object_matches(stage, &stage.from) {
+                return Err(recovery_required(
+                &stage.from,
+                "unproved staged entry restored without overwrite; retained journal for resolution",
+            ));
+            }
+        }
+        cleanup_move_directory(stage)?;
+    }
+    Ok(())
+}
+fn reserve_move_stage(
+    id: BatchId,
+    proof: &CopyStamp,
+    from: &Path,
+    to: &Path,
+) -> Result<MoveStage, PlanError> {
+    #[cfg(test)]
+    let _timer = move_metrics::Timer::new(move_metrics::Phase::Reservation);
+    let parent = normalized_absolute(
+        from.parent()
+            .ok_or_else(|| PlanError::Stale(from.to_path_buf()))?,
+    )?;
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| PlanError::Io(std::io::Error::other(error)))?
+        .as_nanos();
+    let mut reserved = None;
+    for attempt in 0..128 {
+        let directory = parent.join(format!(
+            ".tagrex-move-{}-{nonce}-{}-{attempt}",
+            id.0,
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match pinned_paths::mkdir(&directory) {
+            Ok(()) => {
+                reserved = Some(directory);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(PlanError::Io(error)),
+        }
+    }
+    let directory = reserved.ok_or_else(|| PlanError::Stale(from.to_path_buf()))?;
+    let directory_identity = pinned_paths::directory(&directory)
+        .ok()
+        .and_then(|file| crate::journal::native_identity(&file));
+    let Some(directory_identity) = directory_identity else {
+        let _ = pinned_paths::remove(&directory, true);
+        return Err(PlanError::Stale(directory));
+    };
+    let stage = MoveStage {
+        target: proof.path.clone(),
+        from: from.to_path_buf(),
+        to: to.to_path_buf(),
+        path: directory.join("entry"),
+        directory_identity,
+        identity: proof
+            .identity
+            .clone()
+            .ok_or_else(|| PlanError::Stale(from.to_path_buf()))?,
+    };
+    if let Err(error) = sync_directory(&directory).and_then(|()| sync_directory(&parent)) {
+        let _ = cleanup_move_directory(&stage);
+        return Err(PlanError::Io(error));
+    }
+    Ok(stage)
+}
+fn staged_move(
+    journal: &mut dyn UndoJournal,
+    id: BatchId,
+    proof: &CopyStamp,
+    from: &Path,
+    to: &Path,
+    attempted: &mut bool,
+) -> Result<(), PlanError> {
+    staged_move_with(journal, id, proof, from, to, attempted, |_| {})
+}
+#[allow(clippy::too_many_arguments)]
+fn staged_move_with(
+    journal: &mut dyn UndoJournal,
+    id: BatchId,
+    proof: &CopyStamp,
+    from: &Path,
+    to: &Path,
+    attempted: &mut bool,
+    mut checkpoint: impl FnMut(&str),
+) -> Result<(), PlanError> {
+    ensure_operation_policy()?;
+    if !proof.matches_identity(from) {
+        return Err(PlanError::Stale(from.to_path_buf()));
+    }
+    let stage = reserve_move_stage(id, proof, from, to)?;
+    if let Err(error) = MOVE_CONTEXT.with(|slot| {
+        let slot = slot.borrow();
+        let context = slot
+            .as_ref()
+            .ok_or_else(|| recovery_required(&stage.path, "missing immutable staging context"))?;
+        if context.id != id {
+            return Err(recovery_required(
+                &stage.path,
+                "staging batch disagrees with active context",
+            ));
+        }
+        context.validate_metadata(std::slice::from_ref(&stage))?;
+        context.check_additional_budget(std::slice::from_ref(&stage))
+    }) {
+        let _ = cleanup_move_directory(&stage);
+        return Err(error);
+    }
+    if let Err(error) = journal.prepare_move_stage(id, &stage) {
+        let _ = cleanup_move_directory(&stage);
+        return Err(error.into());
+    }
+    *attempted = true;
+    MOVE_CONTEXT.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let context = slot
+            .as_mut()
+            .ok_or_else(|| recovery_required(&stage.path, "missing immutable staging context"))?;
+        context.remember_stages(std::slice::from_ref(&stage))
+    })?;
+    ensure_operation_policy()?;
+    checkpoint("intent");
+    {
+        #[cfg(test)]
+        let _timer = move_metrics::Timer::new(move_metrics::Phase::Capture);
+        let _step = pinned_paths::Step::entries([from.to_path_buf(), stage.path.clone()])
+            .map_err(PlanError::Io)?;
+        if !proof.matches_identity(from) {
+            return Err(PlanError::Stale(from.to_path_buf()));
+        }
+        stage_directory_matches(&stage)?;
+        checkpoint("checked");
+        rename_noreplace(from, &stage.path).map_err(PlanError::Io)?;
+        sync_transfer_parents(from, &stage.path)
+            .map_err(|error| recovery_required(&stage.path, error.to_string()))?;
+    }
+    checkpoint("staged");
+    stage_directory_matches(&stage)?;
+    if !stage_object_matches(&stage, &stage.path) {
+        // A source swap after the final stat may have captured a foreign entry.
+        // Best-effort no-clobber restoration keeps every payload discoverable.
+        let _ = recover_move_stages(std::slice::from_ref(&stage));
+        return Err(recovery_required(
+            &stage.path,
+            "captured entry does not match original move ownership",
+        ));
+    }
+    checkpoint("verified");
+    let publication = (|| {
+        #[cfg(test)]
+        let _timer = move_metrics::Timer::new(move_metrics::Phase::Publication);
+        let _step = pinned_paths::Step::entries([stage.path.clone(), to.to_path_buf()])
+            .map_err(|error| recovery_required(&stage.path, error.to_string()))?;
+        stage_directory_matches(&stage)?;
+        if !stage_object_matches(&stage, &stage.path) {
+            return Err(recovery_required(
+                &stage.path,
+                "private entry changed before publish",
+            ));
+        }
+        checkpoint("publish_checked");
+        rename_noreplace(&stage.path, to).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                PlanError::RenameCollision(to.to_path_buf())
+            } else {
+                PlanError::Io(error)
+            }
+        })?;
+        sync_transfer_parents(&stage.path, to)
+            .map_err(|error| recovery_required(to, error.to_string()))?;
+        Ok::<(), PlanError>(())
+    })();
+    if let Err(error) = publication {
+        // A failed publish, including a destination collision, must put an
+        // owned staged object back when possible before returning to Undo.
+        // If that restoration is blocked, preserve the reservation and intent.
+        recover_move_stages(std::slice::from_ref(&stage))?;
+        return Err(error);
+    }
+    checkpoint("published");
+    if !stage_object_matches(&stage, to) {
+        return Err(recovery_required(
+            to,
+            "published entry no longer matches original move ownership",
+        ));
+    }
+    cleanup_move_directory(&stage)?;
+    checkpoint("cleaned");
+    Ok(())
+}
+
+/// Model IO belongs to the current held metadata request only on an exact
+/// logical-name match. Independent public model requests (including a peer App
+/// in a progress callback) retain ordinary standalone IO. A matching request
+/// never falls back to the pathname if capability or identity checks fail.
+pub(crate) fn open_metadata_file(path: &Path, write: bool) -> std::io::Result<std::fs::File> {
+    if metadata_identity(path).is_some() {
+        open_bound_file(path, write, false)
+    } else {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(write)
+            .open(path)
+    }
+}
+
+/// Open a fresh file description through pinned parent authority, then bind it
+/// to the original metadata object before a backend can read or mutate it.
+pub(crate) fn open_bound_file(
+    path: &Path,
+    write: bool,
+    create_new: bool,
+) -> std::io::Result<std::fs::File> {
+    let expected = metadata_identity(path);
+    if expected.is_some() && create_new {
+        return Err(std::io::Error::other(
+            "Cannot replace a held metadata source",
+        ));
+    }
+    if write && expected.is_some() {
+        ensure_operation_policy().map_err(std::io::Error::other)?;
+    }
+    let file = pinned_paths::open(path, write, create_new)?;
+    if let Some(expected) = expected {
+        let current = same_file::Handle::from_file(file.try_clone()?)?;
+        if expected.as_ref() != &current {
+            return Err(std::io::Error::other("Held metadata source changed"));
+        }
+    }
+    Ok(file)
+}
+struct MetadataBinding {
+    logical: PathBuf,
+    identity: std::rc::Rc<same_file::Handle>,
+}
+thread_local! {static METADATA_PATHS:std::cell::RefCell<Vec<MetadataBinding>>=const{std::cell::RefCell::new(Vec::new())};}
+fn metadata_identity(path: &Path) -> Option<std::rc::Rc<same_file::Handle>> {
+    METADATA_PATHS.with(|paths| {
+        paths
+            .borrow()
+            .iter()
+            .rev()
+            .find(|binding| binding.logical == path)
+            .map(|binding| binding.identity.clone())
+    })
+}
+struct MetadataPathGuard;
+impl Drop for MetadataPathGuard {
+    fn drop(&mut self) {
+        METADATA_PATHS.with(|paths| {
+            paths.borrow_mut().pop();
+        });
+    }
+}
+fn with_bound_path<T>(
+    path: &Path,
+    write: bool,
+    body: impl FnOnce(&Path) -> Result<T, PlanError>,
+) -> Result<T, PlanError> {
+    if write {
+        ensure_operation_policy()?;
+    }
+    if metadata_identity(path).is_some() {
+        return body(path);
+    }
+    let held = pinned_paths::metadata_file(path, write)
+        .map_err(PlanError::Io)?
+        .map(same_file::Handle::from_file)
+        .transpose()
+        .map_err(PlanError::Io)?
+        .map(std::rc::Rc::new);
+    let _scope = if let Some(identity) = &held {
+        METADATA_PATHS.with(|paths| {
+            paths.borrow_mut().push(MetadataBinding {
+                logical: path.to_path_buf(),
+                identity: identity.clone(),
+            });
+        });
+        Some(MetadataPathGuard)
+    } else {
+        None
+    };
+    // The logical name keeps extension-directed parser/repair policy intact.
+    // All actual IO enters open_bound_file and receives its own seek cursor.
+    let result = body(path)?;
+    if held.is_some() {
+        open_bound_file(path, false, false).map_err(PlanError::Io)?;
+    }
+    Ok(result)
+}
+
+type ExpectedFields<'a> = BTreeMap<(&'a Path, &'a TagField), &'a Option<String>>;
+fn expected_fields(values: &[AppliedValue]) -> ExpectedFields<'_> {
+    values
+        .iter()
+        .map(|value| ((value.path.as_path(), &value.field), &value.value))
+        .collect()
+}
+struct FieldGate<'a, 'b> {
+    expected: &'b ExpectedFields<'a>,
+    interrupted: bool,
+    mode: UndoMode,
+}
+fn field_restore_gate(
+    path: &Path,
+    change: &FileChange,
+    expected: &ExpectedFields<'_>,
+    interrupted: bool,
+    mode: UndoMode,
+) -> Result<Vec<TagField>, PlanError> {
+    if change.tag_changes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let current = TagEngine::read(path)?;
+    field_restore_gate_on_tags(&current, change, expected, interrupted, mode)
+}
+fn field_restore_gate_on_tags(
+    current: &TrackFile,
+    change: &FileChange,
+    expected: &ExpectedFields<'_>,
+    interrupted: bool,
+    mode: UndoMode,
+) -> Result<Vec<TagField>, PlanError> {
+    let key = effective_rename(change).unwrap_or(&change.path);
+    let mut kept = Vec::new();
+    for field in &change.tag_changes {
+        let now = current.tags.get(&field.field);
+        match expected.get(&(key, &field.field)) {
+            None if interrupted && now != field.old.as_ref() => {
+                return Err(PlanError::ChangedSinceApplied(change.path.clone()))
+            }
+            Some(applied) if now != applied.as_ref() && now != field.old.as_ref() => match mode {
+                UndoMode::Strict => {
+                    return Err(PlanError::ChangedSinceApplied(change.path.clone()))
+                }
+                UndoMode::KeepChanged => kept.push(field.field.clone()),
+                UndoMode::Overwrite => {}
+            },
+            _ => {}
+        }
+    }
+    Ok(kept)
+}
+fn cover_digest(covers: &[CoverArt]) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update((covers.len() as u64).to_le_bytes());
+    for cover in covers {
+        for bytes in [
+            cover.kind.to_storage_key().as_bytes(),
+            cover.description.as_bytes(),
+            cover.mime.as_bytes(),
+            cover.data.as_ref(),
+        ] {
+            hash.update((bytes.len() as u64).to_le_bytes());
+            hash.update(bytes);
+        }
+    }
+    hash.finalize().to_vec()
+}
+fn read_bound_track(path: &Path) -> Result<TrackFile, PlanError> {
+    with_bound_path(path, false, |resolved| {
+        let mut file = TagEngine::read(resolved)?;
+        file.path = path.to_path_buf();
+        Ok(file)
+    })
+}
+
 /// A transfer never replaces a file (#605). The pre-flight already refused
 /// targets that exist, but it compares paths as strings: on a case-insensitive
 /// file system `Track.mp3` and `track.mp3` (or the NFC and NFD spelling of one
@@ -1054,9 +2571,8 @@ fn ensure_target_free(from: &Path, to: &Path, copy: bool) -> Result<(), PlanErro
 /// A move goes back only onto a free path: a file put at the original path
 /// since is not the batch's to replace (the file itself is fine, which is what a
 /// case-only rename looks like). A copy is removed only while the file at its
-/// path is still the copy as the batch left it; a batch recorded before stamps
-/// existed has none, and its copies are removed as before. An interrupted
-/// batch has no such legacy exemption: no stamp means no proof of ownership.
+/// path is still the copy as the batch left it. Historical missing/weak stamps
+/// cannot authorize deletion; all such batches remain available for inspection.
 ///
 /// `stamps` is indexed once per Undo so checking a large batch stays linear.
 fn ensure_untransfer_safe(
@@ -1064,24 +2580,55 @@ fn ensure_untransfer_safe(
     original: &Path,
     copy: bool,
     stamps: &HashMap<&Path, &CopyStamp>,
-    interrupted: bool,
+    _interrupted: bool,
 ) -> Result<(), PlanError> {
     if copy {
         let Some(stamp) = stamps.get(target) else {
-            return if interrupted {
-                Err(PlanError::Stale(target.to_path_buf()))
-            } else {
-                Ok(())
-            };
+            return Err(PlanError::Stale(target.to_path_buf()));
         };
-        if CopyStamp::of(target).as_ref() == Some(*stamp) {
+        let actual = stamp
+            .undo_path
+            .as_deref()
+            .filter(|path| path.exists())
+            .unwrap_or(target);
+        if stamp.matches(actual) {
             Ok(())
         } else {
             Err(PlanError::Stale(target.to_path_buf()))
         }
     } else {
+        ensure_move_identity(target, target, stamps)?;
         ensure_target_free(target, original, false)
     }
+}
+
+fn current_copy_path<'a>(
+    target: &'a Path,
+    copy: bool,
+    stamps: &'a HashMap<&Path, &CopyStamp>,
+) -> &'a Path {
+    if copy {
+        if let Some(path) = stamps
+            .get(target)
+            .and_then(|stamp| stamp.undo_path.as_deref())
+            .filter(|path| path.exists())
+        {
+            return path;
+        }
+    }
+    target
+}
+fn transfer_undone(
+    target: &Path,
+    original: &Path,
+    copy: bool,
+    stamps: &HashMap<&Path, &CopyStamp>,
+) -> bool {
+    if copy && current_copy_path(target, true, stamps) != target {
+        return false;
+    }
+    is_untransferred(target, original, copy)
+        && (copy || ensure_move_identity(target, original, stamps).is_ok())
 }
 
 /// The ID3v2 revision of every file `plan` writes in place, read before it is
@@ -1105,17 +2652,10 @@ fn id3v2_revisions(plan: &ChangePlan) -> Vec<FileRevision> {
 /// that restore its values save in the revision the app is set to, which need
 /// not be the one the file was in. A 2.2 file stays as they left it: the backend
 /// does not write 2.2.
-fn restore_revision(
-    path: &Path,
-    revisions: &HashMap<&Path, Id3v2Revision>,
-) -> Result<(), PlanError> {
-    let Some(&recorded) = revisions.get(path) else {
-        return Ok(());
-    };
-    if !Id3v2Revision::WRITABLE.contains(&recorded) {
-        return Ok(());
-    }
-    if TagEngine::id3v2_revision(path)?.is_some_and(|current| current != recorded) {
+fn restore_revision_value(path: &Path, recorded: Id3v2Revision) -> Result<(), PlanError> {
+    if Id3v2Revision::WRITABLE.contains(&recorded)
+        && TagEngine::id3v2_revision(path)?.is_some_and(|current| current != recorded)
+    {
         TagEngine::set_id3v2_revision(path, recorded)?;
     }
     Ok(())
@@ -1127,7 +2667,7 @@ fn applied_values_at(change: &FileChange, now_at: &Path) -> Vec<AppliedValue> {
     if change.copy || change.tag_changes.is_empty() {
         return Vec::new();
     }
-    let Ok(current) = TagEngine::read(now_at) else {
+    let Ok(current) = read_bound_track(now_at) else {
         return Vec::new();
     };
     let path = effective_rename(change).unwrap_or(&change.path);
@@ -1153,26 +2693,18 @@ fn merge_applied_values(
         .map(|value| (value.path.clone(), value.field.clone()))
         .collect();
     // Prefer the last observation if a plan wrote the same path/field twice.
+    let mut older = Vec::new();
     for value in known.iter().rev() {
         if seen.insert((value.path.clone(), value.field.clone())) {
-            current.push(value.clone());
+            older.push(value.clone());
         }
     }
+    older.reverse();
+    if current.is_empty() {
+        return older;
+    }
+    current.extend(older);
     current
-}
-
-/// Field outcomes read at their final paths, after writes or rollback. An
-/// unreached entry is not an execution outcome: sampling it could authorize
-/// Undo to overwrite an external edit to a file we never wrote.
-fn applied_values(plan: &ChangePlan, written: &Written) -> Vec<AppliedValue> {
-    plan.changes
-        .iter()
-        .zip(&written.tag_steps)
-        .filter(|(_, steps)| **steps != 0)
-        .flat_map(|(change, _)| {
-            applied_values_at(change, effective_rename(change).unwrap_or(&change.path))
-        })
-        .collect()
 }
 
 /// Every field of `batch` that no longer reads as the batch left it (#658),
@@ -1205,7 +2737,7 @@ fn changed_since_applied(batch: &AppliedBatch) -> Result<Vec<(usize, KeptField)>
             Some(target) if is_untransferred(target, &change.path, false) => &change.path,
             _ => path,
         };
-        let current = TagEngine::read(now_at)?;
+        let current = read_bound_track(now_at)?;
         for field_change in &change.tag_changes {
             let now = current.tags.get(&field_change.field);
             let old = field_change.old.as_ref();
@@ -1241,7 +2773,7 @@ fn changed_since_applied(batch: &AppliedBatch) -> Result<Vec<(usize, KeptField)>
 fn file_fingerprint(path: &Path) -> Result<Vec<u8>, PlanError> {
     use sha2::{Digest, Sha256};
     use std::io::Read;
-    let mut file = std::fs::File::open(path).map_err(PlanError::Io)?;
+    let mut file = open_bound_file(path, false, false).map_err(PlanError::Io)?;
     let mut digest = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
@@ -1335,42 +2867,232 @@ fn ensure_covers_undo_safe(batch: &AppliedBatch) -> Result<(), PlanError> {
     Ok(())
 }
 
-/// The stamp of every copy `plan` made, read once the batch is written (#604).
-/// A copy whose stamp cannot be read gets none, and is undone unchecked.
-fn copy_stamps(plan: &ChangePlan) -> Vec<CopyStamp> {
-    let mut stamps = Vec::new();
-    for change in plan.changes.iter().filter(|change| change.copy) {
-        let targets = effective_rename(change)
+/// Preserve durable copy-removal locations after a rollback attempt so a later
+/// outcome update cannot discard the evidence needed to recover private files.
+fn retain_copy_removal_paths(batch: &mut AppliedBatch, journal: &dyn UndoJournal) {
+    if let Ok(Some(stored)) = journal.batch(batch.id) {
+        let paths: HashMap<_, _> = stored
+            .copy_stamps
             .into_iter()
-            .chain(change.sidecar_renames.iter().map(|(_, to)| to.as_path()));
-        stamps.extend(targets.filter_map(CopyStamp::of));
-    }
-    stamps
-}
-
-/// Move or copy one file. The one place the two differ, so nothing above has to
-/// branch on it twice.
-fn transfer(from: &Path, to: &Path, copy: bool) -> Result<(), PlanError> {
-    if copy {
-        std::fs::copy(from, to).map(|_| ()).map_err(PlanError::Io)
-    } else {
-        std::fs::rename(from, to).map_err(PlanError::Io)
-    }
-}
-
-/// Reverse one [`transfer`]: a move goes back, a copy is removed.
-fn untransfer(target: &Path, original: &Path, copy: bool) -> Result<(), PlanError> {
-    if copy {
-        // The copy may already be gone (deleted by hand between apply and
-        // undo); that is the state undo wanted, not a failure.
-        match std::fs::remove_file(target) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(PlanError::Io(error)),
+            .filter_map(|stamp| stamp.undo_path.map(|path| (stamp.path, path)))
+            .collect();
+        for stamp in &mut batch.copy_stamps {
+            if let Some(path) = paths.get(&stamp.path) {
+                stamp.undo_path = Some(path.clone());
+            }
         }
-    } else {
-        std::fs::rename(target, original).map_err(PlanError::Io)
     }
+}
+
+/// Exclusively create and flush a copy; moves use the durable staging protocol.
+fn copy_file(
+    from: &Path,
+    to: &Path,
+    created: &mut bool,
+    stamp: &mut Option<CopyStamp>,
+) -> Result<(), PlanError> {
+    use std::io;
+    let mut source = open_bound_file(from, false, false).map_err(PlanError::Io)?;
+    let mut target = open_bound_file(to, true, true).map_err(|error| {
+        if error.kind() == io::ErrorKind::AlreadyExists {
+            PlanError::RenameCollision(to.to_path_buf())
+        } else {
+            PlanError::Io(error)
+        }
+    })?;
+    *created = true;
+    let result = (|| {
+        io::copy(&mut source, &mut target)?;
+        target.set_permissions(source.metadata()?.permissions())?;
+        target.sync_all()
+    })();
+    *stamp = CopyStamp::from_file(to, &mut target);
+    result.map_err(PlanError::Io)?;
+    if stamp.is_none() {
+        return Err(PlanError::Stale(to.to_path_buf()));
+    }
+    sync_transfer_parents(from, to).map_err(PlanError::Io)
+}
+
+pub(crate) fn sync_directory(directory: &Path) -> std::io::Result<()> {
+    if let Some(()) = pinned_paths::sync(directory)? {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        std::fs::File::open(if directory.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            directory
+        })?
+        .sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = directory;
+        Ok(())
+    }
+}
+fn sync_transfer_parents(from: &Path, to: &Path) -> std::io::Result<()> {
+    if let Some(parent) = to.parent() {
+        sync_directory(parent)?;
+    }
+    if from.parent() != to.parent() {
+        if let Some(parent) = from.parent() {
+            sync_directory(parent)?;
+        }
+    }
+    Ok(())
+}
+
+/// Atomic no-clobber moves. Unsupported filesystems/platforms fail without a
+/// copy/unlink fallback; that fallback has additional crash states to journal.
+pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
+    if let Some(()) = pinned_paths::rename(from, to)? {
+        return Ok(());
+    }
+    native_rename_noreplace(from, to)
+}
+fn native_rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
+    if from == to {
+        return Ok(());
+    }
+    if folds_onto(from, to) {
+        return std::fs::rename(from, to);
+    }
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios"
+    ))]
+    {
+        rustix::fs::renameat_with(
+            rustix::fs::CWD,
+            from,
+            rustix::fs::CWD,
+            to,
+            rustix::fs::RenameFlags::NOREPLACE,
+        )
+        .map_err(Into::into)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let from: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+        let to: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: both UTF-16 buffers are NUL-terminated and live through the
+        // call. MoveFileW never replaces an existing destination.
+        if unsafe { windows_sys::Win32::Storage::FileSystem::MoveFileW(from.as_ptr(), to.as_ptr()) }
+            != 0
+        {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios",
+        windows
+    )))]
+    {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "atomic no-replace rename unavailable",
+        ))
+    }
+}
+
+fn remove_recorded_copy(
+    journal: &mut dyn UndoJournal,
+    id: BatchId,
+    target: &Path,
+    stamps: &HashMap<&Path, &CopyStamp>,
+) -> Result<(), PlanError> {
+    remove_recorded_copy_with(journal, id, target, stamps, |_| {})
+}
+
+fn remove_recorded_copy_with(
+    journal: &mut dyn UndoJournal,
+    id: BatchId,
+    target: &Path,
+    stamps: &HashMap<&Path, &CopyStamp>,
+    mut checkpoint: impl FnMut(&str),
+) -> Result<(), PlanError> {
+    let stamp = stamps
+        .get(target)
+        .ok_or_else(|| PlanError::Stale(target.to_path_buf()))?;
+    let undo_path = match &stamp.undo_path {
+        Some(path) => path.clone(),
+        None => {
+            let parent = target
+                .parent()
+                .ok_or_else(|| PlanError::Stale(target.to_path_buf()))?;
+            let mut reserved = None;
+            for attempt in 0..1024 {
+                let directory = parent.join(format!(".tagrex-undo-copy-{}-{attempt}", id.0));
+                match pinned_paths::mkdir(&directory) {
+                    Ok(()) => {
+                        reserved = Some(directory.join("copy"));
+                        break;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(PlanError::Io(error)),
+                }
+            }
+            let path = reserved.ok_or_else(|| PlanError::Stale(target.to_path_buf()))?;
+            if let Some(directory) = path.parent() {
+                sync_directory(directory).map_err(PlanError::Io)?;
+                if let Some(parent) = directory.parent() {
+                    sync_directory(parent).map_err(PlanError::Io)?;
+                }
+            }
+            if let Err(error) = journal.prepare_copy_removal(id, target, &path) {
+                if let Some(directory) = path.parent() {
+                    let _ = pinned_paths::remove(directory, true);
+                }
+                return Err(error.into());
+            }
+            ensure_operation_policy()?;
+            path
+        }
+    };
+    ensure_operation_policy()?;
+    checkpoint("intent");
+    if !undo_path.exists() {
+        if !target.exists() {
+            return Ok(());
+        }
+        // Check after the public progress callback, then atomically move to
+        // our journaled private path. A replacement in the remaining window
+        // is caught by the second digest check before any removal.
+        if !stamp.matches(target) {
+            return Err(PlanError::Stale(target.to_path_buf()));
+        }
+        checkpoint("checked");
+        rename_noreplace(target, &undo_path).map_err(PlanError::Io)?;
+        sync_transfer_parents(target, &undo_path).map_err(PlanError::Io)?;
+    }
+    checkpoint("moved");
+    if !stamp.matches(&undo_path) {
+        // Never overwrite a newly created target while returning an unrelated
+        // replacement. If blocked, the journal retains its recovery location.
+        let _ = rename_noreplace(&undo_path, target);
+        return Err(PlanError::Stale(undo_path));
+    }
+    checkpoint("verified");
+    pinned_paths::remove(&undo_path, false).map_err(PlanError::Io)?;
+    if let Some(parent) = undo_path.parent() {
+        sync_directory(parent).map_err(PlanError::Io)?;
+    }
+    checkpoint("removed");
+    if let Some(directory) = undo_path.parent() {
+        let _ = pinned_paths::remove(directory, true);
+    }
+    Ok(())
 }
 
 /// Existing source parents a move may empty, deepest first. Capture these in
@@ -1432,7 +3154,7 @@ fn prune_emptied_dirs(
         // hold the OS's own bookkeeping (#404) — a `.DS_Store` Finder wrote
         // while it was open. That is not content, and it is not carried either,
         // so it goes with the folder instead of keeping it from being tidied.
-        if clear_os_junk(dir) && std::fs::remove_dir(dir).is_ok() {
+        if clear_os_junk(dir) && pinned_paths::remove(dir, true).is_ok() {
             removed.push(dir.clone());
         }
     }
@@ -1529,12 +3251,13 @@ fn clear_os_junk_after_scan(dir: &Path, after_scan: impl FnOnce()) -> bool {
                 Ok(kind) if kind.is_dir() && !kind.is_symlink() => {
                     // Never bulk-delete a directory validated earlier: another
                     // process may have added real contents since that scan.
-                    if !remove_junk(&path, depth - 1) || std::fs::remove_dir(&path).is_err() {
+                    if !remove_junk(&path, depth - 1) || pinned_paths::remove(&path, true).is_err()
+                    {
                         empty = false;
                     }
                 }
                 Ok(kind) if kind.is_file() && is_os_junk(&path) => {
-                    if std::fs::remove_file(&path).is_err() {
+                    if pinned_paths::remove(&path, false).is_err() {
                         empty = false;
                     }
                 }
@@ -1605,20 +3328,7 @@ fn resolve_target_within_roots(target: &Path, roots: &[PathBuf]) -> Result<PathB
 /// remove those and only those — a directory that already existed is never
 /// touched, even if the rollback leaves it empty.
 fn create_dirs_recording(dir: &Path) -> Result<Vec<PathBuf>, PlanError> {
-    let mut missing = Vec::new();
-    let mut current = Some(dir);
-    while let Some(path) = current {
-        if path.exists() {
-            break;
-        }
-        missing.push(path.to_path_buf());
-        current = path.parent();
-    }
-    missing.reverse();
-    for path in &missing {
-        std::fs::create_dir(path).map_err(PlanError::Io)?;
-    }
-    Ok(missing)
+    pinned_paths::create_all(dir).map_err(PlanError::Io)
 }
 
 /// The rename this change actually performs, if any: `rename_to` unless it's
@@ -1634,7 +3344,12 @@ fn effective_rename(change: &FileChange) -> Option<&Path> {
 /// field no longer matches what the plan recorded as `old`, the plan was
 /// built against a stale snapshot and must not be applied.
 fn ensure_not_stale(change: &FileChange) -> Result<(), PlanError> {
-    let current = TagEngine::read(&change.path)?;
+    with_bound_path(&change.path, false, |path| {
+        ensure_not_stale_at(change, path)
+    })
+}
+fn ensure_not_stale_at(change: &FileChange, path: &Path) -> Result<(), PlanError> {
+    let current = TagEngine::read(path)?;
     for field_change in &change.tag_changes {
         let on_disk = current.tags.get(&field_change.field);
         if on_disk != field_change.old.as_ref() {
@@ -1642,22 +3357,22 @@ fn ensure_not_stale(change: &FileChange) -> Result<(), PlanError> {
         }
     }
     if let Some(cover_change) = &change.cover_change {
-        if TagEngine::read_covers(&change.path)? != cover_change.old {
+        if TagEngine::read_covers(path)? != cover_change.old {
             return Err(PlanError::Stale(change.path.clone()));
         }
     }
     // A block that has changed — or is already gone — since the plan was built
     // would be journaled with a snapshot undo could not put back (#47).
     for block_change in &change.block_changes {
-        if TagEngine::read_block(&change.path, block_change.kind)? != block_change.old {
+        if TagEngine::read_block(path, block_change.kind)? != block_change.old {
             return Err(PlanError::Stale(change.path.clone()));
         }
         // The modeled content omits private/binary frames and some Vorbis
         // provenance. Compare the same exact snapshot Undo would restore.
         if let Some(old_bytes) = &block_change.old_bytes {
             let current_bytes = match block_change.kind {
-                TagBlockKind::Id3v2 => TagEngine::dump_id3v2(&change.path)?,
-                TagBlockKind::VorbisComments => TagEngine::dump_vorbis(&change.path)?,
+                TagBlockKind::Id3v2 => TagEngine::dump_id3v2(path)?,
+                TagBlockKind::VorbisComments => TagEngine::dump_vorbis(path)?,
                 // Unknown exact snapshot formats must not bypass preflight.
                 _ => None,
             };
@@ -1669,7 +3384,7 @@ fn ensure_not_stale(change: &FileChange) -> Result<(), PlanError> {
         // so the captured source revision needs a separate comparison.
         if block_change.kind == TagBlockKind::Id3v2 {
             if let Some(old_revision) = block_change.old_revision {
-                if TagEngine::id3v2_revision(&change.path)? != Some(old_revision) {
+                if TagEngine::id3v2_revision(path)? != Some(old_revision) {
                     return Err(PlanError::Stale(change.path.clone()));
                 }
             }
@@ -1708,66 +3423,71 @@ fn ensure_storable_custom_names(change: &FileChange) -> Result<(), PlanError> {
 /// block at all between the two writes, and a crash in that gap would lose
 /// everything rather than half of it.
 fn write_blocks(path: &Path, change: &FileChange, direction: Direction) -> Result<(), PlanError> {
-    let target = |block_change: &BlockChange| match direction {
-        Direction::Apply => block_change.new.clone(),
-        Direction::Undo => block_change.old.clone(),
-    };
-    let revision = |block_change: &BlockChange| match direction {
-        Direction::Apply => block_change.revision,
-        Direction::Undo => block_change.old_revision,
-    };
-    for block_change in &change.block_changes {
-        // A revision switch keeps the block as it is and only restamps the
-        // header, so it never goes through the rebuild — see
-        // [`TagEngine::set_id3v2_revision`] for why that matters.
-        if block_change.is_revision_only() {
-            if let Some(revision) = revision(block_change) {
-                TagEngine::set_id3v2_revision(path, revision)?;
+    if change.block_changes.is_empty() {
+        return Ok(());
+    }
+    with_bound_path(path, true, |path| {
+        let target = |block_change: &BlockChange| match direction {
+            Direction::Apply => block_change.new.clone(),
+            Direction::Undo => block_change.old.clone(),
+        };
+        let revision = |block_change: &BlockChange| match direction {
+            Direction::Apply => block_change.revision,
+            Direction::Undo => block_change.old_revision,
+        };
+        for block_change in &change.block_changes {
+            // A revision switch keeps the block as it is and only restamps the
+            // header, so it never goes through the rebuild — see
+            // [`TagEngine::set_id3v2_revision`] for why that matters.
+            if block_change.is_revision_only() {
+                if let Some(revision) = revision(block_change) {
+                    TagEngine::set_id3v2_revision(path, revision)?;
+                    continue;
+                }
+            }
+            // The same reason, with the frames the rewrite leaves alone. Undo goes on
+            // below, to the bytes.
+            if block_change.text_to_unicode && matches!(direction, Direction::Apply) {
+                TagEngine::id3v2_text_to_unicode(path)?;
                 continue;
             }
-        }
-        // The same reason, with the frames the rewrite leaves alone. Undo goes on
-        // below, to the bytes.
-        if block_change.text_to_unicode && matches!(direction, Direction::Apply) {
-            TagEngine::id3v2_text_to_unicode(path)?;
-            continue;
-        }
-        if let Some(content) = target(block_change) {
-            // Undo puts an ID3v2 block back from its bytes when they were kept
-            // (#206), so the frames the model cannot express come back too.
-            // Apply never has bytes to write: it is producing a block, not
-            // putting one back.
-            match (direction, &block_change.old_bytes) {
-                (Direction::Undo, Some(bytes)) if block_change.kind == TagBlockKind::Id3v2 => {
-                    TagEngine::restore_id3v2_bytes(
-                        path,
-                        bytes,
-                        &content.covers,
-                        block_change.old_revision,
-                    )?;
-                }
-                (Direction::Undo, Some(bytes))
-                    if block_change.kind == TagBlockKind::VorbisComments =>
-                {
-                    TagEngine::restore_vorbis_bytes(path, bytes, &content.covers)?;
-                }
-                _ => {
-                    TagEngine::write_block(
-                        path,
-                        block_change.kind,
-                        revision(block_change),
-                        &content,
-                    )?;
+            if let Some(content) = target(block_change) {
+                // Undo puts an ID3v2 block back from its bytes when they were kept
+                // (#206), so the frames the model cannot express come back too.
+                // Apply never has bytes to write: it is producing a block, not
+                // putting one back.
+                match (direction, &block_change.old_bytes) {
+                    (Direction::Undo, Some(bytes)) if block_change.kind == TagBlockKind::Id3v2 => {
+                        TagEngine::restore_id3v2_bytes(
+                            path,
+                            bytes,
+                            &content.covers,
+                            block_change.old_revision,
+                        )?;
+                    }
+                    (Direction::Undo, Some(bytes))
+                        if block_change.kind == TagBlockKind::VorbisComments =>
+                    {
+                        TagEngine::restore_vorbis_bytes(path, bytes, &content.covers)?;
+                    }
+                    _ => {
+                        TagEngine::write_block(
+                            path,
+                            block_change.kind,
+                            revision(block_change),
+                            &content,
+                        )?;
+                    }
                 }
             }
         }
-    }
-    for block_change in &change.block_changes {
-        if target(block_change).is_none() {
-            TagEngine::remove_block(path, block_change.kind)?;
+        for block_change in &change.block_changes {
+            if target(block_change).is_none() {
+                TagEngine::remove_block(path, block_change.kind)?;
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Write the `new` image set (or the `old` one on undo). No-op when the change
@@ -1777,17 +3497,22 @@ fn apply_cover_change(
     change: &FileChange,
     direction: Direction,
 ) -> Result<(), PlanError> {
-    let Some(cover_change) = &change.cover_change else {
+    if change.cover_change.is_none() {
         return Ok(());
-    };
-    let target = match direction {
-        Direction::Apply => &cover_change.new,
-        Direction::Undo => &cover_change.old,
-    };
-    if !matches!(direction, Direction::Undo) || TagEngine::read_covers(path)? != *target {
-        TagEngine::write_covers(path, target)?;
     }
-    Ok(())
+    with_bound_path(path, true, |path| {
+        let Some(cover_change) = &change.cover_change else {
+            return Ok(());
+        };
+        let target = match direction {
+            Direction::Apply => &cover_change.new,
+            Direction::Undo => &cover_change.old,
+        };
+        if !matches!(direction, Direction::Undo) || TagEngine::read_covers(path)? != *target {
+            TagEngine::write_covers(path, target)?;
+        }
+        Ok(())
+    })
 }
 
 fn write_tag_changes(
@@ -1795,36 +3520,65 @@ fn write_tag_changes(
     change: &FileChange,
     direction: Direction,
 ) -> Result<(), PlanError> {
+    write_tag_changes_with_gate(path, change, direction, None)
+}
+fn write_tag_changes_with_gate(
+    path: &Path,
+    change: &FileChange,
+    direction: Direction,
+    gate: Option<FieldGate<'_, '_>>,
+) -> Result<(), PlanError> {
     if change.tag_changes.is_empty() {
         return Ok(());
     }
-    let mut track = TagEngine::read(path)?;
-    // An unreached interrupted entry, or an already-restored retry, needs no
-    // write. Besides avoiding normalization, this preserves untouched bytes.
-    if matches!(direction, Direction::Undo)
-        && change
-            .tag_changes
-            .iter()
-            .all(|field| track.tags.get(&field.field) == field.old.as_ref())
-    {
-        return Ok(());
-    }
-    for field_change in &change.tag_changes {
-        let value = match direction {
-            Direction::Apply => &field_change.new,
-            Direction::Undo => &field_change.old,
+    with_bound_path(path, true, |path| {
+        if change.tag_changes.is_empty() {
+            return Ok(());
+        }
+        let mut track = TagEngine::read(path)?;
+        if matches!(direction, Direction::Apply)
+            && change
+                .tag_changes
+                .iter()
+                .any(|field| track.tags.get(&field.field) != field.old.as_ref())
+        {
+            return Err(PlanError::Stale(change.path.clone()));
+        }
+        let kept = if let Some(gate) = gate {
+            field_restore_gate_on_tags(&track, change, gate.expected, gate.interrupted, gate.mode)?
+        } else {
+            Vec::new()
         };
-        match value {
-            Some(value) => {
-                track.tags.insert(field_change.field.clone(), value.clone());
+        // An unreached interrupted entry, or an already-restored retry, needs no
+        // write. Besides avoiding normalization, this preserves untouched bytes.
+        if matches!(direction, Direction::Undo)
+            && change
+                .tag_changes
+                .iter()
+                .all(|field| track.tags.get(&field.field) == field.old.as_ref())
+        {
+            return Ok(());
+        }
+        for field_change in &change.tag_changes {
+            if kept.contains(&field_change.field) {
+                continue;
             }
-            None => {
-                track.tags.remove(&field_change.field);
+            let value = match direction {
+                Direction::Apply => &field_change.new,
+                Direction::Undo => &field_change.old,
+            };
+            match value {
+                Some(value) => {
+                    track.tags.insert(field_change.field.clone(), value.clone());
+                }
+                None => {
+                    track.tags.remove(&field_change.field);
+                }
             }
         }
-    }
-    TagEngine::write(&track)?;
-    Ok(())
+        TagEngine::write(&track)?;
+        Ok(())
+    })
 }
 
 fn now_unix_secs() -> i64 {
@@ -1838,6 +3592,8 @@ fn now_unix_secs() -> i64 {
 pub enum PlanError {
     #[error("file changed on disk since the plan was built: {0}")]
     Stale(PathBuf),
+    #[error("file recovery required at {}: {reason}", .path.display())]
+    RecoveryRequired { path: PathBuf, reason: String },
     #[error("rename target already exists: {0}")]
     RenameCollision(PathBuf),
     /// Undo found a field that has changed since the batch was applied (#658),
@@ -1900,7 +3656,13 @@ mod tests {
         let mut written = Written::new(1);
         written.tag_steps[0] = 3;
 
-        let error = written.roll_back_after(&plan, &[], PlanError::Io(std::io::Error::other("x")));
+        let error = written.roll_back_after(
+            &plan,
+            &[],
+            PlanError::Io(std::io::Error::other("x")),
+            &mut crate::journal::VecJournal::new(),
+            BatchId(0),
+        );
 
         match error {
             PlanError::RollbackIncomplete { count, first, .. } => {
@@ -1920,9 +3682,15 @@ mod tests {
             changes: vec![change_for(&dir.join("never.flac"), "A")],
             ..ChangePlan::default()
         };
-        let written = Written::new(1);
+        let mut written = Written::new(1);
 
-        let error = written.roll_back_after(&plan, &[], PlanError::Io(std::io::Error::other("x")));
+        let error = written.roll_back_after(
+            &plan,
+            &[],
+            PlanError::Io(std::io::Error::other("x")),
+            &mut crate::journal::VecJournal::new(),
+            BatchId(0),
+        );
 
         assert!(matches!(error, PlanError::Io(_)));
         std::fs::remove_dir_all(&dir).ok();

@@ -826,7 +826,14 @@ fn rename_into_new_folders_creates_them_and_undo_removes_them() {
     assert!(target_in_existing.exists());
     // Two levels were created for the first target; `Existing` was not.
     assert_eq!(batch.created_dirs.len(), 2);
-    assert!(batch.created_dirs.iter().all(|d| d.starts_with(dir.path())));
+    // Receipts use resolved paths; public input may retain an alias spelling
+    // (or lack Windows' verbatim prefix). Compare the existing directories.
+    let resolved_root = std::fs::canonicalize(dir.path()).unwrap();
+    assert!(batch.created_dirs.iter().all(|directory| {
+        std::fs::canonicalize(directory)
+            .unwrap()
+            .starts_with(&resolved_root)
+    }));
 
     Executor::undo(&mut journal, batch.id, &roots(dir.path())).unwrap();
 
@@ -1913,6 +1920,21 @@ fn incomplete_rollback_retains_recovery_batch_after_reopen() {
         saved: PathBuf,
     }
     impl UndoJournal for FailFinish {
+        fn prepare_move_stage(
+            &mut self,
+            id: BatchId,
+            stage: &tagrex_core::journal::MoveStage,
+        ) -> Result<(), tagrex_core::journal::JournalError> {
+            self.journal.prepare_move_stage(id, stage)
+        }
+        fn move_stages(
+            &self,
+            id: BatchId,
+        ) -> Result<Vec<tagrex_core::journal::MoveStage>, tagrex_core::journal::JournalError>
+        {
+            self.journal.move_stages(id)
+        }
+
         fn record(&mut self, b: &AppliedBatch) -> Result<BatchId, JournalError> {
             self.journal.record(b)
         }
