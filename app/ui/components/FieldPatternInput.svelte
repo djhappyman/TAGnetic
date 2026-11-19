@@ -158,7 +158,9 @@
     if (cut && !disabled) { hide(); const start = textBefore(range); range.deleteContents(); draw(text(editor), start); publish(); }
   }
   function connect(node: HTMLDivElement) {
-    editor = node; draw(value); history = [{value, caret:value.length}]; historyAt = 0;
+    // Attach once: tracking value here would remount the editable DOM on every
+    // keystroke, losing the caret and the local undo history.
+    untrack(() => { editor = node; draw(value); history = [{value, caret:value.length}]; historyAt = 0; });
     return () => clearTimeout(timer);
   }
   $effect(() => {
