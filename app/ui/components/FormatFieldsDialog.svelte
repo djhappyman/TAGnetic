@@ -1,6 +1,5 @@
 <script lang="ts">
   import { fieldHue } from '../js/field-pattern.js';
-  import { toast } from '../js/dom.js';
   import { X } from '@lucide/svelte';
   import ControllerDialog from './ControllerDialog.svelte';
   import FieldPatternInput from './FieldPatternInput.svelte';
@@ -77,7 +76,7 @@
     try {
       await runRibbonAction(mode === 'write' ? 'field-format-write' : 'field-format-stage', {token});
       root.hidden = true;
-    } catch (reason) { root.hidden = false; error = String(reason); result = null; toast(error, true); }
+    } catch (reason) { root.hidden = false; error = String(reason); result = null; const { toast } = await import('../js/dom.js'); toast(error, true); }
     finally { working = false; }
   }
 </script>
@@ -134,9 +133,11 @@
         {#if result?.locked.length}<span>Locked: {result.locked.join(', ')}.</span>{/if}
       </div>
     </div>
+    <span id="format-write-help" class="sr-only">Bypass staging and write changes immediately.</span>
+    <span id="format-stage-help" class="sr-only">Add these changes to Staged. Review them before using Apply to save your files.</span>
     <div class="ribbon-tool-footer">
       <Button variant="ghost" disabled={working} onclick={close}>Cancel</Button>
-      <div><Button id="ribbon-format-write" variant="ghost" data-tooltip="Bypass staging and write changes immediately." data-tooltip-delay="1200" aria-description="Bypass staging and write changes immediately." disabled={!canStage} onclick={() => submit('write')}>Write</Button><Button id="ribbon-format-stage" data-tooltip="Add these changes to Staged. Review them before using Apply to save your files." data-tooltip-delay="1600" aria-description="Add these changes to Staged. Review them before using Apply to save your files." disabled={!canStage} onclick={() => submit('stage')}>Stage Edits</Button></div>
+      <div><Button id="ribbon-format-write" variant="ghost" data-tooltip="Bypass staging and write changes immediately." data-tooltip-delay="1200" aria-describedby="format-write-help" disabled={!canStage} onclick={() => submit('write')}>Write</Button><Button id="ribbon-format-stage" data-tooltip="Add these changes to Staged. Review them before using Apply to save your files." data-tooltip-delay="1600" aria-describedby="format-stage-help" disabled={!canStage} onclick={() => submit('stage')}>Stage Edits</Button></div>
     </div>
   </div>
 </ControllerDialog>
