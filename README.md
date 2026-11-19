@@ -95,6 +95,10 @@ artwork, scalar CSV/TSV and guarded output implementations are being reconciled
 against this merged base. Their combined hosted verification is pending; this
 paragraph does not mark new UI features or the whole backend complete.
 
+Guarded output publication requires the destination filesystem's safe exclusive
+rename support. Unsupported macOS FAT-family destinations refuse before staging;
+this does not affect their read-only library use. Hosted validation is pending.
+
 The incomplete stress runner and portable legacy metadata-preservation canary
 remain preserved in a recovery checkpoint. Windows stress process supervision,
 general exact-value integration and full programme validation remain open. See

@@ -5130,6 +5130,7 @@ version = "1.4.9"
 dependencies = [
  "base64 0.23.1",
  "getrandom 0.3.4",
+ "libc",
  "regex",
  "rustix",
  "rusty-chromaprint",

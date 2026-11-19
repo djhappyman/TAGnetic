@@ -88,8 +88,8 @@ jobs:
           diskutil mount -mountPoint "$mount" "${device}s1"
           diskutil info -plist "$mount" | python3 -c 'import os,plistlib,sys; p=plistlib.loads(sys.stdin.buffer.read()); expected="exfat" if os.environ["OUTPUT_FILESYSTEM"]=="ExFAT" else "msdos"; actual=p.get("FilesystemType", "").lower(); print("Filesystem:", actual); assert actual==expected, p'
           export TAGREX_OUTPUT_TEST_ROOT="$mount"
-          # FAT-family volumes cannot create symlinks. Those two protections
-          # run on APFS in ordinary CI; exercise all publication paths here.
-          cargo test -p tagrex-commands output::tests -- --nocapture \
-            --skip pinned_parent_cannot_be_redirected_by_a_directory_symlink \
-            --skip checked_rename_refuses_existing_and_dangling_links
+          # Verify actual transport support, then require either successful
+          # publication or an explicit refusal with no namespace effects.
+          # Ordinary APFS CI retains every positive publication/rollback case.
+          cargo test -p tagrex-commands output::tests::apple_volume_capability_matches_native_transport_and_preflights_publication -- --exact --nocapture
+          cargo test -p tagrex-commands output::tests::held_candidate_identity_survives_growth_and_refuses_an_identical_replacement -- --exact --nocapture

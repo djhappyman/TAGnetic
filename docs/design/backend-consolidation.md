@@ -134,3 +134,27 @@ continuing into the ordinary behavior tests; an unconditional final outcome
 check still fails the Linux job if formatting failed. Artifact generation no
 longer requires the job's aggregate failure flag. This preserves the merge gate
 and avoids losing all Linux behavior evidence to formatting-only differences.
+
+## Exclusive transport capability boundary
+
+Hosted `3dfd99dc` exFAT execution passed the growth/foreign-replacement identity
+regression, then reached `Unsupported` from atomic exclusive rename. Its former
+late refusal left only staged candidates and a recovery error. Move Apple volume
+capability validation before any staging or original capture, using a held
+volume descriptor and validated `VOL_CAP_INT_RENAME_EXCL` capability/valid bits.
+Check every distinct destination parent to cover mounted subvolumes. Unknown or
+missing support refuses; never fall back to a checked ordinary replacing rename.
+
+The real-volume regression compares the native rename result with the volume
+capability query. Supported volumes must publish correctly. Unsupported volumes
+must refuse both overwrite modes, preserve originals/unrelated bytes, create no
+new output and leave no private staging/recovery paths. Ordinary APFS CI retains
+the unchanged successful publication and replacement/rollback tests. FAT-family
+jobs now verify the appropriate native capability outcome and the independent
+held-growth/identical-replacement case; green refusal coverage is not a claim
+that protected exports work on unsupported macOS FAT volumes.
+
+Primary interfaces: [Apple's volume capability](https://developer.apple.com/documentation/foundation/urlresourcekey/volumesupportsexclusiverenamingkey)
+and [descriptor attribute query](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/getattrlist.2).
+The libc dependency is already present in the workspace lockfile; no local
+installation, build or test was run. Exact-head hosted verification is pending.

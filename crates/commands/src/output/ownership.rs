@@ -441,6 +441,92 @@ pub(super) fn native_result(result: rustix::io::Result<()>) -> io::Result<()> {
 }
 
 impl Directory {
+    /// Check filesystem transport support before staging or capturing originals.
+    pub(super) fn ensure_exclusive_rename(&self) -> io::Result<()> {
+        #[cfg(target_vendor = "apple")]
+        {
+            use rustix::fs::{fstat, fstatfs, open, Mode, OFlags};
+            use std::os::fd::AsRawFd;
+            use std::os::unix::ffi::OsStrExt;
+            // Volume attributes require its mount root. Bind the reported mount
+            // to this held descriptor's device before querying any capability.
+            let filesystem = fstatfs(&self.fd)?;
+            let mount: Vec<u8> = filesystem
+                .f_mntonname
+                .iter()
+                .take_while(|unit| **unit != 0)
+                .map(|unit| *unit as u8)
+                .collect();
+            if mount.is_empty() || mount.len() == filesystem.f_mntonname.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Invalid volume mount path",
+                ));
+            }
+            let volume = open(
+                Path::new(OsStr::from_bytes(&mount)),
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )?;
+            if fstat(&volume)?.st_dev != fstat(&self.fd)?.st_dev {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "Output volume changed",
+                ));
+            }
+            let mut request = libc::attrlist {
+                bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+                reserved: 0,
+                commonattr: 0,
+                volattr: libc::ATTR_VOL_INFO | libc::ATTR_VOL_CAPABILITIES,
+                dirattr: 0,
+                fileattr: 0,
+                forkattr: 0,
+            };
+            #[repr(C)]
+            struct Response {
+                length: u32,
+                caps: libc::vol_capabilities_attr_t,
+            }
+            let mut response = Response {
+                length: 0,
+                caps: libc::vol_capabilities_attr_t {
+                    capabilities: [0; 4],
+                    valid: [0; 4],
+                },
+            };
+            // SAFETY: volume is held open; request/response are initialized,
+            // aligned C-layout buffers with exactly the requested fixed fields.
+            let result = unsafe {
+                libc::fgetattrlist(
+                    volume.as_raw_fd(),
+                    (&mut request as *mut libc::attrlist).cast(),
+                    (&mut response as *mut Response).cast(),
+                    std::mem::size_of::<Response>(),
+                    0,
+                )
+            };
+            if result != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if response.length as usize != std::mem::size_of::<Response>() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Invalid volume capabilities",
+                ));
+            }
+            let interface = libc::VOL_CAPABILITIES_INTERFACES;
+            let bit = libc::VOL_CAP_INT_RENAME_EXCL;
+            if response.caps.valid[interface] & response.caps.capabilities[interface] & bit == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "This volume does not support safe output publication; choose another destination",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn under_root(root: &Arc<Directory>, parent: &Path) -> io::Result<Arc<Self>> {
         // Reopening only relative to the held root would compare that root to
         // itself after its logical name was moved/replaced. Bind the current
@@ -1303,6 +1389,7 @@ fn perform_batch(
     overwrite: bool,
 ) -> Result<(), OutputError> {
     let root_pin = Arc::new(Directory::open(root, root)?);
+    root_pin.ensure_exclusive_rename()?;
     let mut parents: HashMap<PathBuf, Arc<Directory>> = HashMap::new();
     let mut names = HashSet::new();
     let mut planned = Vec::new();
@@ -1316,7 +1403,13 @@ fn perform_batch(
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing output parent"))?;
         let dir = Directory::under_root(&root_pin, parent)?;
         let canonical = dir.path.clone();
-        let parent = parents.entry(canonical).or_insert(dir).clone();
+        let parent = match parents.entry(canonical) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                dir.ensure_exclusive_rename()?;
+                entry.insert(dir).clone()
+            }
+            std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
+        };
         let name = target
             .file_name()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing output name"))?

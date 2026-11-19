@@ -492,6 +492,57 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn apple_volume_capability_matches_native_transport_and_preflights_publication() {
+        let root = root("volume-capability");
+        let dir = Directory::open(&root, &root).unwrap();
+        let (temporary, mut file) = dir.temporary().unwrap();
+        file.write_all(b"transport probe").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let native = dir.publish(&temporary, std::ffi::OsStr::new("transport-probe.txt"));
+        let capability = dir.ensure_exclusive_rename();
+        match native {
+            Ok(()) => {
+                capability.unwrap();
+                dir.remove(std::ffi::OsStr::new("transport-probe.txt"));
+                let target = root.join("published.txt");
+                write_batch(&root, &[(target.clone(), b"published".to_vec())], false).unwrap();
+                assert_eq!(std::fs::read(target).unwrap(), b"published");
+            }
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                assert_eq!(capability.unwrap_err().kind(), io::ErrorKind::Unsupported);
+                dir.remove(&temporary);
+                let target = root.join("original.txt");
+                let untouched = root.join("unrelated.txt");
+                let absent = root.join("new.txt");
+                std::fs::write(&target, b"original bytes").unwrap();
+                std::fs::write(&untouched, b"unrelated bytes").unwrap();
+                for overwrite in [false, true] {
+                    let result = write_batch(
+                        &root,
+                        &[
+                            (target.clone(), b"replacement".to_vec()),
+                            (absent.clone(), b"new output".to_vec()),
+                        ],
+                        overwrite,
+                    )
+                    .unwrap_err();
+                    assert_eq!(result.kind(), io::ErrorKind::Unsupported);
+                    assert!(result.recovery_paths().is_empty());
+                    assert_eq!(std::fs::read(&target).unwrap(), b"original bytes");
+                    assert_eq!(std::fs::read(&untouched).unwrap(), b"unrelated bytes");
+                    assert!(!absent.exists());
+                    assert_eq!(output_entries(&root), 2, "refusal left staging artifacts");
+                }
+            }
+            Err(error) => panic!("Native transport probe failed unexpectedly: {error}"),
+        }
+        drop(dir);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn publishes_new_files_and_replaces_existing_files_without_leftovers() {
         let root = root("publish");
