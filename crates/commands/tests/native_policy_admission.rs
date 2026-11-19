@@ -39,6 +39,12 @@ fn flac() -> Vec<u8> {
     ]);
     out
 }
+fn failure(index: usize, iteration: usize, phase: &str, error: impl std::fmt::Display) -> String {
+    format!(
+        "session {index}, iteration {iteration}, {phase}: {error}; resource usage/peak: {:?}",
+        tagrex_core::resources::Budget::process().usage()
+    )
+}
 fn run(
     root: &Path,
     index: usize,
@@ -66,14 +72,14 @@ fn run(
     });
     let desired = format!("One{sep}Two");
     let mut waiting = true;
-    for _ in 0..3 {
+    for iteration in 0..3 {
         let plan = app
             .preview_tag_edits(&[TagEditDto {
                 path: path.to_string_lossy().into_owned(),
                 field: "artist".into(),
                 value: Some(desired.clone()),
             }])
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| failure(index, iteration, "preview", e))?;
         let batch = app
             .apply_with(
                 &plan,
@@ -91,17 +97,22 @@ fn run(
                 },
                 &AtomicBool::new(false),
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| failure(index, iteration, "Apply", e))?;
         assert_eq!(app.read_track(&path).unwrap().tags["artist"], desired);
-        app.undo(batch.id).map_err(|e| e.to_string())?;
+        app.undo(batch.id)
+            .map_err(|e| failure(index, iteration, "Undo Apply", e))?;
         assert_eq!(app.read_track(&path).unwrap().tags["artist"], "Original");
         let redo = app
             .redo_with(&mut |_| {})
-            .map_err(|e| e.to_string())?
+            .map_err(|e| failure(index, iteration, "Redo", e))?
             .ok_or("missing Redo")?;
         assert_eq!(app.read_track(&path).unwrap().tags["artist"], desired);
-        app.undo(redo.id).map_err(|e| e.to_string())?;
-        assert!(app.history().map_err(|e| e.to_string())?.is_empty());
+        app.undo(redo.id)
+            .map_err(|e| failure(index, iteration, "Undo Redo", e))?;
+        assert!(app
+            .history()
+            .map_err(|e| failure(index, iteration, "history", e))?
+            .is_empty());
         let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
         assert_eq!(&bytes[bytes.len() - 14..], &flac()[flac().len() - 14..]);
         assert!(bytes

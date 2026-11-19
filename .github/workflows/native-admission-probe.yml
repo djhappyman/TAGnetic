@@ -1,0 +1,32 @@
+name: Native admission probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-admission-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-admission:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build focused fixture
+        run: cargo test --locked -p tagrex-commands --test native_policy_admission --no-run
+      - name: Repeated concurrent Apply Undo Redo
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 25); do
+            echo "Native admission attempt ${attempt}/25"
+            cargo test --locked -p tagrex-commands --test native_policy_admission -- --nocapture
+          done
+      - name: Independent bounded pressure and callback probes
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p tagrex-core --test native_admission_independent -- --nocapture
