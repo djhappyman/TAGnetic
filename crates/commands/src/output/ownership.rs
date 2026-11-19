@@ -229,18 +229,19 @@ fn windows_witness(file: &File) -> io::Result<(u64, [u8; 16], i64, u32)> {
     }
 }
 fn same_handles(left: &same_file::Handle, right: &same_file::Handle) -> io::Result<bool> {
-    if left != right {
-        return Ok(false);
-    }
     #[cfg(windows)]
     {
-        let a = windows_witness(left.as_file())?;
-        let b = windows_witness(right.as_file())?;
-        if (a.0, a.1) != (b.0, b.1) {
+        if left != right {
             return Ok(false);
         }
+        let a = windows_witness(left.as_file())?;
+        let b = windows_witness(right.as_file())?;
+        Ok((a.0, a.1) == (b.0, b.1))
     }
-    Ok(true)
+    #[cfg(not(windows))]
+    {
+        Ok(left == right)
+    }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Stamp {

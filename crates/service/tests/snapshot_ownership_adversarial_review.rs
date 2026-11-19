@@ -58,7 +58,7 @@ fn flac(title: &str, comment: &str) -> Vec<u8> {
 struct Fixture {
     service: Service,
     app: SharedApp,
-    root: tempfile::TempDir,
+    _root: tempfile::TempDir,
     media: PathBuf,
 }
 impl Fixture {
@@ -88,7 +88,7 @@ impl Fixture {
         Self {
             service,
             app,
-            root,
+            _root: root,
             media,
         }
     }
@@ -267,7 +267,7 @@ fn cold_full_scope_snapshot_does_not_read_new_outside_symlink_metadata() {
     let fixture = Fixture::new(1, "approved");
     let actor = fixture.full();
     let target = fixture.media.join("approved-a/0.flac");
-    let outside = fixture.root.path().join("outside.flac");
+    let outside = fixture._root.path().join("outside.flac");
     std::fs::write(&outside, flac("OUTSIDE SECRET FRESH READ", "private")).unwrap();
     std::fs::remove_file(&target).unwrap();
     std::os::unix::fs::symlink(&outside, &target).unwrap();
@@ -295,7 +295,7 @@ fn scoped_saved_rows_exclude_paths_redirected_outside_the_grant() {
     let actor = fixture.scoped("approved-a");
     fixture.snapshot(&full);
     let directory = fixture.media.join("approved-a");
-    let moved = fixture.root.path().join("moved-a");
+    let moved = fixture._root.path().join("moved-a");
     std::fs::rename(&directory, &moved).unwrap();
     std::os::unix::fs::symlink(&moved, &directory).unwrap();
     let snapshot = fixture.snapshot(&actor);

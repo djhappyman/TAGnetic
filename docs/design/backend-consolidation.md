@@ -84,3 +84,11 @@ Remove the redundant return and explicitly type `Vec<Option<Proof>>`; retain the
 whole-batch duplicate-identity checks and every runtime assertion. These are
 source corrections awaiting the next hosted execution, not test passes. Logs
 are retained in the consolidation checkpoint's `evidence/736ddb61/` directory.
+
+Head `62044a1e` passed the previous compile blockers and reached two more
+platform-specific lint gates: macOS simplified the Unix-only compiled identity
+comparison; Windows reported a test fixture's lifetime-owned temporary root as
+unread because its path is used only by Unix probes. Express each platform's
+identity predicate directly and name the retained fixture owner `_root`. Keep
+the Windows full native identity witness, Unix equality and all test cases.
+Logs are retained in `evidence/62044a1e/`; runtime validation remains hosted.
