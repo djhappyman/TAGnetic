@@ -16,17 +16,17 @@ use std::{fs::File, io, sync::Arc};
 // its native editor/ack needs another; admitting every outer job first would
 // exhaust all worker slots before their children can run. Component leases and
 // byte/job ceilings remain authoritative and unchanged.
-static IO_PHASES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-static IO_COMPLETED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static IO_LONGEST_MICROS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[path = "native_admission.rs"]
+mod admission;
+static IO_ADMISSION: admission::Gate = admission::Gate::new();
 thread_local! { static IO_PHASE_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 pub(super) fn private_phase_active() -> bool {
     IO_PHASE_HELD.with(|held| held.get())
 }
-struct IoPhase(
-    std::time::Instant,
-    std::marker::PhantomData<std::rc::Rc<()>>,
-);
+struct IoPhase {
+    _permit: admission::Permit<'static>,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
 fn io_capacity(limits: crate::resources::Limits) -> usize {
     let bytes = native_patch::WORKING_BYTES + media::WORKING_BYTES;
     (limits.jobs / 2)
@@ -43,51 +43,29 @@ impl IoPhase {
                 crate::resources::AdmissionError::Busy
             )));
         }
-        let capacity = io_capacity(Budget::process().limits());
-        if capacity == 0 {
-            return Err(error(crate::resources::AdmissionError::TooLarge));
-        }
-        let start = std::time::Instant::now();
-        let completed_before = IO_COMPLETED.load(Ordering::Acquire);
-        loop {
-            if cancel.load(Ordering::SeqCst) {
-                return Err(PlanError::Cancelled);
-            }
-            let used = IO_PHASES.load(Ordering::Acquire);
-            if used < capacity
-                && IO_PHASES
-                    .compare_exchange(used, used + 1, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-            {
-                IO_PHASE_HELD.with(|held| held.set(true));
-                return Ok(Self(std::time::Instant::now(), std::marker::PhantomData));
-            }
-            if !wait_busy(start, cancel) {
-                return Err(if cancel.load(Ordering::SeqCst) {
-                    PlanError::Cancelled
-                } else {
-                    error(format!(
-                        "native I/O admission deadline: {}; completed while waiting: {}; active: {}/{}; longest completed phase: {}us",
-                        crate::resources::AdmissionError::Busy,
-                        IO_COMPLETED.load(Ordering::Acquire).wrapping_sub(completed_before),
-                        IO_PHASES.load(Ordering::Acquire),
-                        capacity,
-                        IO_LONGEST_MICROS.load(Ordering::Acquire),
-                    ))
-                });
-            }
-        }
+        let limits = Budget::process().limits();
+        // Queue memory is bounded by the existing expensive-job ceiling. A
+        // departure ahead renews the 500 ms stall allowance; later arrivals
+        // cannot barge or extend an older request's wait.
+        let permit = IO_ADMISSION
+            .enter(io_capacity(limits), limits.jobs, cancel)
+            .map_err(|failure| match failure {
+                admission::Refusal::Cancelled => PlanError::Cancelled,
+                admission::Refusal::Resource(failure) => {
+                    error(format!("native I/O admission: {failure}"))
+                }
+            })?;
+        IO_PHASE_HELD.with(|held| held.set(true));
+        Ok(Self {
+            _permit: permit,
+            _thread: std::marker::PhantomData,
+        })
     }
 }
 impl Drop for IoPhase {
     fn drop(&mut self) {
         IO_PHASE_HELD.with(|held| held.set(false));
-        IO_LONGEST_MICROS.fetch_max(
-            self.0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
-            Ordering::AcqRel,
-        );
-        IO_PHASES.fetch_sub(1, Ordering::AcqRel);
-        IO_COMPLETED.fetch_add(1, Ordering::AcqRel);
+        // The owned permit releases capacity even when an editor/sink panics.
     }
 }
 
@@ -970,8 +948,18 @@ fn undo_file(
     valid: Validated,
     operation: u8,
 ) -> Result<(), PlanError> {
+    let phase = IoPhase::enter(&NEVER)?;
+    undo_file_admitted(store, journal, batch, valid, operation, &phase)
+}
+fn undo_file_admitted(
+    store: &Store,
+    journal: &mut dyn NativeJournal,
+    batch: &AppliedBatch,
+    valid: Validated,
+    operation: u8,
+    _phase: &IoPhase,
+) -> Result<(), PlanError> {
     let change = &batch.plan.changes[valid.entry.ordinal];
-    let _phase = IoPhase::enter(&NEVER)?;
     let mut driver = Driver {
         journal,
         batch,
@@ -1072,9 +1060,9 @@ fn rollback_undo(
             .position(|e| e.ordinal == *ordinal)
             .ok_or_else(|| native::invalid("native rollback ordinal"))?;
         let entry = entries.remove(at);
-        if entry.record.is_none() {
+        if entry.operation == 0 || entry.record.is_none() {
             continue;
-        } // No Prepared SQL ack means publication could not begin.
+        } // No durable Undo generation/Prepared ack means Undo could not publish.
         let bytes = entry
             .recovery
             .as_deref()
@@ -1208,10 +1196,13 @@ pub(super) fn undo(
                 }
                 let valid = retire_pending(&store, journal, batch, valid)?;
                 if valid.selected.iter().any(|selected| *selected) {
-                    // Include the attempted file: publication may have reached
-                    // media before a later acknowledgement/retirement failed.
+                    // Refusal here cannot have started an Undo generation. Do
+                    // not mistake the historical Apply record for Undo recovery.
+                    let phase = IoPhase::enter(&NEVER)?;
+                    // Once admitted, include the attempt even if publication
+                    // succeeds before an acknowledgement/retirement fails.
                     completed.push(ordinal);
-                    undo_file(&store, journal, batch, valid, 1)?;
+                    undo_file_admitted(&store, journal, batch, valid, 1, &phase)?;
                 }
                 ensure_operation_policy()?;
                 steps.done();

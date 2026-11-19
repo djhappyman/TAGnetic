@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Linux native FLAC operations queue fairly across sessions, with bounded waits
+  that follow progress ahead rather than letting fast sessions repeatedly jump
+  the queue. No-effect Undo refusals preserve retryable history.
 - Windows metadata reads bypass retained snapshots while a data-writing handle
   remains open, where file timestamps may not yet reflect its changes.
 - Switch, checkbox and radio styles follow the actual checked state.

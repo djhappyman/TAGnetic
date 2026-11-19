@@ -23,8 +23,37 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Prove Undo regression detects the original bookkeeping error
+        if: matrix.profile == 'normal'
+        run: |
+          set -euo pipefail
+          source_path=crates/core/src/plan/native_flac.rs
+          evidence_dir="$(mktemp -d "${TMPDIR:-/tmp}/tagnetic-native-admission-red.XXXXXX")"
+          cp "$source_path" "$evidence_dir/candidate.rs"
+          cleanup() {
+            cp "$evidence_dir/candidate.rs" "$source_path"
+            rm -rf -- "$evidence_dir"
+          }
+          trap cleanup EXIT
+          # Read-only baseline fetch in this disposable hosted checkout. Keep
+          # today's regression and replace only the unfixed production module.
+          baseline=2af025605530456b966b7fd4b44f152e8a91a609
+          git fetch --no-tags --depth=1 origin "$baseline"
+          git show "$baseline:$source_path" > "$source_path"
+          if cargo test --locked -p tagrex-core --test native_admission_independent -- --nocapture > "$evidence_dir/result.log" 2>&1; then
+            cat "$evidence_dir/result.log"
+            echo "Regression unexpectedly passed against unfixed Undo bookkeeping" >&2
+            exit 1
+          fi
+          cat "$evidence_dir/result.log"
+          # A compile error or unrelated test failure is not regression proof.
+          grep -F 'test result: FAILED.' "$evidence_dir/result.log"
+          grep -E 'no-effect admission refusal must not require file recovery:.*Undo rollback material missing' "$evidence_dir/result.log"
+          echo "Confirmed regression fails on the original no-effect rollback error"
       - name: Build focused fixture
         run: cargo test --locked -p tagrex-commands --test native_policy_admission --no-run
+      - name: Deterministic FIFO and bounded stall rules
+        run: cargo test --locked -p tagrex-core --lib plan::native_flac::admission::tests -- --nocapture
       - name: Repeated concurrent Apply Undo Redo
         env:
           PROBE_PROFILE: ${{ matrix.profile }}

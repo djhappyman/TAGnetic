@@ -288,7 +288,254 @@ fn budget_contention_waits_before_effects_and_retained_prefix_can_be_recovered()
     assert_eq!(budget.usage().0, Charge::default());
     sink_reentry_refuses_before_callbacks_and_panic_releases_compound_admission();
     public_progress_does_not_hold_private_admission();
+    undo_denied_before_admission_keeps_applied_history_retryable();
+    undo_refused_before_journal_begin_keeps_applied_history_retryable();
     assert_eq!(budget.usage().0, Charge::default());
+}
+
+struct PreparedPause {
+    arrived: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+struct ControlledJournal {
+    inner: SqliteJournal,
+    pause: Option<PreparedPause>,
+    fail_before_begin: bool,
+    begins: Vec<u8>,
+    checkpoints: usize,
+}
+impl UndoJournal for ControlledJournal {
+    fn native_tags(&mut self) -> Option<&mut dyn NativeJournal> {
+        Some(self)
+    }
+    fn record(&mut self, b: &AppliedBatch) -> Result<BatchId, JournalError> {
+        self.inner.record(b)
+    }
+    fn batches(&self) -> Result<Vec<AppliedBatch>, JournalError> {
+        self.inner.batches()
+    }
+    fn batch(&self, id: BatchId) -> Result<Option<AppliedBatch>, JournalError> {
+        self.inner.batch(id)
+    }
+    fn finish(&mut self, id: BatchId, b: &AppliedBatch) -> Result<(), JournalError> {
+        self.inner.finish(id, b)
+    }
+    fn rollback(&mut self, id: BatchId) -> Result<(), JournalError> {
+        self.inner.rollback(id)
+    }
+}
+impl NativeJournal for ControlledJournal {
+    fn store(&mut self) -> Result<Store, JournalError> {
+        NativeJournal::store(&mut self.inner)
+    }
+    fn record_native(&mut self, b: &AppliedBatch, i: &[Intent]) -> Result<BatchId, JournalError> {
+        NativeJournal::record_native(&mut self.inner, b, i)
+    }
+    fn entries(&self, b: &AppliedBatch) -> Result<Entries, JournalError> {
+        NativeJournal::entries(&self.inner, b)
+    }
+    fn begin(&mut self, b: &AppliedBatch, i: usize, o: u8) -> Result<String, JournalError> {
+        self.begins.push(o);
+        if std::mem::take(&mut self.fail_before_begin) {
+            return Err(JournalError::Storage("controlled pre-begin refusal".into()));
+        }
+        NativeJournal::begin(&mut self.inner, b, i, o)
+    }
+    fn checkpoint(
+        &mut self,
+        b: &AppliedBatch,
+        pos: (usize, u8),
+        r: &Record,
+        e: &Intent,
+        receipts: Option<&[u8]>,
+        done: bool,
+    ) -> Result<(), JournalError> {
+        self.checkpoints += 1;
+        if r.phase() == Phase::Prepared {
+            if let Some(pause) = self.pause.take() {
+                pause
+                    .arrived
+                    .send(())
+                    .map_err(|e| JournalError::Storage(e.to_string()))?;
+                // Prepared retains the Store working lease and private I/O
+                // slot, but neither checkpoint nor publication has run yet.
+                pause
+                    .release
+                    .recv_timeout(Duration::from_secs(15))
+                    .map_err(|e| JournalError::Storage(e.to_string()))?;
+            }
+        }
+        NativeJournal::checkpoint(&mut self.inner, b, pos, r, e, receipts, done)
+    }
+    fn confirm(
+        &self,
+        b: &AppliedBatch,
+        p: (usize, u8),
+        r: &Record,
+        e: &Intent,
+        receipts: &[u8],
+    ) -> Result<(), JournalError> {
+        NativeJournal::confirm(&self.inner, b, p, r, e, receipts)
+    }
+    fn finish_native(&mut self, b: &AppliedBatch) -> Result<(), JournalError> {
+        NativeJournal::finish_native(&mut self.inner, b)
+    }
+    fn retain_native(&mut self, b: &AppliedBatch) -> Result<(), JournalError> {
+        NativeJournal::retain_native(&mut self.inner, b)
+    }
+    fn remove_native(&mut self, id: BatchId) -> Result<(), JournalError> {
+        NativeJournal::remove_native(&mut self.inner, id)
+    }
+}
+
+// Release and join even during assertion unwinding, before Fixture removes the
+// files. Each checkpoint wait also has its own deadline if its owner disappears.
+struct HeldPhase {
+    release: std::sync::mpsc::Sender<()>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+impl HeldPhase {
+    fn finish(mut self) {
+        let _ = self.release.send(());
+        self.worker.take().unwrap().join().unwrap();
+    }
+}
+impl Drop for HeldPhase {
+    fn drop(&mut self) {
+        let _ = self.release.send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn undo_denied_before_admission_keeps_applied_history_retryable() {
+    let f = Fixture::new();
+    let target = f.file("undo-target.flac");
+    let original = fs::read(&target).unwrap();
+    let roots = vec![f.0.clone()];
+    let mut journal = ControlledJournal {
+        inner: f.journal("undo-target.sqlite"),
+        pause: None,
+        fail_before_begin: false,
+        begins: Vec::new(),
+        checkpoints: 0,
+    };
+    let batch =
+        Executor::apply(&plan(std::slice::from_ref(&target)), &mut journal, &roots).unwrap();
+    assert!(batch.native_tags);
+    let applied = fs::read(&target).unwrap();
+    assert_ne!(applied, original);
+    journal.begins.clear();
+    journal.checkpoints = 0;
+
+    let mut holders = Vec::new();
+    for i in 0..2 {
+        let path = f.file(&format!("holder-{i}.flac"));
+        let before = fs::read(&path).unwrap();
+        let inner = f.journal(&format!("holder-{i}.sqlite"));
+        let roots = roots.clone();
+        let (arrived, arrival) = std::sync::mpsc::channel();
+        let (release, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut journal = ControlledJournal {
+                inner,
+                pause: Some(PreparedPause {
+                    arrived,
+                    release: receiver,
+                }),
+                fail_before_begin: false,
+                begins: Vec::new(),
+                checkpoints: 0,
+            };
+            let batch =
+                Executor::apply(&plan(std::slice::from_ref(&path)), &mut journal, &roots).unwrap();
+            Executor::undo(&mut journal, batch.id, &roots).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), before);
+            assert!(journal.batches().unwrap().is_empty());
+        });
+        // Register cleanup before waiting or asserting anything about arrival.
+        holders.push(HeldPhase {
+            release,
+            worker: Some(worker),
+        });
+        arrival
+            .recv_timeout(Duration::from_secs(5))
+            .expect("holder must reach its Prepared checkpoint");
+    }
+
+    let started = Instant::now();
+    let error = Executor::undo(&mut journal, batch.id, &roots).unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert!(
+        matches!(&error, tagrex_core::plan::PlanError::Journal(_)),
+        "no-effect admission refusal must not require file recovery: {error}"
+    );
+    let message = error.to_string();
+    assert!(message.contains("native I/O admission"), "{message}");
+    assert!(!message.contains("Undo rollback material missing"));
+    assert!(
+        journal.begins.is_empty(),
+        "Undo must not begin before admission"
+    );
+    assert_eq!(journal.checkpoints, 0);
+    assert_eq!(fs::read(&target).unwrap(), applied);
+    let history = journal.batches().unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].id, batch.id);
+    assert!(history[0].native_tags);
+    assert!(journal.batch(batch.id).unwrap().is_some());
+
+    for holder in holders {
+        holder.finish();
+    }
+    Executor::undo(&mut journal, batch.id, &roots).unwrap();
+    // Full bytes include all unrelated/multiple values, custom block and audio.
+    assert_eq!(fs::read(&target).unwrap(), original);
+    assert!(journal.batches().unwrap().is_empty());
+}
+
+fn undo_refused_before_journal_begin_keeps_applied_history_retryable() {
+    let f = Fixture::new();
+    let target = f.file("undo-begin-target.flac");
+    let original = fs::read(&target).unwrap();
+    let roots = std::slice::from_ref(&f.0);
+    let mut journal = ControlledJournal {
+        inner: f.journal("undo-begin.sqlite"),
+        pause: None,
+        fail_before_begin: false,
+        begins: Vec::new(),
+        checkpoints: 0,
+    };
+    let batch = Executor::apply(&plan(std::slice::from_ref(&target)), &mut journal, roots).unwrap();
+    assert!(batch.native_tags);
+    let applied = fs::read(&target).unwrap();
+    assert_ne!(applied, original);
+    journal.begins.clear();
+    journal.checkpoints = 0;
+    journal.fail_before_begin = true;
+    let error = Executor::undo(&mut journal, batch.id, roots).unwrap_err();
+    assert!(
+        matches!(&error, tagrex_core::plan::PlanError::Journal(_)),
+        "a refused journal begin must not require file recovery: {error}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("controlled pre-begin refusal"),
+        "{message}"
+    );
+    assert!(!message.contains("Undo rollback material missing"));
+    assert_eq!(journal.begins, vec![1]);
+    assert_eq!(journal.checkpoints, 0);
+    assert_eq!(fs::read(&target).unwrap(), applied);
+    let history = journal.batches().unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].id, batch.id);
+    assert!(history[0].native_tags);
+    assert!(journal.batch(batch.id).unwrap().is_some());
+    Executor::undo(&mut journal, batch.id, roots).unwrap();
+    assert_eq!(fs::read(&target).unwrap(), original);
+    assert!(journal.batches().unwrap().is_empty());
 }
 
 struct SinkJournal {

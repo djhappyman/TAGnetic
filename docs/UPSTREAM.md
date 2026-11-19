@@ -246,3 +246,27 @@ executor staleness checks and existing metadata/mapping/identity race limits.
 The original same-size/restored-mtime canary stays unchanged; a deterministic
 reader/writer/close regression accompanies it. Source review is complete; fresh
 Windows hosted validation is required before acceptance or release.
+
+### Native I/O queue and no-effect Undo follow-up — 1.4.10 candidate
+
+Proposed shared backend fix for upstream main after compatible native mutation
+and journal foundations. Hosted probes on `2af02560` recorded 25 completed I/O
+phases while a single-CPU waiter expired, demonstrating starvation; the disk
+profile also recorded 352 ms completed phases. The candidate replaces polling
+competition with FIFO admission, preserving the derived two active slots and
+all component byte/job ceilings. At most eight requests wait, derived from the
+existing process job limit. The queue's 500 ms allowance measures no advancement
+toward the front; only departure of a predecessor renews it. Later arrivals and
+departures behind a waiter cannot prolong its wait. Total queued time can thus
+exceed 500 ms while earlier work advances. Capture, native-resource and journal
+resource waits retain their existing deadlines; public Store/Budget admission
+remains nonblocking. Slow or stalled holders can still cause an explicit refusal.
+
+Undo acquires private admission before recording an attempted file, and rollback
+ignores an unchanged Apply generation when Undo never durably began. Controlled
+disposable-fixture regressions cover gate denial, pre-begin failure, unchanged
+media/history and successful retry. Deterministic queue rules and the unchanged
+eight-session Apply/Undo/Redo canary accompany the fix. Source review is complete;
+hosted red/green regression, pressure profiles and full current-head platform
+gates remain required. This candidate is not yet a published release or an
+accepted upstream contribution.
