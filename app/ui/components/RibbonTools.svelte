@@ -2,12 +2,12 @@
   import { Eraser, FolderPen, TextCursorInput, ListOrdered, ImagePlus, ImageUp, Image as ImageIcon, SlidersHorizontal, FileMusic, X } from '@lucide/svelte';
   import ControllerDialog from './ControllerDialog.svelte';
   import FormatFieldsDialog from './FormatFieldsDialog.svelte';
+  import AutonumberDialog from './AutonumberDialog.svelte';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
   import NativeCheckbox from './controls/NativeCheckbox.svelte';
   import { NativeSelect, NativeSelectOption } from '$lib/components/ui/native-select/index.js';
   import { runRibbonAction } from '../js/ribbon-actions.js';
-  import { numberWidth, setNumberWidth } from '../js/number-format.js';
   let selected = $state(0);
   let busy = $state(false);
   let working = $state(false);
@@ -16,8 +16,6 @@
   let firstImage = $state(false);
   let replaceArtwork = $state(false);
   let removeKind = $state('text');
-  let trackWidth = $state(String(numberWidth('track')));
-  let discWidth = $state(String(numberWidth('disc')));
   let blocks = $state<{kind:string;label:string}[]>([]);
   function attachState() {
     const update = (event: Event) => { const state = (event as CustomEvent).detail; selected = state.count; busy = state.busy; blocks = state.blocks; };
@@ -36,12 +34,6 @@
     error = '';
     pattern = 'folder.jpg'; firstImage = false; replaceArtwork = false;
     removeKind = 'text';
-    trackWidth = String(numberWidth('track')); discWidth = String(numberWidth('disc'));
-    if (name === 'number') {
-      (document.getElementById('autonum-start') as HTMLInputElement).value = '1';
-      (document.getElementById('autonum-disc') as HTMLInputElement).value = '';
-      for (const [id,checked] of [['autonum-total',false],['autonum-per-group',false],['autonum-keep-sides',true]] as const) (document.getElementById(id) as HTMLInputElement).checked = checked;
-    }
     const root = document.getElementById('ribbon-' + name + '-dialog');
     if (root) root.hidden = false;
   }
@@ -52,7 +44,6 @@
     if (dialog) dialog.hidden = true;
     try {
       const result = await runRibbonAction(action, options);
-      if (result?.dialog && action === 'number') { setNumberWidth('track', trackWidth); setNumberWidth('disc', discWidth); }
       if (result?.dialog) { const root = document.getElementById(result.dialog); if (root) root.hidden = true; }
     } catch (reason) { error = String(reason); if (dialog) dialog.hidden = false; }
     finally { working = false; }
@@ -80,30 +71,7 @@
   <Button id="ribbon-lyrics" variant="ghost" size="icon-sm" class="icon ribbon-command" disabled title="Import lyrics — coming later" aria-label="Import lyrics — coming later"><FileMusic class="ico" size={17} strokeWidth={1.7}/></Button>
 </div>
 
-<ControllerDialog id="ribbon-number-dialog" labelledby="ribbon-number-title">
-  <div class="modal ribbon-tool-body" {@attach attachDialog}>
-    <div class="ribbon-tool-header">
-      <div><h2 id="ribbon-number-title">Autonumber <span id="autonum-count" class="ribbon-selection-count"></span></h2><p class="ribbon-tool-description">Number selected files in their table order.</p></div>
-      <Button variant="ghost" size="icon-sm" aria-label="Close dialog" disabled={working} onclick={() => close('number')}><X size={17}/></Button>
-    </div>
-    <div class="ribbon-dialog-fields">
-      <div class="ribbon-form-grid">
-        <label class="ribbon-field" for="autonum-start">Start at<Input id="autonum-start" type="number" min="0" step="1" value="1" /></label>
-        <label class="ribbon-field" for="autonum-disc">Disc number<Input id="autonum-disc" type="text" placeholder="Keep existing" spellcheck="false" /></label>
-        <label class="ribbon-field">Track format<NativeSelect id="autonum-track-format" bind:value={trackWidth}><NativeSelectOption value="1">1</NativeSelectOption><NativeSelectOption value="2">01</NativeSelectOption><NativeSelectOption value="3">001</NativeSelectOption></NativeSelect></label>
-        <label class="ribbon-field">Disc format<NativeSelect id="autonum-disc-format" bind:value={discWidth}><NativeSelectOption value="1">1</NativeSelectOption><NativeSelectOption value="2">01</NativeSelectOption><NativeSelectOption value="3">001</NativeSelectOption></NativeSelect></label>
-      </div>
-      <div class="ribbon-options-grid">
-        <label class="ribbon-option"><NativeCheckbox id="autonum-total"/><span><strong>Write track total</strong><small>Save the number of tracks too.</small></span></label>
-        <label class="ribbon-option"><NativeCheckbox id="autonum-per-group"/><span><strong>Restart per group</strong><small>Start again in each group.</small></span></label>
-        <label class="ribbon-option ribbon-option-wide"><NativeCheckbox id="autonum-keep-sides" checked/><span><strong>Keep vinyl positions</strong><small>Leave values such as A1 and B2 unchanged.</small></span></label>
-      </div>
-      <p class="ribbon-field-help">Formats pad the table display. Tags stay numeric; filenames use %track:2% or %disc:2%.</p>
-    </div>
-    {#if error}<p class="ribbon-tool-error" role="alert">{error}</p>{/if}
-    <div class="ribbon-tool-footer"><span>Stage to review. Write saves now.</span><div><Button variant="ghost" disabled={working} onclick={() => close('number')}>Cancel</Button><Button id="autonum-run" variant="secondary" disabled={working || !selected} onclick={() => perform('number', {mode:'stage'})}>Stage</Button><Button id="autonum-write" disabled={working || !selected} onclick={() => perform('number', {mode:'write'})}>Write</Button></div></div>
-  </div>
-</ControllerDialog>
+<AutonumberDialog {selected} {busy} />
 <ControllerDialog id="ribbon-import-dialog" labelledby="ribbon-import-title">
   <div class="modal ribbon-tool-body" {@attach attachDialog}>
     <div class="ribbon-tool-header">

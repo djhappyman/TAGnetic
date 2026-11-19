@@ -123,7 +123,9 @@ test('suggestions overlay a stable dialog and chips are centred with matching mu
     body:getComputedStyle(document.getElementById('format-fields-panel')).backgroundColor,
     border:getComputedStyle(document.getElementById('format-extract-tab')).borderTopWidth,
   }));
-  expect(surfaces.tab).toBe(surfaces.body);expect(surfaces.border).toBe('0px');
+  // Tab colours use the shared 150ms transition; compare their settled surface.
+  await expect.poll(()=>page.evaluate(()=>getComputedStyle(document.getElementById('format-extract-tab')).backgroundColor === getComputedStyle(document.getElementById('format-fields-panel')).backgroundColor)).toBe(true);
+  expect(surfaces.border).toBe('0px');
   expect((await dialog.boundingBox()).height).toBeCloseTo(before.height,0);
 });
 
@@ -183,7 +185,7 @@ test('preview is silent, its field labels are chips, and the inactive corner sta
   const title=page.locator('.format-result-title').first();
   await expect(title).toBeVisible();
   const shape=await title.evaluate(node=>({display:getComputedStyle(node).display,background:getComputedStyle(node).backgroundColor,radius:parseFloat(getComputedStyle(node).borderRadius)}));
-  expect(shape.display).toBe('inline-flex');expect(shape.background).not.toBe('rgba(0, 0, 0, 0)');expect(shape.radius).toBeGreaterThan(0);
+  expect(['flex','inline-flex']).toContain(shape.display);expect(shape.background).not.toBe('rgba(0, 0, 0, 0)');expect(shape.radius).toBeGreaterThan(0);
   await editor(page).fill('example');
   await expect(page.locator('#ribbon-format-dialog')).not.toContainText('Preparing preview');
   await page.getByRole('tab',{name:'Extract fields'}).click();

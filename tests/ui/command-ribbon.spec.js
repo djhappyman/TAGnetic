@@ -248,7 +248,7 @@ for (const [command,root,write] of [['ribbon-autonumber','ribbon-number-dialog',
   await rows.nth(1).click();
   await page.locator('#'+command).click();
   const dialog = page.locator('#'+root);
-  for (const name of ['Cancel','Stage','Write']) await expect(dialog.getByRole('button',{name,exact:true})).toBeVisible();
+  for (const name of ['Cancel',command === 'ribbon-autonumber' ? 'Stage Edits' : 'Stage','Write']) await expect(dialog.getByRole('button',{name,exact:true})).toBeVisible();
   await page.locator('#'+write).click();
   await expect(dialog).toBeHidden();
   await expect(page.locator('#undo')).toBeEnabled();
@@ -387,4 +387,26 @@ for (const theme of ['light', 'dark']) test(`header groups the tools beside the 
   await page.keyboard.press('Enter');
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(3);
   await expect(toggle).toHaveAccessibleName('Collapse every group');
+});
+
+test('Autonumber uses quiet controls, borderless actions and stable invalid input handling',async({page},info)=>{
+  await page.locator('#ribbon-autonumber').click();
+  const dialog=page.locator('#ribbon-number-dialog');
+  await expect(dialog.getByRole('button',{name:'Stage Edits',exact:true})).toBeEnabled();
+  await expect(dialog.getByRole('switch')).toHaveCount(3);
+  await expect(dialog.locator('.ribbon-tool-description,.ribbon-field-help,[role=alert]')).toHaveCount(0);
+  const before=await dialog.locator('.modal').boundingBox();
+  await page.locator('#autonum-start').fill('');
+  await expect(page.locator('#autonum-run')).toBeDisabled();await expect(page.locator('#autonum-write')).toBeDisabled();
+  await page.locator('#autonum-start').fill('3');await page.locator('#autonum-disc').fill('not a number');
+  await expect(page.locator('#autonum-run')).toBeDisabled();
+  expect((await dialog.locator('.modal').boundingBox()).height).toBeCloseTo(before.height,0);
+  await page.locator('#autonum-disc').fill('2');await expect(page.locator('#autonum-run')).toBeEnabled();
+  for(const button of await dialog.locator('.ribbon-tool-footer button').all()) expect(await button.evaluate(node=>getComputedStyle(node).borderTopWidth)).toBe('0px');
+  await expect(page.locator('#autonum-write')).toHaveAttribute('data-tooltip',/Bypass staging/);
+  await expect(page.locator('#autonum-run')).toHaveAttribute('data-tooltip-delay','1600');
+  await page.setViewportSize({width:420,height:620});
+  await expect(page.locator('#autonum-run')).toBeInViewport();
+  await expect(page.locator('#autonum-disc-format-control')).toBeInViewport();
+  await info.attach('autonumber-quiet-dialog',{body:await page.screenshot(),contentType:'image/png'});
 });
