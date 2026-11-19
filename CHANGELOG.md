@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Windows metadata reads bypass retained snapshots while a data-writing handle
+  remains open, where file timestamps may not yet reflect its changes.
 - Switch, checkbox and radio styles follow the actual checked state.
 - Numbering validation updates silently without flashing footer buttons.
 - Numbering Write uses only the current action's validated fields; Stage Edits

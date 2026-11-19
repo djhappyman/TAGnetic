@@ -233,3 +233,16 @@ reuses native counters and the existing field-plan/Undo gate; its Rust additions
 are shared backend work for a focused upstream `main` contribution after matching
 native command foundations. No upstream PR or acceptance is claimed by this fork
 release. Preserve upstream inline journal images and its stable waveform API.
+
+
+### Windows cache evidence follow-up — 1.4.10 candidate
+
+Proposed shared backend fix for upstream main after compatible cache foundations:
+the Windows fingerprint probe excludes write sharing, so an already-open
+data-writing handle causes a fresh unretained read. Normal readers remain
+compatible. The probe is short-lived; a new writer may receive a sharing conflict
+during it. This remains a best-effort display/preview cache, with independent
+executor staleness checks and existing metadata/mapping/identity race limits.
+The original same-size/restored-mtime canary stays unchanged; a deterministic
+reader/writer/close regression accompanies it. Source review is complete; fresh
+Windows hosted validation is required before acceptance or release.

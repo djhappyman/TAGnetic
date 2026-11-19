@@ -30,12 +30,23 @@ impl Fingerprint {
         }
         #[cfg(windows)]
         {
-            use std::{mem::MaybeUninit, os::windows::io::AsRawHandle};
+            use std::{
+                mem::MaybeUninit,
+                os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
+            };
             use windows_sys::Win32::Storage::FileSystem::{
                 FileBasicInfo, FileIdInfo, GetFileInformationByHandleEx, FILE_BASIC_INFO,
-                FILE_ID_INFO,
+                FILE_ID_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
             };
-            let file = std::fs::File::open(path).ok()?;
+            // Windows may defer timestamp updates until a writing handle closes.
+            // Refuse cache evidence while a data-writer is open, rather than accept
+            // its old change time. This short probe never covers the parse;
+            // sharing refusal means a fresh, unretained read, not an IO failure.
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+                .open(path)
+                .ok()?;
             let metadata = file.metadata().ok()?;
             let mut basic = MaybeUninit::<FILE_BASIC_INFO>::uninit();
             let mut identity = MaybeUninit::<FILE_ID_INFO>::uninit();
@@ -442,6 +453,35 @@ mod tests {
         );
         consistent(&cache);
     }
+    #[cfg(windows)]
+    #[test]
+    fn open_writer_bypasses_retention_but_readers_keep_cache_hits() {
+        let dir = Fixture::new();
+        let path = dir.track("shared-writer.wav", "Title");
+        let mut cache = ReadCache::default();
+        let first = cache.read(&path).unwrap();
+        // A normal reader must not disable the cache or be denied by its probe.
+        let reader = std::fs::File::open(&path).unwrap();
+        assert!(Fingerprint::of(&path).is_some());
+        assert!(Arc::ptr_eq(&first, &cache.read(&path).unwrap()));
+        let writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        // No timing assumptions: this writable handle is enough to make a
+        // timestamp-only snapshot unsafe, even before its next write/close.
+        assert!(Fingerprint::of(&path).is_none());
+        let fresh = cache.read(&path).unwrap();
+        assert!(!Arc::ptr_eq(&first, &fresh));
+        assert_eq!(fresh.file.tags[&TagField::Title], "Title");
+        assert!(!cache.entries.contains_key(&path));
+        assert!(!Arc::ptr_eq(&fresh, &cache.read(&path).unwrap()));
+        consistent(&cache);
+        drop(writer);
+        assert!(Fingerprint::of(&path).is_some());
+        let retained = cache.read(&path).unwrap();
+        assert!(Arc::ptr_eq(&retained, &cache.read(&path).unwrap()));
+        drop(reader);
+        consistent(&cache);
+    }
+
     #[test]
     fn separate_caches_share_retention_with_transient_jobs_without_losing_reads() {
         use tagrex_core::resources::Limits;
