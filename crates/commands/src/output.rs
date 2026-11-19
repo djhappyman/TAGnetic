@@ -464,6 +464,35 @@ mod tests {
     }
 
     #[test]
+    fn held_candidate_identity_survives_growth_and_refuses_an_identical_replacement() {
+        let root = root("held-growth");
+        let path = root.join("candidate.txt");
+        let original = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let held = same_file::Handle::from_file(original).unwrap();
+        let mut writer = held.as_file();
+        writer.write_all(b"owned bytes").unwrap();
+        writer.sync_all().unwrap();
+        let named = same_file::Handle::from_path(&path).unwrap();
+        assert!(ownership::same_handles(&held, &named).unwrap());
+        drop(named);
+        let moved = root.join("moved-original.txt");
+        std::fs::rename(&path, &moved).unwrap();
+        std::fs::write(&path, b"owned bytes").unwrap();
+        let foreign = same_file::Handle::from_path(&path).unwrap();
+        assert!(!ownership::same_handles(&held, &foreign).unwrap());
+        drop(foreign);
+        drop(held);
+        assert_eq!(std::fs::read(&moved).unwrap(), b"owned bytes");
+        assert_eq!(std::fs::read(&path).unwrap(), b"owned bytes");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn publishes_new_files_and_replaces_existing_files_without_leftovers() {
         let root = root("publish");
         let target = root.join("cover.jpg");

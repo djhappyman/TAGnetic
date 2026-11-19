@@ -193,15 +193,25 @@ impl Image {
     }
 }
 #[cfg(windows)]
-fn windows_witness(file: &File) -> io::Result<(u64, [u8; 16], i64, u32)> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WindowsIdentity {
+    Extended(u64, [u8; 16]),
+    Fat(u32, u64),
+}
+#[cfg(windows)]
+type WindowsWitness = (WindowsIdentity, i64, u32);
+
+#[cfg(windows)]
+fn windows_witness(file: &File) -> io::Result<WindowsWitness> {
     use std::{mem::MaybeUninit, os::windows::io::AsRawHandle};
     use windows_sys::Win32::Storage::FileSystem::{
-        FileBasicInfo, FileIdInfo, GetFileInformationByHandleEx, FILE_BASIC_INFO, FILE_ID_INFO,
+        FileBasicInfo, FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+        GetVolumeInformationByHandleW, BY_HANDLE_FILE_INFORMATION, FILE_BASIC_INFO, FILE_ID_INFO,
     };
     let mut basic = MaybeUninit::<FILE_BASIC_INFO>::uninit();
     let mut identity = MaybeUninit::<FILE_ID_INFO>::uninit();
-    // SAFETY: the live File handle is borrowed, each output points to aligned
-    // storage of its exact SDK size, and initialization is used only on success.
+    // SAFETY: file owns a live handle. Each output is aligned writable storage
+    // of the exact SDK size, and is read only after its query reports success.
     unsafe {
         if GetFileInformationByHandleEx(
             file.as_raw_handle(),
@@ -209,36 +219,83 @@ fn windows_witness(file: &File) -> io::Result<(u64, [u8; 16], i64, u32)> {
             basic.as_mut_ptr().cast(),
             std::mem::size_of::<FILE_BASIC_INFO>() as u32,
         ) == 0
-            || GetFileInformationByHandleEx(
-                file.as_raw_handle(),
-                FileIdInfo,
-                identity.as_mut_ptr().cast(),
-                std::mem::size_of::<FILE_ID_INFO>() as u32,
-            ) == 0
         {
-            return Err(io::Error::last_os_error());
+            let error = io::Error::last_os_error();
+            return Err(io::Error::new(
+                error.kind(),
+                format!("Output basic witness: {error}"),
+            ));
         }
         let basic = basic.assume_init();
-        let identity = identity.assume_init();
-        Ok((
-            identity.VolumeSerialNumber,
-            identity.FileId.Identifier,
-            basic.ChangeTime,
-            basic.FileAttributes,
-        ))
+        let native = if GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileIdInfo,
+            identity.as_mut_ptr().cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        ) != 0
+        {
+            let identity = identity.assume_init();
+            WindowsIdentity::Extended(identity.VolumeSerialNumber, identity.FileId.Identifier)
+        } else {
+            let error = io::Error::last_os_error();
+            // Only unsupported information-class errors can try the FAT API.
+            // Never downgrade permissions/IO failures or ReFS's 128-bit IDs.
+            if !matches!(error.raw_os_error(), Some(1 | 50 | 87)) {
+                return Err(error);
+            }
+            let mut filesystem = [0u16; 32];
+            if GetVolumeInformationByHandleW(
+                file.as_raw_handle(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                filesystem.as_mut_ptr(),
+                filesystem.len() as u32,
+            ) == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let end = filesystem.iter().position(|unit| *unit == 0).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "Unterminated filesystem name")
+            })?;
+            let filesystem = String::from_utf16_lossy(&filesystem[..end]);
+            if !["FAT", "FAT32", "exFAT"]
+                .iter()
+                .any(|name| filesystem.eq_ignore_ascii_case(name))
+            {
+                return Err(error);
+            }
+            let mut legacy = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+            if GetFileInformationByHandle(file.as_raw_handle(), legacy.as_mut_ptr()) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let legacy = legacy.assume_init();
+            WindowsIdentity::Fat(
+                legacy.dwVolumeSerialNumber,
+                (u64::from(legacy.nFileIndexHigh) << 32) | u64::from(legacy.nFileIndexLow),
+            )
+        };
+        Ok((native, basic.ChangeTime, basic.FileAttributes))
     }
 }
-fn same_handles(left: &same_file::Handle, right: &same_file::Handle) -> io::Result<bool> {
+pub(super) fn same_handles(left: &same_file::Handle, right: &same_file::Handle) -> io::Result<bool> {
     #[cfg(windows)]
     {
-        if left != right {
-            return Ok(false);
-        }
-        let a = windows_witness(left.as_file())?;
-        let b = windows_witness(right.as_file())?;
-        Ok((a.0, a.1) == (b.0, b.1))
+        Ok(windows_witness(left.as_file())?.0 == windows_witness(right.as_file())?.0)
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // A filesystem may change the identity assigned while an empty file
+        // grows. Compare current observations of both held kernel objects,
+        // rather than same-file's cached creation-time device/inode pair.
+        let a = left.as_file().metadata()?;
+        let b = right.as_file().metadata()?;
+        Ok((a.dev(), a.ino()) == (b.dev(), b.ino()))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         Ok(left == right)
     }
@@ -250,7 +307,7 @@ struct Stamp {
     #[cfg(unix)]
     change: (i64, i64),
     #[cfg(windows)]
-    windows: (u64, [u8; 16], i64, u32),
+    windows: WindowsWitness,
 }
 impl Stamp {
     fn of(file: &File, m: &Metadata) -> io::Result<Self> {
@@ -330,22 +387,9 @@ impl Proof {
     fn matches(&self, file: File, stamp: bool) -> io::Result<bool> {
         let actual = same_file::Handle::from_file(file)?;
         if !same_handles(&self.file, &actual)? {
-            #[cfg(all(test, unix))]
-            {
-                use std::os::unix::fs::MetadataExt;
-                let held = self.file.as_file().metadata()?;
-                let named = actual.as_file().metadata()?;
-                eprintln!("[DEBUG-output-proof-20261119] identity cached_equal={} held={:?} named={:?}", self.file == actual,
-                    (held.dev(), held.ino(), held.len(), held.mtime(), held.mtime_nsec(), held.ctime(), held.ctime_nsec()),
-                    (named.dev(), named.ino(), named.len(), named.mtime(), named.mtime_nsec(), named.ctime(), named.ctime_nsec()));
-            }
             return Ok(false);
         }
         let (data, witness) = image(actual.as_file())?;
-        #[cfg(test)]
-        if data != self.image || (stamp && witness != self.stamp) {
-            eprintln!("[DEBUG-output-proof-20261119] image_equal={} stamp_equal={} required_stamp={stamp}", data == self.image, witness == self.stamp);
-        }
         Ok(data == self.image && (!stamp || witness == self.stamp))
     }
     fn at(&self, dir: &Directory, name: &OsStr, stamp: bool) -> io::Result<bool> {

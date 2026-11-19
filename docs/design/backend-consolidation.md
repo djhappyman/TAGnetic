@@ -101,3 +101,29 @@ mismatch and pathname resolution. The existing publication regression on real
 mounted disposable volumes is the red feedback loop. No local reproduction or
 filesystem-support claim follows. Diagnostics must be removed after the actual
 cause is confirmed and the corrected hosted regression passes.
+
+## FAT-family ownership correction
+
+Hosted `0080c152` diagnostics confirm the first macOS hypothesis: cached identity
+was unequal while current held/named device/inode, size and timestamps were
+identical on both FAT32 and exFAT. Compare current kernel-handle identities on
+Unix. Keep content hashing, strict mutation stamps and foreign-object refusal.
+The tagged diagnostic code has been removed; its logs remain archived.
+
+Windows exFAT separately returned error 87 during native identity validation.
+Use the extended identity query where supported. Only unsupported-class errors
+may try a legacy volume-serial/file-index query, and only after the held handle
+identifies its own filesystem as FAT/FAT32/exFAT. Do not downgrade ReFS or a
+permission/IO failure. Keep the basic change/attribute witness mandatory. See
+[Microsoft's handle query](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfileinformationbyhandle)
+and [identity semantics and ReFS limits](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/ns-fileapi-by_handle_file_information).
+These source changes still require actual Windows execution.
+
+A retained real-file regression now holds an empty candidate through growth,
+checks the reopened handle, then renames it and creates an identical foreign
+replacement: the owned object must match and the replacement must refuse.
+The existing full publication and rollback assertions remain unchanged. The
+Windows disposable-volume label is shortened and explicitly checked after the
+runner reported an illegal label. The output workflow also watches changes in
+the split ownership module. No local workload ran; all current runtime gates
+remain pending on the corrected head.

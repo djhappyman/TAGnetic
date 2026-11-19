@@ -27,11 +27,14 @@ jobs:
           select vdisk file="$disk"
           attach vdisk
           create partition primary
-          format fs=exfat quick label=TagRexOutputs
+          format fs=exfat quick label=TAGREXTEST
           assign letter=Z
           "@ | diskpart
             if ((Get-Volume -DriveLetter Z).FileSystem -ne 'exFAT') {
               throw 'The disposable exFAT test volume was not created'
+            }
+            if ((Get-Volume -DriveLetter Z).FileSystemLabel -ne 'TAGREXTEST') {
+              throw 'The disposable volume label was not established'
             }
             $env:TAGREX_OUTPUT_TEST_ROOT = 'Z:\'
             # exFAT has no Windows ACLs; the NTFS-only ACL regression runs in normal CI.
