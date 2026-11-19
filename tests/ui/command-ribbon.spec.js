@@ -465,7 +465,8 @@ test('shared toggles visibly move and recolour when checked by pointer and keybo
   const off=await control.evaluate(node=>({background:getComputedStyle(node).backgroundColor,x:node.querySelector('[data-slot=switch-thumb]').getBoundingClientRect().x}));
   await control.click();await expect(control).toHaveAttribute('aria-checked','true');
   await expect(page.locator('#autonum-total')).toBeChecked();
-  await expect.poll(()=>control.evaluate(node=>getComputedStyle(node).backgroundColor)).not.toBe(off.background);
+  const accent=await page.evaluate(()=>{const sample=document.createElement('span');sample.style.color='var(--accent)';document.body.append(sample);const color=getComputedStyle(sample).color;sample.remove();return color;});
+  await expect.poll(()=>control.evaluate(node=>getComputedStyle(node).backgroundColor)).toBe(accent);
   await expect.poll(()=>thumb.evaluate(node=>node.getBoundingClientRect().x)).toBeGreaterThan(off.x+10);
   await control.focus();await page.keyboard.press('Space');await expect(control).toHaveAttribute('aria-checked','false');
   await expect.poll(()=>control.evaluate(node=>getComputedStyle(node).backgroundColor)).toBe(off.background);

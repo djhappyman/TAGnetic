@@ -591,7 +591,8 @@ button {
   box-shadow: var(--shadow);
 }
 
-button:hover:not(:disabled) {
+/* Stateful controls own their checked colours, including under the pointer. */
+button:hover:not(:disabled):not([role="switch"], [role="checkbox"], [role="radio"]) {
   background: var(--row-hover);
 }
 
