@@ -177,7 +177,7 @@ their gates before further feature work builds on them.
 
 ## Frozen source evidence
 
-SHA-256 of the reviewed source candidate (publication commit still pending):
+SHA-256 of the reviewed source candidate published as `63102f9c`:
 
 | File | SHA-256 |
 | --- | --- |
@@ -195,3 +195,11 @@ SHA-256 of the reviewed source candidate (publication commit still pending):
 | `crates/core/tests/sqlite_journal.rs` | `d895ff3910d2015e8c31de6f0c504abfd89f37a8e8b5522696c1bb7911ebeb20` |
 | `crates/service/src/handle_lifecycle_tests.rs` | `9ebd46f3b648e46c408a05fc50529b877370d860c986516efc2cbdd707ab9a76` |
 | `crates/service/src/lifecycle_history_independent_tests.rs` | `3cc88b574585347510e9df1b24a417ddf4d923d6359cadee0b4fa6ec88e21b2b` |
+
+
+Formatter-only follow-up: hosted Windows and macOS passed on `63102f9c`.
+The hosted Linux formatter supplied wrapping changes in six source/test files;
+root applied that diff without local execution and verified identical
+non-whitespace source characters. The hashes above retain the original static
+freeze, rather than pretending to describe the formatted files. New-head hosted
+gates remain required. These results do not certify the whole backend programme.

@@ -326,7 +326,8 @@ fn non_utf8_logical_names_and_repeated_nested_same_source_reads_do_not_share_cur
                         let inner = read(path, backing, &|| false).unwrap();
                         assert_eq!(exact_title(&inner), "Exact non-UTF8 path");
                         assert_eq!(
-                            TagEngine::read(backing.unwrap_or(path)).unwrap().tags[&TagField::Title],
+                            TagEngine::read(backing.unwrap_or(path)).unwrap().tags
+                                [&TagField::Title],
                             "Exact non-UTF8 path"
                         );
                     }

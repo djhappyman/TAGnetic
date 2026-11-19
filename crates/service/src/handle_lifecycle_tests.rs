@@ -79,7 +79,9 @@ fn refused_history(tool: &'static str, disable: bool) {
         // The worker publishes its in-memory result before flushing the durable
         // receipt. Finish that initial write before taking the no-change baseline.
         let receipts: Vec<OperationRecord> =
-            read_json(&root.path().join("service/operations.json")).unwrap().unwrap();
+            read_json(&root.path().join("service/operations.json"))
+                .unwrap()
+                .unwrap();
         if status["operations"][0]["status"] == "succeeded"
             && receipts.iter().any(|record| {
                 record.id == operation["operation"].as_str().unwrap()
