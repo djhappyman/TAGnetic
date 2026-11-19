@@ -158,3 +158,17 @@ Primary interfaces: [Apple's volume capability](https://developer.apple.com/docu
 and [descriptor attribute query](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/getattrlist.2).
 The libc dependency is already present in the workspace lockfile; no local
 installation, build or test was run. Exact-head hosted verification is pending.
+
+## Windows exFAT retirement follow-up
+
+The delayed `3dfd99dc` Windows exFAT log reached successful new-file publication
+and passed the original foreign-replacement rollback canary. Overwrite then
+failed during committed cleanup with access denied. Retire successfully cleaned
+entries before removing their empty private directories: FAT can retain deleted
+backup entries until the proof's held file is closed. Keep every failed entry's
+proofs for recovery; do not alter permissions, sharing guards, capture checks or
+foreign-data assertions. Add phase labels to retained cleanup errors so the next
+native result distinguishes backup, candidate and empty-directory refusal.
+The unchanged overwrite/no-leftovers test is the actual hosted regression; this
+source correction still awaits native Windows verification. Logs are archived
+under `evidence/3dfd99dc/windows-exfat.log`.

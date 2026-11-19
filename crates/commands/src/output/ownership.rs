@@ -1259,15 +1259,19 @@ fn recovery(
         _retained: None,
     }
 }
-fn cleanup(entries: &[Entry], privates: &[Arc<Private>]) -> io::Result<()> {
+fn cleanup(entries: &mut Vec<Entry>, privates: &[Arc<Private>]) -> io::Result<()> {
     let mut failures = Vec::new();
-    for entry in entries {
+    // Fully retired entries no longer need their held files. Closing them
+    // before rmdir lets FAT finish pending deletion of captured backups.
+    // Failed entries retain all evidence for the existing recovery path.
+    entries.retain(|entry| {
+        let previous_failures = failures.len();
         if let (Some(backup), Some(before)) = (&entry.backup, &entry.before) {
             if let Err(error) = entry
                 .private
                 .discard(&entry.private.dir, backup, before, false)
             {
-                failures.push(error.to_string());
+                failures.push(format!("original backup cleanup: {error}"));
             }
         }
         if entry.candidate_owned {
@@ -1276,7 +1280,7 @@ fn cleanup(entries: &[Entry], privates: &[Arc<Private>]) -> io::Result<()> {
                     .private
                     .discard(&entry.private.dir, &entry.candidate, &entry.proof, true)
             {
-                failures.push(error.to_string());
+                failures.push(format!("candidate cleanup: {error}"));
             }
         } else {
             match entry.private.dir.open_regular(&entry.candidate, false) {
@@ -1285,11 +1289,12 @@ fn cleanup(entries: &[Entry], privates: &[Arc<Private>]) -> io::Result<()> {
                     .push("the moved candidate name was reused; replacement retained".into()),
             }
         }
-    }
+        failures.len() != previous_failures
+    });
     if failures.is_empty() {
         for private in privates {
             if let Err(error) = private.remove_empty() {
-                failures.push(error.to_string());
+                failures.push(format!("empty staging directory cleanup: {error}"));
             }
         }
     }
@@ -1550,7 +1555,7 @@ fn perform_batch(
     })();
     if let Err(cause) = staged {
         if !orphaned.is_empty() {
-            let cleanup = cleanup(&entries, &privates);
+            let cleanup = cleanup(&mut entries, &privates);
             let mut error = recovery(
                 &entries,
                 &privates,
@@ -1564,7 +1569,7 @@ fn perform_batch(
             }
             return Err(error);
         }
-        return match cleanup(&entries, &privates) {
+        return match cleanup(&mut entries, &privates) {
             Ok(()) => Err(cause),
             Err(error) => Err(recovery(
                 &entries,
@@ -1628,7 +1633,7 @@ fn perform_batch(
                 format!("{cause}; {}", failures.join("; ")),
             ));
         }
-        return match cleanup(&entries, &privates) {
+        return match cleanup(&mut entries, &privates) {
             Ok(()) => Err(cause),
             Err(error) => Err(recovery(
                 &entries,
@@ -1649,6 +1654,6 @@ fn perform_batch(
             error,
         ));
     }
-    cleanup(&entries, &privates)
+    cleanup(&mut entries, &privates)
         .map_err(|error| recovery(&entries, &privates, "published; cleanup incomplete", error))
 }
