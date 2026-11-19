@@ -92,3 +92,12 @@ unread because its path is used only by Unix probes. Express each platform's
 identity predicate directly and name the retained fixture owner `_root`. Keep
 the Windows full native identity witness, Unix equality and all test cases.
 Logs are retained in `evidence/62044a1e/`; runtime validation remains hosted.
+
+Head `423297d0` reached actual macOS FAT32/exFAT output execution. Both volumes
+failed normal new-file publication at candidate ownership validation before the
+foreign-replacement interleaving. Retain both original assertions and add tagged
+test-only diagnostics to distinguish a cached identity change, content/stamp
+mismatch and pathname resolution. The existing publication regression on real
+mounted disposable volumes is the red feedback loop. No local reproduction or
+filesystem-support claim follows. Diagnostics must be removed after the actual
+cause is confirmed and the corrected hosted regression passes.

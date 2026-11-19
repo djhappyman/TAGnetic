@@ -330,9 +330,22 @@ impl Proof {
     fn matches(&self, file: File, stamp: bool) -> io::Result<bool> {
         let actual = same_file::Handle::from_file(file)?;
         if !same_handles(&self.file, &actual)? {
+            #[cfg(all(test, unix))]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let held = self.file.as_file().metadata()?;
+                let named = actual.as_file().metadata()?;
+                eprintln!("[DEBUG-output-proof-20261119] identity cached_equal={} held={:?} named={:?}", self.file == actual,
+                    (held.dev(), held.ino(), held.len(), held.mtime(), held.mtime_nsec(), held.ctime(), held.ctime_nsec()),
+                    (named.dev(), named.ino(), named.len(), named.mtime(), named.mtime_nsec(), named.ctime(), named.ctime_nsec()));
+            }
             return Ok(false);
         }
         let (data, witness) = image(actual.as_file())?;
+        #[cfg(test)]
+        if data != self.image || (stamp && witness != self.stamp) {
+            eprintln!("[DEBUG-output-proof-20261119] image_equal={} stamp_equal={} required_stamp={stamp}", data == self.image, witness == self.stamp);
+        }
         Ok(data == self.image && (!stamp || witness == self.stamp))
     }
     fn at(&self, dir: &Directory, name: &OsStr, stamp: bool) -> io::Result<bool> {
