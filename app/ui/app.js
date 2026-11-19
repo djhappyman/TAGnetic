@@ -1,3 +1,4 @@
+import { createNumberingActions } from './js/numbering-actions.js';
 import { createFieldFormatActions } from './js/field-format-actions.js';
 import { createLiveStageTransport } from './js/live-stage-transport.js';
 import { nativeLiveFields, setNativeLiveFields } from './js/live-preview.js';
@@ -1061,6 +1062,7 @@ let viewPathIndex = new Map(); // path -> index in viewPaths
 let navPaths = [];
 let navPathIndex = new Map();
 let groupPaths = new Map(); // group key -> its paths, in order
+let displayedGroupByPath = new Map();
 let viewGroups = []; // group keys in order
 // Folder position belongs to the session, independently of column direction,
 // filtering, collapse state, and the row data re-read after Apply/Undo.
@@ -1178,9 +1180,11 @@ function buildViewModel(preparedFilter = null) {
   viewPaths = [];
   navPaths = [];
   groupPaths = new Map();
+  displayedGroupByPath = new Map();
   viewGroups = [];
   viewPathIndex=new Map();navPathIndex=new Map();itemIndexByPath=new Map();
   const pushTrack = (track, groupKey, shown) => {
+    displayedGroupByPath.set(track.path, groupKey ?? '');
     if (shown) {itemIndexByPath.set(track.path,viewItems.length);viewItems.push({ kind: "track", track, groupKey });}
     if (track.unreadable) return; // inert: never selectable, never navigable
     viewPathIndex.set(track.path,viewPaths.length);
@@ -3485,9 +3489,27 @@ const fieldFormatActions = createFieldFormatActions({
   workingField, trackAt, isFieldLocked, adoptTagOnlyPreview, recordLiveFields, writeQuickPlan,
   fieldCatalogue:() => EXTENDED_FIELDS.map(([key]) => ({key,label:fieldLabel(key)})), labelField:fieldLabel,
 });
+const numberingActions = createNumberingActions({
+  invoke,captureSelection,isSelectionCurrent,getPlan:()=>previewPlan,inputRevision:liveInputRevision,
+  read:workingField,
+  group:path=>{
+    if(displayedGroupByPath.has(path))return displayedGroupByPath.get(path);
+    // Selected files hidden by filtering retain the same saved-tag grouping;
+    // destination previews also retain their destination when filtered out.
+    const change=diffByPath.get(path);
+    if(destGrouping)return change?.rename_to?DEST_GROUP_PREFIX+diffDir(change.rename_to):UNCHANGED_GROUP_KEY;
+    // Duplicate result members are already indexed above; unmatched retained
+    // selections use ordinary grouping without rescanning every result group.
+    return groupBy?groupKeyOf(trackAt(path)):'';
+  },
+  order:paths=>hooks.orderPathsForDisplay(paths),context:()=>groupBy,
+  isFieldLocked,adoptTagOnlyPreview,recordLiveFields,writeQuickPlan,
+});
 connectRibbonActions(async (action, options) => {
+  if (action === 'numbering-cancel') return numberingActions(action, options);
   if (action === 'field-format-cancel') return fieldFormatActions(action, options);
   if (applying || undoing) throw new Error('Wait for the current operation to finish.');
+  if (action.startsWith('numbering-')) return numberingActions(action, options);
   if (action.startsWith('field-format-')) return fieldFormatActions(action, options);
   if (action === 'artwork-settings') {
     await openSettings();

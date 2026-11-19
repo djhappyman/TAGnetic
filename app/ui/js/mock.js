@@ -1,3 +1,4 @@
+import { mockNumberingEdits } from './mock-numbering.js';
 import { mockMatches, mockSuggestions } from './query-mock.js';
 // The browser-only fake of the Rust command layer (#143 split it out of app.js).
 //
@@ -890,6 +891,22 @@ function mockInvoke(cmd, args) {
         if(tag_changes.length || next!==path || cover_change) changes.push({path,rename_to:next!==path?next:null,tag_changes,cover_change});
       }
       return Promise.resolve({description:(args.edits || []).length || (args.covers || []).length ? 'Edit tags' : 'Transform',changes,locked_skipped:[...skipped].map(([field,files])=>({field,files}))});
+    }
+    case "preview_numbering_dialog": {
+      const sources=new Map((args.working?.changes||[]).map(change=>[change.path,new Map(change.tag_changes.map(edit=>[edit.field,edit.new]))]));
+      const read=(path,field)=>sources.get(path)?.has(field)?sources.get(path).get(field):findTrack(path)?.tags?.[field];
+      const groups=new Map(args.paths.map((path,i)=>[path,args.groups[i]]));
+      const result=mockNumberingEdits(args.paths,read,path=>groups.get(path),args.options);
+      const byPath=new Map();
+      for(const edit of result.edits){
+        if(mockLockedFields.has(edit.field))throw new Error('Unlock the numbering fields before continuing.');
+        const old=findTrack(edit.path)?.tags?.[edit.field]??null;
+        if(old===edit.value)continue;
+        if(!byPath.has(edit.path))byPath.set(edit.path,[]);
+        byPath.get(edit.path).push({field:edit.field,old,new:edit.value});
+      }
+      const preview={description:'Numbering',changes:[...byPath].map(([path,tag_changes])=>({path,rename_to:null,cover_change:null,tag_changes}))};
+      return Promise.resolve({...result,plan:preview});
     }
     case "preview_tag_edits": {
       const byPath = {};

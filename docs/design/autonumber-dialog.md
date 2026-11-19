@@ -1,42 +1,69 @@
-# Independent Autonumber and Disc actions
+# Independent numbering actions
 
-Owner scope: two connected tabs in the numbering dialog, with independent actions,
-matching Format fields styling. Iterate directly in the running main checkout.
+Scope: expose native numbering through the accepted three-tab dialog, preserving
+its appearance and the existing Stage/Review/Apply/Undo workflow. Iterate on main.
 
-**Autonumber** owns track start, track display, include-total, group restart and
-vinyl-position retention. Its Stage/Write routes explicitly pass `includeDisc:false`
-to the existing numbering engine. They do not read, validate or change the inactive
-Disc input. Only the track display preference is saved after success.
+## Current behavior
 
-**Disc** owns disc number and disc display. Its separate `number-disc` action
-validates only disc input, previews disc-only scalar edits through the existing
-native command, and refuses stale selection, changed staged inputs, new field
-locks and invalid native values. Stage records only disc edits in one batch,
-preserving pending track/other fields. Write saves the disc-only plan through
-the existing quick-write/Undo route. Only the disc display preference is saved.
-Setting a disc applies to the selection independently of track/vinyl/group rules.
+- **Autonumber** changes track numbers only, with a chosen start, optional track
+  totals and a reset at each consecutive displayed-group change.
+- **Disc** changes disc numbers only, optionally advancing at displayed-group
+  changes, resetting at album changes and adding disc totals.
+- **Vinyl** reads positions from Track or Disc. B3 becomes Disc 2, Track 3; a bare
+  B becomes Disc 2, Track 1. Reverse/lowercase notation is accepted. Plain numbers
+  are skipped. Optional Position preservation, side track totals and album disc
+  totals are independent. Zero and overflowing track numbers refuse the action.
 
-The shared lower-level numbering helper retains its optional composed behavior
-for existing callers; the desktop Autonumber action always explicitly excludes
-disc assignment. No Rust command, storage or journal format is changed.
+Only active-tab controls are sent. No inactive option can affect another action.
+Album changes take precedence when disc/group boundaries coincide. Boundaries
+follow consecutive files in displayed selection order, without hidden sorting or
+merging scattered occurrences. Totals use the highest assigned ordinal in each
+segment, matching the native numbering foundation; they cover selected files.
 
-The active tab determines validity and action scope. An invalid value left in
-the other tab cannot block or affect it. Both tabs preserve their temporary
-inputs while switching. Cancel/reopen resets them and reads saved display widths;
-failed operations keep the inputs. Disc requires a positive whole number.
+## Rule and publication ownership
 
-The fixed, viewport-bounded shell has connected borderless tabs, rounded inactive
-corners and concave joins, with internally scrolling panels and no loading/error
-prose. Cancel, Write and Stage Edits share the borderless footer. Existing delayed
-tooltips and assistive descriptions explain immediate Write and Stage/Review/Apply.
-Leading zeroes affect display; tags remain numeric. No media is written by opening,
-editing controls or switching tabs.
+`preview_numbering_dialog` runs on the cancellable native session queue. Rust
+reuses the existing numbering engine for tracks and discs; vinyl shares the
+native side parser. The interface supplies intent, current group identities and
+a small snapshot of current source values, including raw staged inputs awaiting
+acknowledgement. It performs no production counter/total/conversion calculation.
+The browser-only mock is an interface fixture, not a second production path.
 
-Hosted coverage: Svelte/lint/unit plus Chromium/WebKit browser contracts for both
-tabs, inactive-input isolation, field scope, staged-field preservation, independent
-width persistence, numbering order, quiet validation, layout and Disc Write/Undo.
-No local build/test/benchmark workloads run. Mock browser results do not establish
-native media preservation outside existing backend verification scope.
+Rust returns an operation-only validated plan and all requested assignments,
+including values unchanged on disk. Stage needs those assignments to replace an
+older pending value. Write cannot pick up unrelated staged changes. Both actions
+use the existing field locks and write/Undo machinery. Conversion requires both
+track and disc fields together. Native validation, cancellation, file limits,
+checked integer arithmetic and group-payload limits apply before publication.
 
-Upstream route: shared interface -> curated tagrex/tagrex:next after compatible
-workbench/native-command foundations (#729), preserving upstream storage/API policy.
+The interface seals selection, display order, grouping, staged revision and locks
+around asynchronous validation and rechecks them when publishing. Cancel and newer
+requests invalidate old results. Stage records one complete batch. Silent preview
+updates do not fade the footer; a click awaits its exact latest request.
+
+## Accepted presentation
+
+The fixed viewport-bounded shell retains rounded connected tabs, borderless
+surfaces, a two-column toggle grid and subtitles of at most four words. Vinyl explanation is available from a keyboard-accessible info icon beside the
+source-field label. There is no result preview or loading/error panel. Actual failures use the existing toast.
+Footer buttons remain Cancel, Write and Stage Edits, with delayed tooltips.
+Display width is a preference; stored numbers remain unpadded. Only the active
+tab's relevant width preference is saved after success.
+
+Shared Switch/Checkbox/Radio styles now use Bits UI's actual `data-state` values.
+The compatibility switch uses individual `translate` so movement is not doubled.
+
+## Verification and contribution route
+
+Rust fixture tests cover scope isolation, staged albums and vinyl sources,
+per-side/release totals, unchanged-value assignments, locks, cancellation,
+duplicates, group alignment and overflow. JavaScript contracts cover native intent
+serialization, asynchronous invalidation and Stage/Write isolation. Browser tests
+cover layout, independent tabs, stable footer validation and toggle state.
+Authored tests are not execution evidence; current-head GitHub results and native
+fixture readback determine release readiness. Build/test workloads remain separate
+from the running user library; test writes use disposable audio only.
+
+Shared interface behavior is eligible for curated `tagrex/tagrex:next` contribution
+after compatible foundations (#729); standalone shared backend changes route to
+upstream main. No upstream publication is implied by the fork release.

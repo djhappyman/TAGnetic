@@ -108,7 +108,7 @@ impl Default for NumberingOptions {
     }
 }
 
-fn unique_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, AppError> {
+pub(super) fn unique_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, AppError> {
     if paths.len() > MAX_FILES {
         return Err(invalid(
             "Native batches are limited to 100000 selected files.",
@@ -126,7 +126,7 @@ fn unique_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, AppError> {
         .cloned()
         .collect())
 }
-fn check_cancel(cancelled: &impl Fn() -> bool) -> Result<(), AppError> {
+pub(super) fn check_cancel(cancelled: &impl Fn() -> bool) -> Result<(), AppError> {
     if cancelled() {
         return Err(tagrex_core::plan::PlanError::Cancelled.into());
     }
@@ -421,6 +421,22 @@ impl App {
         working: Option<&PlanDto>,
         cancelled: impl Fn() -> bool,
     ) -> Result<PlanDto, AppError> {
+        self.numbering_preview(paths, options, working, None, true, cancelled)
+            .map(|preview| preview.plan)
+    }
+
+    // The desktop supplies displayed group identities, never calculated numbers.
+    // Legacy service callers retain their field/folder boundaries and composed plan.
+    pub(super) fn numbering_preview(
+        &self,
+        paths: &[PathBuf],
+        options: &NumberingOptions,
+        working: Option<&PlanDto>,
+        groups: Option<&HashMap<PathBuf, String>>,
+        number_tracks: bool,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<NumberingDialogPreview, AppError> {
+        let _policy = self.model_policy.enter();
         check_cancel(&cancelled)?;
         if options.start == 0
             || options.step == 0
@@ -479,9 +495,15 @@ impl App {
                 continue;
             }
             let keys = [
-                boundary_key(options.next_disc_on.as_ref(), path, &tags)?,
+                match (groups, options.next_disc_on.as_ref()) {
+                    (Some(groups), Some(_)) => groups.get(path).cloned().unwrap_or_default(),
+                    _ => boundary_key(options.next_disc_on.as_ref(), path, &tags)?,
+                },
                 boundary_key(options.reset_disc_on.as_ref(), path, &tags)?,
-                boundary_key(options.reset_track_on.as_ref(), path, &tags)?,
+                match (groups, options.reset_track_on.as_ref()) {
+                    (Some(groups), Some(_)) => groups.get(path).cloned().unwrap_or_default(),
+                    _ => boundary_key(options.reset_track_on.as_ref(), path, &tags)?,
+                },
             ];
             if let Some(previous) = &previous {
                 let new_release = options.reset_disc_on.is_some() && keys[1] != previous[1];
@@ -498,7 +520,7 @@ impl App {
                 if new_release || new_track_group || (new_disc && options.reset_track_on_disc) {
                     track_number = options.start;
                     track_group += 1;
-                } else {
+                } else if number_tracks {
                     track_number = track_number
                         .checked_add(options.step)
                         .ok_or_else(|| invalid("Track numbering overflow."))?;
@@ -523,11 +545,13 @@ impl App {
         for (path, number, disc, group, release) in counters {
             check_cancel(&cancelled)?;
             let mut tags = TagMap::new();
-            tags.insert(
-                TagField::TrackNumber,
-                format!("{number:0width$}", width = usize::from(options.width)),
-            );
-            if options.write_total {
+            if number_tracks {
+                tags.insert(
+                    TagField::TrackNumber,
+                    format!("{number:0width$}", width = usize::from(options.width)),
+                );
+            }
+            if number_tracks && options.write_total {
                 let total = options.total.unwrap_or(track_totals[&group]);
                 if total < track_totals[&group] {
                     return Err(invalid(
@@ -553,13 +577,31 @@ impl App {
             }
             values.insert(path, tags);
         }
-        let mut plan = self.preview_assignments(&paths, values, working, cancelled)?;
-        plan.unrendered.extend(skipped_vinyl);
-        Ok(plan)
+        if groups.is_none() {
+            // Preserve the existing service API's allocation profile: it does
+            // not need a second serialized copy of every assignment.
+            let matched = values.len();
+            let mut plan = self.preview_assignments(&paths, values, working, cancelled)?;
+            plan.unrendered.extend(skipped_vinyl);
+            return Ok(NumberingDialogPreview {
+                plan,
+                edits: Vec::new(),
+                matched,
+                skipped: paths.len() - matched,
+            });
+        }
+        let mut preview = self.finish_numbering(
+            &paths,
+            values,
+            if groups.is_some() { None } else { working },
+            cancelled,
+        )?;
+        preview.plan.unrendered.extend(skipped_vinyl);
+        Ok(preview)
     }
 }
 
-fn restore_locked_sources(tags: &mut TagMap, saved: &TagMap, locked: &[String]) {
+pub(super) fn restore_locked_sources(tags: &mut TagMap, saved: &TagMap, locked: &[String]) {
     for key in locked {
         let field = TagField::from_storage_key(key);
         if let Some(value) = saved.get(&field) {

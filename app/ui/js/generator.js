@@ -382,7 +382,7 @@ function numberingEdits({ includeDisc = true } = {}) {
   const start = Math.max(0, Math.floor(Number(el("autonum-start").value) || 1));
   const writeTotal = el("autonum-total").checked;
   const perGroup = el("autonum-per-group").checked && !!groupBy;
-  const keepSides = el("autonum-keep-sides").checked;
+  const keepSides = el("autonum-keep-sides")?.checked ?? false;
   const discRaw = includeDisc ? el("autonum-disc").value.trim() : "";
   if (discRaw && !/^\d+$/.test(discRaw)) {
     throw new Error(t("generator.discWhole"));

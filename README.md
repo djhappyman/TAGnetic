@@ -161,9 +161,10 @@ constraint; runtime gates run on hosted runners.
 - [ ] **Cross-field recipe steps.** Save field-copying and field-combining operations inside reusable recipes.
   - [x] **Backend.** Run and save native field assignments over current staged values, with ordered steps, field locks and MCP support.
   - [ ] **UI completion.** Add field-copying and field-combining steps to the recipe editor, including custom destinations.
-- [ ] **Split combined information.** Extract separate artist, title or other fields from a combined value.
+- [x] **Split combined information.** Use Format fields → Extract fields to fill several tags from a combined source value.
   - [x] **Backend.** Extract several fields from a staged value or expression, with unmatched-file reporting and the existing locks and Undo.
-  - [ ] **UI completion.** Add source and extraction-pattern controls to the recipe editor.
+  - [x] **Dialog.** Pull from a source tag and use coloured field chips in the extraction pattern.
+  - [ ] **Recipe editor.** Save extraction steps inside reusable recipes.
 - [ ] **Selective removal recipes.** Save a list of fields to remove during cleanup.
   - [x] **Backend.** Remove named text fields through the existing plan and Undo system, with explicit artwork-removal targets.
   - [ ] **UI completion.** Add field-removal steps and clear field selection to the recipe editor.
@@ -260,16 +261,16 @@ constraint; runtime gates run on hosted runners.
 - [x] **Whole-folder extras.** Carry remaining folder contents when all its music moves to one destination.
 - [x] **Empty-folder cleanup.** Tidy folders left empty by a move and account for created folders during Undo.
 - [x] **Track autonumbering.** Number selected tracks in their displayed order, with a chosen starting value.
-- [x] **Track totals and disc assignment.** Write track counts and an optional disc number during numbering.
+- [x] **Independent numbering actions.** Use separate Autonumber, Disc and Vinyl tabs, with optional track and disc totals.
 - [x] **Numbering by group.** Restart track numbering for each active group.
 - [x] **Vinyl positions.** Preserve positions such as A1/B2 and convert supported side letters into disc and track numbers.
 - [ ] **Filename rearrangement.** Capture and reorder parts of existing filenames without first putting them into tags.
-- [ ] **Automatic disc numbering.** Advance disc numbers and reset track numbers when folders or chosen fields change.
+- [x] **Automatic disc numbering.** Advance discs at displayed-group changes, independently of track numbering.
   - [x] **Backend.** Advance discs on folder or field changes, reset track counters when requested, and preserve vinyl positions without consuming numbers.
-  - [ ] **UI completion.** Connect the numbering controls to the shared native engine and expose the new boundary options.
-- [ ] **Complete multi-disc totals.** Calculate disc totals and reset numbering correctly across several releases in one pass.
+  - [x] **UI.** Independent native track/disc actions, reset per displayed group and disc reset per album.
+- [x] **Multi-disc totals.** Calculate selected-file totals and reset discs between consecutive albums in displayed order.
   - [x] **Backend.** Calculate track and disc totals for consecutive counter groups and reset numbering between releases in one ordered pass.
-  - [ ] **UI completion.** Add release-reset and total choices and verify multi-release numbering in the app.
+  - [x] **UI.** Disc album resets and optional totals; vinyl conversion counts tracks per side and discs per album.
 - [ ] **Flexible destination selection.** Choose additional destination roots while retaining rename previews, sidecar handling and Undo.
 
 ### Artwork

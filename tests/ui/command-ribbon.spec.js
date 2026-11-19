@@ -398,7 +398,7 @@ test('Autonumber uses quiet controls, borderless actions and stable invalid inpu
   await page.locator('#ribbon-autonumber').click();
   const dialog=page.locator('#ribbon-number-dialog');
   await expect(dialog.getByRole('button',{name:'Stage Edits',exact:true})).toBeEnabled();
-  await expect(dialog.getByRole('switch')).toHaveCount(3);
+  await expect(dialog.getByRole('switch')).toHaveCount(2);
   await expect(dialog.locator('.ribbon-tool-description,.ribbon-field-help,[role=alert]')).toHaveCount(0);
   const before=await dialog.locator('.modal').boundingBox();
   await page.locator('#autonum-start').fill('');
@@ -423,13 +423,13 @@ test('Disc and Autonumber have independent validity, scope and display preferenc
   const stored=await page.evaluate(()=>structuredClone(window.tagrex.tracks));
   await page.locator('#ribbon-autonumber').click();
   const dialog=page.locator('#ribbon-number-dialog');
-  await expect(dialog.getByRole('tab')).toHaveCount(2);
+  await expect(dialog.getByRole('tab')).toHaveCount(3);
   const height=(await dialog.locator('.modal').boundingBox()).height;
   await page.locator('#autonum-start').fill('');
   await expect(page.locator('#autonum-run')).toBeDisabled();
   await page.getByRole('tab',{name:'Disc',exact:true}).click();
   await expect(page.locator('#autonum-start')).toBeHidden();
-  await expect(dialog.getByRole('switch')).toHaveCount(0);
+  await expect(dialog.getByRole('switch')).toHaveCount(3);
   await page.locator('#autonum-disc').fill('2');
   await expect(page.locator('#autonum-run')).toBeEnabled();
   expect((await dialog.locator('.modal').boundingBox()).height).toBeCloseTo(height,0);
@@ -454,4 +454,66 @@ test('Disc Write and Undo leave track numbering untouched',async({page})=>{
   expect(await page.evaluate(()=>window.tagrex.tracks.map(track=>({path:track.path,track:track.tags.track})))).toEqual(before.map(({path,track})=>({path,track})));
   await page.locator('#undo').click();
   await expect.poll(()=>page.evaluate(()=>window.tagrex.tracks.map(track=>({path:track.path,track:track.tags.track,disc:track.tags.disc})))).toEqual(before);
+});
+
+test('shared toggles visibly move and recolour when checked by pointer and keyboard',async({page})=>{
+  await page.locator('#ribbon-autonumber').click();
+  const control=page.locator('#autonum-total-control');
+  const thumb=control.locator('[data-slot=switch-thumb]');
+  const off=await control.evaluate(node=>({background:getComputedStyle(node).backgroundColor,x:node.querySelector('[data-slot=switch-thumb]').getBoundingClientRect().x}));
+  await control.click();await expect(control).toHaveAttribute('aria-checked','true');
+  await expect(page.locator('#autonum-total')).toBeChecked();
+  await expect.poll(()=>control.evaluate(node=>getComputedStyle(node).backgroundColor)).not.toBe(off.background);
+  await expect.poll(()=>thumb.evaluate(node=>node.getBoundingClientRect().x)).toBeGreaterThan(off.x+10);
+  await control.focus();await page.keyboard.press('Space');await expect(control).toHaveAttribute('aria-checked','false');
+  await expect.poll(()=>control.evaluate(node=>getComputedStyle(node).backgroundColor)).toBe(off.background);
+  await expect.poll(()=>thumb.evaluate(node=>node.getBoundingClientRect().x)).toBeCloseTo(off.x,0);
+});
+
+test('Vinyl converts side positions into a paired disc/track stage and leaves numeric tracks alone',async({page})=>{
+  await page.evaluate(()=>{window.tagrex.tracks[0].tags.track='A1';window.tagrex.tracks[1].tags.track='B3';window.tagrex.tracks[2].tags.track='12';});
+  await page.locator('#ribbon-select-all').click();await page.locator('#ribbon-autonumber').click();
+  await page.getByRole('tab',{name:'Vinyl',exact:true}).click();
+  await expect(page.locator('#ribbon-number-dialog .vinyl-results')).toHaveCount(0);
+  await expect(page.locator('#autonum-run')).toBeEnabled();await page.locator('#autonum-run').click();
+  await expect(page.locator('#ribbon-number-dialog')).toBeHidden();
+  await expect.poll(()=>page.evaluate(()=>window.tagrex.previewPlan?.changes.filter(change=>change.tag_changes.some(edit=>edit.field==='disc')).length)).toBe(2);
+  const converted=await page.evaluate(()=>window.tagrex.previewPlan.changes.map(change=>Object.fromEntries(change.tag_changes.map(edit=>[edit.field,edit.new]))));
+  expect(converted).toContainEqual(expect.objectContaining({disc:'1',track:'1','custom:POSITION':'A1'}));
+  expect(converted).toContainEqual(expect.objectContaining({disc:'2',track:'3','custom:POSITION':'B3'}));
+  expect(await page.evaluate(()=>window.tagrex.tracks.map(track=>track.tags.track))).toEqual(['A1','B3','12']);
+});
+
+test('numbering options use two columns and short subtitles without a bottom preview',async({page})=>{
+  await page.locator('#ribbon-autonumber').click();
+  const dialog=page.locator('#ribbon-number-dialog');
+  await expect(dialog.locator('#autonum-reset-album')).toHaveCount(0);
+  await expect(dialog.locator('#autonum-keep-sides')).toHaveCount(0);
+  for(const tab of ['Autonumber','Disc','Vinyl']){
+    await dialog.getByRole('tab',{name:tab,exact:true}).click();
+    const panel=dialog.getByRole('tabpanel');
+    const subtitles=await panel.locator('.autonumber-option small').allTextContents();
+    expect(subtitles.every(text=>text.trim().split(/\s+/).length<=4)).toBe(true);
+    expect(await panel.locator('.autonumber-options').evaluate(node=>getComputedStyle(node).gridTemplateColumns.split(' ').length)).toBe(2);
+    await expect(dialog.locator('.vinyl-results,.vinyl-result')).toHaveCount(0);
+  }
+});
+
+test('valid option updates do not fade the numbering footer and immediate Stage uses the newest request',async({page})=>{
+  await page.locator('#ribbon-select-all').click();await page.locator('#ribbon-autonumber').click();
+  const stage=page.locator('#autonum-run');await expect(stage).toBeEnabled();
+  await page.locator('#autonum-start').fill('7');
+  await page.locator('#autonum-total-control').click();
+  await expect(stage).toBeEnabled();
+  await stage.click();await expect(page.locator('#ribbon-number-dialog')).toBeHidden();
+  await expect.poll(()=>page.evaluate(()=>window.tagrex.previewPlan?.changes.map(change=>change.tag_changes.find(edit=>edit.field==='track')?.new))).toEqual(['7','8','9']);
+});
+
+
+test('Vinyl explanation is available from its label info icon',async({page})=>{
+  await page.locator('#ribbon-autonumber').click();await page.getByRole('tab',{name:'Vinyl',exact:true}).click();
+  const panel=page.locator('#number-vinyl-panel'),info=panel.getByRole('button',{name:'About vinyl positions'});
+  await expect(info).toBeVisible();await expect(panel.locator('.vinyl-explanation')).toHaveCount(0);
+  await expect(info).toHaveAccessibleDescription(/B3 becomes Disc 2, Track 3/);
+  await info.focus();await expect(page.locator('#controller-tooltip-content')).toContainText('Plain numbers stay unchanged.');
 });

@@ -1022,6 +1022,33 @@ async fn preview_field_operations(
         .await
 }
 
+/// Native rules for the desktop's independent track, disc and vinyl actions.
+#[tauri::command]
+async fn preview_numbering_dialog(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    groups: Vec<String>,
+    options: tagrex_commands::NumberingDialogOptions,
+    working: Option<PlanDto>,
+) -> Result<tagrex_commands::NumberingDialogPreview, ErrorDto> {
+    let state = state.inner().clone();
+    SESSION_QUEUE
+        .run_latest(&FIELD_PREVIEW_LANE, move |cancel| {
+            let paths = paths.into_iter().map(PathBuf::from).collect::<Vec<_>>();
+            with_app(&state, |app| {
+                app.preview_numbering_dialog_with_cancel(
+                    &paths,
+                    &groups,
+                    &options,
+                    working.as_ref(),
+                    || cancel.cancelled(),
+                )
+                .map_err(ErrorDto::from)
+            })
+        })
+        .await
+}
+
 #[tauri::command]
 async fn preview_tag_edits(
     state: State<'_, AppState>,
@@ -2937,6 +2964,7 @@ fn main() {
             preview_transform,
             preview_tag_edits,
             preview_field_operations,
+            preview_numbering_dialog,
             preview_live_edits,
             preview_cover_embed,
             preview_cover_embed_path,

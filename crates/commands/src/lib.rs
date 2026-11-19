@@ -16,6 +16,8 @@ mod cover_encoding;
 mod field_operations;
 pub use field_operations::{has_field_rules, validate_field_groups, FieldOperation};
 mod native_batch;
+mod numbering_dialog;
+pub use numbering_dialog::{NumberingDialogOptions, NumberingDialogPreview};
 mod playlist_load;
 mod preview_context;
 pub use preview_context::with_preview_cancellation;

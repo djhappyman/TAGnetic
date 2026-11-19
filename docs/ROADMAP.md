@@ -1,37 +1,44 @@
-> Backend consolidation resumed on 19 November: commit and merge achieved work,
-> attach development to main, and retire working branches. Integration and hosted
-> gates are tracked in [PR #55](https://github.com/djhappyman/TAGnetic/pull/55);
-> see [the consolidation record](design/backend-consolidation.md).
+# Engineering roadmap
 
-# Preliminary roadmap
+Current development targets main in this fork. Upstream contributions are curated
+separately. Capabilities and outstanding product epics are listed in the README
+and [roadmap issue #49](https://github.com/djhappyman/TAGnetic/issues/49).
 
-This is a working direction, not a promise of dates or platform performance. Current development targets `main` in this fork. Upstream contribution branches are curated separately.
+## Current checkpoint — native tools exposed in the workbench
 
-## Merged backend checkpoint and pause — 19 November 2026
+The 1.4.10 candidate connects the accepted Autonumber, Disc and Vinyl interface to
+Rust, retaining silent validation, displayed order, field locks and independent
+Stage/Write scope. Format fields exposes Build a field and Extract fields with
+reusable coloured tag chips. Shared toggles now visibly reflect checked state.
+See [numbering design](design/autonumber-dialog.md) for exact boundaries.
 
-Frontend #52, service foundation #50 and protected FLAC/backend foundation #54
-are merged in the fork's main. #54 merged at `cb4f280b`, with Linux, Windows,
-macOS and advisory success on exact head `0ace5efe`.
+The owner authorized a native rebuild/display, independent platform review,
+commit/push and a fresh all-platform release. Release readiness requires the
+current-head frontend, Linux, Windows, macOS, audit/output and package gates.
+Local rebuild authorization does not authorize stress against the user library.
 
-The owner has narrowed the current task: update README/issues, push the
-[documentation checkpoint #53](https://github.com/djhappyman/TAGnetic/pull/53),
-merge it after its hosted gates pass, then stop. Further backend implementation
-is paused. Next session: assess connecting already-built capabilities to the
-frontend through the existing staged Preview/Review/Apply/Undo workflow.
+## Earlier backend foundation and remaining scope
 
-Use [the handoff](design/backend-resumption.md) and
-[tracker #51](https://github.com/djhappyman/TAGnetic/issues/51). Preserved WIP and
-static component reviews are not merged features or whole-programme proof.
-The runner's 40 source test methods have not run; Windows process supervision,
-combined hosted stress and the broader exact/mixed/typed/format work remain open.
-Keep tests/builds/stress off the owner's machine. No release is implied.
+Frontend #52, service #50, backend #54, documentation #53 and reviewed consolidation
+#55 are merged. #55's seven applicable checks passed on ce8fc24d; this is historical
+scope evidence, not validation of later source. Preserve the checkpoint/ref and
+runtime recovery evidence in [the consolidation record](design/backend-consolidation.md).
 
-## Current milestone — a coherent, testable workbench
+General exact/mixed/typed staging, repeated-value expansion, additional format
+integrations and the frozen stress programme remain separate unfinished work.
+Windows process supervision and real device/NAS/power-loss testing remain open.
+Use [tracker #51](https://github.com/djhappyman/TAGnetic/issues/51) and the
+[backend handoff](design/backend-resumption.md); never restore an old whole-tree
+patch over current main. UI exposure does not complete the saved-recipe editor.
 
-- Bring the foundation, compact-player work, progressive filters, interaction fixes and measured optimizations into one maintained branch.
-- Keep preview, Apply and Undo boundaries clear and preserve selections, drafts and focus through navigation.
-- Establish checked Windows, macOS and Linux artifacts before publishing a personal pre-release.
-- Review the interface together and capture fresh light/dark, wide/narrow screenshots. No new screenshots are planned before that session.
+## Next — connect remaining built capabilities
+
+- Add field-copying, combining, extraction, removal and keep-only recipe controls.
+- Expose supported split/merge/deduplicate value tools without promising general
+  repeated-field storage beyond the admitted native model.
+- Connect the import, playlist/report and artwork foundations in focused slices.
+- Verify each complete workflow with disposable fixtures and independent readback,
+  retaining Preview/Review/Apply/Undo, selection and unrelated staged edits.
 
 ## Next — performance and confidence at scale
 

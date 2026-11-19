@@ -48,13 +48,13 @@
 <style>
   .compat-native { display: contents; }
   :global(.compat-checkbox) { width: 16px; height: 16px; min-width: 16px; padding: 0; border-radius: 5px; flex: none; background: var(--bg); color: var(--text); transition: background-color 120ms, border-color 120ms; }
-  :global(.compat-checkbox[data-checked]) { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
-  :global(.compat-checkbox[data-indeterminate]) { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
-  :global(.compat-checkbox:focus-visible), :global(.compat-switch:focus-visible) { outline: 2px solid var(--ring-color); outline-offset: 3px; }
+  :global(.compat-checkbox[data-state='checked']) { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  :global(.compat-checkbox[data-state='indeterminate']) { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  :global(.compat-checkbox:focus-visible), :global(.compat-switch:focus-visible) { outline: 2px solid var(--accent); outline-offset: 3px; }
   :global(.compat-switch) { width: 34px; height: 20px; min-width: 34px; padding: 1px; border: 0; border-radius: 999px; flex: none; background: var(--border); transition: background-color 140ms; }
-  :global(.compat-switch[data-checked]) { background: var(--accent); }
-  :global(.compat-switch [data-slot='switch-thumb']) { width: 18px; height: 18px; background: var(--bg); transition: transform 140ms; }
-  :global(.compat-switch[data-checked] [data-slot='switch-thumb']) { transform: translateX(14px); }
-  :global(.compat-switch[data-unchecked] [data-slot='switch-thumb']) { transform: translateX(0); }
+  :global(.compat-switch[data-state='checked']) { background: var(--accent); }
+  :global(.compat-switch [data-slot='switch-thumb']) { width: 18px; height: 18px; background: var(--bg); transition:translate 140ms; }
+  :global(.compat-switch[data-state='checked'] [data-slot='switch-thumb']) { translate:14px 0; }
+  :global(.compat-switch[data-state='unchecked'] [data-slot='switch-thumb']) { translate:0 0; }
   @media (prefers-reduced-motion: reduce) { :global(.compat-checkbox), :global(.compat-switch), :global(.compat-switch [data-slot='switch-thumb']) { transition: none; } }
 </style>

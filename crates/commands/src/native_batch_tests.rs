@@ -896,3 +896,267 @@ fn native_batches_reject_stale_working_tags_and_cancellation_without_disk_writes
         .is_err());
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
+
+#[test]
+fn desktop_numbering_keeps_track_disc_scopes_and_staged_album_boundaries() {
+    let dir = TempDir::new("desktop-numbering-scopes");
+    let paths: Vec<_> = (0..6)
+        .map(|i| dir.tagged_flac(&format!("{i}.flac"), "Artist", "Title"))
+        .collect();
+    let app = App::open(&dir.0, &dir.0.join("journal.sqlite")).unwrap();
+    let groups = ["one", "one", "two", "one", "one", "two"].map(String::from);
+    let working = app
+        .preview_tag_edits(
+            &paths
+                .iter()
+                .enumerate()
+                .flat_map(|(i, path)| {
+                    [
+                        TagEditDto {
+                            path: path.to_string_lossy().into(),
+                            field: "album".into(),
+                            value: Some(if i < 3 { "A" } else { "B" }.into()),
+                        },
+                        TagEditDto {
+                            path: path.to_string_lossy().into(),
+                            field: "comment".into(),
+                            value: Some("Pending".into()),
+                        },
+                    ]
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    let options = NumberingDialogOptions::Disc {
+        start: "1".into(),
+        disc_total: true,
+        advance_group: true,
+        reset_album: true,
+    };
+    let preview = app
+        .preview_numbering_dialog_with_cancel(&paths, &groups, &options, Some(&working), || false)
+        .unwrap();
+    for (i, number) in ["1", "1", "2", "1", "1", "2"].iter().enumerate() {
+        assert_eq!(batch_value(&preview.plan, &paths[i], "disc"), Some(*number));
+        assert_eq!(
+            batch_value(&preview.plan, &paths[i], "disctotal"),
+            Some("2")
+        );
+    }
+    assert!(preview
+        .edits
+        .iter()
+        .all(|edit| ["disc", "disctotal"].contains(&edit.field.as_str())));
+    assert!(preview
+        .plan
+        .changes
+        .iter()
+        .all(|change| change
+            .tag_changes
+            .iter()
+            .all(|edit| ["disc", "disctotal"].contains(&edit.field.as_str()))));
+    let options = NumberingDialogOptions::Tracks {
+        start: "7".into(),
+        track_total: true,
+        restart_group: true,
+    };
+    let preview = app
+        .preview_numbering_dialog_with_cancel(&paths, &groups, &options, Some(&working), || false)
+        .unwrap();
+    for (i, number) in ["7", "8", "7", "7", "8", "7"].iter().enumerate() {
+        assert_eq!(
+            batch_value(&preview.plan, &paths[i], "track"),
+            Some(*number)
+        );
+    }
+    assert!(preview
+        .edits
+        .iter()
+        .all(|edit| ["track", "tracktotal"].contains(&edit.field.as_str())));
+}
+
+#[test]
+fn desktop_vinyl_reads_staged_disc_and_counts_each_side_and_album() {
+    let dir = TempDir::new("desktop-vinyl-source");
+    let paths: Vec<_> = (0..7)
+        .map(|i| dir.tagged_flac(&format!("{i}.flac"), "Artist", "Title"))
+        .collect();
+    let app = App::open(&dir.0, &dir.0.join("journal.sqlite")).unwrap();
+    let raw = ["A1", "A2", "3b", "A1", "B", "B2", "12"];
+    let working = app
+        .preview_tag_edits(
+            &paths
+                .iter()
+                .enumerate()
+                .flat_map(|(i, path)| {
+                    [
+                        TagEditDto {
+                            path: path.to_string_lossy().into(),
+                            field: "disc".into(),
+                            value: Some(raw[i].into()),
+                        },
+                        TagEditDto {
+                            path: path.to_string_lossy().into(),
+                            field: "album".into(),
+                            value: Some(if i < 3 { "A" } else { "B" }.into()),
+                        },
+                    ]
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    let options = NumberingDialogOptions::Vinyl {
+        source: "disc".into(),
+        keep_position: true,
+        track_total: true,
+        disc_total: true,
+    };
+    let preview = app
+        .preview_numbering_dialog_with_cancel(
+            &paths,
+            &vec![String::new(); paths.len()],
+            &options,
+            Some(&working),
+            || false,
+        )
+        .unwrap();
+    assert_eq!((preview.matched, preview.skipped), (6, 1));
+    for (i, (track, total, disc)) in [
+        ("1", "2", "1"),
+        ("2", "2", "1"),
+        ("3", "3", "2"),
+        ("1", "1", "1"),
+        ("1", "2", "2"),
+        ("2", "2", "2"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(batch_value(&preview.plan, &paths[i], "track"), Some(*track));
+        assert_eq!(
+            batch_value(&preview.plan, &paths[i], "tracktotal"),
+            Some(*total)
+        );
+        assert_eq!(batch_value(&preview.plan, &paths[i], "disc"), Some(*disc));
+        assert_eq!(
+            batch_value(&preview.plan, &paths[i], "disctotal"),
+            Some("2")
+        );
+        assert_eq!(
+            batch_value(&preview.plan, &paths[i], "custom:POSITION"),
+            Some(raw[i])
+        );
+    }
+    assert!(preview
+        .edits
+        .iter()
+        .all(|edit| edit.path != paths[6].to_string_lossy()));
+}
+
+#[test]
+fn desktop_numbering_refuses_duplicates_misalignment_overflow_locks_and_cancellation() {
+    let dir = TempDir::new("desktop-numbering-refusal");
+    let one = dir.tagged_flac("one.flac", "Artist", "Title");
+    let two = dir.tagged_flac("two.flac", "Artist", "Title");
+    let app = App::open(&dir.0, &dir.0.join("journal.sqlite")).unwrap();
+    let options = NumberingDialogOptions::Tracks {
+        start: u32::MAX.to_string(),
+        track_total: false,
+        restart_group: false,
+    };
+    let paths = [one.clone(), two];
+    let groups = ["a".into(), "b".into()];
+    assert!(app
+        .preview_numbering_dialog_with_cancel(&paths, &groups, &options, None, || false)
+        .is_err());
+    assert!(app
+        .preview_numbering_dialog_with_cancel(&paths, &[], &options, None, || false)
+        .is_err());
+    assert!(app
+        .preview_numbering_dialog_with_cancel(&[one.clone(), one], &groups, &options, None, || {
+            false
+        })
+        .is_err());
+    assert!(app
+        .preview_numbering_dialog_with_cancel(&paths, &groups, &options, None, || true)
+        .is_err());
+    // Disc-only numbering never advances an unused track counter.
+    let disc = NumberingDialogOptions::Disc {
+        start: u32::MAX.to_string(),
+        disc_total: false,
+        advance_group: false,
+        reset_album: false,
+    };
+    assert!(app
+        .preview_numbering_dialog_with_cancel(&paths, &groups, &disc, None, || false)
+        .is_ok());
+    app.set_locked_fields(&["disc".into()]);
+    assert!(app
+        .preview_numbering_dialog_with_cancel(&paths, &groups, &disc, None, || false)
+        .is_err());
+}
+
+#[test]
+fn desktop_assignments_include_disk_equal_values_to_replace_pending_values() {
+    let dir = TempDir::new("desktop-numbering-unchanged");
+    let path = dir.tagged_flac("one.flac", "Artist", "Title");
+    let mut app = App::open(&dir.0, &dir.0.join("journal.sqlite")).unwrap();
+    let initial = app
+        .preview_tag_edits(&[TagEditDto {
+            path: path.to_string_lossy().into(),
+            field: "disc".into(),
+            value: Some("2".into()),
+        }])
+        .unwrap();
+    app.apply(&initial).unwrap();
+    let options = NumberingDialogOptions::Disc {
+        start: "2".into(),
+        disc_total: false,
+        advance_group: false,
+        reset_album: false,
+    };
+    let preview = app
+        .preview_numbering_dialog_with_cancel(
+            std::slice::from_ref(&path),
+            &[String::new()],
+            &options,
+            None,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(preview.matched, 1);
+    assert_eq!(preview.edits[0].value.as_deref(), Some("2"));
+    assert!(preview.plan.changes.is_empty());
+}
+
+#[test]
+fn desktop_numbering_rejects_stale_source_baselines_without_writing() {
+    let dir = TempDir::new("desktop-numbering-stale-source");
+    let path = dir.tagged_flac("one.flac", "Artist", "Title");
+    let app = App::open(&dir.0, &dir.0.join("journal.sqlite")).unwrap();
+    let mut working = app
+        .preview_tag_edits(&[TagEditDto {
+            path: path.to_string_lossy().into(),
+            field: "album".into(),
+            value: Some("Staged".into()),
+        }])
+        .unwrap();
+    working.changes[0].tag_changes[0].old = Some("Obsolete album".into());
+    let options = NumberingDialogOptions::Disc {
+        start: "1".into(),
+        disc_total: true,
+        advance_group: true,
+        reset_album: true,
+    };
+    let before = std::fs::read(&path).unwrap();
+    assert!(app
+        .preview_numbering_dialog_with_cancel(
+            std::slice::from_ref(&path),
+            &[String::new()],
+            &options,
+            Some(&working),
+            || false
+        )
+        .is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}

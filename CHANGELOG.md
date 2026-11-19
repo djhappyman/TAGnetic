@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.10] - 2026-11-19
+
+### Added
+
+- Independent Autonumber, Disc and Vinyl tabs with group resets, album disc
+  resets and optional totals, calculated by Rust against current staged inputs.
+- Reusable coloured tag chips and simpler Build a field / Extract fields controls.
+
+### Fixed
+
+- Switch, checkbox and radio styles follow the actual checked state.
+- Numbering validation updates silently without flashing footer buttons.
+- Numbering Write uses only the current action's validated fields; Stage Edits
+  preserves unrelated changes and refuses stale selection, order or staged inputs.
+
+
 ### Added
 
 - Native field recipes for formatting/copying tag values, removing selected

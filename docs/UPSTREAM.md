@@ -222,3 +222,14 @@ root through the existing pinned, no-follow input path. Root-alias deduplication
 and refusal of final/escaping symlinks have disposable-fixture regressions.
 This shared backend fix belongs with focused playlist-loader curation to upstream
 `main`; upstream does not yet have this fork's loader implementation.
+
+## Native desktop numbering and compact dialogs — 1.4.10 candidate
+
+Status: proposed for curation after the fork's current-head release gates. The
+independent Autonumber/Disc/Vinyl controls, shared checked-state styling and
+reusable Format fields chips are shared interface behavior for upstream `next`
+after compatible workbench foundations (#729). The desktop numbering command
+reuses native counters and the existing field-plan/Undo gate; its Rust additions
+are shared backend work for a focused upstream `main` contribution after matching
+native command foundations. No upstream PR or acceptance is claimed by this fork
+release. Preserve upstream inline journal images and its stable waveform API.
