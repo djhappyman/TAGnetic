@@ -323,14 +323,14 @@ pub(crate) fn load_entries(
             retained: bytes as usize + count as usize * 512,
             ..Default::default()
         })
-        .map_err(storage)?,
+        .map_err(|error| storage(format!("native journal entry retention admission: {error}")))?,
     );
     let _work = admit(Charge {
         transient: bytes as usize + 8192,
         jobs: 1,
         ..Default::default()
     })
-    .map_err(storage)?;
+    .map_err(|error| storage(format!("native journal entry read admission: {error}")))?;
     let mut stmt=conn.prepare("SELECT n.ordinal,CASE WHEN length(n.identity)=32 THEN n.identity END,CASE WHEN length(n.digest)=32 THEN n.digest END,n.intents,n.operation,n.record,n.receipts,n.recovery,n.done,CASE WHEN length(CAST(n.operation_id AS BLOB))=34 THEN n.operation_id END,CASE WHEN length(CAST(f.path AS BLOB))<=8192 THEN f.path END,CASE WHEN length(n.roots_digest)=32 THEN n.roots_digest END,n.recovery_role FROM native_tag_files n JOIN file_changes f ON f.id=n.file_change_id AND f.batch_id=n.batch_id WHERE n.batch_id=?1 ORDER BY n.ordinal")?;
     let mut rows = stmt.query([batch.id.0])?;
     let mut entries = Vec::with_capacity(count as usize);
@@ -473,7 +473,17 @@ fn decode<T>(
             )) if start.elapsed() < std::time::Duration::from_millis(500) => {
                 std::thread::sleep(std::time::Duration::from_millis(2));
             }
-            result => return result.map_err(storage),
+            result => {
+                return result.map_err(|error| match error {
+                    crate::model::native_patch::Error::Resource(
+                        crate::resources::AdmissionError::Busy,
+                    ) => storage(format!(
+                        "native journal codec admission: {}",
+                        crate::resources::AdmissionError::Busy
+                    )),
+                    error => storage(error),
+                });
+            }
         }
     }
 }
@@ -683,7 +693,7 @@ impl NativeJournal for SqliteJournal {
             jobs: 1,
             ..Default::default()
         })
-        .map_err(storage)?;
+        .map_err(|error| storage(format!("native journal checkpoint admission: {error}")))?;
         if let Some(receipts) = receipts {
             unpack(receipts)?;
         }
@@ -740,7 +750,7 @@ impl NativeJournal for SqliteJournal {
             jobs: 1,
             ..Default::default()
         })
-        .map_err(storage)?;
+        .map_err(|error| storage(format!("native journal confirmation admission: {error}")))?;
         let bytes = record.journal_bytes().map_err(storage)?;
         let count:i64=self.conn.query_row("SELECT count(*) FROM native_tag_files n JOIN file_changes f ON f.id=n.file_change_id AND f.batch_id=n.batch_id WHERE n.batch_id=?1 AND n.ordinal=?2 AND n.operation=?3 AND n.identity=?4 AND n.digest=?5 AND n.roots_digest=?6 AND n.operation_id=?7 AND n.record=?8 AND n.done=?9 AND (CASE WHEN ?3=0 THEN n.receipts ELSE n.recovery END)=?10 AND f.path=?11 AND n.intents=?12 AND n.recovery_role=CASE WHEN ?3=0 THEN 0 ELSE ?3 END",params![batch.id.0,ordinal as i64,operation,expected.identity.as_slice(),file_digest(&batch.plan.changes[ordinal]).as_slice(),root_digest(&batch.allowed_roots).as_slice(),record.id(),bytes,operation!=1,receipts,marked_path(&batch.plan.changes[ordinal].path),expected.bytes],|r|r.get(0))?;
         if count != 1 {

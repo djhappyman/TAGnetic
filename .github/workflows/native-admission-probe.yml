@@ -12,8 +12,13 @@ concurrency:
 
 jobs:
   native-admission:
+    name: Native admission (${{ matrix.profile }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [normal, single-cpu, io-pressure]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -21,11 +26,73 @@ jobs:
       - name: Build focused fixture
         run: cargo test --locked -p tagrex-commands --test native_policy_admission --no-run
       - name: Repeated concurrent Apply Undo Redo
+        env:
+          PROBE_PROFILE: ${{ matrix.profile }}
         run: |
           set -euo pipefail
+          load_pid=''
+          pressure_path=''
+          cleanup() {
+            if [[ -n "$load_pid" ]]; then
+              kill "$load_pid" 2>/dev/null || true
+              wait "$load_pid" 2>/dev/null || true
+            fi
+            if [[ -n "$pressure_path" ]]; then
+              rm -f -- "$pressure_path" "${pressure_path}.ready"
+            fi
+          }
+          trap cleanup EXIT
+          ensure_pressure() {
+            if [[ -n "$load_pid" ]] && ! kill -0 "$load_pid" 2>/dev/null; then
+              echo "I/O pressure worker stopped before the probe completed" >&2
+              wait "$load_pid" || true
+              return 1
+            fi
+          }
+          if [[ "$PROBE_PROFILE" == io-pressure ]]; then
+            # Use the same temporary-filesystem location as the audio fixtures.
+            pressure_path="$(mktemp "${TMPDIR:-/tmp}/tagnetic-native-admission-pressure.XXXXXX")"
+            export PROBE_PRESSURE_PATH="$pressure_path"
+            # Bounded competing disk traffic on this disposable hosted runner.
+            python3 -u - <<'PY' &
+          import os, time
+          path = os.environ['PROBE_PRESSURE_PATH']
+          fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+          try:
+              block = bytes(1024 * 1024)
+              end = time.monotonic() + 120
+              index = 0
+              while time.monotonic() < end:
+                  os.pwrite(fd, block, (index % 64) * len(block))
+                  os.fsync(fd)
+                  index += 1
+                  if index == 1:
+                      with open(path + '.ready', 'w') as ready:
+                          ready.write('ready')
+          finally:
+              os.close(fd)
+          PY
+            load_pid=$!
+            for ready_attempt in $(seq 1 100); do
+              ensure_pressure
+              if [[ -s "${pressure_path}.ready" ]]; then break; fi
+              sleep 0.05
+            done
+            if [[ ! -s "${pressure_path}.ready" ]]; then
+              echo "I/O pressure worker did not confirm its first successful fsync" >&2
+              exit 1
+            fi
+          fi
+          runner=(cargo test --locked -p tagrex-commands --test native_policy_admission)
+          if [[ "$PROBE_PROFILE" == single-cpu ]]; then
+            core="$(python3 -c 'import os; print(min(os.sched_getaffinity(0)))')"
+            runner=(taskset -c "$core" "${runner[@]}")
+          fi
           for attempt in $(seq 1 25); do
-            echo "Native admission attempt ${attempt}/25"
-            cargo test --locked -p tagrex-commands --test native_policy_admission -- --nocapture
+            ensure_pressure
+            echo "Native admission $PROBE_PROFILE attempt ${attempt}/25"
+            "${runner[@]}" -- --nocapture
+            ensure_pressure
           done
       - name: Independent bounded pressure and callback probes
         if: ${{ !cancelled() }}

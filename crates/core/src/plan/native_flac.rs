@@ -33,7 +33,10 @@ impl IoPhase {
         if IO_PHASE_HELD.with(|held| held.get()) {
             // A private sink can reenter the executor. Refuse immediately rather
             // than waiting on an outer phase this thread cannot finish yet.
-            return Err(error(crate::resources::AdmissionError::Busy));
+            return Err(error(format!(
+                "native I/O admission reentrancy: {}",
+                crate::resources::AdmissionError::Busy
+            )));
         }
         let capacity = io_capacity(Budget::process().limits());
         if capacity == 0 {
@@ -57,7 +60,10 @@ impl IoPhase {
                 return Err(if cancel.load(Ordering::SeqCst) {
                     PlanError::Cancelled
                 } else {
-                    error(crate::resources::AdmissionError::Busy)
+                    error(format!(
+                        "native I/O admission deadline: {}",
+                        crate::resources::AdmissionError::Busy
+                    ))
                 });
             }
         }
@@ -172,9 +178,23 @@ pub(super) struct Captured {
 fn error(error: impl std::fmt::Display) -> PlanError {
     native::storage(error).into()
 }
+fn media_error(stage: &str, failure: media::Error) -> PlanError {
+    match failure {
+        media::Error::Resource(failure) => {
+            error(format!("native media {stage} admission: {failure}"))
+        }
+        failure => error(failure),
+    }
+}
 fn exact_error(error: crate::model::exact::ExactReadError) -> PlanError {
     match error {
         crate::model::exact::ExactReadError::Cancelled => PlanError::Cancelled,
+        crate::model::exact::ExactReadError::Resource(crate::resources::AdmissionError::Busy) => {
+            self::error(format!(
+                "native metadata read admission: {}",
+                crate::resources::AdmissionError::Busy
+            ))
+        }
         error => self::error(error),
     }
 }
@@ -288,7 +308,7 @@ pub(super) fn capture(
             },
             cancel,
         )
-        .map_err(error)?;
+        .map_err(|error| self::error(format!("native capture working admission: {error}")))?;
         for field in &change.tag_changes {
             if exact.legacy().file.tags.get(&field.field) != field.old.as_ref() {
                 return Err(PlanError::Stale(change.path.clone()));
@@ -344,7 +364,7 @@ pub(super) fn capture(
             },
             cancel,
         )
-        .map_err(error)?;
+        .map_err(|error| self::error(format!("native intent retention admission: {error}")))?;
         let bytes = native::pack(&parts)?;
         captured.push(Captured {
             patches,
@@ -553,7 +573,7 @@ fn apply_file(
             if cancel.load(Ordering::SeqCst) && !observed.publishing {
                 PlanError::Cancelled
             } else {
-                error(e)
+                media_error("preparation", e)
             }
         })?;
     let published = prepared.publish(&mut driver, &mut observed).map_err(|e| {
@@ -918,7 +938,7 @@ fn retire_pending(
                 verify_finish(&mut driver, &durable).map_err(error)?;
                 published
                     .retire(|_| Ok(()), &mut driver, &mut ())
-                    .map_err(error)?;
+                    .map_err(|e| media_error("retirement", e))?;
                 valid.original = bound(
                     &batch.plan.changes[valid.entry.ordinal],
                     &valid.entry.intent.identity,
@@ -1011,7 +1031,7 @@ fn undo_file(
                 Ok(())
             },
         )
-        .map_err(error)?;
+        .map_err(|e| media_error("Undo preparation", e))?;
     let published = prepared
         .publish(&mut driver, &mut ())
         .map_err(|e| recovery(&change.path, e))?;
@@ -1019,7 +1039,7 @@ fn undo_file(
     verify_finish(&mut driver, &record).map_err(error)?;
     published
         .retire(|_| Ok(()), &mut driver, &mut ())
-        .map_err(error)
+        .map_err(|e| media_error("retirement", e))
 }
 fn rollback_undo(
     batch: &AppliedBatch,
