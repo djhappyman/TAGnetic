@@ -1,3 +1,7 @@
+> Backend consolidation resumed on 19 November: commit and merge achieved work,
+> attach development to main, and retire working branches. Integration and hosted
+> gates are pending; see [the consolidation record](design/backend-consolidation.md).
+
 # Preliminary roadmap
 
 This is a working direction, not a promise of dates or platform performance. Current development targets `main` in this fork. Upstream contribution branches are curated separately.

@@ -15,6 +15,7 @@ pub mod media_mutation;
 pub mod model;
 pub mod plan;
 pub mod provider;
+pub mod report_template;
 pub mod resources;
 pub mod scanner;
 pub mod text_codec;

@@ -579,22 +579,77 @@ impl Service {
                     working.as_ref().unwrap_or(&empty_working),
                 )?
             }
-            "draft.from_text" => {
-                let mode = args
-                    .get("mode")
-                    .cloned()
-                    .map(serde_json::from_value)
-                    .transpose()?
-                    .unwrap_or_default();
-                let result = app.preview_text_import(
-                    &paths,
-                    required(args, "text")?,
-                    &tagrex_commands::TextImportOptions {
-                        pattern: required(args, "mask")?.into(),
-                        mode,
-                    },
-                    previous.as_ref().map(|p| &p.plan).or(working.as_ref()),
-                )?;
+            "draft.from_text" | "draft.from_table" => {
+                let result = if tool == "draft.from_table" {
+                    use base64::Engine as _;
+                    let options: tagrex_commands::TabularImportOptions =
+                        serde_json::from_value(args.get("table").cloned().ok_or_else(|| {
+                            ServiceError::invalid("Supply table options and mappings")
+                        })?)?;
+                    let bytes = match (args.get("text"), args.get("data_base64")) {
+                        (Some(text), None) => {
+                            if tagrex_core::text_codec::TextEncoding::from_label(&options.encoding)
+                                .map_err(|error| ServiceError::invalid(error.to_string()))?
+                                != tagrex_core::text_codec::TextEncoding::Utf8
+                            {
+                                return Err(ServiceError::invalid(
+                                    "text is UTF-8; use data_base64 for other declared encodings",
+                                ));
+                            }
+                            text.as_str()
+                                .ok_or_else(|| ServiceError::invalid("text must be a string"))?
+                                .as_bytes()
+                                .to_vec()
+                        }
+                        (None, Some(data)) => base64::engine::general_purpose::STANDARD
+                            .decode(data.as_str().ok_or_else(|| {
+                                ServiceError::invalid("data_base64 must be a string")
+                            })?)
+                            .map_err(|_| ServiceError::invalid("Invalid table base64"))?,
+                        _ => {
+                            return Err(ServiceError::invalid(
+                                "Supply exactly one of text or data_base64",
+                            ))
+                        }
+                    };
+                    app.preview_tabular_import(
+                        &paths,
+                        &bytes,
+                        &options,
+                        previous.as_ref().map(|p| &p.plan).or(working.as_ref()),
+                    )
+                    .map_err(|error| match error {
+                        tagrex_commands::TabularImportError::Native(error) => {
+                            ServiceError::from(error)
+                        }
+                        tagrex_commands::TabularImportError::Resource(error) => ServiceError::new(
+                            match error {
+                                tagrex_core::resources::AdmissionError::Busy => "busy",
+                                tagrex_core::resources::AdmissionError::TooLarge => {
+                                    "resource_limit"
+                                }
+                            },
+                            error.to_string(),
+                        ),
+                        error => ServiceError::new("invalid_table", error.to_string()),
+                    })?
+                } else {
+                    let mode = args
+                        .get("mode")
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()?
+                        .unwrap_or_default();
+                    app.preview_text_import(
+                        &paths,
+                        required(args, "text")?,
+                        &tagrex_commands::TextImportOptions {
+                            pattern: required(args, "mask")?.into(),
+                            mode,
+                        },
+                        previous.as_ref().map(|p| &p.plan).or(working.as_ref()),
+                    )?
+                };
                 for row in &result.rows {
                     if let Some(path) = &row.path {
                         for field in &row.fields {
@@ -945,7 +1000,11 @@ impl Service {
         }
         let plan = if matches!(
             tool,
-            "draft.transform" | "draft.from_text" | "draft.from_sidecars" | "draft.number"
+            "draft.transform"
+                | "draft.from_text"
+                | "draft.from_table"
+                | "draft.from_sidecars"
+                | "draft.number"
         ) && previous.is_some()
         {
             plan
@@ -2776,6 +2835,60 @@ mod composition_tests {
         assert!(preset.description.contains("preset={query:"));
         assert!(preset.description.contains("SHARED"));
     }
+    #[test]
+    fn native_table_import_composes_shared_intent_and_keeps_errors_atomic() {
+        let f = Fixture::new();
+        let draft = f.draft(json!({"title":"Pending", "comment":"Keep"}));
+        let table = json!({"mode":"filename","match_column":{"kind":"header","name":"File"},"mappings":[{"column":{"kind":"header","name":"Title"},"field":"title"}]});
+        let imported = f.call("draft.from_table",json!({"paths":[f.paths[0]],"draft":draft["draft"],"text":"File,Title\n0.wav,Saved\nmissing.wav,Ignored","table":table}));
+        assert!(field(&imported, &f.paths[0], "title").is_none());
+        assert_eq!(
+            field(&imported, &f.paths[0], "comment").unwrap()["new"],
+            "Keep"
+        );
+        assert!(!imported["unrendered"].as_array().unwrap().is_empty());
+        let before = f.call("staging.get", json!({}));
+        let failure = f
+            .service
+            .call(
+                &f.principal,
+                "draft.from_table",
+                json!({"paths":[f.paths[0]],"table":table,"text":"File,Title\n0.wav,\"unclosed"}),
+            )
+            .unwrap_err();
+        assert_eq!(failure.code, "invalid_table");
+        assert_eq!(f.call("staging.get", json!({})), before);
+        assert!(f.service.call(&f.principal,"draft.from_table",json!({"paths":[f.paths[0]],"table":table,"text":"File,Title\n0.wav,one\n0.wav,two"})).is_err());
+        assert_eq!(f.call("staging.get", json!({})), before);
+    }
+
+    #[test]
+    fn native_table_import_validates_input_kind_and_supports_explicit_encoded_bytes() {
+        use base64::Engine as _;
+        let f = Fixture::new();
+        let table = json!({"encoding":"utf-16le","mappings":[{"column":{"kind":"header","name":"Title"},"field":"title"}]});
+        assert!(f
+            .service
+            .call(
+                &f.principal,
+                "draft.from_table",
+                json!({"paths":[f.paths[0]],"table":table,"text":"Title\nWrong encoding"})
+            )
+            .is_err());
+        let bytes = tagrex_core::text_codec::encode(
+            "Title\nBjörk 🎵",
+            tagrex_core::text_codec::TextEncoding::Utf16Le,
+            true,
+            1024,
+        )
+        .unwrap();
+        let imported=f.call("draft.from_table",json!({"paths":[f.paths[0]],"table":table,"data_base64":base64::engine::general_purpose::STANDARD.encode(bytes)}));
+        assert_eq!(
+            field(&imported, &f.paths[0], "title").unwrap()["new"],
+            "Björk 🎵"
+        );
+    }
+
     #[test]
     fn native_field_recipe_uses_shared_working_values_across_different_scopes() {
         let f = Fixture::new();

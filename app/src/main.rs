@@ -48,6 +48,13 @@ static BROWSER_QUEUE: blocking::Queue = blocking::Queue::new();
 static SETTINGS_QUEUE: blocking::Queue = blocking::Queue::new();
 static SESSION_QUEUE: blocking::Queue = blocking::Queue::new();
 static FIELD_PREVIEW_LANE: blocking::Latest = blocking::Latest::new();
+static RENAME_PREVIEW_LANE: blocking::Latest = blocking::Latest::new();
+static NAME_PREVIEW_LANE: blocking::Latest = blocking::Latest::new();
+static TEXT_PREVIEW_LANE: blocking::Latest = blocking::Latest::new();
+static TRANSFORM_PREVIEW_LANE: blocking::Latest = blocking::Latest::new();
+static MOVE_PREVIEW_LANE: blocking::Latest = blocking::Latest::new();
+static GROUP_PREVIEW_LANE: blocking::Latest = blocking::Latest::new();
+static GROUP_PLAN_PREVIEW_LANE: blocking::Latest = blocking::Latest::new();
 static LIBRARY_QUERY_QUEUE: blocking::Queue = blocking::Queue::new();
 static LIBRARY_SUGGEST_QUEUE: blocking::Queue = blocking::Queue::new();
 static QUERY_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -214,7 +221,7 @@ async fn library_benchmark_query(
         .cloned()
         .ok_or_else(|| shell_error("Synthetic benchmark no longer exists."))?;
     tauri::async_runtime::spawn_blocking(move || {
-        index.query(&request, || false).map_err(shell_error)
+        index.query(&request, || false).map_err(ErrorDto::from)
     })
     .await
     .map_err(shell_error)?
@@ -451,7 +458,7 @@ fn take_launch_paths(pending: State<PendingOpen>) -> Vec<String> {
 async fn list_tracks(state: State<'_, AppState>) -> Result<Vec<TrackDto>, ErrorDto> {
     let state = state.inner().clone();
     SESSION_QUEUE
-        .run(move || with_app(&state, |app| Ok(app.list_tracks())))
+        .run(move || with_app(&state, |app| app.list_tracks().map_err(ErrorDto::from)))
         .await
 }
 
@@ -466,7 +473,7 @@ async fn library_query(
     let state = state.inner().clone();
     let source = state.clone();
     let index = SESSION_QUEUE
-        .run(move || with_app(&source, |app| Ok(app.query_snapshot())))
+        .run(move || with_app(&source, |app| app.query_snapshot().map_err(ErrorDto::from)))
         .await?;
     let snapshot_id = index.id;
     let result = LIBRARY_QUERY_QUEUE
@@ -476,7 +483,7 @@ async fn library_query(
                     QUERY_REVISION.load(Ordering::SeqCst) != revision
                         || LIBRARY_GENERATION.load(Ordering::SeqCst) != generation
                 })
-                .map_err(shell_error)
+                .map_err(ErrorDto::from)
         })
         .await?;
     let current = SESSION_QUEUE
@@ -507,7 +514,7 @@ async fn library_suggest(
     let state = state.inner().clone();
     let source = state.clone();
     let index = SESSION_QUEUE
-        .run(move || with_app(&source, |app| Ok(app.query_snapshot())))
+        .run(move || with_app(&source, |app| app.query_snapshot().map_err(ErrorDto::from)))
         .await?;
     let snapshot_id = index.id;
     let result = LIBRARY_SUGGEST_QUEUE
@@ -517,7 +524,7 @@ async fn library_suggest(
                     SUGGEST_REVISION.load(Ordering::SeqCst) != revision
                         || LIBRARY_GENERATION.load(Ordering::SeqCst) != generation
                 })
-                .map_err(shell_error)
+                .map_err(ErrorDto::from)
         })
         .await?;
     let current = SESSION_QUEUE
@@ -548,7 +555,7 @@ async fn library_duplicates_start(
     }
     let state = state.inner().clone();
     let index = SESSION_QUEUE
-        .run(move || with_app(&state, |app| Ok(app.query_snapshot())))
+        .run(move || with_app(&state, |app| app.query_snapshot().map_err(ErrorDto::from)))
         .await?;
     let (id, status, job) = {
         let mut jobs = DUPLICATE_JOBS.lock().map_err(shell_error)?;
@@ -800,7 +807,7 @@ async fn preview_rename(
 ) -> Result<PlanDto, ErrorDto> {
     let state = state.inner().clone();
     SESSION_QUEUE
-        .run(move || {
+        .run_latest(&RENAME_PREVIEW_LANE, move |_cancel| {
             let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
             with_app(&state, |app| {
                 app.preview_rename(&mask, &paths).map_err(ErrorDto::from)
@@ -817,7 +824,7 @@ async fn preview_tags_from_name(
 ) -> Result<PlanDto, ErrorDto> {
     let state = state.inner().clone();
     SESSION_QUEUE
-        .run(move || {
+        .run_latest(&NAME_PREVIEW_LANE, move |_cancel| {
             let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
             with_app(&state, |app| {
                 app.preview_tags_from_name(&mask, &paths)
@@ -895,7 +902,7 @@ async fn preview_tags_from_text(
 ) -> Result<PlanDto, ErrorDto> {
     let state = state.inner().clone();
     SESSION_QUEUE
-        .run(move || {
+        .run_latest(&TEXT_PREVIEW_LANE, move |_cancel| {
             let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
             with_app(&state, |app| {
                 app.preview_tags_from_text(&mask, &text, &paths)
@@ -949,7 +956,7 @@ async fn preview_transform(
 ) -> Result<PlanDto, ErrorDto> {
     let state = state.inner().clone();
     SESSION_QUEUE
-        .run(move || {
+        .run_latest(&TRANSFORM_PREVIEW_LANE, move |_cancel| {
             let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
             with_app(&state, |app| {
                 app.preview_transform(&paths, &rules, &scope)
@@ -970,7 +977,7 @@ async fn preview_move(
 ) -> Result<PlanDto, ErrorDto> {
     let state = state.inner().clone();
     SESSION_QUEUE
-        .run(move || {
+        .run_latest(&MOVE_PREVIEW_LANE, move |_cancel| {
             let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
             let destination = destination
                 .map(|d| d.trim().to_string())
@@ -2681,7 +2688,7 @@ async fn preview_transform_groups(
 ) -> Result<PlanDto, ErrorDto> {
     let state = state.inner().clone();
     SESSION_QUEUE
-        .run(move || {
+        .run_latest(&GROUP_PREVIEW_LANE, move |_cancel| {
             let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
             with_app(&state, |app| {
                 app.preview_transform_groups(&paths, &groups)
@@ -2701,7 +2708,7 @@ async fn preview_transform_over_plan(
 ) -> Result<PlanDto, ErrorDto> {
     let state = state.inner().clone();
     SESSION_QUEUE
-        .run(move || {
+        .run_latest(&GROUP_PLAN_PREVIEW_LANE, move |_cancel| {
             with_app(&state, |app| {
                 app.preview_transform_over_plan(&plan, &groups)
                     .map_err(ErrorDto::from)

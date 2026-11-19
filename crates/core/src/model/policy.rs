@@ -55,7 +55,17 @@ impl Default for ModelPolicy {
         }))))
     }
 }
+impl std::fmt::Debug for ModelPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModelPolicy").field("revision", &self.revision()).finish_non_exhaustive()
+    }
+}
 impl ModelPolicy {
+    /// Current generation of this owner, independent of the caller's TLS scope.
+    /// Query workers use it to invalidate snapshots without changing their IO policy.
+    pub fn revision(&self) -> u64 {
+        self.snapshot().revision
+    }
     /// Atomically configure the complete interpretation. Empty/unknown settings
     /// have the same defaults as the standalone model setters.
     pub fn configure(&self, id3v23: bool, priority: &[String], separator: &str, code_page: &str) {

@@ -763,7 +763,9 @@ fn split_prefix<'a>(value: &'a str, words: &[String]) -> Option<(&'a str, &'a st
         if word.is_empty() {
             continue;
         }
-        let (head, rest) = value.split_at_checked(word.len())?;
+        let Some((head, rest)) = value.split_at_checked(word.len()) else {
+            continue;
+        };
         if head.eq_ignore_ascii_case(word) && rest.starts_with(' ') {
             return Some((head, rest.trim_start()));
         }
@@ -792,7 +794,9 @@ fn cut_mix(value: &str) -> String {
     }
     for noise in NOISE_ATTRIBUTES {
         if trimmed.len() >= noise.len() {
-            let (head, tail) = trimmed.split_at(trimmed.len() - noise.len());
+            let Some((head, tail)) = trimmed.split_at_checked(trimmed.len() - noise.len()) else {
+                continue;
+            };
             if tail.eq_ignore_ascii_case(noise) {
                 return trim_trailing_separator(head);
             }

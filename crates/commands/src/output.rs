@@ -1,19 +1,22 @@
 //! Confined sidecar output. On Unix every operation is relative to a pinned
 //! directory descriptor; replacing a directory path cannot redirect a write.
 
-use std::io::{self, Write};
+use std::io;
+#[cfg(test)]
+use std::io::Write;
 #[cfg(unix)]
 use std::path::Component;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(test)]
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 /// A pinned destination directory; all publication stays relative to it.
 struct Directory {
     #[cfg(unix)]
     fd: rustix::fd::OwnedFd,
-    #[cfg(not(unix))]
     path: PathBuf,
     // Windows share modes pin each ancestor's name while outputs are staged
     // and published. Opening the final directory alone would leave its parents
@@ -44,7 +47,7 @@ impl Directory {
                 };
                 fd = openat(&fd, name, flags, Mode::empty())?;
             }
-            Ok(Self { fd })
+            Ok(Self { fd, path: parent })
         }
         #[cfg(not(unix))]
         {
@@ -87,31 +90,8 @@ impl Directory {
             }
         }
     }
-    #[cfg(unix)]
-    /// Read replacement permissions without following a target link.
-    fn permissions(&self, name: &std::ffi::OsStr) -> io::Result<Option<std::fs::Permissions>> {
-        use std::os::unix::fs::PermissionsExt;
-        match rustix::fs::statat(&self.fd, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(stat)
-                if rustix::fs::FileType::from_raw_mode(stat.st_mode)
-                    == rustix::fs::FileType::RegularFile =>
-            {
-                // mode_t is u16 on Darwin and u32 on Linux. Keep the widening
-                // conversion even where it is an identity conversion.
-                #[allow(clippy::useless_conversion)]
-                let mode = u32::from(stat.st_mode & 0o777);
-                Ok(Some(std::fs::Permissions::from_mode(mode)))
-            }
-            Ok(_) => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "output target is not a regular file",
-            )),
-            Err(rustix::io::Errno::NOENT) => Ok(None),
-            Err(error) => Err(error.into()),
-        }
-    }
-
-    /// Reserve a unique staging file in this pinned directory.
+    /// Disposable low-level transport fixture.
+    #[cfg(test)]
     fn temporary(&self) -> io::Result<(std::ffi::OsString, std::fs::File)> {
         for _ in 0..100 {
             let name = format!(
@@ -154,89 +134,14 @@ impl Directory {
         ))
     }
 
-    /// Move a staging or recovery name within the pinned directory.
-    fn rename(&self, from: &std::ffi::OsStr, to: &std::ffi::OsStr) -> io::Result<()> {
-        #[cfg(unix)]
-        {
-            Ok(rustix::fs::renameat(&self.fd, from, &self.fd, to)?)
-        }
-        #[cfg(not(unix))]
-        {
-            std::fs::rename(self.path.join(from), self.path.join(to))
-        }
-    }
-
-    /// Publish without replacing a racing target when supported by the filesystem.
+    /// Exercise the same native no-replace transport as the production batch.
+    #[cfg(test)]
     fn publish(&self, from: &std::ffi::OsStr, to: &std::ffi::OsStr) -> io::Result<()> {
-        #[cfg(unix)]
-        {
-            publish_with_fallback(
-                || {
-                    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
-                    return rustix::fs::renameat_with(
-                        &self.fd,
-                        from,
-                        &self.fd,
-                        to,
-                        rustix::fs::RenameFlags::NOREPLACE,
-                    );
-                    #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
-                    Err(rustix::io::Errno::NOSYS)
-                },
-                || rustix::fs::linkat(&self.fd, from, &self.fd, to, rustix::fs::AtFlags::empty()),
-                || self.publish_by_checked_rename(from, to),
-            )
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::ffi::OsStrExt;
-            use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
-            let wide = |name: &std::ffi::OsStr| -> io::Result<Vec<u16>> {
-                let mut path: Vec<u16> = self.path.join(name).as_os_str().encode_wide().collect();
-                if path.contains(&0) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "NUL in output path",
-                    ));
-                }
-                path.push(0);
-                Ok(path)
-            };
-            let from = wide(from)?;
-            let to = wide(to)?;
-            // No REPLACE_EXISTING flag: a target appearing after staging wins.
-            // Unlike hard links this also works on FAT/exFAT. Both names are
-            // under the same pinned directory, so no cross-volume copy occurs.
-            // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw
-            // SAFETY: both buffers are NUL-terminated and live for this call;
-            // the API borrows the pointers and does not retain them.
-            if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_WRITE_THROUGH) } == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
-            std::fs::hard_link(self.path.join(from), self.path.join(to))
-        }
+        self.move_exclusive(from, self, to)
     }
 
-    /// Compatibility path for filesystems without atomic no-replace rename or
-    /// hard links. There remains a race between the absence check and rename;
-    /// it is confined to this pinned directory and never follows target links.
-    #[cfg(unix)]
-    fn publish_by_checked_rename(
-        &self,
-        from: &std::ffi::OsStr,
-        to: &std::ffi::OsStr,
-    ) -> io::Result<()> {
-        if self.regular(to)? {
-            return Err(io::ErrorKind::AlreadyExists.into());
-        }
-        self.rename(from, to)
-    }
-
-    /// Best-effort cleanup confined to this directory.
+    /// Fixture cleanup only; production uses verified private capture.
+    #[cfg(test)]
     fn remove(&self, name: &std::ffi::OsStr) {
         #[cfg(unix)]
         {
@@ -307,33 +212,6 @@ pub(crate) fn read_under(root: &Path, relative: &Path) -> io::Result<std::fs::Fi
         ));
     }
     Ok(file)
-}
-
-/// Prefer atomic no-replace operations; only unsupported-operation errors may
-/// reach the final checked rename. Permission, collision and I/O errors stop.
-#[cfg(unix)]
-fn publish_with_fallback(
-    exclusive_rename: impl FnOnce() -> rustix::io::Result<()>,
-    hard_link: impl FnOnce() -> rustix::io::Result<()>,
-    checked_rename: impl FnOnce() -> io::Result<()>,
-) -> io::Result<()> {
-    let unsupported = |e: rustix::io::Errno| {
-        // ENOTSUP and EOPNOTSUPP are distinct on Darwin, aliases on Linux.
-        e == rustix::io::Errno::NOSYS
-            || e == rustix::io::Errno::INVAL
-            || e == rustix::io::Errno::NOTSUP
-            || e == rustix::io::Errno::OPNOTSUPP
-    };
-    match exclusive_rename() {
-        Ok(()) => return Ok(()),
-        Err(e) if unsupported(e) => {}
-        Err(e) => return Err(e.into()),
-    }
-    match hard_link() {
-        Ok(()) => Ok(()),
-        Err(e) if unsupported(e) => checked_rename(),
-        Err(e) => Err(e.into()),
-    }
 }
 
 /// Windows name-surrogate reparse tags redirect a path; cloud placeholders do not.
@@ -419,119 +297,24 @@ fn pin_windows_ancestors(parent: &Path) -> io::Result<Vec<std::fs::File>> {
     Ok(handles)
 }
 
-struct Staged {
-    dir: Directory,
-    name: std::ffi::OsString,
-    temporary: std::ffi::OsString,
-    backup: Option<std::ffi::OsString>,
-    published: bool,
-}
+// Deterministic fixture-only interleaving at the same point an external process
+// can replace a newly published output. Production has no fault environment.
+#[cfg(test)]
+type PublicationHook = Box<dyn FnMut(&Path)>;
+#[cfg(test)]
+thread_local! { static PUBLICATION_HOOK: std::cell::RefCell<Option<PublicationHook>> = const { std::cell::RefCell::new(None) }; }
 
-impl Drop for Staged {
-    fn drop(&mut self) {
-        self.dir.remove(&self.temporary);
-    }
-}
+mod ownership;
+pub use ownership::OutputError;
 
-/// Stage the entire batch before publishing. Existing links (including dangling
-/// ones) and special files are rejected. A later failure restores prior outputs.
+/// Stage and validate the entire batch before publication. Ownership failures
+/// retain evidence and return typed recovery requirements.
 pub(crate) fn write_batch(
     root: &Path,
     outputs: &[(PathBuf, Vec<u8>)],
     overwrite: bool,
-) -> io::Result<()> {
-    let mut staged = Vec::new();
-    for (target, bytes) in outputs {
-        let parent = target
-            .parent()
-            .ok_or_else(|| io::Error::other("missing output parent"))?;
-        let name = target
-            .file_name()
-            .ok_or_else(|| io::Error::other("missing output name"))?
-            .to_owned();
-        let dir = Directory::open(root, parent)?;
-        if dir.regular(&name)? && !overwrite {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "output already exists",
-            ));
-        }
-        let (temporary, mut file) = dir.temporary()?;
-        let entry = Staged {
-            dir,
-            name,
-            temporary,
-            backup: None,
-            published: false,
-        };
-        let result = (|| {
-            #[cfg(unix)]
-            if let Some(permissions) = entry.dir.permissions(&entry.name)? {
-                file.set_permissions(permissions)?;
-            }
-            file.write_all(bytes)?;
-            file.sync_all()
-        })();
-        drop(file);
-        result?;
-        staged.push(entry);
-    }
-    let result = (|| {
-        for entry in &mut staged {
-            if entry.dir.regular(&entry.name)? {
-                if !overwrite {
-                    return Err(io::Error::new(
-                        io::ErrorKind::AlreadyExists,
-                        "output already exists",
-                    ));
-                }
-                let (backup, file) = entry.dir.temporary()?;
-                drop(file);
-                if let Err(e) = entry.dir.rename(&entry.name, &backup) {
-                    entry.dir.remove(&backup);
-                    return Err(e);
-                }
-                entry.backup = Some(backup);
-                // A target switched to a link after the check is moved, never
-                // opened. Validate the moved object before replacing it.
-                entry.dir.regular(entry.backup.as_deref().unwrap())?;
-            }
-            entry.dir.publish(&entry.temporary, &entry.name)?;
-            entry.published = true;
-        }
-        Ok(())
-    })();
-    if let Err(cause) = &result {
-        let mut failures = Vec::new();
-        for entry in staged.iter().rev() {
-            if entry.published {
-                entry.dir.remove(&entry.name);
-            }
-            if let Some(backup) = &entry.backup {
-                if let Err(error) = entry.dir.rename(backup, &entry.name) {
-                    failures.push(format!(
-                        "{} (backup {}): {error}",
-                        entry.name.to_string_lossy(),
-                        backup.to_string_lossy()
-                    ));
-                }
-            }
-        }
-        if !failures.is_empty() {
-            return Err(io::Error::other(format!(
-                "{}; output restoration failed; originals retained in {}",
-                cause,
-                failures.join(", ")
-            )));
-        }
-    } else {
-        for entry in &staged {
-            if let Some(backup) = &entry.backup {
-                entry.dir.remove(backup);
-            }
-        }
-    }
-    result
+) -> Result<(), OutputError> {
+    ownership::write_batch(root, outputs, overwrite)
 }
 
 #[cfg(test)]
@@ -566,39 +349,35 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn unsupported_atomic_publication_reaches_checked_rename() {
-        let root = root("fallback");
+    fn missing_safe_capture_primitive_refuses_instead_of_checked_rename() {
+        let root = root("unsupported-capture");
         let dir = Directory::open(&root, &root).unwrap();
         let (temporary, mut file) = dir.temporary().unwrap();
-        file.write_all(b"fallback").unwrap();
+        file.write_all(b"staged output").unwrap();
         drop(file);
-        let name = std::ffi::OsStr::new("cover.jpg");
-        publish_with_fallback(
-            || Err(rustix::io::Errno::NOTSUP),
-            || Err(rustix::io::Errno::OPNOTSUPP),
-            || dir.publish_by_checked_rename(&temporary, name),
-        )
-        .unwrap();
-        assert_eq!(std::fs::read(root.join(name)).unwrap(), b"fallback");
-        // Existing files and links must still stop the final fallback.
-        let (second, mut file) = dir.temporary().unwrap();
-        file.write_all(b"must not replace").unwrap();
-        drop(file);
+        let result = ownership::native_result(Err(rustix::io::Errno::NOTSUP));
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Unsupported);
         assert_eq!(
-            dir.publish_by_checked_rename(&second, name)
+            std::fs::read(root.join(&temporary)).unwrap(),
+            b"staged output"
+        );
+        assert!(!root.join("cover.jpg").exists());
+        std::fs::write(root.join("cover.jpg"), b"original").unwrap();
+        assert_eq!(
+            dir.publish(&temporary, std::ffi::OsStr::new("cover.jpg"))
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::AlreadyExists
         );
-        assert_eq!(std::fs::read(root.join(name)).unwrap(), b"fallback");
-        dir.remove(&second);
+        assert_eq!(std::fs::read(root.join("cover.jpg")).unwrap(), b"original");
+        dir.remove(&temporary);
         drop(dir);
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
     #[test]
-    fn checked_rename_refuses_existing_and_dangling_links() {
+    fn exclusive_publish_refuses_existing_and_dangling_links() {
         let root = root("fallback-links");
         let dir = Directory::open(&root, &root).unwrap();
         let (temporary, file) = dir.temporary().unwrap();
@@ -606,9 +385,7 @@ mod tests {
         std::fs::write(root.join("original"), b"untouched").unwrap();
         for (name, target) in [("live", "original"), ("dangling", "missing")] {
             std::os::unix::fs::symlink(target, root.join(name)).unwrap();
-            assert!(dir
-                .publish_by_checked_rename(&temporary, std::ffi::OsStr::new(name))
-                .is_err());
+            assert!(dir.publish(&temporary, std::ffi::OsStr::new(name)).is_err());
             assert!(std::fs::symlink_metadata(root.join(name))
                 .unwrap()
                 .file_type()
@@ -622,43 +399,68 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn publication_fallback_does_not_hide_collisions_or_permission_errors() {
+    fn native_no_replace_errors_never_fall_back_to_replacing_rename() {
         for error in [
             rustix::io::Errno::EXIST,
             rustix::io::Errno::ACCESS,
             rustix::io::Errno::IO,
         ] {
-            let result = publish_with_fallback(
-                || Err(error),
-                || panic!("must stop"),
-                || panic!("must stop"),
-            );
             assert_eq!(
-                result.unwrap_err().raw_os_error(),
-                Some(error.raw_os_error())
-            );
-            let result = publish_with_fallback(
-                || Err(rustix::io::Errno::NOTSUP),
-                || Err(error),
-                || panic!("must stop"),
-            );
-            assert_eq!(
-                result.unwrap_err().raw_os_error(),
+                ownership::native_result(Err(error))
+                    .unwrap_err()
+                    .raw_os_error(),
                 Some(error.raw_os_error())
             );
         }
-        publish_with_fallback(
-            || Ok(()),
-            || panic!("rename succeeded"),
-            || panic!("rename succeeded"),
-        )
-        .unwrap();
-        publish_with_fallback(
-            || Err(rustix::io::Errno::NOTSUP),
-            || Ok(()),
-            || panic!("link succeeded"),
-        )
-        .unwrap();
+        for error in [
+            rustix::io::Errno::NOSYS,
+            rustix::io::Errno::INVAL,
+            rustix::io::Errno::NOTSUP,
+            rustix::io::Errno::OPNOTSUPP,
+        ] {
+            assert_eq!(
+                ownership::native_result(Err(error)).unwrap_err().kind(),
+                io::ErrorKind::Unsupported
+            );
+        }
+        ownership::native_result(Ok(())).unwrap();
+    }
+
+    #[test]
+    fn rollback_preserves_replacement_after_prior_output_publication() {
+        let root = root("foreign-published-output");
+        let first = root.join("first.txt");
+        let second = root.join("second.txt");
+        let preserved = root.join("captured-first.txt");
+        let (callback_first, callback_second, callback_preserved) =
+            (first.clone(), second.clone(), preserved.clone());
+        PUBLICATION_HOOK.with(|hook| {
+            hook.replace(Some(Box::new(move |published| {
+                if published == callback_first {
+                    std::fs::rename(&callback_first, &callback_preserved).unwrap();
+                    std::fs::write(&callback_first, b"external replacement").unwrap();
+                    std::fs::write(&callback_second, b"racing target").unwrap();
+                }
+            })))
+        });
+        let outcome = write_batch(
+            &root,
+            &[
+                (first.clone(), b"owned first".to_vec()),
+                (second.clone(), b"owned second".to_vec()),
+            ],
+            false,
+        );
+        PUBLICATION_HOOK.with(|hook| hook.replace(None));
+        assert!(outcome.is_err());
+        assert_eq!(std::fs::read(&preserved).unwrap(), b"owned first");
+        assert_eq!(
+            std::fs::read(&first).ok().as_deref(),
+            Some(b"external replacement".as_slice()),
+            "rollback deleted an unowned replacement: {outcome:?}"
+        );
+        assert_eq!(std::fs::read(&second).unwrap(), b"racing target");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -817,3 +619,9 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests;
+
+#[cfg(test)]
+mod independent_review_tests;

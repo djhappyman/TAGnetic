@@ -5129,9 +5129,11 @@ name = "tagrex-commands"
 version = "1.4.9"
 dependencies = [
  "base64 0.23.1",
+ "getrandom 0.3.4",
  "regex",
  "rustix",
  "rusty-chromaprint",
+ "same-file",
  "serde",
  "serde_json",
  "sha2 0.10.9",

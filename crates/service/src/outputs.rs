@@ -548,7 +548,10 @@ impl Service {
                         }
                         return Ok(AnalysisResult::Bpm(detected));
                     }
-                    let index = tagrex_commands::query::QueryIndex::from_tracks(&rows);
+                    let index = tagrex_commands::query::QueryIndex::try_from_tracks(&rows)
+                        .map_err(|error| {
+                            ServiceError::from(tagrex_commands::AppError::Resource(error))
+                        })?;
                     drop(rows);
                     let cache = Mutex::new(tagrex_commands::duplicates::AnalysisCache::default());
                     tagrex_commands::duplicates::scan_with_updates(
@@ -834,9 +837,20 @@ fn portable_path(root: &Path, path: &Path) -> String {
         .unwrap_or_else(|_| path.to_string_lossy().into_owned())
 }
 
-fn output_error(error: std::io::Error) -> ServiceError {
-    ServiceError::new(if error.kind()==std::io::ErrorKind::AlreadyExists {"output_exists"} else {"output_failed"},
-        "Output publication failed; existing outputs were retained or restored where supported. Inspect the output manifest before retrying.")
+fn output_error(error: tagrex_commands::OutputError) -> ServiceError {
+    let code = match &error {
+        tagrex_commands::OutputError::RecoveryRequired { .. } => "recovery_required",
+        tagrex_commands::OutputError::Resource(tagrex_core::resources::AdmissionError::Busy) => {
+            "resource_busy"
+        }
+        tagrex_commands::OutputError::Resource(
+            tagrex_core::resources::AdmissionError::TooLarge,
+        ) => "resource_limit",
+        tagrex_commands::OutputError::Changed(_) => "stale_file",
+        other if other.kind() == std::io::ErrorKind::AlreadyExists => "output_exists",
+        _ => "output_failed",
+    };
+    ServiceError::new(code, error.to_string())
 }
 
 fn export_limit(_: export::OutputLimit) -> ServiceError {

@@ -1,4 +1,5 @@
 //! Conservative working-set admission and bounded encoded-only result caching.
+use crate::resources::{Budget, Charge, Lease};
 use sha2::{Digest, Sha256};
 use std::{
     collections::VecDeque,
@@ -28,10 +29,11 @@ impl Key {
     }
 }
 pub(super) struct Cache {
-    entries: VecDeque<(Key, Arc<[u8]>)>,
+    entries: VecDeque<(Key, Arc<[u8]>, Lease)>,
     bytes: usize,
     max_entries: usize,
     max_bytes: usize,
+    budget: Budget,
 }
 impl Cache {
     fn new(max_entries: usize, max_bytes: usize) -> Self {
@@ -40,18 +42,19 @@ impl Cache {
             bytes: 0,
             max_entries,
             max_bytes,
+            budget: Budget::process(),
         }
     }
     pub fn get(&mut self, key: &Key) -> Option<Arc<[u8]>> {
-        let index = self.entries.iter().position(|(k, _)| k == key)?;
+        let index = self.entries.iter().position(|(k, _, _)| k == key)?;
         let entry = self.entries.remove(index)?;
         let bytes = entry.1.clone();
         self.entries.push_back(entry);
         Some(bytes)
     }
     pub fn insert(&mut self, key: Key, data: Arc<[u8]>) {
-        if let Some(index) = self.entries.iter().position(|(k, _)| k == &key) {
-            if let Some((_, old)) = self.entries.remove(index) {
+        if let Some(index) = self.entries.iter().position(|(k, _, _)| k == &key) {
+            if let Some((_, old, _)) = self.entries.remove(index) {
                 self.bytes -= old.len() + 128;
             }
         }
@@ -59,15 +62,23 @@ impl Cache {
         if self.max_entries == 0 || bytes > self.max_bytes {
             return;
         }
+        // Same-key invalidation is intentional; unrelated useful cached images
+        // survive shared admission refusal even when local eviction could help.
+        let Ok(retained) = self.budget.try_acquire(Charge {
+            retained: bytes,
+            ..Charge::default()
+        }) else {
+            return;
+        };
         while self.entries.len() >= self.max_entries || self.bytes > self.max_bytes - bytes {
-            if let Some((_, old)) = self.entries.pop_front() {
+            if let Some((_, old, _)) = self.entries.pop_front() {
                 self.bytes -= old.len() + 128;
             } else {
                 break;
             }
         }
         self.bytes += bytes;
-        self.entries.push_back((key, data));
+        self.entries.push_back((key, data, retained));
     }
 }
 fn dimensions(w: u32, h: u32, max: u32) -> (u64, u64) {
@@ -82,12 +93,16 @@ fn dimensions(w: u32, h: u32, max: u32) -> (u64, u64) {
 /// Decoder internals/allocator overhead are implementation dependent, so this
 /// is conservative admission accounting rather than an OS-level memory limit.
 pub(super) fn admitted(w: u32, h: u32, max: u32, rows: bool) -> bool {
+    estimate(w, h, max, rows).is_some_and(|bytes| bytes <= WORK_BYTES)
+}
+
+pub(super) fn estimate(w: u32, h: u32, max: u32, rows: bool) -> Option<u64> {
     if w == 0 || h == 0 || max == 0 {
-        return false;
+        return None;
     }
     // Row-wise decoding saves memory but must also bound decompression work.
     if u64::from(w) * u64::from(h) > 512_000_000 {
-        return false;
+        return None;
     }
     let (sw, sh) = if rows {
         dimensions(w, h, max.saturating_mul(2))
@@ -108,13 +123,14 @@ pub(super) fn admitted(w: u32, h: u32, max: u32, rows: bool) -> bool {
     } else {
         0
     };
-    decoded
-        .saturating_add(scratch)
-        .saturating_add(final_images)
-        .saturating_add(row_scratch)
-        .saturating_add(DECODE_BYTES as u64)
-        .saturating_add(2 * ENCODE_BYTES as u64)
-        <= WORK_BYTES
+    Some(
+        decoded
+            .saturating_add(scratch)
+            .saturating_add(final_images)
+            .saturating_add(row_scratch)
+            .saturating_add(DECODE_BYTES as u64)
+            .saturating_add(2 * ENCODE_BYTES as u64),
+    )
 }
 pub(super) struct Encoded(pub Vec<u8>);
 impl Write for Encoded {
@@ -172,7 +188,10 @@ mod tests {
         assert!(c.get(&keys[3]).is_none());
         assert_eq!(
             c.bytes,
-            c.entries.iter().map(|(_, v)| v.len() + 128).sum::<usize>()
+            c.entries
+                .iter()
+                .map(|(_, v, _)| v.len() + 128)
+                .sum::<usize>()
         );
     }
     #[test]
@@ -181,5 +200,51 @@ mod tests {
         out.write_all(&[1; 100]).unwrap();
         assert!(out.write_all(&vec![2; ENCODE_BYTES]).is_err());
         assert_eq!(out.0.len(), 100);
+    }
+
+    #[test]
+    fn refused_encoded_image_does_not_evict_hot_data_and_replacements_do_not_keep_stale_bytes() {
+        use crate::resources::Limits;
+        let budget = Budget::new(Limits {
+            retained: 1000,
+            transient: 1000,
+            total: 1000,
+            jobs: 1,
+        });
+        let mut cache = Cache::new(2, 200);
+        cache.budget = budget.clone();
+        let old_key = Key::new(b"old", 100, 85);
+        let new_key = Key::new(b"new", 100, 85);
+        let original: Arc<[u8]> = vec![1; 10].into();
+        cache.insert(old_key.clone(), original.clone());
+        let pressure = budget
+            .try_acquire(Charge {
+                retained: 1000 - 138,
+                ..Charge::default()
+            })
+            .unwrap();
+        cache.insert(new_key.clone(), vec![2; 11].into());
+        assert!(Arc::ptr_eq(&cache.get(&old_key).unwrap(), &original));
+        assert!(cache.get(&new_key).is_none());
+        cache.insert(new_key.clone(), vec![2; 500].into());
+        assert!(Arc::ptr_eq(&cache.get(&old_key).unwrap(), &original));
+        cache.insert(old_key.clone(), vec![3; 11].into());
+        assert!(cache.get(&old_key).is_none());
+        assert_eq!(budget.usage().0.retained, 862);
+        drop(pressure);
+        cache.insert(new_key.clone(), Arc::from([]));
+        assert_eq!(
+            cache.bytes, 128,
+            "empty payload must still charge cache metadata"
+        );
+        assert_eq!(budget.usage().0.retained, 128);
+        drop(cache);
+        assert_eq!(budget.usage().0, Charge::default());
+
+        let mut too_small = Cache::new(1, 127);
+        too_small.budget = budget.clone();
+        too_small.insert(old_key, Arc::from([]));
+        assert!(too_small.entries.is_empty());
+        assert_eq!(budget.usage().0, Charge::default());
     }
 }

@@ -232,6 +232,8 @@ pub enum QueryError {
     Invalid(String),
     #[error("Query superseded by a newer request or library revision.")]
     Cancelled,
+    #[error(transparent)]
+    Resource(#[from] tagrex_core::resources::AdmissionError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,12 +250,28 @@ impl Value {
     }
 }
 
+// Accounting identity is deliberately excluded from semantic row equality.
+// Shared saved strings keep this owner alive when rows survive snapshot replacement.
+#[derive(Debug, Clone, Default)]
+struct RowOwnership {
+    _lease: Option<Arc<tagrex_core::resources::Lease>>,
+}
+impl PartialEq for RowOwnership {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+impl Eq for RowOwnership {}
+
 /// A single row's searchable saved metadata. Technical properties are optional.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryRow {
+    ownership: RowOwnership,
     pub path: String,
     values: Arc<BTreeMap<String, Value>>,
-    computed: BTreeMap<String, Value>,
+    technical: BTreeMap<String, Value>,
+    computed: Arc<BTreeMap<String, Value>>,
+    overlay_ownership: RowOwnership,
     search: Arc<Value>,
     format: Option<tagrex_core::model::AudioFormat>,
     props: Option<tagrex_core::model::AudioProps>,
@@ -262,6 +280,80 @@ pub struct QueryRow {
 }
 
 impl QueryRow {
+    /// Admit saved text, case-folded text and the combined search buffer before
+    /// cloning them. The conservative reservation also covers map nodes and
+    /// technical fields added before the row is published.
+    pub fn try_from_track(
+        track: &TrackDto,
+    ) -> Result<Self, tagrex_core::resources::AdmissionError> {
+        Self::try_from_track_in(track, &tagrex_core::resources::Budget::process())
+    }
+
+    pub fn try_from_track_in(
+        track: &TrackDto,
+        budget: &tagrex_core::resources::Budget,
+    ) -> Result<Self, tagrex_core::resources::AdmissionError> {
+        use tagrex_core::resources::{AdmissionError, Charge};
+        // A native file has a small set of tag blocks. Bound externally built
+        // DTOs too: even empty labels need join separators and a temporary
+        // reference vector before any saved string can be measured.
+        if track.tag_blocks.len() > 256 {
+            return Err(AdmissionError::TooLarge);
+        }
+        let bytes = track
+            .tags
+            .iter()
+            .try_fold(0usize, |sum, (key, value)| {
+                sum.checked_add(key.len())?.checked_add(value.len())
+            })
+            .and_then(|sum| sum.checked_add(track.path.len().checked_mul(4)?))
+            .and_then(|sum| sum.checked_add(track.format.len()))
+            .and_then(|sum| {
+                sum.checked_add(
+                    track
+                        .tag_blocks
+                        .iter()
+                        .try_fold(0usize, |n, b| n.checked_add(b.label.len()))?,
+                )
+            })
+            .and_then(|sum| sum.checked_mul(12))
+            .and_then(|sum| sum.checked_add(track.tag_blocks.len().checked_mul(128)?))
+            .and_then(|sum| sum.checked_add(track.tags.len().checked_add(16)?.checked_mul(512)?))
+            .and_then(|sum| sum.checked_add(4096))
+            .ok_or(AdmissionError::TooLarge)?;
+        let mut lease = budget.try_acquire(Charge {
+            retained: bytes,
+            ..Charge::default()
+        })?;
+        let mut row = Self::from_track(track);
+        let measured = row
+            .values
+            .iter()
+            .fold(4096usize + row.path.capacity(), |sum, (key, value)| {
+                sum.saturating_add(512)
+                    .saturating_add(key.capacity())
+                    .saturating_add(value.raw.capacity())
+                    .saturating_add(value.folded.capacity())
+            })
+            .saturating_add(row.search.raw.capacity())
+            .saturating_add(row.search.folded.capacity());
+        // The admission estimate must dominate the live allocation. Refuse an
+        // unexpected shape rather than publishing an under-accounted row.
+        if measured > bytes {
+            return Err(AdmissionError::TooLarge);
+        }
+        lease.try_resize(Charge {
+            retained: measured,
+            ..Charge::default()
+        })?;
+        row.ownership = RowOwnership {
+            _lease: Some(Arc::new(lease)),
+        };
+        Ok(row)
+    }
+
+    /// Unmetered low-level constructor for caller-managed datasets. Native
+    /// session entry points use `try_from_track` and propagate admission refusal.
     pub fn from_track(track: &TrackDto) -> Self {
         let mut fields = track.tags.clone();
         let path = std::path::Path::new(&track.path);
@@ -334,6 +426,7 @@ impl QueryRow {
             search.push_str(value);
         }
         Self {
+            ownership: RowOwnership::default(),
             path: track.path.clone(),
             values: Arc::new(
                 fields
@@ -341,7 +434,9 @@ impl QueryRow {
                     .map(|(k, v)| (k, Value::new(v)))
                     .collect(),
             ),
-            computed: BTreeMap::new(),
+            technical: BTreeMap::new(),
+            computed: Arc::default(),
+            overlay_ownership: RowOwnership::default(),
             search: Arc::new(Value::new(search)),
             format: None,
             props: None,
@@ -350,8 +445,25 @@ impl QueryRow {
         }
     }
 
-    pub(crate) fn set_source_metadata(&mut self, metadata: Option<&std::fs::Metadata>) {
-        self.source_fingerprint = metadata.and_then(crate::read_cache::Fingerprint::from_metadata);
+    pub(crate) fn set_source_metadata(
+        &mut self,
+        metadata: Option<&std::fs::Metadata>,
+        policy_revision: u64,
+    ) {
+        #[cfg(not(windows))]
+        {
+            self.source_fingerprint =
+                metadata.and_then(crate::read_cache::Fingerprint::from_metadata);
+        }
+        #[cfg(windows)]
+        {
+            // Metadata alone has no authoritative Windows file ID/change time.
+            self.source_fingerprint = metadata
+                .and_then(|_| crate::read_cache::Fingerprint::of(std::path::Path::new(&self.path)));
+        }
+        if tagrex_core::model::read_policy_revision() != policy_revision {
+            self.source_fingerprint = None;
+        }
     }
 
     pub fn set_technical(
@@ -368,7 +480,7 @@ impl QueryRow {
             ("channels", channels.map(|v| v.to_string())),
         ] {
             if let Some(value) = value {
-                Arc::make_mut(&mut self.values).insert(key.into(), Value::new(value));
+                self.technical.insert(key.into(), Value::new(value));
             }
         }
     }
@@ -387,6 +499,7 @@ impl QueryRow {
     pub fn value(&self, field: &str) -> &str {
         self.computed
             .get(canonical_field(field))
+            .or_else(|| self.technical.get(canonical_field(field)))
             .or_else(|| self.values.get(canonical_field(field)))
             .map(|v| v.raw.as_str())
             .unwrap_or("")
@@ -394,10 +507,15 @@ impl QueryRow {
     fn folded(&self, field: &str) -> &str {
         self.computed
             .get(canonical_field(field))
+            .or_else(|| self.technical.get(canonical_field(field)))
             .or_else(|| self.values.get(canonical_field(field)))
             .map(|v| v.folded.as_str())
             .unwrap_or("")
     }
+}
+
+fn computed_render_error(error: &tagrex_core::mask::BoundedRenderError) -> QueryError {
+    invalid(&format!("Computed field could not render: {error}"))
 }
 
 fn canonical_field(field: &str) -> &str {
@@ -518,9 +636,23 @@ pub struct QueryIndex {
     /// Bounded "some row stores this exact field key" evidence, positive and
     /// negative. Derived from immutable rows, never a value authority.
     field_keys: Mutex<HashMap<String, bool>>,
+    read_policy_revision: u64,
+    read_policy_owner: Option<tagrex_core::model::ModelPolicy>,
+    _overlay_ownership: RowOwnership,
+    _snapshot_ownership: RowOwnership,
 }
 
 impl QueryIndex {
+    /// Build an admitted native snapshot; a refusal drops every partial row.
+    pub fn try_from_tracks(
+        tracks: &[TrackDto],
+    ) -> Result<Self, tagrex_core::resources::AdmissionError> {
+        let rows = tracks
+            .iter()
+            .map(QueryRow::try_from_track)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self::from_rows(rows))
+    }
     pub fn from_tracks(tracks: &[TrackDto]) -> Self {
         Self::from_rows(tracks.iter().map(QueryRow::from_track).collect())
     }
@@ -544,7 +676,67 @@ impl QueryIndex {
                 32 * 1024 * 1024,
             ))),
             field_keys: Mutex::default(),
+            read_policy_revision: tagrex_core::model::read_policy_revision(),
+            read_policy_owner: None,
+            _overlay_ownership: RowOwnership::default(),
+            _snapshot_ownership: RowOwnership::default(),
         }
+    }
+    /// Create independent query/cancellation/cache state over admitted immutable
+    /// saved rows. No saved tag/search strings are cloned or reinterpreted.
+    pub fn fork_snapshot_rows(&self, selected: Option<&[usize]>) -> Result<Self, QueryError> {
+        if !self.is_current() {
+            return Err(QueryError::Cancelled);
+        }
+        if let Some(selected) = selected {
+            if selected.len() > self.rows.len()
+                || selected.windows(2).any(|pair| pair[0] >= pair[1])
+                || selected.last().is_some_and(|last| *last >= self.rows.len())
+            {
+                return Err(invalid(
+                    "Snapshot row selection must be ordered, unique and in range.",
+                ));
+            }
+        }
+        let count = selected.map_or(self.rows.len(), <[usize]>::len);
+        let retained = count
+            .checked_mul(std::mem::size_of::<Arc<QueryRow>>())
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Self>() + 512))
+            .ok_or(tagrex_core::resources::AdmissionError::TooLarge)?;
+        let lease = tagrex_core::resources::Budget::process().try_acquire(
+            tagrex_core::resources::Charge {
+                retained,
+                ..Default::default()
+            },
+        )?;
+        let mut rows = Vec::with_capacity(count);
+        for position in 0..count {
+            if position.is_multiple_of(128) && !self.is_current() {
+                return Err(QueryError::Cancelled);
+            }
+            let index = selected.map_or(position, |indices| indices[position]);
+            rows.push(self.rows[index].clone());
+        }
+        if !self.is_current() {
+            return Err(QueryError::Cancelled);
+        }
+        let mut index =
+            Self::from_shared_rows(rows).with_policy_from(self);
+        index._snapshot_ownership = RowOwnership {
+            _lease: Some(Arc::new(lease)),
+        };
+        Ok(index)
+    }
+
+    pub(crate) fn with_model_policy(mut self, owner: tagrex_core::model::ModelPolicy, revision: u64) -> Self {
+        self.read_policy_revision = revision;
+        self.read_policy_owner = Some(owner);
+        self
+    }
+    fn with_policy_from(mut self, source: &Self) -> Self {
+        self.read_policy_revision = source.read_policy_revision;
+        self.read_policy_owner = source.read_policy_owner.clone();
+        self
     }
     pub fn with_updates(&self, rows: Vec<QueryRow>) -> Self {
         self.invalidate();
@@ -557,7 +749,7 @@ impl QueryIndex {
             .iter()
             .map(|row| updates.remove(&row.path).unwrap_or_else(|| row.clone()))
             .collect();
-        Self::from_shared_rows(rows)
+        Self::from_shared_rows(rows).with_policy_from(self)
     }
     /// Read-only refreshes must not invalidate facets, ongoing queries or
     /// duplicate evidence unless the rows or their source identity changed.
@@ -579,7 +771,11 @@ impl QueryIndex {
             .clear();
     }
     pub fn is_current(&self) -> bool {
-        self.valid.load(Ordering::Acquire)
+        self.valid.load(Ordering::Acquire) && self.read_policy_is_current()
+    }
+    pub(crate) fn read_policy_is_current(&self) -> bool {
+        self.read_policy_revision == self.read_policy_owner.as_ref().map_or_else(tagrex_core::model::read_policy_revision, tagrex_core::model::ModelPolicy::revision)
+            && self.read_policy_revision != u64::MAX
     }
     pub fn known_field(&self, field: &str) -> bool {
         FIELDS.contains(&field)
@@ -644,73 +840,162 @@ impl QueryIndex {
         definitions: &[CustomField],
         cancelled: &impl Fn() -> bool,
     ) -> Result<Option<Arc<QueryIndex>>, QueryError> {
+        use tagrex_core::resources::{AdmissionError, Budget, Charge};
+        const RETAINED: usize = 64 * 1024 * 1024;
+        const WORK: usize = 128 * 1024 * 1024;
+        const RENDER_WORK: usize = 64 * 1024 * 1024;
+        const INPUT: usize = 8 * 1024 * 1024;
+        if cancelled() {
+            return Err(QueryError::Cancelled);
+        }
         if definitions.is_empty() {
             return Ok(None);
         }
         if definitions.len() > 32 {
             return Err(invalid("Use at most 32 computed filter fields."));
         }
-        let key = serde_json::to_string(definitions)
-            .map_err(|error| QueryError::Invalid(error.to_string()))?;
-        if key == self.custom_key {
-            return Ok(None);
-        }
-        if let Some((cached_key, index)) = &*self.custom.lock().unwrap_or_else(|p| p.into_inner()) {
-            if cached_key == &key {
-                return Ok(Some(index.clone()));
-            }
-        }
-        let mut keys = std::collections::HashSet::new();
-        let mut masks = Vec::new();
-        for definition in definitions {
+        // Validate borrowed strings before serializing a cache key or cloning
+        // definitions. Duplicate checks need no allocations for 32 entries.
+        for (i, definition) in definitions.iter().enumerate() {
             if definition.key.is_empty()
                 || definition.key.len() > 128
                 || definition.mask.len() > 2048
                 || FIELDS.contains(&definition.key.as_str())
-                || self
-                    .rows
+                || definitions[..i]
                     .iter()
-                    .any(|row| row.values.contains_key(&definition.key))
-                || !keys.insert(definition.key.clone())
+                    .any(|previous| previous.key == definition.key)
             {
                 return Err(invalid(
                     "Computed fields need unique, non-reserved keys and bounded masks.",
                 ));
             }
+        }
+        let budget = Budget::process();
+        // 32 bounded definitions, including JSON's worst-case six-byte escapes
+        // and Vec growth, fit this small warm-lookup allowance.
+        let _key_work = budget.try_acquire(Charge {
+            transient: 1024 * 1024,
+            ..Charge::default()
+        })?;
+        let key =
+            serde_json::to_string(definitions).map_err(|error| invalid(&error.to_string()))?;
+        if key == self.custom_key {
+            return Ok(None);
+        }
+        let cached = self
+            .custom
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .filter(|(cached_key, _)| cached_key == &key)
+            .map(|(_, index)| index.clone());
+        if let Some(index) = cached {
+            if cancelled() {
+                return Err(QueryError::Cancelled);
+            }
+            return Ok(Some(index));
+        }
+        // Reserve the bounded shared AST before parsing, then grow retained
+        // and per-row work admission before each clone/render. Tiny overlays do
+        // not occupy a whole 128 MiB work slot merely because that is the cap.
+        let compile_work = definitions.iter().fold(64 * 1024usize, |sum, definition| {
+            sum.saturating_add(definition.mask.len().saturating_mul(512))
+                .saturating_add(8192)
+        });
+        let mut derived_bytes = key.capacity().saturating_mul(2).saturating_add(8192);
+        let mut lease = budget.try_acquire(Charge {
+            retained: derived_bytes,
+            transient: compile_work,
+            jobs: 1,
+        })?;
+        for definition in definitions {
+            for (row, source) in self.rows.iter().enumerate() {
+                if row.is_multiple_of(128) && cancelled() {
+                    return Err(QueryError::Cancelled);
+                }
+                if source.values.contains_key(&definition.key) {
+                    return Err(invalid(
+                        "Computed fields need unique, non-reserved keys and bounded masks.",
+                    ));
+                }
+            }
+        }
+        let mut masks = Vec::with_capacity(definitions.len());
+        for definition in definitions {
+            if cancelled() {
+                return Err(QueryError::Cancelled);
+            }
             masks.push(
-                tagrex_core::mask::Mask::parse(&definition.mask).map_err(|error| {
-                    QueryError::Invalid(format!("Invalid computed filter mask: {error}"))
-                })?,
+                tagrex_core::mask::Mask::parse_for_render(&definition.mask)
+                    .map_err(|error| invalid(&format!("Invalid computed filter mask: {error}")))?,
             );
         }
         let render_fields = masks
             .iter()
             .flat_map(|mask| mask.render_fields())
             .collect::<std::collections::BTreeSet<_>>();
+        if render_fields.len() > 512 {
+            return Err(AdmissionError::TooLarge.into());
+        }
         let mut rows = Vec::new();
-        let mut derived_bytes = 0usize;
-        for (i, source) in self.rows.iter().enumerate() {
-            if i % 128 == 0 && cancelled() {
+        for source in &self.rows {
+            if cancelled() {
                 return Err(QueryError::Cancelled);
             }
-            let mut tags = tagrex_core::export::lenient_tags(&tagrex_core::model::TagMap::new());
+            let mut selected = Vec::with_capacity(render_fields.len());
+            let mut input_bytes = 8192usize;
             for field in &render_fields {
+                if cancelled() {
+                    return Err(QueryError::Cancelled);
+                }
                 let key = field.to_storage_key();
-                let value = source.values.get(&key).or_else(|| {
-                    source
-                        .values
-                        .iter()
-                        .find(|(key, _)| {
-                            tagrex_core::model::TagField::from_storage_key(key).same_name(field)
-                        })
-                        .map(|(_, v)| v)
-                });
+                let mut value = source.values.get(&key);
+                if value.is_none() {
+                    if let tagrex_core::model::TagField::Custom(name) = field {
+                        for (number, (stored, candidate)) in source.values.iter().enumerate() {
+                            if number.is_multiple_of(128) && cancelled() {
+                                return Err(QueryError::Cancelled);
+                            }
+                            // Compare borrowed names first. Do not allocate a
+                            // TagField for every unrelated potentially huge key.
+                            if stored
+                                .strip_prefix("custom:")
+                                .unwrap_or(stored)
+                                .eq_ignore_ascii_case(name)
+                                && tagrex_core::model::TagField::from_storage_key(stored)
+                                    .same_name(field)
+                            {
+                                value = Some(candidate);
+                                break;
+                            }
+                        }
+                    }
+                }
                 if let Some(value) = value {
                     if value.raw.len() > 1024 * 1024 {
-                        return Err(invalid("A computed field input exceeds 1 MiB."));
+                        return Err(AdmissionError::TooLarge.into());
                     }
-                    tags.insert(field.clone(), value.raw.clone());
+                    input_bytes = input_bytes
+                        .saturating_add(key.len())
+                        .saturating_add(value.raw.len())
+                        .saturating_add(512);
+                    if input_bytes > INPUT {
+                        return Err(AdmissionError::TooLarge.into());
+                    }
+                    selected.push((field, value));
                 }
+            }
+            // Only clone after the aggregate has been checked. The source map
+            // itself and each individual field may be much larger than this job.
+            let input_work = compile_work.saturating_add(input_bytes);
+            lease.try_resize(Charge {
+                retained: derived_bytes,
+                transient: input_work,
+                jobs: 1,
+            })?;
+            let mut tags = tagrex_core::export::lenient_tags(&tagrex_core::model::TagMap::new());
+            for (field, value) in selected {
+                tags.insert(field.clone(), value.raw.clone());
             }
             let context = tagrex_core::mask::FileContext {
                 path: Some(std::path::Path::new(&source.path)),
@@ -719,27 +1004,108 @@ impl QueryIndex {
                 size_bytes: source.value("size").parse().ok(),
                 modified: source.modified,
             };
-            derived_bytes = derived_bytes
+            let mut render_work = 0usize;
+            for mask in &masks {
+                if cancelled() {
+                    return Err(QueryError::Cancelled);
+                }
+                let bytes = mask
+                    .render_work_bytes(&tags, &context)
+                    .ok_or(AdmissionError::TooLarge)?;
+                if bytes > RENDER_WORK {
+                    return Err(AdmissionError::TooLarge.into());
+                }
+                render_work = render_work.max(bytes);
+            }
+            // Core's AST allowance includes rendering scratch/result growth;
+            // the additional 8 MiB dominates a <=1 MiB result's case-folded
+            // copy and allocation-growth overlap before it becomes retention.
+            let row_work = input_work
+                .saturating_add(render_work)
+                .saturating_add(8 * 1024 * 1024);
+            if row_work > WORK {
+                return Err(AdmissionError::TooLarge.into());
+            }
+            let base = std::mem::size_of::<QueryRow>()
+                .saturating_mul(2)
                 .saturating_add(256)
                 .saturating_add(source.path.len());
-            if derived_bytes > 64 * 1024 * 1024 {
-                return Err(invalid("Computed filter fields exceed the 64 MiB budget."));
+            derived_bytes = derived_bytes.saturating_add(base);
+            // Inherited overlays are uncommon but cannot be copied outside the
+            // new owner's allowance when a derived index is queried directly.
+            for (key, value) in source.computed.iter().chain(source.technical.iter()) {
+                derived_bytes = derived_bytes
+                    .saturating_add(512)
+                    .saturating_add(key.capacity())
+                    .saturating_add(value.raw.capacity())
+                    .saturating_add(value.folded.capacity());
             }
+            if derived_bytes > RETAINED {
+                return Err(AdmissionError::TooLarge.into());
+            }
+            lease.try_resize(Charge {
+                retained: derived_bytes,
+                transient: row_work,
+                jobs: 1,
+            })?;
             let mut row = (**source).clone();
+            let mut computed = (*source.computed).clone();
             for (definition, mask) in definitions.iter().zip(&masks) {
-                let value = mask.render_with(&tags, &context).unwrap_or_default();
+                if cancelled() {
+                    return Err(QueryError::Cancelled);
+                }
+                let value = match mask.render_with_budget(&tags, &context, RENDER_WORK) {
+                    Ok(value) => value,
+                    Err(tagrex_core::mask::BoundedRenderError::TooLarge) => {
+                        return Err(AdmissionError::TooLarge.into())
+                    }
+                    Err(tagrex_core::mask::BoundedRenderError::Mask(
+                        tagrex_core::mask::MaskError::MissingTag(_),
+                    )) => String::new(),
+                    Err(error) => return Err(computed_render_error(&error)),
+                };
                 let value = Value::new(value);
                 derived_bytes = derived_bytes
-                    .saturating_add(128)
+                    .saturating_add(512)
                     .saturating_add(definition.key.len())
                     .saturating_add(value.raw.capacity())
                     .saturating_add(value.folded.capacity());
-                if derived_bytes > 64 * 1024 * 1024 {
-                    return Err(invalid("Computed filter fields exceed the 64 MiB budget."));
+                if derived_bytes > RETAINED {
+                    return Err(AdmissionError::TooLarge.into());
                 }
-                row.computed.insert(definition.key.clone(), value);
+                lease.try_resize(Charge {
+                    retained: derived_bytes,
+                    transient: row_work,
+                    jobs: 1,
+                })?;
+                computed.insert(definition.key.clone(), value);
             }
+            row.computed = Arc::new(computed);
             rows.push(Arc::new(row));
+            drop(tags);
+            lease.try_resize(Charge {
+                retained: derived_bytes,
+                transient: compile_work,
+                jobs: 1,
+            })?;
+        }
+        drop(masks);
+        drop(render_fields);
+        if cancelled() {
+            return Err(QueryError::Cancelled);
+        }
+        lease.try_resize(Charge {
+            retained: derived_bytes,
+            ..Charge::default()
+        })?;
+        let owner = RowOwnership {
+            _lease: Some(Arc::new(lease)),
+        };
+        for row in &mut rows {
+            // Every row was allocated above and has not escaped yet.
+            Arc::get_mut(row)
+                .expect("unpublished computed row is uniquely owned")
+                .overlay_ownership = owner.clone();
         }
         let index = Arc::new(Self {
             id: self.id,
@@ -754,11 +1120,24 @@ impl QueryIndex {
             custom_key: key.clone(),
             regex_cache: self.regex_cache.clone(),
             field_keys: Mutex::default(),
+            read_policy_revision: self.read_policy_revision,
+            read_policy_owner: self.read_policy_owner.clone(),
+            _overlay_ownership: owner,
+            _snapshot_ownership: RowOwnership::default(),
         });
         if cancelled() {
             return Err(QueryError::Cancelled);
         }
-        *self.custom.lock().unwrap_or_else(|p| p.into_inner()) = Some((key, index.clone()));
+        // Preserve the old hot overlay on every refusal/error/cancellation.
+        let previous = {
+            self.custom
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .replace((key, index.clone()))
+        };
+        // A large old overlay can be the final owner of many buffers. Release
+        // it after unlocking so another warm lookup never waits on that drop.
+        drop(previous);
         Ok(Some(index))
     }
     pub fn duplicate_results(&self, kind: &str) -> DuplicateResults {
@@ -2986,5 +3365,54 @@ mod scoped_text_and_facet_cache_tests {
             (FACET_CACHE_ENTRIES, FACET_CACHE_BYTES),
             "a computed overlay must not inherit the old thrashing budget"
         );
+    }
+}
+
+#[cfg(test)]
+mod overlay_owner_tests {
+    use super::*;
+    #[test]
+    fn immutable_overlay_rows_keep_the_batch_and_base_charged_until_last_clone() {
+        let name = "query::overlay_owner_tests::immutable_overlay_rows_keep_the_batch_and_base_charged_until_last_clone";
+        if std::env::var("TAGREX_OVERLAY_OWNER_CHILD").as_deref() != Ok("1") {
+            let output =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args(["--exact", name])
+                    .env("TAGREX_OVERLAY_OWNER_CHILD", "1")
+                    .output()
+                    .expect("child process");
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let tracks: Vec<TrackDto> = (0..4).map(|i| serde_json::from_value(serde_json::json!({
+            "path":format!("/fixture/{i}.flac"),"format":"FLAC","tags":{"comment":"Long value ".repeat(4000)},"has_cover":false
+        })).expect("fixture")).collect();
+        let budget = tagrex_core::resources::Budget::process();
+        let index = QueryIndex::try_from_tracks(&tracks).expect("base admission");
+        let derived = index
+            .custom_index(
+                &[CustomField {
+                    key: "custom:display".into(),
+                    mask: "%comment%".into(),
+                }],
+                &|| false,
+            )
+            .expect("overlay admission")
+            .expect("overlay");
+        let row = derived.rows[0].clone();
+        let clone = (*row).clone();
+        assert!(Arc::ptr_eq(&row.computed, &clone.computed));
+        drop(index);
+        drop(derived);
+        drop(row);
+        assert!(budget.usage().0.retained > 0);
+        assert!(!clone.value("custom:display").is_empty());
+        drop(clone);
+        assert_eq!(budget.usage().0, tagrex_core::resources::Charge::default());
     }
 }

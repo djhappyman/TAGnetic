@@ -49,6 +49,9 @@ impl SidecarScan {
         dst: &Path,
         exts: &[String],
     ) -> Option<Vec<(String, String)>> {
+        if crate::preview_context::requested() {
+            return None;
+        }
         let (Some(src_dir), Some(src_stem)) =
             (src.parent(), src.file_stem().and_then(OsStr::to_str))
         else {
@@ -65,6 +68,9 @@ impl SidecarScan {
         };
         let mut pairs = Vec::new();
         for entry in entries {
+            if crate::preview_context::requested() {
+                return None;
+            }
             let path = dir.path.join(&entry.name);
             // Never the audio file itself.
             if path == *src {
@@ -116,11 +122,17 @@ impl Directory {
         let entries = std::fs::read_dir(path).ok()?;
         let mut by_stem: HashMap<OsString, Vec<Entry>> = HashMap::new();
         for entry in entries.flatten() {
+            if crate::preview_context::requested() {
+                return None;
+            }
             let name = entry.file_name();
             let Some(stem) = Path::new(&name).file_stem().map(OsStr::to_os_string) else {
                 continue;
             };
             by_stem.entry(stem).or_default().push(Entry { name });
+        }
+        if crate::preview_context::requested() {
+            return None;
         }
         Some(Self {
             path: path.to_path_buf(),
@@ -159,6 +171,32 @@ mod tests {
 
     fn exts() -> Vec<String> {
         ["lrc", "txt"].iter().map(|ext| ext.to_string()).collect()
+    }
+
+    #[test]
+    fn cancelled_directory_scan_stops_without_caching_a_partial_listing() {
+        let dir = Scratch::new("cancelled-listing");
+        fs::write(dir.0.join("track.wav"), b"audio").unwrap();
+        fs::write(dir.0.join("track.lrc"), b"lyrics").unwrap();
+        for index in 0..128 {
+            fs::write(dir.0.join(format!("extra-{index}.txt")), b"extra").unwrap();
+        }
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let probe = calls.clone();
+        let mut scan = SidecarScan::default();
+        let src = dir.0.join("track.wav");
+        let dst = dir.0.join("renamed.wav");
+        let result = crate::with_preview_cancellation(
+            move || {
+                probe.set(probe.get() + 1);
+                probe.get() > 16
+            },
+            || scan.pairs(&src, &dst, &exts()),
+        );
+        assert!(result.is_none());
+        assert!(scan.dirs.is_empty());
+        assert!(calls.get() <= 18);
+        assert_eq!(scan.pairs(&src, &dst, &exts()).unwrap().len(), 1);
     }
 
     #[test]

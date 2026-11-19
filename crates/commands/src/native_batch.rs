@@ -134,7 +134,7 @@ fn check_cancel(cancelled: &impl Fn() -> bool) -> Result<(), AppError> {
 }
 
 impl App {
-    fn preview_assignments(
+    pub(crate) fn preview_assignments(
         &self,
         paths: &[PathBuf],
         values: HashMap<PathBuf, TagMap>,
