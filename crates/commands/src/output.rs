@@ -494,26 +494,41 @@ mod tests {
 
     #[cfg(target_vendor = "apple")]
     #[test]
-    fn apple_volume_capability_matches_native_transport_and_preflights_publication() {
+    fn apple_volume_capability_preflights_publication_without_namespace_effects() {
         let root = root("volume-capability");
         let dir = Directory::open(&root, &root).unwrap();
         let (temporary, mut file) = dir.temporary().unwrap();
         file.write_all(b"transport probe").unwrap();
         file.sync_all().unwrap();
         drop(file);
-        let native = dir.publish(&temporary, std::ffi::OsStr::new("transport-probe.txt"));
+        let probe_name = std::ffi::OsStr::new("transport-probe.txt");
+        let native = dir.publish(&temporary, probe_name);
         let capability = dir.ensure_exclusive_rename();
-        match native {
+        let native_supported = match native {
             Ok(()) => {
-                capability.unwrap();
-                dir.remove(std::ffi::OsStr::new("transport-probe.txt"));
+                assert_eq!(std::fs::read(root.join(probe_name)).unwrap(), b"transport probe");
+                dir.remove(probe_name);
+                true
+            }
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                assert_eq!(std::fs::read(root.join(&temporary)).unwrap(), b"transport probe");
+                assert!(!root.join(probe_name).exists());
+                dir.remove(&temporary);
+                false
+            }
+            Err(error) => panic!("Native transport probe failed unexpectedly: {error}"),
+        };
+        match capability {
+            Ok(()) => {
+                assert!(native_supported, "advertised exclusive rename did not work");
                 let target = root.join("published.txt");
                 write_batch(&root, &[(target.clone(), b"published".to_vec())], false).unwrap();
                 assert_eq!(std::fs::read(target).unwrap(), b"published");
             }
             Err(error) if error.kind() == io::ErrorKind::Unsupported => {
-                assert_eq!(capability.unwrap_err().kind(), io::ErrorKind::Unsupported);
-                dir.remove(&temporary);
+                // A successful single probe cannot substitute for missing or
+                // negative volume capability reporting across all transports.
+                eprintln!("APPLE_OUTPUT_REFUSAL native_probe={native_supported}: {error}");
                 let target = root.join("original.txt");
                 let untouched = root.join("unrelated.txt");
                 let absent = root.join("new.txt");
@@ -537,7 +552,7 @@ mod tests {
                     assert_eq!(output_entries(&root), 2, "refusal left staging artifacts");
                 }
             }
-            Err(error) => panic!("Native transport probe failed unexpectedly: {error}"),
+            Err(error) => panic!("Volume capability query failed unexpectedly: {error}"),
         }
         drop(dir);
         std::fs::remove_dir_all(root).unwrap();

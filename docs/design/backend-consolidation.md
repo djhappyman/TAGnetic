@@ -172,3 +172,15 @@ native result distinguishes backup, candidate and empty-directory refusal.
 The unchanged overwrite/no-leftovers test is the actual hosted regression; this
 source correction still awaits native Windows verification. Logs are archived
 under `evidence/3dfd99dc/windows-exfat.log`.
+
+Head `19759497` passed both exFAT volume regressions. FAT32's one native rename
+probe succeeded while its capability query did not admit exclusive publication.
+The new test incorrectly assumed these outcomes were equivalent. Preserve the
+conservative production rule: missing valid capability evidence or a reported
+negative refuses before staging even if one specific rename succeeds. The test
+now verifies both native-probe namespace outcomes, requires native success for
+an admitted volume, and requires full no-effects refusal for unadmitted volumes.
+Existing successful APFS publication/rollback tests remain unchanged and catch
+blanket refusal. Unknown capability reporting and confirmed absence now have
+distinct user-facing errors. No FAT32 output-support claim follows from green
+refusal coverage; actual hosted results on the new head remain required.

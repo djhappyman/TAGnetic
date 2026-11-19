@@ -91,5 +91,5 @@ jobs:
           # Verify actual transport support, then require either successful
           # publication or an explicit refusal with no namespace effects.
           # Ordinary APFS CI retains every positive publication/rollback case.
-          cargo test -p tagrex-commands output::tests::apple_volume_capability_matches_native_transport_and_preflights_publication -- --exact --nocapture
+          cargo test -p tagrex-commands output::tests::apple_volume_capability_preflights_publication_without_namespace_effects -- --exact --nocapture
           cargo test -p tagrex-commands output::tests::held_candidate_identity_survives_growth_and_refuses_an_identical_replacement -- --exact --nocapture

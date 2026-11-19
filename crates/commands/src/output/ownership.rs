@@ -517,7 +517,13 @@ impl Directory {
             }
             let interface = libc::VOL_CAPABILITIES_INTERFACES;
             let bit = libc::VOL_CAP_INT_RENAME_EXCL;
-            if response.caps.valid[interface] & response.caps.capabilities[interface] & bit == 0 {
+            if response.caps.valid[interface] & bit == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "This volume does not report safe output capabilities; choose another destination",
+                ));
+            }
+            if response.caps.capabilities[interface] & bit == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     "This volume does not support safe output publication; choose another destination",
