@@ -74,6 +74,33 @@ The backend foundation checkpoint `2a9341e9` is committed on `feat/native-field-
 
 A completed basic feature does not mean every advanced option is finished. The list tracks product capabilities, not delivery dates or a guarantee for every file variant. See the [changelog](CHANGELOG.md) for release history and the [engineering roadmap](docs/ROADMAP.md) for performance, platform testing and release work.
 
+### Merged checkpoint and next session — 19 November 2026
+
+GitHub `main` includes the earlier frontend work from
+[PR #52](https://github.com/djhappyman/TAGnetic/pull/52), service authority/lifecycle
+[PR #50](https://github.com/djhappyman/TAGnetic/pull/50), and the backend foundation
+[PR #54](https://github.com/djhappyman/TAGnetic/pull/54), merged at `cb4f280b`.
+Linux, Windows, macOS and advisories passed on #54's exact head `0ace5efe`.
+
+The foundation adds protected whole-plan, in-place plain-text FLAC Apply and
+persistent Undo on supporting Linux profiles/SQLite journals, plus shared
+file/recovery authority, per-App policy isolation, bounded admission and stronger
+exact-read metadata checks. Native protected writes on other platforms, exact
+Stage/Review DTOs and broader mixed/typed/format integration remain open.
+
+**Stop after this README/documentation is pushed and PR #53 is merged.** Further
+implementation is paused. The next session will look at connecting the work
+already built to the frontend, preserving Preview → Review → Apply → Undo.
+Backend-only work does not mark unfinished UI features complete.
+
+Broader backend work remains preserved WIP. The stress runner has a fresh static
+review and 40 test methods in source, not executed results; Windows process
+supervision and hosted programme validation remain open. See
+[the next-session handoff](docs/design/backend-resumption.md),
+[publication evidence](docs/performance/native-flac-publication.md) and
+[tracker #51](https://github.com/djhappyman/TAGnetic/issues/51). No local tests,
+builds, benchmarks or stress workloads should run under the machine-use constraint.
+
 ### Editing and reviewing changes
 
 - [x] **Table editing.** Edit tag values directly in the file table.

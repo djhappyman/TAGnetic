@@ -2,6 +2,25 @@
 
 This is a working direction, not a promise of dates or platform performance. Current development targets `main` in this fork. Upstream contribution branches are curated separately.
 
+## Merged backend checkpoint and pause — 19 November 2026
+
+Frontend #52, service foundation #50 and protected FLAC/backend foundation #54
+are merged in the fork's main. #54 merged at `cb4f280b`, with Linux, Windows,
+macOS and advisory success on exact head `0ace5efe`.
+
+The owner has narrowed the current task: update README/issues, push the
+[documentation checkpoint #53](https://github.com/djhappyman/TAGnetic/pull/53),
+merge it after its hosted gates pass, then stop. Further backend implementation
+is paused. Next session: assess connecting already-built capabilities to the
+frontend through the existing staged Preview/Review/Apply/Undo workflow.
+
+Use [the handoff](design/backend-resumption.md) and
+[tracker #51](https://github.com/djhappyman/TAGnetic/issues/51). Preserved WIP and
+static component reviews are not merged features or whole-programme proof.
+The runner's 40 source test methods have not run; Windows process supervision,
+combined hosted stress and the broader exact/mixed/typed/format work remain open.
+Keep tests/builds/stress off the owner's machine. No release is implied.
+
 ## Current milestone — a coherent, testable workbench
 
 - Bring the foundation, compact-player work, progressive filters, interaction fixes and measured optimizations into one maintained branch.

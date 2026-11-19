@@ -1,11 +1,75 @@
 # Backend parity and hardening programme
 
+> Latest instruction (19 November): update README/issues, push and merge #53,
+> then stop. #54 is merged at `cb4f280b` with all four hosted gates passed.
+> Further implementation is paused; next session will assess frontend wiring.
+> Follow [the next-session handoff](backend-resumption.md). Earlier pause/resume
+> wording below records historical checkpoints and is superseded for current work.
+
+
 This programme covers the remaining Rust capabilities in the README roadmap,
 including the new foundations at `2a9341e9` and `75fc07fc`. It preserves
 Tagnetic's current workflow and existing data. Backend-only delivery leaves
 product feature checkboxes unchecked until the UI is implemented and verified.
 
 ## Scope and dependency order
+
+### Checkpoint and pause — 18 November 2026
+
+The authorized finish-and-pause boundary is protected Linux FLAC
+[PR #54](https://github.com/djhappyman/TAGnetic/pull/54), reviewed head
+`0ace5efebf2464df64fed2c10c228b257d58abe7`. Required hosted checks and merge
+records are linked there. Service authority/lifecycle
+[PR #50](https://github.com/djhappyman/TAGnetic/pull/50) merged at `67625add`
+after all four hosted checks passed.
+
+**Remaining implementation is paused.** Read [resume tracker #51](https://github.com/djhappyman/TAGnetic/issues/51)
+and the [handoff](backend-pause-2026-11-18.md) before starting again. The historical `b7e19f2a`
+FLAC checkpoint passed 1,638 Linux workspace tests, zero failures, 34 existing optional
+ignored; workspace Clippy/formatting, two private D-Bus tests and UI check/lint/
+build plus 216 unit tests passed. Independent coordinator, journal, policy,
+admission, portable-boundary, process-death harness, descriptor IO, Windows
+fixture and created-directory receipt reviews completed after corrections.
+The current platform candidate adds a reciprocal static review and has not been
+compiled, tested or formatted locally; all runtime gates are hosted.
+These overlapping scopes do not
+certify the wider parked programme, every platform or a release.
+
+| Wave | Capability | Checkpoint and remaining work |
+| --- | --- | --- |
+| 1A | Shared resource admission, cache identity and policy invalidation | Process Budget and required native admission/per-App policy included in #54. Broader resource/cache/query/response ownership WIP is parked; combined RSS and actual large-library proof remain open. |
+| 1B | Track-bound seek and job/preview contracts | Playback/control ownership reviews preserved locally. Physical-device/native lifecycle verification and focused publication remain open. |
+| 1C | Durable Apply/Undo recovery | Reviewed shared file authority and copy/move/staging recovery prerequisites included in #54. Native filesystems, power-loss and low-latency busy SQLite cancellation remain open. |
+| 2 | Exact repeated metadata and native identity | Narrow whole-plan in-place plain-text FLAC Apply/persistent Undo on supporting Linux profiles included in #54. Coordinator 135, journal 61, policy 17, admission 54 and portable-policy 36 scoped gates passed; crash harness 43 behavior +3 dispatchers passed (not additive). Exact Stage/DTO, mixed/typed/other-format and portable preservation remain open. |
+| 3 | Artwork processing, properties/order and patterned export | Pixel/EXIF implementation/reviews parked. Native picture properties/order, shared stage/export, command and UI integration remain open. |
+| 4 | CSV/TSV import mapping | Scalar parser/shared-stage implementation and diagnostics parked. Exact-value destinations, publication and UI remain open. |
+| 5 | Grouped playlists/reports/encodings/append | Renderer/output ownership implementations and reviews parked. Command/stage/grouped publication and atomic append remain open. |
+| 6 | Value/pattern helpers, mappings, filenames and composed recipes | Further implementation and end-to-end integration remain planned. |
+| 7 | Portable settings/recipes, safe sources and compatibility | Further implementation and producer/schema evidence remain planned. |
+| 8 | Format policies, timestamps, containers and chapters | Further implementation and per-container preservation/platform evidence remain planned. |
+| 9 | Integrated stress and delivery | Parked 48-case runner contract has 16 passing harness tests. NEW independent runner review and a complete frozen-programme run remain open. No full-backend readiness claim. |
+
+On an explicitly requested resume, start from then-current merged main, reconcile
+already integrated #50/#54 code and curate only remaining WIP from the recovery
+archive. Do not apply the old whole-programme patch over main. Independently
+review [the runner contract](../performance/backend-stress-coverage-readiness.md),
+then run combined unchanged-source workloads. Keep original fault canaries and
+existing quotas; publish focused slices with exact-head hosted gates before
+continuing UI exposure. [Publication evidence](../performance/native-flac-publication.md)
+records the Linux-only route and portable canary curation limits.
+
+The [ranked findings](../performance/backend-roadmap-findings.md) retain
+historical reproductions and correction gates. The Title-only preservation
+failure is corrected in the admitted Linux route; broader legacy-path
+preservation is still open.
+
+Tests must include cold/warm and over-capacity cases, concurrent operations,
+external changes, invalid input, cancellation, process death and recovery where
+applicable. Timings include workload/environment and distinguish native compute,
+queue/lock wait, filesystem work and IPC. Resource accounting is not an RSS
+guarantee. No user media, runtime dependencies or existing Undo data are test
+fixtures. Preserve compact results and recovery evidence; remove task-owned
+disposable fixture trees only after verification.
 
 - [ ] **Shared hardening:** audit new operations; bound aggregate memory and work;
   retain useful metadata cache entries under pressure; validate settings and
@@ -35,6 +99,9 @@ product feature checkboxes unchecked until the UI is implemented and verified.
 - [ ] **Formats and preservation:** finer tag policies, timestamp preservation,
   additional containers and existing chapter metadata. Verify actual writer
   support before advertising a format; preserve unrelated container data.
+
+The active [ranked findings ledger](../performance/backend-roadmap-findings.md)
+records reproduced consequences and correction gates, including open findings.
 
 ## Completion gates
 
