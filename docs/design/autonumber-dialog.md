@@ -1,33 +1,42 @@
-# Quiet Autonumber dialog
+# Independent Autonumber and Disc actions
 
-Scope: bring the existing Autonumber interface into the Format fields visual
-language, directly in the main checkout per the owner's iteration workflow.
-`AutonumberDialog.svelte` owns the dialog presentation and its temporary inputs.
-The existing generator still computes/stages numbering in displayed file order;
-Write retains the existing quick-write and Undo route. No Rust/wire change.
+Owner scope: two connected tabs in the numbering dialog, with independent actions,
+matching Format fields styling. Iterate directly in the running main checkout.
 
-The recessed body contains Start at, Track display, Disc number and Disc display,
-followed by three compact switches: include track total, restart for each group,
-and keep A1/B2 positions. Both display selectors stay visible. No extra tabs or
-new numbering modes are introduced. Leading-zero choices affect table display;
-stored tags remain numeric. That explanation is available to assistive technology.
+**Autonumber** owns track start, track display, include-total, group restart and
+vinyl-position retention. Its Stage/Write routes explicitly pass `includeDisc:false`
+to the existing numbering engine. They do not read, validate or change the inactive
+Disc input. Only the track display preference is saved after success.
 
-Cancel, Write and Stage Edits share the borderless footer convention. Write's
-1200ms hover hint explains bypassing staging; Stage Edits uses 1600ms and explains
-Review/Apply. Actions disable for invalid or missing starts and invalid disc
-numbers. Invalid inputs do not expand an error panel. Actual operation failures
-use the existing nonblocking notification, loaded after the shell mounts.
+**Disc** owns disc number and disc display. Its separate `number-disc` action
+validates only disc input, previews disc-only scalar edits through the existing
+native command, and refuses stale selection, changed staged inputs, new field
+locks and invalid native values. Stage records only disc edits in one batch,
+preserving pending track/other fields. Write saves the disc-only plan through
+the existing quick-write/Undo route. Only the disc display preference is saved.
+Setting a disc applies to the selection independently of track/vinyl/group rules.
 
-Cancel/reopen resets temporary inputs and reads saved display widths. Only a
-successful Stage/Write saves those widths. Failed writes retain the inputs when
-the dialog reopens. Existing selection, field locks, grouping, vinyl retention,
-staged edits and history retain their existing engine contracts.
+The shared lower-level numbering helper retains its optional composed behavior
+for existing callers; the desktop Autonumber action always explicitly excludes
+disc assignment. No Rust command, storage or journal format is changed.
 
-Verification: hosted Svelte checks/lint/unit and command-ribbon integration tests
-cover numbering order, both formatting choices, cancellation, preserved staging,
-quick writes, switches, quiet invalid states and narrow footer reachability.
-No local builds or test suites run under the current machine-use constraint.
-Visual/component review is not independent verification of native media writes.
+The active tab determines validity and action scope. An invalid value left in
+the other tab cannot block or affect it. Both tabs preserve their temporary
+inputs while switching. Cancel/reopen resets them and reads saved display widths;
+failed operations keep the inputs. Disc requires a positive whole number.
+
+The fixed, viewport-bounded shell has connected borderless tabs, rounded inactive
+corners and concave joins, with internally scrolling panels and no loading/error
+prose. Cancel, Write and Stage Edits share the borderless footer. Existing delayed
+tooltips and assistive descriptions explain immediate Write and Stage/Review/Apply.
+Leading zeroes affect display; tags remain numeric. No media is written by opening,
+editing controls or switching tabs.
+
+Hosted coverage: Svelte/lint/unit plus Chromium/WebKit browser contracts for both
+tabs, inactive-input isolation, field scope, staged-field preservation, independent
+width persistence, numbering order, quiet validation, layout and Disc Write/Undo.
+No local build/test/benchmark workloads run. Mock browser results do not establish
+native media preservation outside existing backend verification scope.
 
 Upstream route: shared interface -> curated tagrex/tagrex:next after compatible
-workbench/native-command foundations (#729). No fork identity/storage changes.
+workbench/native-command foundations (#729), preserving upstream storage/API policy.

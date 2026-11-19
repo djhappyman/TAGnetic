@@ -30,6 +30,7 @@ function harness(tracks, values = []) {
     presentRawField() {}, clearRawFields() {}, edits: new Map(), tracks, trackAt: path => index.get(path), setPendingImportCover() {},
     applying: false, undoing: false, captureSelection: () => subject,
     current: true, isSelectionCurrent: () => c.current,
+    locked: new Set(), isFieldLocked:field => c.locked.has(field),
     previewPlan: null, isAutomaticTransformPreview: () => false,
     sharedStagingEnabled: false, diffByPath: null,
     setPreviewPlan: plan => { c.previewPlan = plan; }, setPreviewSource() {},
@@ -45,7 +46,7 @@ function harness(tracks, values = []) {
     invoke: async (command, args) => {
       calls.invoke.push({ command, args });
       if (command === 'preview_field_operations') return {changes: paths.map((path,index) => ({path, tag_changes:[{field:args.operations[0].field, new:values[index] || null}]}))};
-      if (command === 'preview_tag_edits') return { changes: args.edits };
+      if (command === 'preview_tag_edits') return { changes: args.edits.map(edit=>({path:edit.path,tag_changes:[{field:edit.field,new:edit.value}]})) };
       throw Error(`Unexpected command: ${command}`);
     },
     writeQuickPlan: plan => calls.writes.push(plan),
@@ -161,4 +162,25 @@ test('Format Values refuses late results when staged input changes during the na
   c.recordLiveField(['p0'], 'artist', 'Newer human edit');
   await assert.rejects(pending, /staged values changed/);
   assert.deepEqual(plain(c.liveInputs().edits), [{path:'p0',field:'artist',value:'Newer human edit'}]);
+});
+
+test('Disc stages only disc values in one notification and preserves a pending track edit',async()=>{
+  const {c,calls}=harness(rows(2));
+  c.previewPlan={changes:[{path:'p0',tag_changes:[{field:'track',old:'1',new:'8'}]}]};
+  await c.runRibbon('number-disc',{disc:'02',mode:'stage'});
+  assert.deepEqual(plain(c.liveInputs().edits),[{path:'p0',field:'track',value:'8'},{path:'p0',field:'disc',value:'2'},{path:'p1',field:'disc',value:'2'}]);
+  assert.equal(calls.events,1);assert.equal(calls.writes.length,0);
+  assert.deepEqual(plain(calls.invoke[0].args.edits).map(edit=>edit.field),['disc','disc']);
+});
+test('Disc Write owns no track edits and rejects invalid, locked or stale assignments',async()=>{
+  const {c,calls}=harness(rows(2));
+  await c.runRibbon('number-disc',{disc:'3',mode:'write'});
+  assert.deepEqual(plain(calls.writes[0].changes).flatMap(change=>change.tag_changes).map(edit=>edit.field),['disc','disc']);
+  assert.equal(calls.events,0);
+  await assert.rejects(c.runRibbon('number-disc',{disc:'0',mode:'stage'}),/whole disc/);
+  c.locked.add('disc');await assert.rejects(c.runRibbon('number-disc',{disc:'2',mode:'stage'}),/locked/);c.locked.clear();
+  const pending=c.runRibbon('number-disc',{disc:'2',mode:'stage'});
+  c.recordLiveField(['p0'],'title','New human edit');
+  await assert.rejects(pending,/staged values changed/);
+  assert.deepEqual(plain(c.liveInputs().edits),[{path:'p0',field:'title',value:'New human edit'}]);
 });

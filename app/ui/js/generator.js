@@ -374,7 +374,7 @@ function isVinylSide(value) {
 // buffer, then preview — so it flows through the usual apply/undo path. Options:
 // start value, optional TrackTotal + disc, per-group restart when a grouping is
 // active, and preserving existing vinyl-side positions.
-function numberingEdits() {
+function numberingEdits({ includeDisc = true } = {}) {
   const paths = hooks.orderPathsForDisplay(selectedPaths()); // same order as the file table
   if (paths.length === 0) {
     throw new Error(t("generator.selectToNumber"));
@@ -383,7 +383,7 @@ function numberingEdits() {
   const writeTotal = el("autonum-total").checked;
   const perGroup = el("autonum-per-group").checked && !!groupBy;
   const keepSides = el("autonum-keep-sides").checked;
-  const discRaw = el("autonum-disc").value.trim();
+  const discRaw = includeDisc ? el("autonum-disc").value.trim() : "";
   if (discRaw && !/^\d+$/.test(discRaw)) {
     throw new Error(t("generator.discWhole"));
   }
@@ -428,9 +428,9 @@ function numberingEdits() {
   ]);
 }
 
-async function numberTracks() {
+async function numberTracks(options = {}) {
   let values;
-  try { values = numberingEdits(); } catch (error) { toast(error.message, true); return false; }
+  try { values = numberingEdits(options); } catch (error) { toast(error.message, true); return false; }
   if (!values.length) { toast(t("generator.nothingToNumber")); return false; }
   for (const {path, field, value} of values) {
     if (!edits.has(path)) edits.set(path, new Map());

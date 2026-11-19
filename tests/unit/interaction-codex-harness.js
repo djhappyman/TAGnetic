@@ -44,5 +44,5 @@ export function numberHarness(source, tracks, paths, options = {}) {
     toast: (...args) => calls.toast.push(args), t: key => key, tn: (_, n) => n,
   });
   vm.runInContext(source, context);
-  return { run: () => context.numberTracks(), calls, edits };
+  return { run: options => context.numberTracks(options), calls, edits };
 }

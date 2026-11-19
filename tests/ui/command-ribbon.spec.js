@@ -142,9 +142,13 @@ test('grouping menu is usable from a neutral ribbon button', async ({ page }) =>
 test('Autonumber owns the track and disc format choices and stages numbers in file order', async ({ page }) => {
   await page.locator('#ribbon-select-all').click();
   await page.locator('#ribbon-autonumber').click();
-  await expect(page.getByRole('dialog', {name:/Autonumber/})).toBeVisible();
+  await expect(page.getByRole('dialog', {name:/Numbering/})).toBeVisible();
   await expect(page.locator('#autonum-track-format-control')).toBeVisible();
+  await expect(page.locator('#autonum-disc-format-control')).toBeHidden();
+  await page.getByRole('tab',{name:'Disc',exact:true}).click();
   await expect(page.locator('#autonum-disc-format-control')).toBeVisible();
+  await page.locator('#autonum-disc').fill('2');
+  await page.getByRole('tab',{name:'Autonumber',exact:true}).click();
   await expect(page.locator('.command-ribbon > .ribbon-group #autonum-track-format')).toHaveCount(0);
   await page.locator('#autonum-start').fill('3');
   await page.locator('#autonum-run').click();
@@ -152,6 +156,7 @@ test('Autonumber owns the track and disc format choices and stages numbers in fi
   await expect(page.locator('#diff-apply')).toBeEnabled();
   const plan = await page.evaluate(() => window.tagrex.previewPlan);
   expect(plan.changes.map(change => change.tag_changes.find(field => field.field === 'track')?.new)).toEqual(['3','4','5']);
+  expect(plan.changes.flatMap(change=>change.tag_changes).some(field=>field.field==='disc')).toBe(false);
 });
 
 test('artwork importer uses a string or first-image option and stages without writing', async ({ page }) => {
@@ -398,7 +403,9 @@ test('Autonumber uses quiet controls, borderless actions and stable invalid inpu
   const before=await dialog.locator('.modal').boundingBox();
   await page.locator('#autonum-start').fill('');
   await expect(page.locator('#autonum-run')).toBeDisabled();await expect(page.locator('#autonum-write')).toBeDisabled();
-  await page.locator('#autonum-start').fill('3');await page.locator('#autonum-disc').fill('not a number');
+  await page.locator('#autonum-start').fill('3');
+  await page.getByRole('tab',{name:'Disc',exact:true}).click();
+  await page.locator('#autonum-disc').fill('not a number');
   await expect(page.locator('#autonum-run')).toBeDisabled();
   expect((await dialog.locator('.modal').boundingBox()).height).toBeCloseTo(before.height,0);
   await page.locator('#autonum-disc').fill('2');await expect(page.locator('#autonum-run')).toBeEnabled();
@@ -409,4 +416,42 @@ test('Autonumber uses quiet controls, borderless actions and stable invalid inpu
   await expect(page.locator('#autonum-run')).toBeInViewport();
   await expect(page.locator('#autonum-disc-format-control')).toBeInViewport();
   await info.attach('autonumber-quiet-dialog',{body:await page.screenshot(),contentType:'image/png'});
+});
+
+test('Disc and Autonumber have independent validity, scope and display preferences',async({page})=>{
+  await page.locator('#ribbon-select-all').click();
+  const stored=await page.evaluate(()=>structuredClone(window.tagrex.tracks));
+  await page.locator('#ribbon-autonumber').click();
+  const dialog=page.locator('#ribbon-number-dialog');
+  await expect(dialog.getByRole('tab')).toHaveCount(2);
+  const height=(await dialog.locator('.modal').boundingBox()).height;
+  await page.locator('#autonum-start').fill('');
+  await expect(page.locator('#autonum-run')).toBeDisabled();
+  await page.getByRole('tab',{name:'Disc',exact:true}).click();
+  await expect(page.locator('#autonum-start')).toBeHidden();
+  await expect(dialog.getByRole('switch')).toHaveCount(0);
+  await page.locator('#autonum-disc').fill('2');
+  await expect(page.locator('#autonum-run')).toBeEnabled();
+  expect((await dialog.locator('.modal').boundingBox()).height).toBeCloseTo(height,0);
+  await page.locator('#autonum-disc-format-control').click();await page.getByRole('option',{name:'01',exact:true}).click();
+  await page.locator('#autonum-run').click();await expect(dialog).toBeHidden();
+  await expect.poll(()=>page.evaluate(()=>window.tagrex.previewPlan?.changes.flatMap(change=>change.tag_changes).map(edit=>edit.field))).toEqual(['disc','disc','disc']);
+  expect(await page.evaluate(()=>window.tagrex.tracks)).toEqual(stored);
+  expect(await page.evaluate(()=>localStorage.getItem('tagrex.discDigits'))).toBe('2');
+  expect(await page.evaluate(()=>localStorage.getItem('tagrex.trackDigits'))).toBeNull();
+  await page.locator('#ribbon-autonumber').click();await page.locator('#autonum-start').fill('4');await page.locator('#autonum-run').click();
+  await expect.poll(()=>page.evaluate(()=>window.tagrex.previewPlan?.changes.map(change=>change.tag_changes.find(edit=>edit.field==='track')?.new))).toEqual(['4','5','6']);
+  expect(await page.evaluate(()=>window.tagrex.previewPlan.changes.map(change=>change.tag_changes.find(edit=>edit.field==='disc')?.new))).toEqual(['2','2','2']);
+});
+
+test('Disc Write and Undo leave track numbering untouched',async({page})=>{
+  await page.locator('#ribbon-select-all').click();
+  const before=await page.evaluate(()=>window.tagrex.tracks.map(track=>({path:track.path,track:track.tags.track,disc:track.tags.disc})));
+  await page.locator('#ribbon-autonumber').click();await page.getByRole('tab',{name:'Disc',exact:true}).click();
+  await page.locator('#autonum-disc').fill('3');await page.locator('#autonum-write').click();
+  await expect(page.locator('#ribbon-number-dialog')).toBeHidden();
+  await expect.poll(()=>page.evaluate(()=>window.tagrex.tracks.map(track=>track.tags.disc))).toEqual(['3','3','3']);
+  expect(await page.evaluate(()=>window.tagrex.tracks.map(track=>({path:track.path,track:track.tags.track})))).toEqual(before.map(({path,track})=>({path,track})));
+  await page.locator('#undo').click();
+  await expect.poll(()=>page.evaluate(()=>window.tagrex.tracks.map(track=>({path:track.path,track:track.tags.track,disc:track.tags.disc})))).toEqual(before);
 });

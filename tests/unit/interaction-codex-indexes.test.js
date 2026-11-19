@@ -117,3 +117,13 @@ test('one pending cover removal retains an early-exit lookup', async () => {
   assert.equal(h.calls.adopt[0][0].changes.length, 1);
   assert.equal(laterReads, 0);
 });
+
+test('the Autonumber tab ignores the inactive Disc input and generates tracks only', async () => {
+  for (const disc of ['2', 'not a number']) {
+    const h=numberHarness(number,[{path:'a',tags:{track:'9',disc:'7'},group:'g'}],['a'],{'autonum-disc':{value:disc}});
+    await h.run({includeDisc:false});
+    assert.equal(h.edits.get('a').get('track'),'1');
+    assert.equal(h.edits.get('a').has('disc'),false);
+    assert.equal(h.calls.toast.length,0);
+  }
+});

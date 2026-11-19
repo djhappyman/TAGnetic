@@ -3509,11 +3509,28 @@ connectRibbonActions(async (action, options) => {
     await exportCover();
   } else if (action === 'number') {
     if (options.mode === 'write') {
-      const edits = numberingEdits();
+      const edits = numberingEdits({includeDisc:false});
       const plan = await invoke('preview_tag_edits', {edits, paths, cover:null});
       if (!isSelectionCurrent(subject)) throw new Error('The selection changed. Try again.');
       await writeQuickPlan(plan);
-    } else if (await numberTracks() === false) return;
+    } else if (await numberTracks({includeDisc:false}) === false) return;
+    return {dialog:'ribbon-number-dialog'};
+  } else if (action === 'number-disc') {
+    // Disc assignment is an independent action. Never run the track-numbering
+    // engine or inspect its hidden controls, grouping or vinyl options here.
+    const raw = String(options.disc ?? '').trim();
+    const value = Number(raw);
+    if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value < 1) throw new Error('Enter a whole disc number of 1 or more.');
+    if (isFieldLocked('disc')) throw new Error('Disc is locked. Unlock it before setting disc numbers.');
+    const revision = liveInputRevision(), base = previewPlan;
+    const edits = paths.map(path => ({path,field:'disc',value:String(value)}));
+    const plan = await invoke('preview_tag_edits', {edits,paths,cover:null});
+    if (!isSelectionCurrent(subject)) throw new Error('The selection changed. Try again.');
+    if (revision !== liveInputRevision() || base !== previewPlan) throw new Error('The staged values changed. Try again.');
+    if (isFieldLocked('disc') || plan.locked_skipped?.some(item => item.field === 'disc')) throw new Error('Disc was locked during the preview. Nothing was changed.');
+    if (plan.changes.some(change => change.tag_changes?.some(edit => edit.field === 'disc' && edit.invalid))) throw new Error('This disc number is not supported by the selected files.');
+    if (options.mode === 'write') await writeQuickPlan(plan);
+    else { adoptTagOnlyPreview(); recordLiveFields(edits); }
     return {dialog:'ribbon-number-dialog'};
   } else if (action === 'remove-tags') {
     if (options.mode === 'write') {
