@@ -2,26 +2,24 @@
 
 This is a working direction, not a promise of dates or platform performance. Current development targets `main` in this fork. Upstream contribution branches are curated separately.
 
-## Backend checkpoint and resumed programme — 18 November 2026
+## Merged backend checkpoint and pause — 19 November 2026
 
-Service authority/lifecycle PR #50 is merged at `67625add`. The finish-and-pause
-boundary is protected Linux FLAC [PR #54](https://github.com/djhappyman/TAGnetic/pull/54),
-reviewed head `0ace5efe`; required hosted results and merge evidence live there.
-The earlier `b7e19f2a` source passed 1,638 Linux workspace tests, Clippy and formatting after
-scoped independent reviews, including portable policy, true-death harnesses and descriptor IO compatibility. It includes required shared file-recovery,
-per-App policy and concurrent-admission corrections. The new platform correction
-is source-reviewed only; current runtime/compile/format verification is pending hosted CI.
+Frontend #52, service foundation #50 and protected FLAC/backend foundation #54
+are merged in the fork's main. #54 merged at `cb4f280b`, with Linux, Windows,
+macOS and advisory success on exact head `0ace5efe`.
 
-The owner has resumed all remaining backend implementation. Follow the
-[active execution plan](design/backend-resumption.md). The historical handoff
-preserves the earlier checkpoint. Continue with
-with the [handoff](design/backend-pause-2026-11-18.md),
-[programme](design/backend-parity-programme.md) and
-[resume issue #51](https://github.com/djhappyman/TAGnetic/issues/51).
-Review the stress-runner contract independently before claiming a complete
-programme stress run. Exact staging, mixed/typed/other-format operations,
-picture/export integration and native platform/device/large-library proof remain
-open. Backend evidence does not re-tick product features or create a release.
+The owner has narrowed the current task: update README/issues, push the
+[documentation checkpoint #53](https://github.com/djhappyman/TAGnetic/pull/53),
+merge it after its hosted gates pass, then stop. Further backend implementation
+is paused. Next session: assess connecting already-built capabilities to the
+frontend through the existing staged Preview/Review/Apply/Undo workflow.
+
+Use [the handoff](design/backend-resumption.md) and
+[tracker #51](https://github.com/djhappyman/TAGnetic/issues/51). Preserved WIP and
+static component reviews are not merged features or whole-programme proof.
+The runner's 40 source test methods have not run; Windows process supervision,
+combined hosted stress and the broader exact/mixed/typed/format work remain open.
+Keep tests/builds/stress off the owner's machine. No release is implied.
 
 ## Current milestone — a coherent, testable workbench
 

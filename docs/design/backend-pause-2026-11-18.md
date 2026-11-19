@@ -1,8 +1,10 @@
 # Backend pause checkpoint — 18 November 2026
 
-> Resumed: the owner now authorizes completion of the remaining backend programme.
-> Follow [the active execution plan](backend-resumption.md). Earlier pause wording
-> below records the historical checkpoint and is superseded for current work.
+> Latest instruction (19 November): update README/issues, push and merge #53,
+> then stop. #54 is merged at `cb4f280b` with all four hosted gates passed.
+> Further implementation is paused; next session will assess frontend wiring.
+> Follow [the next-session handoff](backend-resumption.md). Earlier pause/resume
+> wording below records historical checkpoints and is superseded for current work.
 
 
 The finish-and-pause boundary is protected Linux FLAC

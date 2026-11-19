@@ -1,5 +1,12 @@
 # Backend programme: ranked findings and correction gates
 
+> Delivery update: #54 merged at `cb4f280b` after all four exact-head checks passed.
+> Latest owner instruction is to finish README/issues and merge #53, then stop.
+> Further implementation is paused for the next frontend-connection session.
+> Runner recheck found/fixed static parsing/cleanup gaps; Windows supervision and
+> hosted execution remain open. Forty source methods are not forty test passes.
+
+
 Paused engineering evidence, 18 November 2026. Resume through [tracker #51](https://github.com/djhappyman/TAGnetic/issues/51) and [the handoff](../design/backend-pause-2026-11-18.md). Priorities describe consequences
 inside disposable fixtures; they are not a public vulnerability assessment.
 Passing a corrected scope does not certify the whole backend or platform matrix.

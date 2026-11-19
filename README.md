@@ -74,26 +74,32 @@ The backend foundation checkpoint `2a9341e9` is committed on `feat/native-field-
 
 A completed basic feature does not mean every advanced option is finished. The list tracks product capabilities, not delivery dates or a guarantee for every file variant. See the [changelog](CHANGELOG.md) for release history and the [engineering roadmap](docs/ROADMAP.md) for performance, platform testing and release work.
 
-### Backend checkpoint and resumed programme — 18 November 2026
+### Merged checkpoint and next session — 19 November 2026
 
-Service authority/lifecycle [PR #50](https://github.com/djhappyman/TAGnetic/pull/50)
-is merged at `67625add`. The protected Linux FLAC text Apply/persistent-Undo
-checkpoint is [PR #54](https://github.com/djhappyman/TAGnetic/pull/54), reviewed
-head `0ace5efe`; its hosted checks and merge record are tracked there. It includes
-required shared file-recovery, per-App metadata-policy and admission corrections.
-The historical Linux checkpoint `b7e19f2a` passed 1,638 workspace tests, Clippy and formatting;
-the changed platform candidate is source-reviewed and awaits hosted validation.
-scoped independent reviews completed, including portable policy, true process-death harnesses and descriptor IO compatibility.
+GitHub `main` includes the earlier frontend work from
+[PR #52](https://github.com/djhappyman/TAGnetic/pull/52), service authority/lifecycle
+[PR #50](https://github.com/djhappyman/TAGnetic/pull/50), and the backend foundation
+[PR #54](https://github.com/djhappyman/TAGnetic/pull/54), merged at `cb4f280b`.
+Linux, Windows, macOS and advisories passed on #54's exact head `0ace5efe`.
 
-Remaining backend implementation is **active again** under the owner’s resumed
-programme. See [the active execution plan](docs/design/backend-resumption.md). This is not a
-complete backend/UI milestone or a new release. See [the handoff](docs/design/backend-pause-2026-11-18.md),
+The foundation adds protected whole-plan, in-place plain-text FLAC Apply and
+persistent Undo on supporting Linux profiles/SQLite journals, plus shared
+file/recovery authority, per-App policy isolation, bounded admission and stronger
+exact-read metadata checks. Native protected writes on other platforms, exact
+Stage/Review DTOs and broader mixed/typed/format integration remain open.
+
+**Stop after this README/documentation is pushed and PR #53 is merged.** Further
+implementation is paused. The next session will look at connecting the work
+already built to the frontend, preserving Preview → Review → Apply → Undo.
+Backend-only work does not mark unfinished UI features complete.
+
+Broader backend work remains preserved WIP. The stress runner has a fresh static
+review and 40 test methods in source, not executed results; Windows process
+supervision and hosted programme validation remain open. See
+[the next-session handoff](docs/design/backend-resumption.md),
 [publication evidence](docs/performance/native-flac-publication.md) and
-[resume issue #51](https://github.com/djhappyman/TAGnetic/issues/51).
-The stress-runner review (including updated crash/unwind probe mapping), exact
-staging, mixed/typed/other-format paths and
-platform/device/large-library proof remain open. Feature/UI checkboxes below
-remain unchanged.
+[tracker #51](https://github.com/djhappyman/TAGnetic/issues/51). No local tests,
+builds, benchmarks or stress workloads should run under the machine-use constraint.
 
 ### Editing and reviewing changes
 
