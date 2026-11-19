@@ -32,18 +32,18 @@ fn unchanged_metadata_read_reuses_the_query_snapshot() {
     wav.extend([0; 320]);
     std::fs::write(&path, wav).unwrap();
     let app = App::open(&fixture.0, &fixture.0.join("journal.sqlite")).unwrap();
-    let before = app.query_snapshot();
+    let before = app.query_snapshot().unwrap();
     assert!(before.is_current());
     let bytes = std::fs::read(&path).unwrap();
     app.read_track_rows(std::slice::from_ref(&path)).unwrap();
-    let after = app.query_snapshot();
+    let after = app.query_snapshot().unwrap();
     assert!(Arc::ptr_eq(&before, &after));
     assert!(before.is_current());
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
     // Mutating only the caller's returned row cannot corrupt the cached row.
     let mut rows = app.read_track_rows(std::slice::from_ref(&path)).unwrap();
     rows[0].tags.insert("title".into(), "Local only".into());
-    assert!(Arc::ptr_eq(&before, &app.query_snapshot()));
+    assert!(Arc::ptr_eq(&before, &app.query_snapshot().unwrap()));
     #[cfg(unix)]
     {
         // Same bytes and mtime, but a real filesystem change: preserve ctime
@@ -57,6 +57,6 @@ fn unchanged_metadata_read_reuses_the_query_snapshot() {
             .unwrap();
         app.read_track_rows(std::slice::from_ref(&path)).unwrap();
         assert!(!before.is_current());
-        assert!(!Arc::ptr_eq(&before, &app.query_snapshot()));
+        assert!(!Arc::ptr_eq(&before, &app.query_snapshot().unwrap()));
     }
 }

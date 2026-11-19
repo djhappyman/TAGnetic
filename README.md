@@ -88,18 +88,33 @@ file/recovery authority, per-App policy isolation, bounded admission and stronge
 exact-read metadata checks. Native protected writes on other platforms, exact
 Stage/Review DTOs and broader mixed/typed/format integration remain open.
 
-**Stop after this README/documentation is pushed and PR #53 is merged.** Further
-implementation is paused. The next session will look at connecting the work
-already built to the frontend, preserving Preview → Review → Apply → Undo.
-Backend-only work does not mark unfinished UI features complete.
+The additional backend consolidation is tracked in
+[PR #55](https://github.com/djhappyman/TAGnetic/pull/55). It covers shared
+resource/cache/query ownership, source-bound player controls, artwork processing,
+scalar CSV/TSV imports, bounded report helpers and guarded output publication.
+Three platform agents reviewed the source and implemented coordinated policy,
+recovery, native-path and resource-error corrections. These backend foundations
+do not mark unfinished UI features or the whole backend complete.
 
-Broader backend work remains preserved WIP. The stress runner has a fresh static
-review and 40 test methods in source, not executed results; Windows process
-supervision and hosted programme validation remain open. See
-[the next-session handoff](docs/design/backend-resumption.md),
-[publication evidence](docs/performance/native-flac-publication.md) and
-[tracker #51](https://github.com/djhappyman/TAGnetic/issues/51). No local tests,
-builds, benchmarks or stress workloads should run under the machine-use constraint.
+Guarded output publication requires confirmed safe exclusive rename support
+from the destination filesystem. Unconfirmed or unsupported macOS destinations
+refuse before staging; this does not affect read-only library use. See
+[the review and verification record](docs/performance/backend-platform-review.md)
+and PR #55's exact-head checks for supported scope and delivery status.
+
+The development server serves the main checkout. The existing native process,
+library, profile and Undo state are preserved; a frontend source switch does
+not load newly compiled Rust into that running process. The authorized finish
+is to merge the gated consolidation, retire non-main branches/worktrees with
+recovery material retained, and stop before further UI wiring.
+
+The incomplete stress runner and portable legacy metadata-preservation canary
+remain preserved in a recovery checkpoint. Windows stress process supervision,
+general exact-value integration and full programme validation remain open. See
+[the consolidation record](docs/design/backend-consolidation.md) and
+[tracker #51](https://github.com/djhappyman/TAGnetic/issues/51). Local builds,
+tests, benchmarks and stress workloads remain prohibited under the machine-use
+constraint; runtime gates run on hosted runners.
 
 ### Editing and reviewing changes
 

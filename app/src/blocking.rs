@@ -64,7 +64,7 @@ impl Queue {
         let mut pending = resource.pending.load(Ordering::Acquire);
         loop {
             if pending >= MAX_PENDING {
-                return Err(ErrorDto::plain("Too many pending operations; wait for the current work to finish and try again"));
+                return Err(queue_error("operation.queue_busy", "Too many pending operations; wait for the current work to finish and try again", true));
             }
             match resource.pending.compare_exchange_weak(
                 pending,
@@ -79,6 +79,9 @@ impl Queue {
         let admission = Admission(resource.clone());
         // A rejected request must not cancel an already admitted preview.
         let cancel = lane.map(Latest::begin);
+        // Only read-only latest lanes cancel on caller loss. Ordinary mutation
+        // jobs retain their permit and run to a journaled result.
+        let _cancel_on_drop = CancelOnDrop(cancel.clone());
         let waiting = cancel.clone().map(Waiting);
         let mut lock = std::pin::pin!(resource.gate.clone().lock_owned());
         let permit = std::future::poll_fn(|cx| {
@@ -102,18 +105,54 @@ impl Queue {
             if cancel.as_ref().is_some_and(Cancellation::cancelled) {
                 return Err(superseded());
             }
-            let result = job(cancel.clone());
+            let result = if let Some(token) = cancel.clone() {
+                tagrex_commands::with_preview_cancellation(
+                    move || token.cancelled(),
+                    || job(cancel.clone()),
+                )
+            } else {
+                job(None)
+            };
             if cancel.as_ref().is_some_and(Cancellation::cancelled) {
                 return Err(superseded());
             }
             result
         })
         .await
-        .map_err(|error| ErrorDto::plain(format!("Background task failed: {error}")))?
+        .map_err(|error| {
+            queue_error(
+                "operation.worker_failed",
+                format!("Background task failed: {error}"),
+                false,
+            )
+        })?
     }
 }
 fn superseded() -> ErrorDto {
-    ErrorDto::plain("Preview was superseded by newer input")
+    queue_error(
+        "operation.superseded",
+        "Preview was superseded or its caller disconnected",
+        false,
+    )
+}
+
+fn queue_error(code: &str, text: impl Into<String>, retryable: bool) -> ErrorDto {
+    ErrorDto {
+        message: tagrex_commands::MessageDto {
+            code: code.into(),
+            args: [("retryable".into(), retryable.to_string())].into(),
+            ..Default::default()
+        },
+        text: text.into(),
+    }
+}
+struct CancelOnDrop(Option<Cancellation>);
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if let Some(cancel) = &self.0 {
+            cancel.cancel();
+        }
+    }
 }
 
 pub struct Latest(Mutex<Option<Cancellation>>);
@@ -132,16 +171,7 @@ impl Latest {
             .unwrap_or_else(|p| p.into_inner())
             .replace(next.clone())
         {
-            old.0.cancelled.store(true, Ordering::Release);
-            let waiter = old
-                .0
-                .waiter
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .take();
-            if let Some(waiter) = waiter {
-                waiter.wake();
-            }
+            old.cancel();
         }
         next
     }
@@ -159,6 +189,19 @@ struct CancelFlag {
 #[derive(Clone)]
 pub struct Cancellation(Arc<CancelFlag>);
 impl Cancellation {
+    fn cancel(&self) {
+        self.0.cancelled.store(true, Ordering::Release);
+        let waiter = self
+            .0
+            .waiter
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
+        if let Some(waiter) = waiter {
+            waiter.wake();
+        }
+    }
+
     pub fn cancelled(&self) -> bool {
         self.0.cancelled.load(Ordering::Acquire)
     }
@@ -478,5 +521,107 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Acquire),
             0
         );
+    }
+    #[test]
+    fn dropping_a_running_preview_cancels_work_but_retains_serialization_until_exit() {
+        let queue = Queue::new();
+        let lane = super::Latest::new();
+        let (started, ready) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let (observed, result) = mpsc::channel();
+        let mut first = Box::pin(queue.run_latest(&lane, move |cancel| {
+            started.send(()).unwrap();
+            wait.recv_timeout(Duration::from_secs(5)).unwrap();
+            observed.send(cancel.cancelled()).unwrap();
+            Ok(())
+        }));
+        prime(first.as_mut());
+        ready.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(first);
+        let mut next = Box::pin(queue.run(|| Ok(())));
+        prime(next.as_mut());
+        assert_eq!(
+            queue
+                .resource()
+                .pending
+                .load(std::sync::atomic::Ordering::Acquire),
+            2
+        );
+        release.send(()).unwrap();
+        assert!(result.recv_timeout(Duration::from_secs(5)).unwrap());
+        tauri::async_runtime::block_on(next).unwrap();
+        assert_eq!(
+            queue
+                .resource()
+                .pending
+                .load(std::sync::atomic::Ordering::Acquire),
+            0
+        );
+    }
+
+    #[test]
+    fn rejected_latest_request_has_a_retryable_code_and_does_not_cancel_accepted_work() {
+        let queue = Queue::new();
+        let lane = super::Latest::new();
+        let held = tauri::async_runtime::block_on(queue.resource().gate.clone().lock_owned());
+        let mut accepted = Box::pin(queue.run_latest(&lane, |cancel| {
+            assert!(!cancel.cancelled());
+            Ok(())
+        }));
+        prime(accepted.as_mut());
+        let mut waiting = Vec::new();
+        for _ in 1..super::MAX_PENDING {
+            let mut job = Box::pin(queue.run(|| Ok(())));
+            prime(job.as_mut());
+            waiting.push(job);
+        }
+        let error =
+            tauri::async_runtime::block_on(queue.run_latest(&lane, |_| Ok(()))).unwrap_err();
+        assert_eq!(error.message.code, "operation.queue_busy");
+        assert_eq!(error.message.args["retryable"], "true");
+        drop(waiting);
+        drop(held);
+        tauri::async_runtime::block_on(accepted).unwrap();
+        assert_eq!(
+            queue
+                .resource()
+                .pending
+                .load(std::sync::atomic::Ordering::Acquire),
+            0
+        );
+    }
+    #[test]
+    fn superseded_latest_worker_inherits_cancellation_at_legacy_native_read_boundary() {
+        let root =
+            std::env::temp_dir().join(format!("tagrex-legacy-cancel-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let journal = root.join("undo.sqlite");
+        let app = tagrex_commands::App::open(&root, &journal).unwrap();
+        let missing = root.join("must-not-be-read.wav");
+        let queue = Queue::new();
+        let lane = super::Latest::new();
+        let (entered_tx, entered) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let (observed_tx, observed) = mpsc::channel();
+        let mut first = Box::pin(queue.run_latest(&lane, move |_| {
+            entered_tx.send(()).unwrap();
+            wait.recv_timeout(Duration::from_secs(5)).unwrap();
+            let error = app.read_track(&missing).unwrap_err();
+            observed_tx.send(error.to_string()).unwrap();
+            Ok(())
+        }));
+        prime(first.as_mut());
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        let mut newest = Box::pin(queue.run_latest(&lane, |_| Ok(())));
+        prime(newest.as_mut());
+        release.send(()).unwrap();
+        assert!(tauri::async_runtime::block_on(first).is_err());
+        let message = observed.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            message.to_lowercase().contains("cancel"),
+            "unexpected read error: {message}"
+        );
+        tauri::async_runtime::block_on(newest).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

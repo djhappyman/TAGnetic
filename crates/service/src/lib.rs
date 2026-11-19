@@ -25,6 +25,8 @@ mod outputs;
 mod plans;
 pub mod private_storage;
 mod recovery;
+mod saved_rows;
+use saved_rows::SnapshotRows;
 mod staging;
 pub use catalog::{tool_catalog, ToolDefinition};
 pub use staging::{
@@ -80,15 +82,52 @@ impl From<serde_json::Error> for ServiceError {
         Self::invalid(error.to_string())
     }
 }
+impl From<tagrex_commands::query::QueryError> for ServiceError {
+    fn from(error: tagrex_commands::query::QueryError) -> Self {
+        match error {
+            tagrex_commands::query::QueryError::Cancelled => {
+                Self::new("cancelled", "This query lane was cancelled or superseded")
+            }
+            tagrex_commands::query::QueryError::Resource(
+                tagrex_core::resources::AdmissionError::Busy,
+            ) => Self::new("resource_busy", error.to_string()),
+            tagrex_commands::query::QueryError::Resource(
+                tagrex_core::resources::AdmissionError::TooLarge,
+            ) => Self::new("resource_limit", error.to_string()),
+            other => Self::invalid(other.to_string()),
+        }
+    }
+}
+
 impl From<tagrex_commands::AppError> for ServiceError {
     fn from(error: tagrex_commands::AppError) -> Self {
         // Provider responses may contain credential-bearing request URLs. Do not
         // propagate their error bodies; the provider adapter supplies safe errors.
         let code = match &error {
-            tagrex_commands::AppError::Plan(
-                tagrex_core::plan::PlanError::RollbackIncomplete { .. }
-                | tagrex_core::plan::PlanError::RecoveryRequired { .. },
-            ) => "recovery_required",
+            tagrex_commands::AppError::Output(tagrex_commands::OutputError::RecoveryRequired {
+                ..
+            }) => "recovery_required",
+            tagrex_commands::AppError::Output(tagrex_commands::OutputError::Resource(
+                tagrex_core::resources::AdmissionError::Busy,
+            )) => "resource_busy",
+            tagrex_commands::AppError::Output(tagrex_commands::OutputError::Resource(
+                tagrex_core::resources::AdmissionError::TooLarge,
+            )) => "resource_limit",
+            tagrex_commands::AppError::Output(tagrex_commands::OutputError::Changed(_)) => {
+                "stale_file"
+            }
+            tagrex_commands::AppError::Resource(tagrex_core::resources::AdmissionError::Busy) => {
+                "resource_busy"
+            }
+            tagrex_commands::AppError::Resource(
+                tagrex_core::resources::AdmissionError::TooLarge,
+            ) => "resource_limit",
+            tagrex_commands::AppError::Plan(tagrex_core::plan::PlanError::RollbackIncomplete {
+                ..
+            })
+            | tagrex_commands::AppError::Plan(tagrex_core::plan::PlanError::RecoveryRequired {
+                ..
+            }) => "recovery_required",
             tagrex_commands::AppError::Plan(tagrex_core::plan::PlanError::Cancelled) => {
                 "cancelled_and_restored"
             }
@@ -206,10 +245,17 @@ pub trait DesktopBackend: Send + Sync {
 }
 
 #[derive(Clone)]
+struct SavedSnapshot {
+    generation: u64,
+    rows: Arc<SnapshotRows>,
+    index: Arc<tagrex_commands::query::QueryIndex>,
+}
+
+#[derive(Clone)]
 struct Snapshot {
     owner: String,
     id: String,
-    rows: Arc<Vec<TrackDto>>,
+    rows: Arc<SnapshotRows>,
     index: Arc<tagrex_commands::query::QueryIndex>,
 }
 #[derive(Clone)]
@@ -269,7 +315,7 @@ struct Operation {
 struct State {
     security: SecurityStore,
     snapshots: HashMap<String, Snapshot>,
-    snapshot_cache: Option<(u64, Arc<Vec<TrackDto>>)>,
+    snapshot_cache: Option<SavedSnapshot>,
     selections: HashMap<String, Selection>,
     query_lanes: HashMap<(String, String), (String, Arc<AtomicBool>)>,
     plans: HashMap<String, plans::SealedPlan>,
@@ -656,6 +702,7 @@ impl Service {
             | "draft.move"
             | "draft.from_name"
             | "draft.from_text"
+            | "draft.from_table"
             | "draft.from_sidecars"
             | "draft.number"
             | "draft.import"
@@ -706,33 +753,58 @@ impl Service {
         let app = app_guard.as_ref().ok_or_else(no_library)?;
         let cached = {
             let state = lock(&self.0.state)?;
-            state
-                .snapshot_cache
-                .clone()
-                .filter(|(id, _)| Some(*id) == app.query_snapshot_id())
+            state.snapshot_cache.clone().filter(|saved| {
+                Some(saved.generation) == app.query_snapshot_id() && saved.index.is_current()
+            })
         };
-        let all_rows = if let Some((_, rows)) = cached {
-            rows
+        let mut retired_cache = None;
+        let saved = if let Some(saved) = cached {
+            saved
         } else {
-            let rows = Arc::new(app.list_tracks());
-            let generation = app.query_snapshot_id().ok_or_else(no_library)?;
-            lock(&self.0.state)?.snapshot_cache = Some((generation, rows.clone()));
-            rows
+            let rows = Arc::new(SnapshotRows::all(app.list_tracks()?));
+            let index = app.query_snapshot()?;
+            let saved = SavedSnapshot {
+                generation: index.id,
+                rows,
+                index,
+            };
+            retired_cache = lock(&self.0.state)?.snapshot_cache.replace(saved.clone());
+            saved
         };
         let full_scope = permitted(&grant, app.library_root(), false).is_ok();
-        let generation = app.query_snapshot_id();
+        let generation = app.query_snapshot_id().ok_or_else(|| {
+            ServiceError::new(
+                "stale_snapshot",
+                "Metadata interpretation changed while preparing the snapshot; retry",
+            )
+        })?;
+        let native_index = saved.index;
+        let all_rows = saved.rows;
         let source_root = app.library_root().to_path_buf();
+        if native_index.rows.len() != all_rows.len()
+            || native_index
+                .rows
+                .iter()
+                .zip(all_rows.iter())
+                .any(|(native, dto)| native.path != dto.path)
+        {
+            return Err(ServiceError::new(
+                "stale_snapshot",
+                "Saved rows and native query rows no longer describe one snapshot",
+            ));
+        }
         drop(app_guard);
+        // Last-owner destruction can walk a large saved model; release both
+        // registries before dropping the replaced cached rows/index.
+        drop(retired_cache);
         let rows = if full_scope {
             all_rows
         } else {
-            Arc::new(
-                all_rows
-                    .iter()
-                    .filter(|r| permitted(&grant, Path::new(&r.path), false).is_ok())
-                    .cloned()
-                    .collect(),
-            )
+            // Evaluate scope once and share all metadata strings. The admitted
+            // position vector drives both DTO access and native row selection.
+            Arc::new(SnapshotRows::selected(all_rows, |row| {
+                permitted(&grant, Path::new(&row.path), false).is_ok()
+            })?)
         };
         {
             let state = lock(&self.0.state)?;
@@ -745,13 +817,16 @@ impl Service {
                 ));
             }
         }
-        // Index construction is pure CPU over immutable DTOs. It must not hold
+        // Index forking is pure CPU over admitted immutable rows. It must not hold
         // the desktop App mutex or park other native commands for hundreds of ms.
-        let index = Arc::new(tagrex_commands::query::QueryIndex::from_tracks(&rows));
+        let index = Arc::new(native_index.fork_snapshot_rows(rows.positions())?);
         {
             let guard = lock(&self.0.app)?;
             let app = guard.as_ref().ok_or_else(no_library)?;
-            if app.query_snapshot_id() != generation || app.library_root() != source_root {
+            if app.query_snapshot_id() != Some(generation)
+                || app.library_root() != source_root
+                || !index.is_current()
+            {
                 return Err(ServiceError::new(
                     "stale_snapshot",
                     "The opened files changed while preparing this snapshot; retry",
@@ -773,8 +848,8 @@ impl Service {
                 "Snapshot index budget is 400000 retained rows; release unused snapshots",
             ));
         }
-        // Large snapshots share saved DTOs instead of cloning a 100k-row model
-        // for each agent. Each private query index remains bounded independently.
+        // Saved DTOs and admitted native row owners are shared. Each client
+        // retains independent query/cancellation/derived-cache state.
         state.snapshots.insert(
             id.clone(),
             Snapshot {
@@ -888,13 +963,7 @@ impl Service {
                 state.query_lanes.remove(&key);
             }
         }
-        let result = outcome.map_err(|error| {
-            if matches!(error, tagrex_commands::query::QueryError::Cancelled) {
-                ServiceError::new("cancelled", "This query lane was cancelled or superseded")
-            } else {
-                ServiceError::invalid(error.to_string())
-            }
-        })?;
+        let result = outcome.map_err(ServiceError::from)?;
         self.grant(principal, "read")?;
         let bytes = result
             .indices

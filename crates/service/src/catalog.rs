@@ -9,7 +9,7 @@ pub struct ToolDefinition {
 /// Compact, explicit application API. Every method is permissioned at execution;
 /// descriptions and read-only annotations never serve as authorization.
 pub fn tool_catalog() -> Vec<ToolDefinition> {
-    let entries:[(&str,&str,&str);59]=[
+    let entries:[(&str,&str,&str);60]=[
         ("session.status","Inspect the shared session, this client's grants, and recovery state.",""),
         ("session.open","Open approved files/folders in the existing desktop session; refuses pending human work.","paths"),
         ("session.refresh","Refresh the current desktop file table without replacing pending desired edits.",""),
@@ -30,6 +30,7 @@ pub fn tool_catalog() -> Vec<ToolDefinition> {
         ("draft.move","Preview move/copy under an already-authorized destination. Directory pruning is disabled.","selection paths mask destination copy draft"),
         ("draft.from_name","Extract tags from selected filenames using a reusable mask.","selection paths mask draft"),
         ("draft.from_text","Extract tags from text. mode sequential (default), filename (%_filename_ext%) or path (%_path%). Duplicate matching keys fail; unmatched rows are reported. Uses current staging.","selection paths mask text mode draft"),
+        ("draft.from_table","Map strict quoted CSV/TSV records into current staging. table contains delimiter, quote, headers, mode, match_column and mappings [{column:{kind:header,name:Title},field:title,empty:skip}]. Index columns are zero-based. Supply exactly one of UTF-8 text or encoded data_base64; table.encoding declares the latter. Empty defaults to skip; clear/reject are explicit. Duplicate destinations, ambiguous file matches and malformed records fail before publication.","selection paths text data_base64 table draft"),
         ("draft.from_sidecars","Import UTF-8/UTF-16 lyrics or notes from a relative patterned text file beneath each audio folder. Requires the folder read grant. skip_missing reports missing files; invalid files fail.","selection paths field pattern skip_missing draft"),
         ("draft.number","Preview native ordered track/disc numbering using staged tags. Boundaries are folder or field objects, e.g. {kind:field,field:album}; counters reset on consecutive changes. keep_vinyl defaults true. Automatic totals use the highest generated number per counter group.","selection paths start step total width write_total disc disc_width disc_total write_disc_total next_disc_on reset_disc_on reset_track_on reset_track_on_disc keep_vinyl draft"),
         ("draft.import","Preview release tags with explicit file order and zero-based release-track indices. Known track totals are per disc, not whole-release counts. Require top-level paths or selection. Uses a fetched release receipt or typed import values.","selection paths release track_indices import vinyl_sides_to_disc draft"),
@@ -120,7 +121,7 @@ fn schema(keys: &str) -> Value {
                 json!({"type":"array","description":"Exact {path,field,value} items. Top-level paths or selection is also required.","items":{"type":"object","properties":{"path":{"type":"string"},"field":{"type":"string","description":"Storage key, e.g. title, tracktotal, custom:MYFIELD"},"value":{"type":["string","null"]}},"required":["path","field","value"],"additionalProperties":false}})
             }
             "rules" | "groups" => json!({"type":"array","items":{"type":"object"}}),
-            "query" | "values" | "import" | "preset" | "patch" | "next_disc_on"
+            "query" | "values" | "import" | "preset" | "patch" | "next_disc_on" | "table"
             | "reset_disc_on" | "reset_track_on" => json!({"type":"object"}),
             _ => json!({"type":"string"}),
         };

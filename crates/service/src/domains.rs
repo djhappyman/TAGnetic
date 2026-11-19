@@ -620,7 +620,9 @@ impl Service {
                             "App search presets use literal case-insensitive search",
                         ));
                     }
-                    let index = tagrex_commands::query::QueryIndex::from_tracks(&[]);
+                    let index = tagrex_commands::query::QueryIndex::try_from_tracks(&[]).map_err(
+                        |error| ServiceError::from(tagrex_commands::AppError::Resource(error)),
+                    )?;
                     index
                         .query(
                             &tagrex_commands::query::QueryRequest {
@@ -630,7 +632,7 @@ impl Service {
                             },
                             || false,
                         )
-                        .map_err(|e| ServiceError::invalid(e.to_string()))?;
+                        .map_err(ServiceError::from)?;
                 }
                 _ => {}
             }

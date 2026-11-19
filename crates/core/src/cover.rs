@@ -5,9 +5,11 @@
 //! image to a maximum dimension and re-encodes it as JPEG at a chosen quality,
 //! feeding the same embed path so the result stays previewable and undoable.
 
+pub mod pipeline;
 mod resources;
 
 use crate::model::CoverArt;
+use crate::resources::{Budget, Charge};
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
 use image::{DynamicImage, Rgb, RgbImage};
@@ -20,12 +22,23 @@ use std::io::Cursor;
 /// already fits within `max_px`, or the bytes can't be decoded — a cover we
 /// can't read should still embed as-is rather than fail the whole operation.
 pub fn resize_cover(art: &CoverArt, max_px: u32, quality: u8) -> CoverArt {
+    resize_cover_with_budget(art, max_px, quality, &Budget::process())
+}
+
+fn resize_cover_with_budget(art: &CoverArt, max_px: u32, quality: u8, budget: &Budget) -> CoverArt {
     if max_px == 0 || art.data.len() > resources::ENCODE_BYTES {
         return art.clone();
     }
     // The size from the header alone (#622): a cover that fits is never
     // decoded at all.
     let _processing = resources::PROCESS.lock().unwrap_or_else(|p| p.into_inner());
+    let Ok(mut reservation) = budget.try_acquire(Charge {
+        transient: resources::DECODE_BYTES,
+        jobs: 1,
+        ..Charge::default()
+    }) else {
+        return art.clone();
+    };
     let Ok(mut reader) = image::ImageReader::new(Cursor::new(&art.data)).with_guessed_format()
     else {
         return art.clone();
@@ -62,6 +75,33 @@ pub fn resize_cover(art: &CoverArt, max_px: u32, quality: u8) -> CoverArt {
     };
     if let Some(data) = cached() {
         return result(data);
+    }
+    // Reserve the larger permitted path because the row decoder can fall back
+    // to a full decoder. The reservation precedes either decode/allocation.
+    let work = [
+        full_allowed
+            .then(|| resources::estimate(width, height, max_px, false))
+            .flatten(),
+        rows_allowed
+            .then(|| resources::estimate(width, height, max_px, true))
+            .flatten(),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .unwrap_or(0);
+    let Ok(work) = usize::try_from(work) else {
+        return art.clone();
+    };
+    if reservation
+        .try_resize(Charge {
+            transient: work,
+            jobs: 1,
+            ..Charge::default()
+        })
+        .is_err()
+    {
+        return art.clone();
     }
     let shrunk = rows_allowed
         .then(|| shrink_png_rows(&art.data, width, height, max_px.saturating_mul(2)))
@@ -112,21 +152,54 @@ pub fn resize_cover(art: &CoverArt, max_px: u32, quality: u8) -> CoverArt {
 /// 16000×16000, an interlaced PNG past its limit), which embeds at full size
 /// and so has to be said in the preview (#706). An image whose size cannot be
 /// read at all is not claimed to be over anything.
+/// `false` also includes unavailable inspection capacity; use
+/// [`inspect_cover_size`] for a user-facing size or processing diagnostic.
 pub fn is_over_max(art: &CoverArt, max_px: u32) -> bool {
+    matches!(
+        inspect_cover_size(art, max_px),
+        CoverSizeInspection::OverLimit { .. }
+    )
+}
+
+/// A bounded size check must distinguish lack of capacity or invalid headers
+/// from evidence that an image fits. UI-facing callers should use this outcome
+/// rather than treating the compatibility boolean's `false` as proof of fit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoverSizeInspection {
+    Disabled,
+    WithinLimit { width: u32, height: u32 },
+    OverLimit { width: u32, height: u32 },
+    Unknown,
+    Busy,
+}
+
+/// Inspect header dimensions under shared admission without decoding pixels.
+pub fn inspect_cover_size(art: &CoverArt, max_px: u32) -> CoverSizeInspection {
     if max_px == 0 {
-        return false;
+        return CoverSizeInspection::Disabled;
     }
     let _processing = resources::PROCESS.lock().unwrap_or_else(|p| p.into_inner());
+    let Ok(_reservation) = Budget::process().try_acquire(Charge {
+        transient: resources::DECODE_BYTES,
+        jobs: 1,
+        ..Charge::default()
+    }) else {
+        return CoverSizeInspection::Busy;
+    };
     let Ok(mut reader) = image::ImageReader::new(Cursor::new(&art.data)).with_guessed_format()
     else {
-        return false;
+        return CoverSizeInspection::Unknown;
     };
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(resources::DECODE_BYTES as u64);
     reader.limits(limits);
-    reader
-        .into_dimensions()
-        .is_ok_and(|(width, height)| width > max_px || height > max_px)
+    match reader.into_dimensions() {
+        Ok((width, height)) if width > max_px || height > max_px => {
+            CoverSizeInspection::OverLimit { width, height }
+        }
+        Ok((width, height)) => CoverSizeInspection::WithinLimit { width, height },
+        Err(_) => CoverSizeInspection::Unknown,
+    }
 }
 
 /// The size past which a PNG cover is shrunk by [`shrink_png_rows`] before the
@@ -227,6 +300,40 @@ mod tests {
     fn dimensions(data: &[u8]) -> (u32, u32) {
         let img = image::load_from_memory(data).unwrap();
         (img.width(), img.height())
+    }
+
+    #[test]
+    fn shared_resource_pressure_preserves_artwork_and_retry_can_resize() {
+        use crate::resources::Limits;
+        let art = CoverArt {
+            mime: "image/png".into(),
+            data: png(512, 256).into(),
+            kind: crate::model::CoverKind::Back,
+            description: "Pressure".into(),
+        };
+        let budget = Budget::new(Limits {
+            retained: 1024,
+            transient: 256 * 1024 * 1024,
+            total: 256 * 1024 * 1024,
+            jobs: 1,
+        });
+        let competing = budget
+            .try_acquire(Charge {
+                transient: 256 * 1024 * 1024,
+                jobs: 1,
+                ..Charge::default()
+            })
+            .unwrap();
+        let original = resize_cover_with_budget(&art, 128, 81, &budget);
+        assert!(std::sync::Arc::ptr_eq(&original.data, &art.data));
+        assert_eq!(original.kind, art.kind);
+        drop(competing);
+        let resized = resize_cover_with_budget(&art, 128, 81, &budget);
+        assert_eq!(dimensions(&resized.data), (128, 64));
+        assert_eq!(resized.kind, art.kind);
+        assert_eq!(resized.description, art.description);
+        assert_eq!(budget.usage().0, Charge::default());
+        assert!(budget.usage().1.transient > resources::DECODE_BYTES);
     }
 
     #[test]

@@ -727,6 +727,8 @@ export const fr = {
   "placeholder.math.round": "$round(x[,n]) — à un nombre entier, ou à n décimales",
   // ---- failures, composed in Rust (#268) ----
   "error.io": "Erreur d'E/S : {detail}",
+  "error.resourceBusy": "L’application est occupée. Attendez la fin des opérations en cours, puis réessayez.",
+  "error.resourceLimit": "Cette opération dépasse une limite de ressources. Sélectionnez moins de fichiers ou réduisez la taille des données.",
   "error.journal": "Erreur du journal : {detail}",
   "error.journal.unknownBatch": "Identifiant de lot inconnu : {id}",
   "error.journal.notRollbackable": "Ce lot ne peut pas être annulé : {detail}",
@@ -804,6 +806,8 @@ export const fr = {
   "plan.carryingExtras": { one: "avec {n} fichier supplémentaire", other: "avec {n} fichiers supplémentaires" },
   "plan.cleanedUp": "nettoyé",
   "plan.coverNotShrunk": { one: "{n} image trop grande pour être réduite est intégrée en taille réelle", other: "{n} images trop grandes pour être réduites sont intégrées en taille réelle" },
+  "plan.coverSizeUncheckedBusy": { one: "Impossible de vérifier la taille de {n} image car le traitement des images est occupé", other: "Impossible de vérifier la taille de {n} images car le traitement des images est occupé" },
+  "plan.coverSizeUnknown": { one: "Impossible de lire les dimensions de {n} image", other: "Impossible de lire les dimensions de {n} images" },
   "plan.interrupted": "interrompu avant la fin",
   // ---- the settings sheet ----
   "settings.discogs.token": "Token personnel",

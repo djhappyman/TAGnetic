@@ -17,6 +17,9 @@ mod field_operations;
 pub use field_operations::{has_field_rules, validate_field_groups, FieldOperation};
 mod native_batch;
 mod playlist_load;
+mod preview_context;
+pub use preview_context::with_preview_cancellation;
+mod tabular;
 pub use native_batch::{
     NumberBoundary, NumberingOptions, TextImportMode, TextImportOptions, TextImportPreview,
     TextImportRow, TextImportStatus, TextSidecarOptions,
@@ -24,10 +27,14 @@ pub use native_batch::{
 pub use playlist_load::{
     PlaylistIssue, PlaylistIssueKind, PlaylistLoadOptions, PlaylistLoadPreview,
 };
+pub use tabular::{
+    ColumnMapping, EmptyCell, ImportColumn, TabularImportError, TabularImportOptions,
+};
 mod bounded_cache;
 pub mod duplicates;
 mod import_matching;
 mod output;
+pub use output::OutputError;
 pub mod query;
 mod query_members;
 mod read_cache;
@@ -423,11 +430,7 @@ impl CoverEmbedOptions {
     pub fn read_image(self, image_path: &Path) -> Result<PreparedCoverEmbed, AppError> {
         let art = read_cover_image_art(image_path)?;
         let art = tagrex_core::cover::resize_cover(&art, self.max_px, self.quality);
-        let notes = if tagrex_core::cover::is_over_max(&art, self.max_px) {
-            vec![PlanMessage::CoverNotShrunk { images: 1 }]
-        } else {
-            Vec::new()
-        };
+        let notes = cover_size_notes(std::iter::once(&art), self.max_px);
         Ok(PreparedCoverEmbed { art, notes })
     }
 }
@@ -735,6 +738,12 @@ pub enum PlanMessage {
     CoverNotShrunk {
         images: usize,
     },
+    CoverSizeUncheckedBusy {
+        images: usize,
+    },
+    CoverSizeUnknown {
+        images: usize,
+    },
     /// A note on a History entry: the batch never finished, the app having
     /// stopped part-way through it (#659).
     Interrupted,
@@ -773,6 +782,8 @@ impl PlanMessage {
             Self::CarryingExtras { .. } => "plan.carryingExtras",
             Self::CleanedUp => "plan.cleanedUp",
             Self::CoverNotShrunk { .. } => "plan.coverNotShrunk",
+            Self::CoverSizeUncheckedBusy { .. } => "plan.coverSizeUncheckedBusy",
+            Self::CoverSizeUnknown { .. } => "plan.coverSizeUnknown",
             Self::Interrupted => "plan.interrupted",
         }
     }
@@ -811,9 +822,10 @@ impl PlanMessage {
             Self::EditTagsWithCover { files } | Self::CarryingExtras { files } => {
                 Some(*files as u64)
             }
-            Self::SetCoverImages { images } | Self::CoverNotShrunk { images } => {
-                Some(*images as u64)
-            }
+            Self::SetCoverImages { images }
+            | Self::CoverNotShrunk { images }
+            | Self::CoverSizeUncheckedBusy { images }
+            | Self::CoverSizeUnknown { images } => Some(*images as u64),
             _ => None,
         }
     }
@@ -863,6 +875,10 @@ impl PlanMessage {
                 1 => "1 image too large to shrink goes in at full size".to_string(),
                 n => format!("{n} images too large to shrink go in at full size"),
             },
+            Self::CoverSizeUncheckedBusy { images } => format!(
+                "Size could not be checked for {images} image(s) because artwork processing is busy"),
+            Self::CoverSizeUnknown { images } => format!(
+                "Dimensions could not be read for {images} image(s)"),
             Self::Interrupted => "interrupted before it finished".to_string(),
         }
     }
@@ -946,6 +962,15 @@ impl From<AppError> for ErrorDto {
     }
 }
 
+impl From<query::QueryError> for ErrorDto {
+    fn from(error: query::QueryError) -> Self {
+        match error {
+            query::QueryError::Resource(error) => Self::from(AppError::Resource(error)),
+            other => Self::plain(other.to_string()),
+        }
+    }
+}
+
 // The `?` conversions the command layer leans on. Each routes through the error
 // type that already knows what the failure is, so a code is never invented at
 // the boundary.
@@ -1003,6 +1028,16 @@ fn error_message(error: &AppError) -> MessageDto {
     match error {
         // Backend-only additions use the existing English fallback until their
         // interface catalogue entries are delivered together.
+        AppError::Resource(tagrex_core::resources::AdmissionError::Busy) => {
+            coded("error.resourceBusy", BTreeMap::new())
+        }
+        AppError::Resource(tagrex_core::resources::AdmissionError::TooLarge) => {
+            coded("error.resourceLimit", BTreeMap::new())
+        }
+        AppError::Output(OutputError::Resource(error)) => {
+            error_message(&AppError::Resource(*error))
+        }
+        AppError::Output(_) => MessageDto::default(),
         AppError::ExportLimit(_) => MessageDto::default(),
         AppError::TagIo(inner) => match inner {
             TagIoError::UnsupportedFormat(what) => {
@@ -2554,7 +2589,20 @@ impl App {
         path: &Path,
     ) -> Result<std::sync::Arc<tagrex_core::model::TrackRead>, tagrex_core::model::TagIoError> {
         let _policy = self.model_policy.enter();
-        self.read_cache.borrow_mut().read(path)
+        let check = || {
+            if preview_context::requested() {
+                Err(tagrex_core::model::TagIoError::from(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "Preview cancelled",
+                )))
+            } else {
+                Ok(())
+            }
+        };
+        check()?;
+        let result = self.read_cache.borrow_mut().read(path);
+        check()?;
+        result
     }
 
     /// Read only the tag-file view of the same cached snapshot.
@@ -2658,12 +2706,12 @@ impl App {
 
     /// The files this session operates on: the explicit filter when set (a
     /// file-set drop), otherwise a fresh recursive scan of `library_root`.
-    fn source_paths(&self) -> Vec<PathBuf> {
+    fn source_paths(&self) -> Box<dyn Iterator<Item = PathBuf> + '_> {
         match &self.file_filter {
-            Some(files) => files.clone(),
-            None => scanner::scan(&self.library_root, &ScanOptions::default())
-                .filter_map(Result::ok)
-                .collect(),
+            Some(files) => Box::new(files.iter().cloned()),
+            None => Box::new(
+                scanner::scan(&self.library_root, &ScanOptions::default()).filter_map(Result::ok),
+            ),
         }
     }
 
@@ -2900,41 +2948,48 @@ impl App {
     /// order (the scanner yields filesystem order, which isn't alphabetical) —
     /// this order is also what mapping-by-position (rename masks, release
     /// import) lines up against.
-    pub fn list_tracks(&self) -> Vec<TrackDto> {
+    pub fn list_tracks(&self) -> Result<Vec<TrackDto>, AppError> {
         let _policy = self.model_policy.enter();
-        let policy = tagrex_core::model::read_policy_revision();
-        let mut records: Vec<(TrackDto, query::QueryRow)> = self
-            .source_paths()
-            .into_iter()
-            .map(|path| {
-                let track = self.track_dto(&path);
-                let row = self.query_row(&track);
-                (track, row)
-            })
-            .collect();
+        let policy_revision = tagrex_core::model::read_policy_revision();
+        preview_context::check()?;
+        let mut records = Vec::new();
+        for path in self.source_paths() {
+            preview_context::check()?;
+            let track = self.track_dto(&path);
+            let row = self.query_row(&track, policy_revision)?;
+            records.push((track, row));
+        }
+        preview_context::check()?;
+        if policy_revision == u64::MAX
+            || tagrex_core::model::read_policy_revision() != policy_revision
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "Metadata settings changed while listing rows; retry the operation",
+            )
+            .into());
+        }
         records.sort_by(|(a, _), (b, _)| natural_cmp(&a.path, &b.path));
         let (tracks, rows): (Vec<_>, Vec<_>) = records.into_iter().unzip();
         self.invalidate_query();
-        let policy = if policy != u64::MAX && policy == tagrex_core::model::read_policy_revision() {
-            policy
-        } else {
-            u64::MAX
-        };
-        let index = std::sync::Arc::new(query::QueryIndex::from_rows(rows));
-        if policy == u64::MAX {
-            index.invalidate();
-        }
-        self.query_policy.set(policy);
-        *self.query_index.borrow_mut() = Some(index);
-        tracks
+        self.query_policy.set(policy_revision);
+        *self.query_index.borrow_mut() = Some(std::sync::Arc::new(
+            query::QueryIndex::from_rows(rows)
+                .with_model_policy(self.model_policy.clone(), policy_revision),
+        ));
+        Ok(tracks)
     }
 
-    fn query_row(&self, track: &TrackDto) -> query::QueryRow {
-        let mut row = query::QueryRow::from_track(track);
+    fn query_row(
+        &self,
+        track: &TrackDto,
+        policy_revision: u64,
+    ) -> Result<query::QueryRow, AppError> {
+        let mut row = query::QueryRow::try_from_track(track)?;
         let read = self.read_snapshot(Path::new(&track.path)).ok();
         let props = read.as_ref().map(|read| read.props);
         let metadata = std::fs::metadata(&track.path).ok();
-        row.set_source_metadata(metadata.as_ref());
+        row.set_source_metadata(metadata.as_ref(), policy_revision);
         row.set_technical(
             metadata.as_ref().map(|m| m.len()),
             props.as_ref().and_then(|p| p.bitrate_kbps),
@@ -2948,7 +3003,7 @@ impl App {
                 metadata.and_then(|m| m.modified().ok()),
             );
         }
-        row
+        Ok(row)
     }
 
     fn validate_query_policy(&self) -> u64 {
@@ -2994,27 +3049,39 @@ impl App {
 
     /// Share the current immutable query snapshot without sending rows through IPC.
     /// Warm queries reuse this `Arc` and never probe files.
-    pub fn query_snapshot(&self) -> std::sync::Arc<query::QueryIndex> {
+    pub fn query_snapshot(&self) -> Result<std::sync::Arc<query::QueryIndex>, AppError> {
         let _policy = self.model_policy.enter();
         self.validate_query_policy();
+        let policy_changed = self
+            .query_index
+            .borrow()
+            .as_ref()
+            .is_some_and(|index| !index.read_policy_is_current())
+            || self
+                .query_pending
+                .borrow()
+                .as_ref()
+                .is_some_and(|pending| !pending.index.read_policy_is_current());
+        if policy_changed {
+            self.invalidate_query();
+        }
         let dirty = self
             .query_pending
             .borrow()
             .as_ref()
             .map(|pending| pending.paths.iter().cloned().collect::<Vec<_>>());
         if let Some(paths) = dirty {
-            if self.read_track_rows(&paths).is_err() {
-                self.invalidate_query();
-            }
+            self.read_track_rows(&paths)?;
         }
         if self.query_index.borrow().is_none() {
-            self.list_tracks();
+            self.list_tracks()?;
         }
-        self.query_index
+        Ok(self
+            .query_index
             .borrow()
             .as_ref()
             .expect("list_tracks initializes query snapshot")
-            .clone()
+            .clone())
     }
 
     /// Root of the authoritative session; this accessor does not grant access.
@@ -3027,7 +3094,11 @@ impl App {
     pub fn query_snapshot_id(&self) -> Option<u64> {
         let _policy = self.model_policy.enter();
         self.validate_query_policy();
-        self.query_index.borrow().as_ref().map(|index| index.id)
+        self.query_index
+            .borrow()
+            .as_ref()
+            .filter(|index| index.is_current())
+            .map(|index| index.id)
     }
 
     /// Refresh one source file without rescanning or parsing its neighbours.
@@ -3046,12 +3117,14 @@ impl App {
     /// reads its own rows, or a write that validates before mutating — should
     /// not pay for snapshots they discard.
     fn validate_track_paths(&self, paths: &[PathBuf]) -> Result<(), AppError> {
+        preview_context::check()?;
         let root = std::fs::canonicalize(&self.library_root)?;
         let files = self
             .file_filter
             .as_ref()
             .map(|files| files.iter().collect::<HashSet<_>>());
         for path in paths {
+            preview_context::check()?;
             let outside = || AppError::OutsideRoot(path.to_string_lossy().into_owned());
             if !scanner::is_supported_audio(path)
                 || files.as_ref().is_some_and(|files| !files.contains(path))
@@ -3091,21 +3164,58 @@ impl App {
         paths: &[PathBuf],
         force_refresh: bool,
     ) -> Result<Vec<TrackDto>, AppError> {
-        let policy = self.validate_query_policy();
+        let mut attempt = 0;
+        loop {
+            match self.read_track_rows_once(paths, force_refresh) {
+                Err(AppError::Io(error))
+                    if error.kind() == std::io::ErrorKind::Interrupted && attempt < 2 =>
+                {
+                    attempt += 1;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    fn read_track_rows_once(
+        &self,
+        paths: &[PathBuf],
+        force_refresh: bool,
+    ) -> Result<Vec<TrackDto>, AppError> {
+        preview_context::check()?;
+        let policy_revision = self.validate_query_policy();
         self.validate_track_paths(paths)?;
         let mut rows = Vec::with_capacity(paths.len());
-        let tracks = paths
-            .iter()
-            .map(|path| {
-                let track = self.track_dto(path);
-                rows.push(self.query_row(&track));
-                track
-            })
-            .collect();
-        if policy == u64::MAX || policy != tagrex_core::model::read_policy_revision() {
+        let mut tracks = Vec::with_capacity(paths.len());
+        for path in paths {
+            preview_context::check()?;
+            let track = self.track_dto(path);
+            preview_context::check()?;
+            rows.push(self.query_row(&track, policy_revision)?);
+            tracks.push(track);
+        }
+        preview_context::check()?;
+        if policy_revision == u64::MAX
+            || tagrex_core::model::read_policy_revision() != policy_revision
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "Metadata settings changed while reading rows; retry the operation",
+            )
+            .into());
+        }
+        if self
+            .query_index
+            .borrow()
+            .as_ref()
+            .is_some_and(|index| !index.read_policy_is_current())
+            || self
+                .query_pending
+                .borrow()
+                .as_ref()
+                .is_some_and(|pending| !pending.index.read_policy_is_current())
+        {
             self.invalidate_query();
-            self.query_policy.set(u64::MAX);
-            return Ok(tracks);
         }
         let previous = self.query_index.borrow().clone();
         let pending = self.query_pending.borrow_mut().take();
@@ -3265,14 +3375,16 @@ impl App {
     /// Deeper folders are processed first, so a nested source folder claims its
     /// own files before its parent can. Returns how many files were attached, so
     /// the preview can say so.
-    fn attach_folder_extras(&self, changes: &mut [FileChangeDto]) -> usize {
+    fn attach_folder_extras(&self, changes: &mut [FileChangeDto]) -> Result<usize, AppError> {
+        preview_context::check()?;
         if !self.carry_folder_extras.get() {
-            return 0;
+            return Ok(0);
         }
         // Every file the plan already accounts for: the tracks themselves and
         // the sidecars travelling with them.
         let mut claimed: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
         for change in changes.iter() {
+            preview_context::check()?;
             claimed.insert(PathBuf::from(&change.path));
             for (from, _) in &change.sidecar_renames {
                 claimed.insert(PathBuf::from(from));
@@ -3288,6 +3400,7 @@ impl App {
         let mut by_folder: std::collections::BTreeMap<PathBuf, Vec<usize>> =
             std::collections::BTreeMap::new();
         for (index, change) in changes.iter().enumerate() {
+            preview_context::check()?;
             if change.rename_to.is_none() {
                 continue;
             }
@@ -3303,7 +3416,9 @@ impl App {
         folders.sort_by_key(|folder| std::cmp::Reverse(folder.components().count()));
 
         let mut carried = 0;
+        let mut scan_budget = ExtrasScanBudget::default();
         for folder in folders {
+            preview_context::check()?;
             let indices = &by_folder[&folder];
             // One destination, or none of this is answerable.
             let mut destinations = indices.iter().filter_map(|index| {
@@ -3322,13 +3437,22 @@ impl App {
             }
             // Everything audible under the folder has to be leaving with them.
             let mut extras = Vec::new();
-            if !collect_folder_extras(&folder, &folder, &moving, &claimed, &mut extras) {
+            if !collect_folder_extras(
+                &folder,
+                &folder,
+                &moving,
+                &claimed,
+                &mut extras,
+                0,
+                &mut scan_budget,
+            )? {
                 continue;
             }
             let Some(first) = indices.first().copied() else {
                 continue;
             };
             for (source, relative) in extras {
+                preview_context::check()?;
                 claimed.insert(source.clone());
                 changes[first]
                     .folder_extras
@@ -3340,7 +3464,8 @@ impl App {
                 carried += 1;
             }
         }
-        carried
+        preview_context::check()?;
+        Ok(carried)
     }
 
     /// The sidecar pairs that a rename from `src` to `dst` should carry (#58):
@@ -3375,14 +3500,21 @@ impl App {
     /// stem matches the audio file's and whose extension is in the configured
     /// set; its target keeps the destination directory and the new stem. No-op
     /// when the feature is off or the change carries no real rename.
-    fn attach_sidecars(&self, change: &mut FileChangeDto, scan: &mut sidecars::SidecarScan) {
+    fn attach_sidecars(
+        &self,
+        change: &mut FileChangeDto,
+        scan: &mut sidecars::SidecarScan,
+    ) -> Result<(), AppError> {
+        preview_context::check()?;
         let Some(rename_to) = change.rename_to.as_deref() else {
-            return;
+            return Ok(());
         };
-        if let Some(pairs) = self.sidecar_pairs(scan, Path::new(&change.path), Path::new(rename_to))
-        {
+        let pairs = self.sidecar_pairs(scan, Path::new(&change.path), Path::new(rename_to));
+        preview_context::check()?;
+        if let Some(pairs) = pairs {
             change.sidecar_renames = pairs;
         }
+        Ok(())
     }
 
     /// Render `mask` against `path`'s own tags and turn the result into a
@@ -3497,13 +3629,12 @@ impl App {
         // preview builds its own and sees the disk as it is then.
         let mut scan = sidecars::SidecarScan::default();
         for path in paths {
+            preview_context::check()?;
             let root = path.parent().unwrap_or(path);
-            let target = match self.render_target_under(
-                &mask,
-                path,
-                root,
-                working.get(path.as_path()).copied(),
-            ) {
+            let rendered =
+                self.render_target_under(&mask, path, root, working.get(path.as_path()).copied());
+            preview_context::check()?;
+            let target = match rendered {
                 Ok(target) => target,
                 Err(Some(field)) => {
                     tally_unrendered(&mut unrendered, field, path);
@@ -3526,7 +3657,7 @@ impl App {
                 creates_folder: creates_folder(&target),
                 folder_extras: Vec::new(),
             };
-            self.attach_sidecars(&mut change, &mut scan);
+            self.attach_sidecars(&mut change, &mut scan)?;
             changes.push(change);
         }
         let mut plan = self.plan(
@@ -3598,9 +3729,14 @@ impl App {
 
         let mut changes = Vec::new();
         for path in paths {
+            preview_context::check()?;
             let Ok(track) = self.read_cached(path) else {
+                // Unreadable files keep the legacy skip policy; a cancelled
+                // preview must abort rather than publish a shortened plan.
+                preview_context::check()?;
                 continue;
             };
+            preview_context::check()?;
             let subject_path = working
                 .get(path.as_path())
                 .and_then(|change| change.rename_to.as_deref())
@@ -3749,9 +3885,14 @@ impl App {
         let (tracks, _) = text_list_tracks(&mask, text)?;
         let mut changes = Vec::new();
         for (path, (_, extracted)) in paths.iter().zip(tracks) {
+            preview_context::check()?;
             let Ok(track) = self.read_cached(path) else {
+                // Unreadable files keep the legacy skip policy; a cancelled
+                // preview must abort rather than publish a shortened plan.
+                preview_context::check()?;
                 continue;
             };
+            preview_context::check()?;
 
             let mut tag_changes = Vec::new();
             for (field, value) in &extracted {
@@ -3910,9 +4051,14 @@ impl App {
         let mut scan = sidecars::SidecarScan::default();
 
         for path in paths {
+            preview_context::check()?;
             let Ok(track) = self.read_cached(path) else {
+                // Unreadable files keep the legacy skip policy; a cancelled
+                // preview must abort rather than publish a shortened plan.
+                preview_context::check()?;
                 continue;
             };
+            preview_context::check()?;
 
             if scope == "filename" {
                 let stem = path
@@ -3951,7 +4097,7 @@ impl App {
                     creates_folder: false,
                     folder_extras: Vec::new(),
                 };
-                self.attach_sidecars(&mut change, &mut scan);
+                self.attach_sidecars(&mut change, &mut scan)?;
                 changes.push(change);
                 continue;
             }
@@ -3998,7 +4144,7 @@ impl App {
                     creates_folder: false,
                     folder_extras: Vec::new(),
                 };
-                self.attach_sidecars(&mut change, &mut scan);
+                self.attach_sidecars(&mut change, &mut scan)?;
                 changes.push(change);
                 continue;
             }
@@ -4081,9 +4227,14 @@ impl App {
         // One listing per source folder for this preview (#58).
         let mut scan = sidecars::SidecarScan::default();
         for path in paths {
+            preview_context::check()?;
             let Ok(track) = self.read_cached(path) else {
+                // Unreadable files keep the legacy skip policy; a cancelled
+                // preview must abort rather than publish a shortened plan.
+                preview_context::check()?;
                 continue;
             };
+            preview_context::check()?;
 
             let stem = |p: &Path| {
                 p.file_stem()
@@ -4162,7 +4313,7 @@ impl App {
                 folder_extras: Vec::new(),
             };
             if renamed {
-                self.attach_sidecars(&mut change, &mut scan);
+                self.attach_sidecars(&mut change, &mut scan)?;
             }
             changes.push(change);
         }
@@ -4515,12 +4666,11 @@ impl App {
         // One listing per source folder for this preview (#58).
         let mut scan = sidecars::SidecarScan::default();
         for path in paths {
-            let target = match self.render_target_under(
-                &mask,
-                path,
-                &root,
-                working.get(path.as_path()).copied(),
-            ) {
+            preview_context::check()?;
+            let rendered =
+                self.render_target_under(&mask, path, &root, working.get(path.as_path()).copied());
+            preview_context::check()?;
+            let target = match rendered {
                 Ok(target) => target,
                 Err(Some(field)) => {
                     tally_unrendered(&mut unrendered, field, path);
@@ -4543,13 +4693,13 @@ impl App {
                 creates_folder: creates_folder(&target),
                 folder_extras: Vec::new(),
             };
-            self.attach_sidecars(&mut change, &mut scan);
+            self.attach_sidecars(&mut change, &mut scan)?;
             changes.push(change);
         }
         // Whatever else lives in a folder every track is leaving (#161). Said in
         // the description because the extras ride on another file's change, so
         // the diff has no row of their own to show.
-        let carried = self.attach_folder_extras(&mut changes);
+        let carried = self.attach_folder_extras(&mut changes)?;
         let notes = match carried {
             0 => Vec::new(),
             files => vec![PlanMessage::CarryingExtras { files }],
@@ -4948,16 +5098,35 @@ impl App {
         &self,
         covers: impl IntoIterator<Item = &'a CoverArt>,
     ) -> Vec<PlanMessage> {
-        let max_px = self.cover_max_px.get();
-        match covers
-            .into_iter()
-            .filter(|art| tagrex_core::cover::is_over_max(art, max_px))
-            .count()
-        {
-            0 => Vec::new(),
-            images => vec![PlanMessage::CoverNotShrunk { images }],
+        cover_size_notes(covers, self.cover_max_px.get())
+    }
+}
+
+fn cover_size_notes<'a>(
+    covers: impl IntoIterator<Item = &'a CoverArt>,
+    max_px: u32,
+) -> Vec<PlanMessage> {
+    use tagrex_core::cover::{inspect_cover_size, CoverSizeInspection};
+    let (mut oversized, mut busy, mut unknown) = (0, 0, 0);
+    for art in covers {
+        match inspect_cover_size(art, max_px) {
+            CoverSizeInspection::OverLimit { .. } => oversized += 1,
+            CoverSizeInspection::Busy => busy += 1,
+            CoverSizeInspection::Unknown => unknown += 1,
+            _ => {}
         }
     }
+    let mut notes = Vec::new();
+    if oversized > 0 {
+        notes.push(PlanMessage::CoverNotShrunk { images: oversized });
+    }
+    if busy > 0 {
+        notes.push(PlanMessage::CoverSizeUncheckedBusy { images: busy });
+    }
+    if unknown > 0 {
+        notes.push(PlanMessage::CoverSizeUnknown { images: unknown });
+    }
+    notes
 }
 
 /// The cover change one file gets from an import (#207), or `None` when this
@@ -5044,9 +5213,14 @@ impl App {
         let floor = self.bpm_floor.get();
         let mut changes = Vec::new();
         for (path, raw) in detected {
+            preview_context::check()?;
             let Ok(track) = self.read_cached(path) else {
+                // Unreadable files keep the legacy skip policy; a cancelled
+                // preview must abort rather than publish a shortened plan.
+                preview_context::check()?;
                 continue;
             };
+            preview_context::check()?;
             let bpm = bpm_in_range(*raw, floor);
             let old = track.tags.get(&TagField::Bpm).cloned();
             let same = old
@@ -6272,7 +6446,7 @@ impl App {
             .iter()
             .filter_map(|root| std::fs::canonicalize(root).ok())
             .collect();
-        let listed: HashSet<PathBuf> = self.source_paths().into_iter().collect();
+        let listed: HashSet<PathBuf> = self.source_paths().collect();
         for path in paths {
             if !listed.contains(path) {
                 return Err(AppError::OutsideRoot(path.to_string_lossy().into_owned()));
@@ -7238,27 +7412,61 @@ fn cleaned_up_description(description: &str) -> String {
 /// leftovers may well belong to that instead. Otherwise `extras` collects every
 /// file that no change already accounts for, each with its path relative to
 /// `root` so a `Scans/` subfolder lands as a `Scans/` subfolder.
+#[derive(Default)]
+struct ExtrasScanBudget {
+    entries: usize,
+    bytes: usize,
+}
+
 fn collect_folder_extras(
     root: &Path,
     folder: &Path,
     moving: &std::collections::BTreeSet<PathBuf>,
     claimed: &std::collections::BTreeSet<PathBuf>,
     extras: &mut Vec<(PathBuf, PathBuf)>,
-) -> bool {
+    depth: usize,
+    budget: &mut ExtrasScanBudget,
+) -> Result<bool, AppError> {
+    preview_context::check()?;
+    if depth > 128 {
+        return Err(crate::field_operations::invalid(
+            "Folder extras exceed 128 nested levels.",
+        ));
+    }
     let Ok(entries) = std::fs::read_dir(folder) else {
         // An unreadable folder is not evidence that carrying is safe.
-        return false;
+        return Ok(false);
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        preview_context::check()?;
+        let Ok(entry) = entry else {
+            return Ok(false);
+        };
+        budget.entries = budget.entries.saturating_add(1);
+        if budget.entries > 100_000 {
+            return Err(crate::field_operations::invalid(
+                "Folder extras exceed 100000 inspected entries.",
+            ));
+        }
         let path = entry.path();
-        if path.is_dir() {
-            if !collect_folder_extras(root, &path, moving, claimed, extras) {
-                return false;
+        let Ok(kind) = entry.file_type() else {
+            return Ok(false);
+        };
+        // An alias cannot prove that an entire source subtree is leaving.
+        if kind.is_symlink() {
+            return Ok(false);
+        }
+        if kind.is_dir() {
+            if !collect_folder_extras(root, &path, moving, claimed, extras, depth + 1, budget)? {
+                return Ok(false);
             }
             continue;
         }
+        if !kind.is_file() {
+            return Ok(false);
+        }
         if scanner::is_supported_audio(&path) && !moving.contains(&path) {
-            return false;
+            return Ok(false);
         }
         if claimed.contains(&path) || moving.contains(&path) {
             continue;
@@ -7271,9 +7479,17 @@ fn collect_folder_extras(
         let Ok(relative) = path.strip_prefix(root) else {
             continue;
         };
+        budget.bytes = budget
+            .bytes
+            .saturating_add(path.as_os_str().len().saturating_mul(4).saturating_add(512));
+        if budget.bytes > 64 * 1024 * 1024 {
+            return Err(crate::field_operations::invalid(
+                "Folder extras exceed the 64 MiB path budget.",
+            ));
+        }
         extras.push((path.clone(), relative.to_path_buf()));
     }
-    true
+    Ok(true)
 }
 
 /// The tag field a release id is stored under, by provider source (#20).
@@ -7592,7 +7808,7 @@ pub fn publish_confined_outputs(
     root: &Path,
     outputs: &[(PathBuf, Vec<u8>)],
     overwrite: bool,
-) -> std::io::Result<()> {
+) -> Result<(), OutputError> {
     output::write_batch(root, outputs, overwrite)
 }
 
@@ -9026,6 +9242,10 @@ impl From<&tagrex_core::provider::Release> for ReleaseDto {
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error(transparent)]
+    Resource(#[from] tagrex_core::resources::AdmissionError),
+    #[error(transparent)]
+    Output(#[from] OutputError),
+    #[error(transparent)]
     ExportLimit(#[from] tagrex_core::export::OutputLimit),
     #[error(transparent)]
     TagIo(#[from] tagrex_core::model::TagIoError),
@@ -9462,9 +9682,9 @@ mod tests {
         let dir = TempDir::new("query-generation");
         let path = dir.tagged_flac("x.flac", "Old Artist", "Title");
         let mut app = open_app(&dir);
-        let old = app.query_snapshot();
+        let old = app.query_snapshot().unwrap();
         assert_eq!(old.rows[0].value("artist"), "Old Artist");
-        assert!(std::sync::Arc::ptr_eq(&old, &app.query_snapshot()));
+        assert!(std::sync::Arc::ptr_eq(&old, &app.query_snapshot().unwrap()));
         let plan = app
             .preview_tag_edits(&[TagEditDto {
                 path: path.to_string_lossy().into_owned(),
@@ -9478,16 +9698,16 @@ mod tests {
         );
         let batch = app.apply(&plan).unwrap();
         assert!(!old.is_current());
-        let applied = app.query_snapshot();
+        let applied = app.query_snapshot().unwrap();
         assert_ne!(old.id, applied.id);
         assert_eq!(applied.rows[0].value("artist"), "New Artist");
         app.undo(batch.id).unwrap();
         assert!(!applied.is_current());
-        let undone = app.query_snapshot();
+        let undone = app.query_snapshot().unwrap();
         assert_eq!(undone.rows[0].value("artist"), "Old Artist");
         app.redo_with(&mut |_| {}).unwrap().unwrap();
         assert!(!undone.is_current(), "Redo invalidates saved-tag search");
-        let redone = app.query_snapshot();
+        let redone = app.query_snapshot().unwrap();
         assert_eq!(redone.rows[0].value("artist"), "New Artist");
         app.read_track(&path).unwrap();
         assert!(
@@ -9501,13 +9721,16 @@ mod tests {
         let dir = TempDir::new("query-warm");
         let path = dir.tagged_flac("x.flac", "Artist", "Title");
         let app = open_app(&dir);
-        let snapshot = app.query_snapshot();
+        let snapshot = app.query_snapshot().unwrap();
         std::fs::remove_file(path).unwrap();
-        assert!(std::sync::Arc::ptr_eq(&snapshot, &app.query_snapshot()));
+        assert!(std::sync::Arc::ptr_eq(
+            &snapshot,
+            &app.query_snapshot().unwrap()
+        ));
         assert_eq!(snapshot.rows.len(), 1);
-        app.list_tracks();
+        app.list_tracks().unwrap();
         assert!(!snapshot.is_current());
-        let refreshed = app.query_snapshot();
+        let refreshed = app.query_snapshot().unwrap();
         assert!(refreshed.rows.is_empty());
         drop(app);
         assert!(!refreshed.is_current());
@@ -9519,7 +9742,7 @@ mod tests {
         let changed = dir.tagged_flac("changed.flac", "Old Artist", "Changed");
         let untouched = dir.tagged_flac("untouched.flac", "Untouched Artist", "Untouched");
         let mut app = open_app(&dir);
-        let before = app.query_snapshot();
+        let before = app.query_snapshot().unwrap();
         let before_untouched = before
             .rows
             .iter()
@@ -9537,7 +9760,7 @@ mod tests {
         app.apply(&plan).unwrap();
         assert!(!before.is_current());
         // No frontend readback has happened: a query refreshes its own dirty set.
-        let after = app.query_snapshot();
+        let after = app.query_snapshot().unwrap();
         assert_eq!(after.rows.len(), 2);
         assert_eq!(
             after
@@ -11968,7 +12191,7 @@ mod tests {
         dir.tagged_flac("x.flac", "Boards of Canada", "Roygbiv");
         let app = open_app(&dir);
 
-        let tracks = app.list_tracks();
+        let tracks = app.list_tracks().unwrap();
         assert_eq!(tracks.len(), 1);
         assert_eq!(
             tracks[0].tags.get("artist").map(String::as_str),
@@ -12012,6 +12235,7 @@ mod tests {
         assert_eq!(
             refreshed,
             app.list_tracks()
+                .unwrap()
                 .into_iter()
                 .find(|row| row.path == path.to_string_lossy())
                 .unwrap(),
@@ -12030,7 +12254,10 @@ mod tests {
             &dir.0.join("journal.sqlite"),
         )
         .unwrap();
-        assert_eq!(app.read_track(&selected).unwrap(), app.list_tracks()[0]);
+        assert_eq!(
+            app.read_track(&selected).unwrap(),
+            app.list_tracks().unwrap()[0]
+        );
         assert!(matches!(
             app.read_track(&unselected),
             Err(AppError::OutsideRoot(_))
@@ -12108,7 +12335,7 @@ mod tests {
         let row = app.read_track(&path).unwrap();
         assert!(row.unreadable);
         assert_eq!(row.duration_secs, None);
-        assert_eq!(row, app.list_tracks()[0]);
+        assert_eq!(row, app.list_tracks().unwrap()[0]);
         std::fs::remove_file(&path).unwrap();
         assert!(
             app.read_track(&path).is_err(),
@@ -12124,7 +12351,7 @@ mod tests {
         std::fs::write(dir.0.join("bad.flac"), b"not a real flac file").unwrap();
         let app = open_app(&dir);
 
-        let tracks = app.list_tracks();
+        let tracks = app.list_tracks().unwrap();
         // Both are listed — the unreadable one is a placeholder, not dropped.
         assert_eq!(tracks.len(), 2);
         let bad = tracks
@@ -12195,7 +12422,7 @@ mod tests {
             };
             let history = serde_json::to_value(app.history().unwrap()).unwrap();
             let journal_bytes = std::fs::read(&journal_path).unwrap();
-            let rows = app.list_tracks();
+            let rows = app.list_tracks().unwrap();
             assert_eq!(rows.len(), 2);
             assert_eq!(rows[0].path, bad.to_string_lossy());
             assert_eq!(rows[1].path, good.to_string_lossy());
@@ -12241,6 +12468,7 @@ mod tests {
             let refresh = || match api {
                 "list" => app
                     .list_tracks()
+                    .unwrap()
                     .into_iter()
                     .find(|row| row.path == path.to_string_lossy())
                     .unwrap(),
@@ -14958,7 +15186,7 @@ mod tests {
         std::fs::write(&broken, b"not a flac at all").unwrap();
         let app = open_app(&dir);
 
-        let tracks = app.list_tracks();
+        let tracks = app.list_tracks().unwrap();
         let by_name = |name: &str| {
             tracks
                 .iter()
@@ -15874,13 +16102,13 @@ mod tests {
         let kept = dir.tagged_flac("keep.flac", "Autechre", "Rain");
         let gone = dir.tagged_flac("gone.flac", "Autechre", "Second Bad Vilbel");
         let mut app = open_app(&dir);
-        assert_eq!(app.list_tracks().len(), 2);
+        assert_eq!(app.list_tracks().unwrap().len(), 2);
 
         let trashed = app.trash_files(std::slice::from_ref(&gone)).unwrap();
         assert_eq!(trashed.len(), 1);
         assert!(!gone.exists(), "the file is still where it was");
         assert!(kept.exists(), "the wrong file went");
-        let left = app.list_tracks();
+        let left = app.list_tracks().unwrap();
         assert_eq!(left.len(), 1);
         assert!(left[0].path.ends_with("keep.flac"));
     }
@@ -17742,7 +17970,12 @@ mod tests {
             &dir.0.join("j.sqlite"),
         )
         .unwrap();
-        let paths: Vec<String> = app.list_tracks().into_iter().map(|t| t.path).collect();
+        let paths: Vec<String> = app
+            .list_tracks()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.path)
+            .collect();
         assert_eq!(paths.len(), 2);
         assert!(paths.contains(&a.to_string_lossy().into_owned()));
         assert!(paths.contains(&c.to_string_lossy().into_owned()));

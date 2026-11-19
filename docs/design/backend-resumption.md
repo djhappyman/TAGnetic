@@ -1,6 +1,11 @@
 # Backend handoff for the next session
 
-Latest owner instruction, 19 November 2026: update README and GitHub issues,
+> Superseding owner request, 19 November: consolidate and merge achieved work,
+> move the development server to main, and retire non-main working branches.
+> Follow [the consolidation record](backend-consolidation.md). The pause
+> instruction below describes the preceding checkpoint. No local workloads.
+
+Earlier checkpoint instruction, superseded by the consolidation request above: update README and GitHub issues,
 push the documentation and merge PR #53 after its required checks pass, then
 stop. This supersedes the earlier request to continue all backend work. Tomorrow
 we will look at connecting work already built to the frontend; this is a

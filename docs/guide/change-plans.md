@@ -86,6 +86,13 @@ current library.
   deliver for files outside the open folder.
 - **Renames and moves undo completely**, including removing directories the move
   had to create, and including sidecar files that travelled with the track.
+- **Move ownership is recorded before the move.** Undo checks the original
+  filesystem object, including after restarting. A later file put at the moved
+  path is refused and history is retained. A path-only move can bring back edits
+  made in place to that same object. Older move records without this evidence
+  remain readable, but cannot automatically move an unproved file; changing
+  fields back does not establish file ownership. Filesystems without durable
+  object identity and a birth generation refuse new moves before writing.
 - **An edit made since is never overwritten without asking.** If a file was
   edited after the batch was applied (by a later batch, or by another program),
   undo stops and asks: **Undo the untouched** keeps the newer values and undoes
@@ -94,12 +101,36 @@ current library.
   edit; **Don't undo** leaves the files as they are.
 - **A damaged journal does not lock you out.** If the journal file cannot be
   read (a crash or a full disk part-way through a write), it is set aside next to
-  where it was, as `journal.sqlite.corrupt-…`, and a fresh one is started. The
+  where it was, inside a unique `journal.sqlite.corrupt-…` recovery directory
+  with any SQLite companion files, and a fresh one is started. If setting aside
+  the files fails, opening stops and retains the recovery evidence. The
   folder opens as usual; a message says the earlier history can no longer be
   undone and where the damaged file was kept.
 
 The journal lives with the rest of the app's data — see
 [Settings › Where things are stored](settings.md#where-things-are-stored).
+
+## Copied files and interrupted Undo
+
+Interrupted move recovery checks the complete set of recovery records against
+its original plan before restoring or cleaning up any reservation. Inconsistent
+paths, unsupported identity versions or oversized recovery sets stop Undo and
+keep the files and history for inspection. Older Unix non-link proofs and older
+Windows proofs cannot distinguish a file from a directory, so they cannot
+authorize automatic recovery. History remains readable. New proofs distinguish
+regular files, links and directories. An older explicit Unix link proof remains
+usable for a sidecar only when the required directory evidence is also typed.
+Copied-file histories with ambiguous native evidence are kept for inspection.
+
+Undo removes a copied file only when strong recorded content evidence still
+matches. Older batches without this evidence remain visible in history, but
+automatic copy removal is refused. Metadata-only history remains usable.
+
+If another program replaces a destination, Undo preserves that replacement and
+retains the batch. An interrupted copy removal may leave recovery material in a
+private `.tagrex-undo-copy-*` folder; keep it while the batch needs recovery.
+Damaged-journal recovery can likewise retain a complete snapshot group and a
+manifest in its recovery directory when moving the originals is interrupted.
 
 ## What the gate does not cover
 

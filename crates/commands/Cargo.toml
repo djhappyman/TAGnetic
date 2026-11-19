@@ -25,6 +25,9 @@ regex = "1.13.1"
 # Read-only duplicate evidence: existing workspace decoder and SHA-256, plus
 # local Chromaprint comparisons (no AcoustID lookup or external service).
 sha2 = "0.10.9"
+same-file = "1.0.6"
+# Private output artifact names use OS randomness; the workspace already locks this release.
+getrandom = "0.3"
 symphonia = { version = "0.5.5", features = ["all"] }
 rusty-chromaprint = "0.3.0"
 # Move files to the system Trash (#213). Cross-platform (Finder's trash, the
@@ -47,3 +50,7 @@ rustix = { version = "1.1.5", features = ["fs"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+# Descriptor-bound volume capability preflight; this release is already locked.
+libc = "0.2"

@@ -307,7 +307,20 @@ impl App {
         working: Option<&PlanDto>,
         cancelled: impl Fn() -> bool,
     ) -> Result<PlanDto, AppError> {
+        let _policy = self.model_policy.enter();
         let _encoding_scope = cover_encoding::Scope::new();
+        let policy_revision = tagrex_core::model::read_policy_revision();
+        let check_policy = || {
+            if policy_revision == u64::MAX
+                || tagrex_core::model::read_policy_revision() != policy_revision
+            {
+                Err(invalid(
+                    "Metadata settings changed during the recipe; preview it again.",
+                ))
+            } else {
+                Ok(())
+            }
+        };
         if paths.len() > 100_000 {
             return Err(invalid(
                 "Field batches are limited to 100000 selected files.",
@@ -337,6 +350,7 @@ impl App {
             if cancelled() {
                 return Err(tagrex_core::plan::PlanError::Cancelled.into());
             }
+            check_policy()?;
             if !seen.insert(path) {
                 continue;
             }
@@ -387,6 +401,7 @@ impl App {
                 if cancelled() {
                     return Err(tagrex_core::plan::PlanError::Cancelled.into());
                 }
+                check_policy()?;
                 match step {
                     Step::Format(field, mask) => {
                         let file = self.file_context(mask, &track);
@@ -537,6 +552,7 @@ impl App {
         if cancelled() {
             return Err(tagrex_core::plan::PlanError::Cancelled.into());
         }
+        check_policy()?;
         let mut plan = match working {
             Some(plan) => self.cleaned_up_plan(plan, changes),
             None => self.plan(
@@ -549,6 +565,7 @@ impl App {
             ),
         };
         plan.unrendered.extend(unmatched);
+        check_policy()?;
         Ok(plan)
     }
 }

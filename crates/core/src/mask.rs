@@ -218,7 +218,7 @@ impl<'a> FileContext<'a> {
 pub struct Mask {
     pattern: String,
     segments: Vec<Segment>,
-    regex: Regex,
+    regex: Option<Regex>,
     /// Two placeholders with nothing between them and no stated width to split
     /// on. Rendering them is perfectly well-defined (`%disc%%track%` -> `101`);
     /// *extracting* them is not, since nothing says where one value ends and
@@ -245,9 +245,22 @@ pub struct Mask {
 
 pub(super) const MAX_PATTERN_OUTPUT: usize = 1024 * 1024;
 
+mod render_budget;
+pub use render_budget::BoundedRenderError;
+
 impl Mask {
     /// Parse and validate a pattern string.
     pub fn parse(pattern: &str) -> Result<Self, MaskError> {
+        Self::parse_mode(pattern, false)
+    }
+
+    /// Parse the shared grammar for rendering, without compiling an extraction
+    /// regex. Extraction is explicitly unavailable on the resulting mask.
+    pub fn parse_for_render(pattern: &str) -> Result<Self, MaskError> {
+        Self::parse_mode(pattern, true)
+    }
+
+    fn parse_mode(pattern: &str, only_render: bool) -> Result<Self, MaskError> {
         if pattern.len() > 8192 {
             return Err(MaskError::BadArgument(
                 "Patterns are limited to 8192 bytes.".into(),
@@ -256,14 +269,19 @@ impl Mask {
         let segments = parse_segments(pattern)?;
         let mut previous = None;
         let adjacent_placeholders = has_ambiguous_adjacency(&segments, &mut previous);
-        let render_only = has_side(&segments)
+        let render_only = only_render
+            || has_side(&segments)
             || has_position(&segments)
             || has_file(&segments, |_| true)
             || has_call(&segments);
         let extract_only = has_skip(&segments);
         let needs_audio_props = has_file(&segments, FileValue::needs_audio_props);
         let needs_metadata = has_file(&segments, FileValue::needs_metadata);
-        let regex = build_regex(&segments)?;
+        let regex = if only_render {
+            None
+        } else {
+            Some(build_regex(&segments)?)
+        };
         Ok(Self {
             pattern: pattern.to_string(),
             segments,
@@ -332,7 +350,12 @@ impl Mask {
     /// Filename -> tags (the import direction).
     pub fn extract(&self, filename: &str) -> Result<TagMap, MaskError> {
         self.validate_extraction()?;
-        let captures = self.regex.captures(filename).ok_or(MaskError::NoMatch)?;
+        let captures = self
+            .regex
+            .as_ref()
+            .ok_or(MaskError::RenderOnly)?
+            .captures(filename)
+            .ok_or(MaskError::NoMatch)?;
 
         let mut tags = TagMap::new();
         let mut index = 0;

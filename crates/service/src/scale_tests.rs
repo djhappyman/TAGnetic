@@ -25,7 +25,7 @@ impl ScaleFixture {
         let app = App::open(&media, &root.path().join("journal.sqlite")).unwrap();
         // Establish the App's actual query generation before seeding a synthetic
         // saved-DTO cache. The empty file set is intentional in model probes.
-        app.list_tracks();
+        app.list_tracks().unwrap();
         let service =
             Service::new(Arc::new(Mutex::new(Some(app))), root.path().join("service")).unwrap();
         service.set_enabled(true).unwrap();
@@ -50,9 +50,9 @@ impl ScaleFixture {
         }
     }
 
-    fn seed(&self, count: usize) -> Arc<Vec<TrackDto>> {
+    fn seed(&self, count: usize) -> Arc<SnapshotRows> {
         let padding = "x".repeat(100);
-        let rows = Arc::new((0..count).map(|i| {
+        let rows = (0..count).map(|i| {
             serde_json::from_value(json!({
                 "path":self.media.join(format!("{padding}-{i:06}.flac")),
                 "format":"FLAC", "duration_secs":240,"has_cover":i%2==0,
@@ -61,7 +61,7 @@ impl ScaleFixture {
                     "title":format!("Track {i:06}"),"genre":"Hardcore",
                     "comment":if i==0 {"large-unrequested-comment".repeat(80_000)} else {String::new()}}
             })).unwrap()
-        }).collect::<Vec<_>>());
+        }).collect::<Vec<_>>();
         let generation = self
             .service
             .0
@@ -72,7 +72,16 @@ impl ScaleFixture {
             .unwrap()
             .query_snapshot_id()
             .unwrap();
-        self.service.0.state.lock().unwrap().snapshot_cache = Some((generation, rows.clone()));
+        // These caller-managed synthetic DTOs intentionally measure the model,
+        // not native admission or disk scanning. Build their immutable base in
+        // the measured seed phase, just as production consumes the App's base.
+        let index = Arc::new(QueryIndex::from_tracks(&rows));
+        let rows = Arc::new(SnapshotRows::all(rows));
+        self.service.0.state.lock().unwrap().snapshot_cache = Some(SavedSnapshot {
+            generation,
+            rows: rows.clone(),
+            index,
+        });
         rows
     }
 
@@ -143,7 +152,11 @@ fn hundred_thousand_rows_keep_projection_and_concurrent_clients_independent() {
         "invalid_handle"
     );
 
-    let desktop = Arc::new(QueryIndex::from_tracks(&rows));
+    let desktop = Arc::new(QueryIndex::from_rows(
+        rows.iter()
+            .map(tagrex_commands::query::QueryRow::from_track)
+            .collect(),
+    ));
     let barrier = Arc::new(Barrier::new(3));
     let agent_one = std::thread::spawn({
         let service = fixture.service.clone();
@@ -427,7 +440,11 @@ fn two_thousand_disposable_wav_files_measure_cold_and_warm_native_snapshots() {
 fn native_manifest_and_inspector_aggregate_floor_probe() {
     let fixture = ScaleFixture::new();
     let rows = fixture.seed(100_000);
-    let index = QueryIndex::from_tracks(&rows);
+    let index = QueryIndex::from_rows(
+        rows.iter()
+            .map(tagrex_commands::query::QueryRow::from_track)
+            .collect(),
+    );
     let request: QueryRequest = serde_json::from_value(json!({
         "requestId":1,
         "query":{"version":2,"text":"","root":{"kind":"group","id":"root","mode":"all","children":[]}}

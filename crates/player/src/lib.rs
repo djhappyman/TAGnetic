@@ -20,16 +20,23 @@
 //! so in the status, and retries the device on the next play.
 
 mod aiff;
+mod controlled;
+mod fixed;
 mod mailbox;
 mod mp4;
+mod router;
 pub use mailbox::PlayerError;
 pub mod tempo;
 
+use controlled::{Control, Controlled, Ticket};
 use std::collections::VecDeque;
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::mpsc::RecvTimeoutError;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::time::{Duration, Instant};
 
 use rodio::cpal::traits::HostTrait;
@@ -59,6 +66,8 @@ pub struct PlayerStatus {
     /// really is — and say so, rather than showing a position nothing is playing
     /// from. Cleared when a track starts or playback stops.
     pub seek_refused: bool,
+    /// A track-bound seek is waiting for the audio consumer to acknowledge it.
+    pub seek_pending: bool,
     /// No audio output device could be opened: a headless session, a sound
     /// server that is not running, or a device that is busy or unplugged. The
     /// player keeps running and a later play retries the device, so this can
@@ -171,7 +180,7 @@ trait Sink {
     fn play(&self);
     fn pause(&self);
     fn set_volume(&self, volume: f32);
-    fn try_seek(&self, to: Duration) -> Result<(), rodio::source::SeekError>;
+    fn request_seek(&self, to: Duration, queued: usize) -> Result<Ticket, String>;
     /// Tracks appended and not yet played out. A track that has reached its
     /// end stops counting, which is how the loop notices a track boundary.
     fn len(&self) -> usize;
@@ -180,42 +189,74 @@ trait Sink {
     }
 }
 
-impl Sink for RodioSink {
+/// Rodio handles mixing, gain and queue completion. Source-local controls own
+/// pause and seek so its blocking sink-level seek API is never called.
+struct DevicePlayer {
+    sink: RodioSink,
+    sources: Mutex<VecDeque<Control>>,
+    paused: Arc<AtomicBool>,
+    format: (rodio::ChannelCount, rodio::SampleRate),
+}
+impl Sink for DevicePlayer {
     fn append(&self, source: Decoded) {
-        RodioSink::append(self, source);
+        let source = fixed::Fixed::new(source, self.format.0, self.format.1);
+        let (source, control) = Controlled::new_fixed(source, self.paused.clone());
+        let mut sources = self.sources.lock().unwrap_or_else(|p| p.into_inner());
+        while sources.len() > self.sink.len() {
+            sources.pop_front();
+        }
+        sources.push_back(control);
+        drop(sources);
+        self.sink.append(source);
     }
     fn stop(&self) {
-        RodioSink::stop(self);
+        self.sink.stop();
     }
     fn play(&self) {
-        RodioSink::play(self);
+        self.paused.store(false, Ordering::Release);
     }
     fn pause(&self) {
-        RodioSink::pause(self);
+        self.paused.store(true, Ordering::Release);
     }
     fn set_volume(&self, volume: f32) {
-        RodioSink::set_volume(self, volume);
+        self.sink.set_volume(volume);
     }
-    fn try_seek(&self, to: Duration) -> Result<(), rodio::source::SeekError> {
-        RodioSink::try_seek(self, to)
+    fn request_seek(&self, target: Duration, queued: usize) -> Result<Ticket, String> {
+        let mut sources = self.sources.lock().unwrap_or_else(|p| p.into_inner());
+        while sources.len() > queued {
+            sources.pop_front();
+        }
+        let source = sources.front().ok_or("No track remains to seek")?;
+        Ok(source.seek(target))
     }
     fn len(&self) -> usize {
-        RodioSink::len(self)
+        self.sink.len()
     }
 }
 
 /// A real audio output device.
 struct Device {
-    output: MixerDeviceSink,
+    _output: MixerDeviceSink,
+    router: router::Handle,
 }
 
-impl Output for Device {
-    type Sink = RodioSink;
-
-    fn sink(&self, volume: f32) -> RodioSink {
-        let sink = RodioSink::connect_new(self.output.mixer());
+impl DevicePlayer {
+    fn new(router: &router::Handle, volume: f32) -> Self {
+        let (sink, output) = RodioSink::new();
+        router.replace(output);
         sink.set_volume(volume);
-        sink
+        Self {
+            sink,
+            sources: Mutex::new(VecDeque::new()),
+            paused: Arc::new(AtomicBool::new(false)),
+            format: router.format(),
+        }
+    }
+}
+impl Output for Device {
+    type Sink = DevicePlayer;
+    fn sink(&self, volume: f32) -> DevicePlayer {
+        DevicePlayer::new(&self.router, volume)
     }
 }
 
@@ -256,6 +297,7 @@ where
     let mut paused = false;
     // Whether the decoder refused the last seek on the current track (#190).
     let mut seek_refused = false;
+    let mut pending_seek: Option<PendingSeek> = None;
     // What the UI was last told. Compared before anything is built, so a tick
     // that changes nothing costs no allocation and takes no lock.
     let mut published = StatusKey::default();
@@ -265,11 +307,14 @@ where
     write_status(
         &status,
         &mut published,
-        &queue,
-        &clock,
-        paused,
-        seek_refused,
-        device.is_none(),
+        StatusKey::of(
+            &queue,
+            &clock,
+            paused,
+            seek_refused,
+            device.is_none(),
+            pending_seek.is_some(),
+        ),
     );
 
     loop {
@@ -278,7 +323,9 @@ where
         // nothing queued there is nothing to advance and nothing to report, so
         // it parks until a command arrives instead of ticking an idle player
         // five times a second.
-        let wait = if queue.is_empty() {
+        let wait = if pending_seek.is_some() {
+            Duration::from_millis(10)
+        } else if queue.is_empty() {
             IDLE_WAIT
         } else {
             PLAYING_TICK
@@ -286,6 +333,9 @@ where
         match rx.recv_timeout(wait) {
             Ok(cmd) => match cmd {
                 Cmd::Play(path) => {
+                    if let Some(pending) = pending_seek.take() {
+                        pending.ticket.cancel();
+                    }
                     // The one place a device is retried: a track the user has
                     // just asked for plays as soon as a device is there. A
                     // second failure is harmless and leaves the status honest.
@@ -344,6 +394,9 @@ where
                     }
                 }
                 Cmd::Stop => {
+                    if let Some(pending) = pending_seek.take() {
+                        pending.ticket.cancel();
+                    }
                     if let Some(old) = sink.take() {
                         old.stop();
                     }
@@ -365,50 +418,44 @@ where
                         // when the audio did (#190). A sink can also finish the
                         // track between that check and the seek, so what the
                         // sink reports afterwards decides — not the `Ok`.
-                        let target = Duration::from_secs_f64(secs.max(0.0));
+                        let target = Duration::from_secs_f64(secs.max(0.0)).min(
+                            queue.front().map_or(Duration::MAX, |track| {
+                                if track.duration.is_zero() {
+                                    Duration::MAX
+                                } else {
+                                    track.duration
+                                }
+                            }),
+                        );
+                        let previous = pending_seek.take();
+                        if let Some(previous) = &previous {
+                            previous.ticket.supersede();
+                        }
                         match seek(sink.as_ref(), target, queue.len()) {
                             SeekOutcome::Seeked => {
                                 clock.seek(target);
                                 seek_refused = false;
                             }
+                            SeekOutcome::Pending(ticket) => {
+                                pending_seek = Some(PendingSeek {
+                                    ticket,
+                                    track: queue.front().expect("nonempty seek queue").path.clone(),
+                                    started: Instant::now(),
+                                });
+                            }
                             SeekOutcome::Refused(err) => {
+                                if let Some(previous) = &previous {
+                                    previous.ticket.cancel();
+                                }
                                 eprintln!("audio: seek refused: {err}");
                                 seek_refused = true;
                             }
                             // Nothing is left to seek; the boundary below takes
                             // the player idle.
-                            SeekOutcome::PlayedOut => {}
-                            SeekOutcome::BoundaryCrossed => {
-                                // The track ended inside the seek. rodio's seek
-                                // order belongs to the sink, not to the track, so
-                                // it may have landed on the track that starts
-                                // now. Rebuild that one from its beginning, where
-                                // the clock restarts it: a seek cannot be taken
-                                // back. The gapless boundary is the only thing
-                                // lost, and the race had already broken it.
-                                queue.pop_front();
-                                if let Some(old) = sink.take() {
-                                    old.stop();
+                            SeekOutcome::PlayedOut => {
+                                if let Some(previous) = &previous {
+                                    previous.ticket.cancel();
                                 }
-                                sink = fresh_sink(device.as_ref(), volume);
-                                let remaining: Vec<Track> = queue.drain(..).collect();
-                                for track in remaining {
-                                    if let Some(sink) = sink.as_ref() {
-                                        enqueue(sink, &mut queue, (*track.path).clone());
-                                    }
-                                }
-                                if queue.is_empty() {
-                                    clock.stop();
-                                } else {
-                                    clock.start();
-                                    if paused {
-                                        clock.pause();
-                                        if let Some(sink) = sink.as_ref() {
-                                            sink.pause();
-                                        }
-                                    }
-                                }
-                                seek_refused = false;
                             }
                         }
                     }
@@ -418,12 +465,46 @@ where
             Err(RecvTimeoutError::Disconnected) => break,
         }
 
+        if let Some(pending) = pending_seek.take() {
+            let same_track = queue
+                .front()
+                .is_some_and(|track| Arc::ptr_eq(&track.path, &pending.track))
+                && sink.as_ref().is_some_and(|sink| sink.len() == queue.len());
+            if !same_track {
+                pending.ticket.cancel();
+            } else if let Some(result) = pending.ticket.poll() {
+                match result {
+                    Ok((target, acknowledged)) => {
+                        // Paused seeks stay frozen; running seeks include the
+                        // small acknowledgement-to-publication interval.
+                        clock.seek_at(target, if paused { Instant::now() } else { acknowledged });
+                        pending.ticket.accept();
+                        seek_refused = false;
+                    }
+                    Err(error) => {
+                        pending.ticket.accept();
+                        eprintln!("audio: seek refused: {error}");
+                        seek_refused = true;
+                    }
+                }
+            } else if pending.started.elapsed() >= SEEK_ACK_TIMEOUT {
+                pending.ticket.cancel();
+                eprintln!("audio: seek refused: output did not acknowledge within the deadline");
+                seek_refused = true;
+            } else {
+                pending_seek = Some(pending);
+            }
+        }
+
         // The sink drains sources as they finish. When it holds fewer than our
         // queue, a track boundary was crossed: drop the finished front and
         // restart the clock for the new current track.
         while queue.len() > sink.as_ref().map_or(0, Sink::len) && !queue.is_empty() {
             queue.pop_front();
             clock.start();
+            if paused {
+                clock.pause();
+            }
             seek_refused = false; // a new track, and a new answer on seeking
         }
         if queue.is_empty() {
@@ -435,11 +516,14 @@ where
         write_status(
             &status,
             &mut published,
-            &queue,
-            &clock,
-            paused,
-            seek_refused,
-            device.is_none(),
+            StatusKey::of(
+                &queue,
+                &clock,
+                paused,
+                seek_refused,
+                device.is_none(),
+                pending_seek.is_some(),
+            ),
         );
     }
 }
@@ -456,7 +540,13 @@ fn open_output() -> Result<Device, DeviceSinkError> {
     // The device sink lives as long as the player thread; its parting message
     // on drop is noise in a terminal-launched build.
     output.log_on_drop(false);
-    Ok(Device { output })
+    let config = output.config();
+    let (router, source) = router::Router::new(config.channel_count(), config.sample_rate());
+    output.mixer().add(source);
+    Ok(Device {
+        _output: output,
+        router,
+    })
 }
 
 fn open_device() -> Result<MixerDeviceSink, DeviceSinkError> {
@@ -508,14 +598,17 @@ fn enqueue<S: Sink>(sink: &S, queue: &mut VecDeque<Track>, path: PathBuf) -> boo
     true
 }
 
-/// What became of a seek, judged from the sink rather than from its answer.
-///
-/// rodio answers `Ok(())` both when a source sought and when there was nothing
-/// left to seek (`rodio-0.23.0/src/player.rs`: "No sound is playing, seek will
-/// not be performed"), and the last sound can finish between the caller's check
-/// and the call. The sink's queue length afterwards is the evidence: it only
-/// shrinks when a track plays out.
+/// A seek is bound to the tracked source. A boundary cancels its effect on
+/// the visible clock; it never requires rebuilding or seeking the next track.
+struct PendingSeek {
+    ticket: Ticket,
+    track: Arc<PathBuf>,
+    started: Instant,
+}
+const SEEK_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+
 enum SeekOutcome {
+    Pending(Ticket),
     /// A source sought and the sink still holds it: the clock may follow.
     Seeked,
     /// The decoder refused; the audio did not move.
@@ -523,10 +616,6 @@ enum SeekOutcome {
     /// The last track played out during the call; there is nothing to follow,
     /// and the boundary check takes the player idle.
     PlayedOut,
-    /// The current track played out inside the call while a later one remains.
-    /// rodio's seek order belongs to the sink, not to a track, so that seek may
-    /// have been applied to the track that starts now; the caller rebuilds it.
-    BoundaryCrossed,
 }
 
 fn seek<S: Sink>(sink: Option<&S>, target: Duration, queued: usize) -> SeekOutcome {
@@ -538,22 +627,30 @@ fn seek<S: Sink>(sink: Option<&S>, target: Duration, queued: usize) -> SeekOutco
     // Compare with the player's tracked queue, not an already advanced sink.
     // Otherwise a boundary just before this call can hide the same race.
     if sink.len() < queued {
-        return SeekOutcome::BoundaryCrossed;
+        return SeekOutcome::PlayedOut;
     }
-    let result = sink.try_seek(target);
-    // A track ended while the seek was in flight. That is checked before the
-    // result: rodio may answer `Ok` for a seek that landed on the *next*
-    // track (its order is shared by the sink), and an `Err` does not undo the
-    // boundary either.
+    let result = sink.request_seek(target, queued);
+    // Even an acknowledged source-local request cannot move the visible clock
+    // after its source ended. The next track remains primed and untouched.
     if sink.is_empty() {
         return SeekOutcome::PlayedOut;
     }
     if sink.len() < queued {
-        return SeekOutcome::BoundaryCrossed;
+        return SeekOutcome::PlayedOut;
     }
     match result {
-        Ok(()) => SeekOutcome::Seeked,
-        Err(err) => SeekOutcome::Refused(err.to_string()),
+        Ok(ticket) => match ticket.poll() {
+            Some(Ok(_)) => {
+                ticket.accept();
+                SeekOutcome::Seeked
+            }
+            Some(Err(error)) => {
+                ticket.accept();
+                SeekOutcome::Refused(error)
+            }
+            None => SeekOutcome::Pending(ticket),
+        },
+        Err(err) => SeekOutcome::Refused(err),
     }
 }
 
@@ -686,16 +783,7 @@ const PLAYING_TICK: Duration = Duration::from_millis(200);
 /// command wakes it, and the long timeout is only a safety net.
 const IDLE_WAIT: Duration = Duration::from_secs(60);
 
-fn write_status(
-    status: &Arc<Mutex<PlayerStatus>>,
-    published: &mut StatusKey,
-    queue: &VecDeque<Track>,
-    clock: &PlayClock,
-    paused: bool,
-    seek_refused: bool,
-    output_unavailable: bool,
-) {
-    let next = StatusKey::of(queue, clock, paused, seek_refused, output_unavailable);
+fn write_status(status: &Arc<Mutex<PlayerStatus>>, published: &mut StatusKey, next: StatusKey) {
     // The common case while paused or idle: nothing the UI could see changed,
     // so no path string is built and the mutex the UI polls is not touched.
     if next == *published {
@@ -720,6 +808,7 @@ struct StatusKey {
     duration: Duration,
     wants_next: bool,
     seek_refused: bool,
+    seek_pending: bool,
     output_unavailable: bool,
 }
 
@@ -730,6 +819,7 @@ impl StatusKey {
         paused: bool,
         seek_refused: bool,
         output_unavailable: bool,
+        seek_pending: bool,
     ) -> Self {
         let Some(current) = queue.front() else {
             return Self {
@@ -756,6 +846,7 @@ impl StatusKey {
             duration,
             wants_next: queue.len() == 1 && near_end,
             seek_refused,
+            seek_pending,
             output_unavailable,
         }
     }
@@ -773,6 +864,7 @@ impl StatusKey {
             duration_secs: self.duration.as_secs_f64(),
             wants_next: self.wants_next,
             seek_refused: self.seek_refused,
+            seek_pending: self.seek_pending,
             output_unavailable: self.output_unavailable,
         }
     }
@@ -1058,20 +1150,23 @@ mod test_support {
     /// long a blocked output stays blocked.
     pub(super) struct SeekGate {
         open: Mutex<bool>,
-        released: std::sync::Condvar,
+        ticket: Mutex<Option<Ticket>>,
     }
 
     impl SeekGate {
-        fn wait(&self) {
-            let mut open = self.open.lock().unwrap();
-            while !*open {
-                open = self.released.wait(open).unwrap();
+        fn submit(&self, ticket: Ticket) {
+            let open = self.open.lock().unwrap();
+            if *open {
+                ticket.finish(Ok(()));
+            } else {
+                *self.ticket.lock().unwrap() = Some(ticket);
             }
         }
-
         pub(super) fn release(&self) {
             *self.open.lock().unwrap() = true;
-            self.released.notify_all();
+            if let Some(ticket) = self.ticket.lock().unwrap().take() {
+                ticket.finish(Ok(()));
+            }
         }
     }
 
@@ -1108,7 +1203,7 @@ mod test_support {
         pub(super) fn hold_seeks(&self) -> Arc<SeekGate> {
             let gate = Arc::new(SeekGate {
                 open: Mutex::new(false),
-                released: std::sync::Condvar::new(),
+                ticket: Mutex::new(None),
             });
             self.0.lock().unwrap().seek_gate = Some(gate.clone());
             gate
@@ -1192,7 +1287,7 @@ mod test_support {
         fn set_volume(&self, volume: f32) {
             self.record(Call::Volume(volume));
         }
-        fn try_seek(&self, to: Duration) -> Result<(), rodio::source::SeekError> {
+        fn request_seek(&self, to: Duration, _queued: usize) -> Result<Ticket, String> {
             let (refuse, drain, gate) = {
                 let mut audio = self.audio.lock().unwrap();
                 audio.calls.push(Call::Seek(to));
@@ -1204,21 +1299,22 @@ mod test_support {
             };
             // A blocked device is a blocked seek: the audio thread is inside
             // this call, exactly where rodio waits for its feedback.
+            let ticket = Ticket::new(to);
             if let Some(gate) = gate {
-                gate.wait();
+                gate.submit(ticket.clone());
+                return Ok(ticket);
             }
             if drain > 0 {
                 // The track reached its end while the seek was in flight.
                 self.queue.fetch_sub(drain, Ordering::SeqCst);
                 self.audio.lock().unwrap().drain_on_seek = 0;
             }
-            if refuse {
-                Err(rodio::source::SeekError::NotSupported {
-                    underlying_source: "the test decoder",
-                })
+            ticket.finish(if refuse {
+                Err("the test decoder cannot seek".into())
             } else {
                 Ok(())
-            }
+            });
+            Ok(ticket)
         }
         fn len(&self) -> usize {
             self.queue.load(Ordering::SeqCst)
@@ -1528,7 +1624,7 @@ mod with_an_output_device {
         // the old one. A seek must not be sent to the remaining next source.
         assert!(matches!(
             seek(Some(&sink), Duration::from_secs(3), 2),
-            SeekOutcome::BoundaryCrossed
+            SeekOutcome::PlayedOut
         ));
         assert!(!output
             .calls()
@@ -1789,12 +1885,34 @@ mod with_an_output_device {
         clean_up(&track);
     }
 
-    // The damaging half of the same race: a later track is already in the sink,
-    // and rodio's seek order belongs to the sink rather than to the track, so the
-    // seek can land on the track that is starting. Rebuilding that source is the
-    // only way to make the clock's restart at zero match the audio.
     #[test]
-    fn a_seek_across_a_boundary_restarts_the_next_track_from_its_beginning() {
+    fn a_boundary_while_paused_keeps_the_next_tracks_clock_frozen() {
+        let first = playable_file("paused-boundary-first", 4);
+        let second = playable_file("paused-boundary-second", 4);
+        let player = TestPlayer::with_a_device();
+        player.send(Cmd::Play(first.clone()));
+        player.send(Cmd::SetNext(second.clone()));
+        player.send(Cmd::Pause);
+        player.wait_until("both sources paused", |p| {
+            p.status().is_paused && p.output.queued() == 2
+        });
+        player.output.finish_front();
+        player.wait_until("the next source after a paused boundary", |p| {
+            playing(p, &second)
+        });
+        let before = player.status().position_secs;
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(player.status().is_paused);
+        assert_eq!(player.status().position_secs, before);
+        player.finish("paused at a boundary");
+        clean_up(&first);
+        clean_up(&second);
+    }
+
+    // A source-local seek cannot affect the next track, even if the boundary
+    // occurs during submission. Keep the primed source rather than rebuilding it.
+    #[test]
+    fn a_seek_across_a_boundary_leaves_the_primed_next_track_untouched() {
         let first = playable_file("seek-race-first", 4);
         let second = playable_file("seek-race-second", 4);
         let player = TestPlayer::with_a_device();
@@ -1816,19 +1934,19 @@ mod with_an_output_device {
         player.send(Cmd::Seek(3.0));
         player.wait_until("the next track", |p| playing(p, &second));
 
-        // The starting track was taken off the sink the seek touched and
-        // appended again, so it starts at zero as the clock says it does.
+        // No extra source or sink was made. The gapless primed next track is
+        // retained and starts from its own position, with no old seek applied.
         assert_eq!(
             appended(&player),
-            appends + 1,
-            "the next track was not rebuilt after the seek crossed the boundary"
+            appends,
+            "a source-local seek unnecessarily rebuilt the primed next track"
         );
-        assert_eq!(sinks(&player), sinks_before + 1);
+        assert_eq!(sinks(&player), sinks_before);
         assert_eq!(player.output.queued(), 1);
         let status = player.status();
         assert!(
             status.position_secs < 1.0,
-            "the rebuilt track started at {}",
+            "the next track started at {}",
             status.position_secs
         );
         assert!(!status.seek_refused);
@@ -1838,55 +1956,47 @@ mod with_an_output_device {
         clean_up(&second);
     }
 
-    // Source-confirmed dependency limitation, pinned so it cannot be mistaken
-    // for recovery: rodio's `Player::try_seek` waits on its feedback channel
-    // with no timeout (`rodio-0.23.0/src/player.rs`), and that feedback comes
-    // from the audio thread pulling samples. A device that stops pulling never
-    // sends it, so a seek there never returns — and neither does Stop behind it.
-    // The fake sink parks the same way, which makes the window deterministic.
+    // A device that never pulls must not stall the transport actor. Releasing
+    // an old acknowledgement after Stop/Play cannot seek the replacement track.
     #[test]
-    fn a_seek_the_output_never_answers_holds_up_every_later_command() {
+    fn an_unanswered_seek_does_not_hold_up_stop_or_replay() {
         let track = playable_file("blocked-seek", 4);
         let player = TestPlayer::with_a_device();
         player.send(Cmd::Play(track.clone()));
         player.wait_until("playback to start", |p| playing(p, &track));
-
-        let stops = |p: &TestPlayer| -> usize {
-            p.output
-                .calls()
-                .into_iter()
-                .filter(|call| *call == Call::Stop)
-                .count()
-        };
-        let stops_before = stops(&player);
         let gate = player.output.hold_seeks();
         player.send(Cmd::Seek(2.0));
-        player.wait_until("the seek to reach the output", |p| {
-            p.output
-                .calls()
-                .contains(&Call::Seek(Duration::from_secs(2)))
-        });
-
+        player.wait_until("the seek to become pending", |p| p.status().seek_pending);
+        let started = Instant::now();
         player.send(Cmd::Stop);
-        std::thread::sleep(Duration::from_millis(300));
-        assert!(
-            playing(&player, &track),
-            "the player moved on while its output was inside a seek"
-        );
-        assert_eq!(
-            stops(&player),
-            stops_before,
-            "a command reached the output while the seek was still blocked"
-        );
-
-        // Releasing the sink is what lets the accepted controls run, in order.
-        gate.release();
-        player.wait_until("the stop after the output answered", |p| {
+        player.wait_until("Stop despite unanswered seek", |p| {
             p.status().path.is_none()
         });
-        assert!(stops(&player) > stops_before);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        player.send(Cmd::Play(track.clone()));
+        player.wait_until("replay despite unanswered seek", |p| playing(p, &track));
+        gate.release();
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(player.status().position_secs < 1.0);
+        assert!(!player.status().seek_pending);
+        player.finish("after a nonblocking seek");
+        clean_up(&track);
+    }
 
-        player.finish("after a blocked seek");
+    #[test]
+    fn an_unanswered_seek_times_out_without_claiming_success() {
+        let track = playable_file("seek-deadline", 4);
+        let player = TestPlayer::with_a_device();
+        player.send(Cmd::Play(track.clone()));
+        player.wait_until("playback to start", |p| playing(p, &track));
+        let gate = player.output.hold_seeks();
+        player.send(Cmd::Seek(3.5));
+        player.wait_until("the seek deadline", |p| p.status().seek_refused);
+        assert!(!player.status().seek_pending);
+        gate.release();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(player.status().position_secs < 3.5);
+        player.finish("after the seek deadline");
         clean_up(&track);
     }
 
@@ -2092,6 +2202,441 @@ mod with_an_output_device {
         player.wait_until("an idle player to answer", |p| playing(p, &track));
 
         player.finish("after an idle wait");
+        clean_up(&track);
+    }
+}
+
+#[cfg(test)]
+mod real_sink_without_hardware {
+    use super::*;
+    use test_support::{clean_up, playable_file, wait_until};
+    struct OutputHarness(router::Handle);
+    impl Output for OutputHarness {
+        type Sink = DevicePlayer;
+        fn sink(&self, volume: f32) -> DevicePlayer {
+            DevicePlayer::new(&self.0, volume)
+        }
+    }
+    fn harness() -> (
+        mailbox::Sender,
+        Arc<Mutex<PlayerStatus>>,
+        router::Router,
+        std::thread::JoinHandle<()>,
+    ) {
+        let (handle, router) = router::Router::new(
+            rodio::ChannelCount::new(2).unwrap(),
+            rodio::SampleRate::new(44_100).unwrap(),
+        );
+        let (tx, rx) = mailbox::channel();
+        let status = Arc::new(Mutex::new(PlayerStatus::default()));
+        let shared = status.clone();
+        let actor = std::thread::spawn(move || {
+            audio_thread(rx, shared, || Ok(OutputHarness(handle.clone())))
+        });
+        (tx, status, router, actor)
+    }
+    #[test]
+    fn real_rodio_queue_without_device_consumption_survives_seek_volume_bursts_stop_and_replay() {
+        let track = playable_file("real-sink-stall", 4);
+        let (tx, status, _router, actor) = harness();
+        tx.send(Cmd::Play(track.clone())).unwrap();
+        wait_until("real sink to queue the track", || {
+            status.lock().unwrap().path.is_some()
+        });
+        for i in 0..100_000 {
+            tx.send(Cmd::Seek((i % 3) as f64)).unwrap();
+            tx.send(Cmd::SetVolume((i % 100) as f32 / 100.0)).unwrap();
+        }
+        wait_until("pending source-bound acknowledgement", || {
+            status.lock().unwrap().seek_pending
+        });
+        let stopped = Instant::now();
+        tx.send(Cmd::Stop).unwrap();
+        wait_until("Stop with no device samples consumed", || {
+            status.lock().unwrap().path.is_none()
+        });
+        assert!(stopped.elapsed() < Duration::from_secs(1));
+        tx.send(Cmd::Play(track.clone())).unwrap();
+        wait_until("replay with no old seek inherited", || {
+            status.lock().unwrap().path.is_some()
+        });
+        assert!(!status.lock().unwrap().seek_pending);
+        drop(tx);
+        actor.join().unwrap();
+        clean_up(&track);
+    }
+    #[test]
+    fn real_rodio_queue_acknowledges_seek_while_paused_after_output_consumption_resumes() {
+        let track = playable_file("real-sink-paused-seek", 4);
+        let (tx, status, mut router, actor) = harness();
+        tx.send(Cmd::Play(track.clone())).unwrap();
+        tx.send(Cmd::Pause).unwrap();
+        wait_until("paused playback", || status.lock().unwrap().is_paused);
+        tx.send(Cmd::Seek(2.0)).unwrap();
+        wait_until("pending seek without device consumption", || {
+            status.lock().unwrap().seek_pending
+        });
+        assert!(status.lock().unwrap().position_secs < 0.01);
+        // Actual Rodio queue, format conversion and actual AIFF decoder. The
+        // consumer was absent; it resumes now while playback remains paused.
+        for _ in 0..8_192 {
+            router.next();
+        }
+        wait_until("actual decoder acknowledgement while paused", || {
+            !status.lock().unwrap().seek_pending
+        });
+        {
+            let value = status.lock().unwrap();
+            assert!(value.is_paused);
+            assert_eq!(value.position_secs, 2.0);
+            assert!(!value.seek_refused);
+        }
+        tx.send(Cmd::Stop).unwrap();
+        wait_until("Stop after a paused seek", || {
+            status.lock().unwrap().path.is_none()
+        });
+        drop(tx);
+        actor.join().unwrap();
+        clean_up(&track);
+    }
+    #[test]
+    #[ignore = "manual bounded decoding/control throughput measurement"]
+    fn decoded_source_control_throughput_probe() {
+        fn consume(source: impl Iterator<Item = f32>) -> (u64, usize) {
+            let mut hash = 0xcbf29ce484222325u64;
+            let mut count = 0;
+            for value in source {
+                hash = (hash ^ u64::from(std::hint::black_box(value).to_bits()))
+                    .wrapping_mul(0x100000001b3);
+                count += 1;
+            }
+            (hash, count)
+        }
+        let track = playable_file("control-throughput", 12);
+        let mut raw = Vec::new();
+        let mut controlled = Vec::new();
+        for _ in 0..7 {
+            let start = Instant::now();
+            let expected = consume(rodio::source::UniformSourceIterator::new(
+                open_decoder(&track).unwrap(),
+                rodio::ChannelCount::new(2).unwrap(),
+                rodio::SampleRate::new(48_000).unwrap(),
+            ));
+            raw.push(start.elapsed().as_secs_f64() * 1_000.0);
+            let start = Instant::now();
+            let fixed = fixed::Fixed::new(
+                open_decoder(&track).unwrap(),
+                rodio::ChannelCount::new(2).unwrap(),
+                rodio::SampleRate::new(48_000).unwrap(),
+            );
+            let (source, _control) = Controlled::new_fixed(fixed, Arc::new(AtomicBool::new(false)));
+            let actual = consume(source);
+            controlled.push(start.elapsed().as_secs_f64() * 1_000.0);
+            assert_eq!(actual, expected, "source controls changed decoded samples");
+            assert!(actual.1 >= 44_100 * 12);
+        }
+        raw.sort_by(f64::total_cmp);
+        controlled.sort_by(f64::total_cmp);
+        println!("12s synthetic AIFF, seven warm samples, decode + 48kHz stereo conversion + sample checksum; real converter median {:.3}ms max {:.3}ms; controlled median {:.3}ms max {:.3}ms", raw[3], raw[6], controlled[3], controlled[6]);
+        clean_up(&track);
+    }
+    #[test]
+    #[ignore = "independent generated MP3/FLAC/M4A/AIFF decoder seek probe requires ffmpeg"]
+    fn actual_decoders_acknowledge_seeks_after_converter_metadata_and_midstream_reads() {
+        use rodio::Source;
+        let root =
+            std::env::temp_dir().join(format!("tagrex-midstream-seek-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        for (extension, codec) in [
+            ("mp3", "libmp3lame"),
+            ("flac", "flac"),
+            ("m4a", "aac"),
+            ("aiff", "pcm_s16be"),
+        ] {
+            let path = root.join(format!("track.{extension}"));
+            let result = std::process::Command::new("ffmpeg")
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:sample_rate=44100:duration=4",
+                    "-c:a",
+                    codec,
+                ])
+                .arg(&path)
+                .status()
+                .unwrap();
+            assert!(result.success());
+            let pause = Arc::new(AtomicBool::new(false));
+            let decoded = open_decoder(&path).unwrap();
+            let first_span = decoded.current_span_len();
+            let fixed = fixed::Fixed::new(
+                decoded,
+                rodio::ChannelCount::new(2).unwrap(),
+                rodio::SampleRate::new(48_000).unwrap(),
+            );
+            let (source, control) = Controlled::new_fixed(fixed, pause.clone());
+            let mut converted = rodio::source::UniformSourceIterator::new(
+                source,
+                rodio::ChannelCount::new(2).unwrap(),
+                rodio::SampleRate::new(48_000).unwrap(),
+            );
+            for _ in 0..138 {
+                assert!(converted.next().is_some());
+            }
+            let ticket = control.seek(Duration::from_secs(2));
+            let mut consumed = 0;
+            while ticket.poll().is_none() && consumed < 96_000 {
+                assert!(
+                    converted.next().is_some(),
+                    "{extension} ended before seek acknowledgement"
+                );
+                consumed += 1;
+            }
+            assert!(
+                matches!(ticket.poll(), Some(Ok(_))),
+                "{extension}: span {first_span:?}, consumed {consumed}, result {:?}",
+                ticket.poll()
+            );
+            pause.store(true, Ordering::Release);
+            let paused_ticket = control.seek(Duration::from_secs(1));
+            let mut paused_consumed = 0;
+            while paused_ticket.poll().is_none() && paused_consumed < 96_000 {
+                assert!(converted.next().is_some());
+                paused_consumed += 1;
+            }
+            assert!(
+                matches!(paused_ticket.poll(), Some(Ok(_))),
+                "{extension} paused seek failed: {:?}",
+                paused_ticket.poll()
+            );
+            println!("{extension}: initial native span {first_span:?}; midstream ack after {consumed} output samples; paused ack after {paused_consumed}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod actor_seek_ownership {
+    use super::*;
+    use std::sync::{atomic::AtomicUsize, mpsc};
+    use test_support::{clean_up, playable_file, wait_until};
+    struct Blocking {
+        position: usize,
+        gate: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
+    }
+    impl Iterator for Blocking {
+        type Item = f32;
+        fn next(&mut self) -> Option<f32> {
+            let sample = self.position as f32;
+            self.position += 1;
+            Some(sample)
+        }
+    }
+    impl rodio::Source for Blocking {
+        fn current_span_len(&self) -> Option<usize> {
+            None
+        }
+        fn channels(&self) -> rodio::ChannelCount {
+            rodio::ChannelCount::new(2).unwrap()
+        }
+        fn sample_rate(&self) -> rodio::SampleRate {
+            rodio::SampleRate::new(8000).unwrap()
+        }
+        fn total_duration(&self) -> Option<Duration> {
+            None
+        }
+        fn try_seek(&mut self, target: Duration) -> Result<(), rodio::source::SeekError> {
+            if let Some((entered, release)) = self.gate.take() {
+                entered.send(()).unwrap();
+                release.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+            self.position = target.as_secs() as usize * 16_000;
+            Ok(())
+        }
+    }
+    type Source = Controlled<fixed::Fixed<Blocking>>;
+    struct Shared {
+        gate: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+        source: Mutex<Option<Source>>,
+        control: Mutex<Option<Control>>,
+        requested: Mutex<Vec<Duration>>,
+        queued: AtomicUsize,
+        generations: AtomicUsize,
+        paused: Arc<AtomicBool>,
+    }
+    #[derive(Clone)]
+    struct Harness(Arc<Shared>);
+    impl Output for Harness {
+        type Sink = Harness;
+        fn sink(&self, _: f32) -> Harness {
+            self.clone()
+        }
+    }
+    impl Sink for Harness {
+        fn append(&self, source: Decoded) {
+            drop(source);
+            let fixed = fixed::Fixed::new(
+                Blocking {
+                    position: 0,
+                    gate: self.0.gate.lock().unwrap().take(),
+                },
+                rodio::ChannelCount::new(2).unwrap(),
+                rodio::SampleRate::new(8000).unwrap(),
+            );
+            let (source, control) = Controlled::new_fixed(fixed, self.0.paused.clone());
+            *self.0.source.lock().unwrap() = Some(source);
+            *self.0.control.lock().unwrap() = Some(control);
+            self.0.generations.fetch_add(1, Ordering::SeqCst);
+            self.0.queued.store(1, Ordering::SeqCst);
+        }
+        fn stop(&self) {
+            self.0.queued.store(0, Ordering::SeqCst);
+        }
+        fn play(&self) {
+            self.0.paused.store(false, Ordering::SeqCst);
+        }
+        fn pause(&self) {
+            self.0.paused.store(true, Ordering::SeqCst);
+        }
+        fn set_volume(&self, _: f32) {}
+        fn request_seek(&self, target: Duration, _: usize) -> Result<Ticket, String> {
+            let ticket = self
+                .0
+                .control
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .seek(target);
+            self.0.requested.lock().unwrap().push(target);
+            Ok(ticket)
+        }
+        fn len(&self) -> usize {
+            self.0.queued.load(Ordering::SeqCst)
+        }
+    }
+    struct Fixture {
+        output: Harness,
+        tx: mailbox::Sender,
+        status: Arc<Mutex<PlayerStatus>>,
+        actor: std::thread::JoinHandle<()>,
+        entered: mpsc::Receiver<()>,
+        release: mpsc::Sender<()>,
+        track: PathBuf,
+    }
+    fn fixture(name: &str) -> Fixture {
+        let (entered_tx, entered) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let output = Harness(Arc::new(Shared {
+            gate: Mutex::new(Some((entered_tx, release_rx))),
+            source: Mutex::new(None),
+            control: Mutex::new(None),
+            requested: Mutex::new(Vec::new()),
+            queued: AtomicUsize::new(0),
+            generations: AtomicUsize::new(0),
+            paused: Arc::new(AtomicBool::new(false)),
+        }));
+        let (tx, rx) = mailbox::channel();
+        let status = Arc::new(Mutex::new(PlayerStatus::default()));
+        let out = output.clone();
+        let state = status.clone();
+        let actor = std::thread::spawn(move || audio_thread(rx, state, || Ok(out.clone())));
+        let track = playable_file(name, 10);
+        tx.send(Cmd::Play(track.clone())).unwrap();
+        wait_until("actor to install the controlled source", || {
+            status.lock().unwrap().path.is_some()
+        });
+        Fixture {
+            output,
+            tx,
+            status,
+            actor,
+            entered,
+            release,
+            track,
+        }
+    }
+    #[test]
+    fn actor_latest_timeout_cancels_a_superseded_decoder_call_without_a_late_clock_or_sample() {
+        let Fixture {
+            output,
+            tx,
+            status,
+            actor,
+            entered,
+            release,
+            track,
+        } = fixture("actor-owned-seek-timeout");
+        tx.send(Cmd::Seek(3.0)).unwrap();
+        wait_until("first seek submitted", || {
+            output.0.requested.lock().unwrap().len() == 1
+        });
+        let mut source = output.0.source.lock().unwrap().take().unwrap();
+        let consumer = std::thread::spawn(move || source.next());
+        entered.recv_timeout(Duration::from_secs(1)).unwrap();
+        tx.send(Cmd::Seek(1.0)).unwrap();
+        wait_until("replacement seek submitted", || {
+            output.0.requested.lock().unwrap().len() == 2
+        });
+        wait_until("latest actor deadline", || {
+            let value = status.lock().unwrap();
+            value.seek_refused && !value.seek_pending
+        });
+        assert!(status.lock().unwrap().position_secs < 2.8);
+        release.send(()).unwrap();
+        assert_eq!(consumer.join().unwrap(), None);
+        output.0.queued.store(0, Ordering::SeqCst);
+        wait_until("ended source to leave the actor idle", || {
+            status.lock().unwrap().path.is_none()
+        });
+        assert_eq!(status.lock().unwrap().position_secs, 0.0);
+        drop(tx);
+        actor.join().unwrap();
+        clean_up(&track);
+    }
+    #[test]
+    fn actor_stop_and_replay_keep_new_source_independent_of_a_superseded_blocked_seek() {
+        let Fixture {
+            output,
+            tx,
+            status,
+            actor,
+            entered,
+            release,
+            track,
+        } = fixture("actor-owned-seek-replay");
+        tx.send(Cmd::Seek(3.0)).unwrap();
+        wait_until("first seek submitted", || {
+            output.0.requested.lock().unwrap().len() == 1
+        });
+        let mut old = output.0.source.lock().unwrap().take().unwrap();
+        let consumer = std::thread::spawn(move || old.next());
+        entered.recv_timeout(Duration::from_secs(1)).unwrap();
+        tx.send(Cmd::Seek(1.0)).unwrap();
+        wait_until("replacement seek submitted", || {
+            output.0.requested.lock().unwrap().len() == 2
+        });
+        tx.send(Cmd::Stop).unwrap();
+        wait_until("Stop with blocked old source", || {
+            status.lock().unwrap().path.is_none()
+        });
+        tx.send(Cmd::Play(track.clone())).unwrap();
+        wait_until("replacement source installed", || {
+            output.0.generations.load(Ordering::SeqCst) == 2
+        });
+        let mut fresh = output.0.source.lock().unwrap().take().unwrap();
+        assert_eq!(fresh.next(), Some(0.0));
+        release.send(()).unwrap();
+        assert_eq!(consumer.join().unwrap(), None);
+        assert_eq!(fresh.next(), Some(1.0));
+        assert!(!status.lock().unwrap().seek_pending);
+        drop(tx);
+        actor.join().unwrap();
         clean_up(&track);
     }
 }
