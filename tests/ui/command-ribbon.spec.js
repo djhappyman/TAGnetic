@@ -461,16 +461,15 @@ test('Disc Write and Undo leave track numbering untouched',async({page})=>{
 test('shared toggles visibly move and recolour when checked by pointer and keyboard',async({page})=>{
   await page.locator('#ribbon-autonumber').click();
   const control=page.locator('#autonum-total-control');
-  const thumb=control.locator('[data-slot=switch-thumb]');
-  const off=await control.evaluate(node=>({background:getComputedStyle(node).backgroundColor,x:node.querySelector('[data-slot=switch-thumb]').getBoundingClientRect().x}));
+  const off=await control.evaluate(node=>({background:getComputedStyle(node).backgroundColor,x:node.querySelector('[data-slot=switch-thumb]').getBoundingClientRect().x-node.getBoundingClientRect().x}));
   await control.click();await expect(control).toHaveAttribute('aria-checked','true');
   await expect(page.locator('#autonum-total')).toBeChecked();
   const accent=await page.evaluate(()=>{const sample=document.createElement('span');sample.style.color='var(--accent)';document.body.append(sample);const color=getComputedStyle(sample).color;sample.remove();return color;});
   await expect.poll(()=>control.evaluate(node=>getComputedStyle(node).backgroundColor)).toBe(accent);
-  await expect.poll(()=>thumb.evaluate(node=>node.getBoundingClientRect().x)).toBeGreaterThan(off.x+10);
+  await expect.poll(()=>control.evaluate(node=>node.querySelector('[data-slot=switch-thumb]').getBoundingClientRect().x-node.getBoundingClientRect().x)).toBeGreaterThan(off.x+10);
   await control.focus();await page.keyboard.press('Space');await expect(control).toHaveAttribute('aria-checked','false');
   await expect.poll(()=>control.evaluate(node=>getComputedStyle(node).backgroundColor)).toBe(off.background);
-  await expect.poll(()=>thumb.evaluate(node=>node.getBoundingClientRect().x)).toBeCloseTo(off.x,0);
+  await expect.poll(()=>control.evaluate(node=>node.querySelector('[data-slot=switch-thumb]').getBoundingClientRect().x-node.getBoundingClientRect().x)).toBeCloseTo(off.x,0);
 });
 
 test('Vinyl converts side positions into a paired disc/track stage and leaves numeric tracks alone',async({page})=>{
