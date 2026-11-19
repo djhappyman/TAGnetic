@@ -473,6 +473,13 @@ fn undo_denied_before_admission_keeps_applied_history_retryable() {
     );
     let message = error.to_string();
     assert!(message.contains("native I/O admission"), "{message}");
+    assert!(message.contains("reason=stalled"), "{message}");
+    assert!(message.contains("rank=Some(0)"), "{message}");
+    assert!(message.contains("active=2"), "{message}");
+    assert!(
+        message.contains("stage=Checkpoint(Prepared, false)"),
+        "blocked checkpoint holders must be identified: {message}"
+    );
     assert!(!message.contains("Undo rollback material missing"));
     assert!(
         journal.begins.is_empty(),

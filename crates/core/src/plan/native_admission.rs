@@ -23,6 +23,36 @@ pub(super) enum Refusal {
     Resource(AdmissionError),
 }
 
+#[derive(Debug)]
+pub(super) struct Failure {
+    pub(super) cause: Refusal,
+    pub(super) diagnostic: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Stage {
+    Work(&'static str),
+    Media(crate::media_mutation::Event),
+    Native(crate::model::native_patch::Event),
+    Checkpoint(crate::media_mutation::Phase, bool),
+}
+
+struct Holder {
+    slot: usize,
+    thread: std::thread::ThreadId,
+    started: Instant,
+    stage_started: Instant,
+    stage: Stage,
+}
+
+struct RefusalContext {
+    reason: &'static str,
+    rank: Option<usize>,
+    queued: usize,
+    active: usize,
+    rank_idle: Option<Duration>,
+}
+
 struct Waiter {
     ticket: u64,
     advanced: Instant,
@@ -32,8 +62,71 @@ struct State {
     active: usize,
     next: u64,
     waiting: VecDeque<Waiter>,
+    holders: Vec<Holder>,
 }
 impl State {
+    fn context(&self, reason: &'static str, ticket: Option<u64>, now: Instant) -> RefusalContext {
+        let rank = ticket.and_then(|ticket| self.waiting.iter().position(|w| w.ticket == ticket));
+        RefusalContext {
+            reason,
+            rank,
+            queued: self.waiting.len(),
+            active: self.active,
+            rank_idle: rank.map(|rank| now.saturating_duration_since(self.waiting[rank].advanced)),
+        }
+    }
+    fn failure(&self, cause: Refusal, context: RefusalContext, now: Instant) -> Failure {
+        use std::fmt::Write;
+        let mut diagnostic = format!(
+            "reason={}; rank={:?}; queued={}; active={}; rank_idle_us={:?}; holders=[",
+            context.reason,
+            context.rank,
+            context.queued,
+            context.active,
+            context.rank_idle.map(|age| age.as_micros()),
+        );
+        for (index, holder) in self.holders.iter().enumerate() {
+            if index != 0 {
+                diagnostic.push_str(", ");
+            }
+            let _ = write!(
+                diagnostic,
+                "slot={}, age_us={}, stage_age_us={}, stage=",
+                holder.slot,
+                now.saturating_duration_since(holder.started).as_micros(),
+                now.saturating_duration_since(holder.stage_started)
+                    .as_micros(),
+            );
+            // Read the enum fields explicitly, retaining bounded source-defined
+            // labels and no media paths or contents in these diagnostics.
+            let _ = match holder.stage {
+                Stage::Work(name) => write!(diagnostic, "Work({name})"),
+                Stage::Media(event) => write!(diagnostic, "Media({event:?})"),
+                Stage::Native(event) => write!(diagnostic, "Native({event:?})"),
+                Stage::Checkpoint(phase, done) => {
+                    write!(diagnostic, "Checkpoint({phase:?}, {done})")
+                }
+            };
+        }
+        diagnostic.push(']');
+        Failure { cause, diagnostic }
+    }
+    fn holder(&mut self, now: Instant) -> usize {
+        // Active slots are reused only after their permit is dropped. Queue
+        // ticket resets therefore cannot confuse diagnostic ownership.
+        let mut slot = 0;
+        while self.holders.iter().any(|holder| holder.slot == slot) {
+            slot += 1;
+        }
+        self.holders.push(Holder {
+            slot,
+            thread: std::thread::current().id(),
+            started: now,
+            stage_started: now,
+            stage: Stage::Work("admitted"),
+        });
+        slot
+    }
     fn enqueue(&mut self, maximum: usize, now: Instant) -> Result<u64, Refusal> {
         if self.waiting.len() >= maximum {
             return Err(Refusal::Resource(AdmissionError::Busy));
@@ -100,6 +193,7 @@ impl Gate {
                 active: 0,
                 next: 0,
                 waiting: VecDeque::new(),
+                holders: Vec::new(),
             }),
             changed: Condvar::new(),
         }
@@ -109,30 +203,54 @@ impl Gate {
         capacity: usize,
         maximum: usize,
         cancel: &AtomicBool,
-    ) -> Result<Permit<'_>, Refusal> {
+    ) -> Result<Permit<'_>, Failure> {
         if cancel.load(Ordering::SeqCst) {
-            return Err(Refusal::Cancelled);
+            return Err(Failure {
+                cause: Refusal::Cancelled,
+                diagnostic: "reason=cancelled before enqueue".into(),
+            });
         }
         if capacity == 0 || maximum == 0 {
-            return Err(Refusal::Resource(AdmissionError::TooLarge));
+            return Err(Failure {
+                cause: Refusal::Resource(AdmissionError::TooLarge),
+                diagnostic: "reason=zero admission capacity or queue bound".into(),
+            });
         }
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        let ticket = state.enqueue(maximum, Instant::now())?;
+        let now = Instant::now();
+        let enqueue_context = state.context(
+            if state.waiting.len() >= maximum {
+                "enqueue capacity full"
+            } else {
+                "enqueue ticket exhausted"
+            },
+            None,
+            now,
+        );
+        let ticket = state
+            .enqueue(maximum, now)
+            .map_err(|cause| state.failure(cause, enqueue_context, now))?;
         self.changed.notify_all();
         loop {
-            match state.poll(
-                ticket,
-                capacity,
-                cancel.load(Ordering::SeqCst),
-                Instant::now(),
-            ) {
+            let cancelled = cancel.load(Ordering::SeqCst);
+            let now = Instant::now();
+            // Capture position and its age before poll removes a refused
+            // waiter and advances the successors' observations.
+            let mut context = state.context("stalled", Some(ticket), now);
+            if context.rank.is_none() {
+                context.reason = "queued ticket missing";
+            } else if cancelled {
+                context.reason = "queued request cancelled";
+            }
+            match state.poll(ticket, capacity, cancelled, now) {
                 Ok(true) => {
+                    let slot = state.holder(now);
                     self.changed.notify_all();
-                    return Ok(Permit(self));
+                    return Ok(Permit(self, slot));
                 }
                 Err(error) => {
                     self.changed.notify_all();
-                    return Err(error);
+                    return Err(state.failure(error, context, now));
                 }
                 Ok(false) => {
                     let (next, _) = self
@@ -144,11 +262,26 @@ impl Gate {
             }
         }
     }
+    pub(super) fn stage(&self, stage: Stage) {
+        let thread = std::thread::current().id();
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(holder) = state.holders.iter_mut().rev().find(|h| h.thread == thread) {
+            holder.stage = stage;
+            holder.stage_started = Instant::now();
+        }
+    }
 }
-pub(super) struct Permit<'a>(&'a Gate);
+pub(super) struct Permit<'a>(&'a Gate, usize);
 impl Drop for Permit<'_> {
     fn drop(&mut self) {
         let mut state = self.0.state.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(at) = state
+            .holders
+            .iter()
+            .position(|holder| holder.slot == self.1)
+        {
+            state.holders.remove(at);
+        }
         state.active -= 1;
         self.0.changed.notify_all();
     }
@@ -162,6 +295,7 @@ mod tests {
             active: 1,
             next: 0,
             waiting: VecDeque::new(),
+            holders: Vec::new(),
         }
     }
     #[test]
@@ -239,8 +373,15 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let holder = gate.enter(1, 8, &cancel).unwrap();
         std::thread::scope(|scope| {
-            let worker =
-                scope.spawn(|| matches!(gate.enter(1, 8, &cancel), Err(Refusal::Cancelled)));
+            let worker = scope.spawn(|| {
+                matches!(
+                    gate.enter(1, 8, &cancel),
+                    Err(Failure {
+                        cause: Refusal::Cancelled,
+                        ..
+                    })
+                )
+            });
             let end = Instant::now() + Duration::from_secs(2);
             let mut state = gate.state.lock().unwrap();
             while state.waiting.is_empty() && Instant::now() < end {
@@ -261,5 +402,49 @@ mod tests {
         assert!(result.is_err());
         assert!(gate.enter(1, 8, &cancel).is_ok());
         assert!(gate.state.lock().unwrap().waiting.is_empty());
+    }
+    #[test]
+    fn refusal_diagnostics_capture_pre_removal_rank_and_active_stage_without_extending_wait() {
+        let gate = Gate::new();
+        let cancel = AtomicBool::new(false);
+        let holder = gate.enter(1, 1, &cancel).unwrap();
+        gate.stage(Stage::Work("controlled sync"));
+        {
+            let now = Instant::now();
+            let mut state = gate.state.lock().unwrap();
+            let ticket = state.enqueue(1, now).unwrap();
+            let at = now + STALL;
+            let context = state.context("stalled", Some(ticket), at);
+            let cause = state.poll(ticket, 1, false, at).unwrap_err();
+            let failure = state.failure(cause, context, at);
+            assert_eq!(failure.cause, Refusal::Resource(AdmissionError::Busy));
+            assert!(failure
+                .diagnostic
+                .contains("reason=stalled; rank=Some(0); queued=1; active=1"));
+            assert!(failure.diagnostic.contains("rank_idle_us=Some(500000)"));
+            assert!(failure.diagnostic.contains("stage=Work(controlled sync)"));
+            assert!(state.waiting.is_empty());
+            assert_eq!(state.holders.len(), 1);
+            state.enqueue(1, now).unwrap();
+        }
+        let failure = match gate.enter(1, 1, &cancel) {
+            Err(failure) => failure,
+            Ok(_) => panic!("a full diagnostic queue must refuse"),
+        };
+        assert_eq!(failure.cause, Refusal::Resource(AdmissionError::Busy));
+        assert!(failure.diagnostic.contains("reason=enqueue capacity full"));
+        {
+            let mut state = gate.state.lock().unwrap();
+            let ticket = state.waiting[0].ticket;
+            assert_eq!(
+                state.poll(ticket, 1, true, Instant::now()),
+                Err(Refusal::Cancelled)
+            );
+        }
+        drop(holder);
+        let state = gate.state.lock().unwrap();
+        assert_eq!(state.active, 0);
+        assert!(state.holders.is_empty());
+        assert!(state.waiting.is_empty());
     }
 }

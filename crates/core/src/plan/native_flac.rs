@@ -20,6 +20,20 @@ use std::{fs::File, io, sync::Arc};
 mod admission;
 static IO_ADMISSION: admission::Gate = admission::Gate::new();
 thread_local! { static IO_PHASE_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+fn io_stage(stage: admission::Stage) {
+    if private_phase_active() {
+        IO_ADMISSION.stage(stage);
+    }
+}
+// Undo's observer stays infallible and non-cancelling, just like the previous
+// unit observer. It records existing boundaries without extending admission.
+struct Trace;
+impl media::Observer for Trace {
+    fn event(&mut self, event: media::Event) -> io::Result<()> {
+        io_stage(admission::Stage::Media(event));
+        Ok(())
+    }
+}
 pub(super) fn private_phase_active() -> bool {
     IO_PHASE_HELD.with(|held| held.get())
 }
@@ -49,11 +63,12 @@ impl IoPhase {
         // cannot barge or extend an older request's wait.
         let permit = IO_ADMISSION
             .enter(io_capacity(limits), limits.jobs, cancel)
-            .map_err(|failure| match failure {
+            .map_err(|failure| match failure.cause {
                 admission::Refusal::Cancelled => PlanError::Cancelled,
-                admission::Refusal::Resource(failure) => {
-                    error(format!("native I/O admission: {failure}"))
-                }
+                admission::Refusal::Resource(cause) => error(format!(
+                    "native I/O admission: {cause}; {}",
+                    failure.diagnostic
+                )),
             })?;
         IO_PHASE_HELD.with(|held| held.set(true));
         Ok(Self {
@@ -76,6 +91,7 @@ struct Cancel<'a> {
 }
 impl native_patch::Control for Cancel<'_> {
     fn event(&mut self, event: native_patch::Event) -> io::Result<()> {
+        io_stage(admission::Stage::Native(event));
         if event == native_patch::Event::BeforeMutation {
             self.mutating = true;
         }
@@ -87,6 +103,7 @@ impl native_patch::Control for Cancel<'_> {
 }
 impl media::Observer for Cancel<'_> {
     fn event(&mut self, event: media::Event) -> io::Result<()> {
+        io_stage(admission::Stage::Media(event));
         if event == media::Event::StateDurable(Phase::Publishing) {
             self.publishing = true;
         }
@@ -415,6 +432,7 @@ struct Driver<'a> {
 }
 impl StateSink for Driver<'_> {
     fn persist(&mut self, record: &Record) -> io::Result<()> {
+        io_stage(admission::Stage::Checkpoint(record.phase(), false));
         ensure_operation_policy().map_err(io_error)?;
         if record.phase() == Phase::Publishing
             && crate::model::read_policy_revision() != self.policy_revision
@@ -431,6 +449,7 @@ impl StateSink for Driver<'_> {
                 record.phase() >= Phase::Published && self.operation != 1,
             )
             .map_err(io_error)?;
+        io_stage(admission::Stage::Checkpoint(record.phase(), true));
         ensure_operation_policy().map_err(io_error)
     }
 }
@@ -454,6 +473,7 @@ fn push_bundle(parts: &mut Vec<Vec<u8>>, bytes: &[u8], owner: &mut Lease) -> io:
     Ok(())
 }
 fn verify_finish(driver: &mut Driver<'_>, record: &Record) -> io::Result<()> {
+    io_stage(admission::Stage::Work("journal confirmation"));
     driver
         .journal
         .confirm(
@@ -467,6 +487,7 @@ fn verify_finish(driver: &mut Driver<'_>, record: &Record) -> io::Result<()> {
                 .ok_or_else(|| io::Error::other("native receipt missing"))?,
         )
         .map_err(io_error)?;
+    io_stage(admission::Stage::Work("journal confirmation complete"));
     ensure_operation_policy().map_err(io_error)
 }
 fn growth<'a>(
@@ -498,6 +519,7 @@ fn apply_file(
 ) -> Result<(), PlanError> {
     let change = &batch.plan.changes[ordinal];
     let _phase = IoPhase::enter(cancel)?;
+    io_stage(admission::Stage::Work("Apply source binding"));
     let original = bound(change, &captured.intent.identity)?;
     let mut driver = Driver {
         journal,
@@ -516,6 +538,7 @@ fn apply_file(
         publishing: false,
         mutating: false,
     };
+    io_stage(admission::Stage::Work("Apply preparation"));
     let prepared = store
         .prepare_file_id(
             (&captured.intent.operation_id, "flac", cancel),
@@ -545,6 +568,7 @@ fn apply_file(
                         native_patch::apply_prepared(candidate, &current, control)
                     })
                     .map_err(io_error)?;
+                    io_stage(admission::Stage::Work("Apply receipt encoding"));
                     let bytes =
                         retry_native(cancel, |_| receipt.encode_for_journal()).map_err(io_error)?;
                     push_bundle(&mut encoded, bytes.bytes(), &mut driver._receipt_owner)?;
@@ -569,6 +593,7 @@ fn apply_file(
                 media_error("preparation", e)
             }
         })?;
+    io_stage(admission::Stage::Work("Apply publication"));
     let published = prepared.publish(&mut driver, &mut observed).map_err(|e| {
         if cancel.load(Ordering::SeqCst) && !observed.publishing {
             PlanError::Cancelled
@@ -580,6 +605,7 @@ fn apply_file(
     // Check their actual persisted representation before full-image retirement.
     let record = published.record().clone();
     verify_finish(&mut driver, &record).map_err(|e| recovery(&change.path, e))?;
+    io_stage(admission::Stage::Work("Apply retirement"));
     published
         .retire(|_| Ok(()), &mut driver, &mut observed)
         .map_err(|e| recovery(&change.path, e))
@@ -887,6 +913,7 @@ fn retire_pending(
 ) -> Result<Validated, PlanError> {
     if let Some(record) = valid.pending.take() {
         let _phase = IoPhase::enter(&NEVER)?;
+        io_stage(admission::Stage::Work("pending retirement"));
         if valid.preimage {
             store
                 .discard_preimage(record.id(), valid.original)
@@ -918,7 +945,7 @@ fn retire_pending(
             };
             if record.phase() == Phase::Retired {
                 store
-                    .finish_retirement(record.id(), &mut valid.original, |_| Ok(()), &mut ())
+                    .finish_retirement(record.id(), &mut valid.original, |_| Ok(()), &mut Trace)
                     .map_err(error)?;
             } else {
                 // A local Published manifest plus a matching admitted source
@@ -930,7 +957,7 @@ fn retire_pending(
                 let durable = published.record().clone();
                 verify_finish(&mut driver, &durable).map_err(error)?;
                 published
-                    .retire(|_| Ok(()), &mut driver, &mut ())
+                    .retire(|_| Ok(()), &mut driver, &mut Trace)
                     .map_err(|e| media_error("retirement", e))?;
                 valid.original = bound(
                     &batch.plan.changes[valid.entry.ordinal],
@@ -975,9 +1002,11 @@ fn undo_file_admitted(
     let receipts = valid.receipts;
     let selected = valid.selected;
     let overwrite = valid.overwrite;
+    io_stage(admission::Stage::Work("Undo journal begin"));
     let id = driver
         .journal
         .begin(batch, valid.entry.ordinal, operation)?;
+    io_stage(admission::Stage::Work("Undo preparation"));
     let prepared = store
         .prepare_file_id(
             (&id, "flac", &NEVER),
@@ -990,7 +1019,7 @@ fn undo_file_admitted(
                     .map(|(_, r)| (r.target(), r.old())),
             )?,
             &mut driver,
-            &mut (),
+            &mut Trace,
             |candidate, driver| {
                 let mut reverse = Vec::new();
                 // Reverse order preserves the raw positional anchors from a composed
@@ -1013,6 +1042,7 @@ fn undo_file_admitted(
                         )
                     })
                     .map_err(io_error)?;
+                    io_stage(admission::Stage::Work("Undo receipt encoding"));
                     let bytes = retry_native(&NEVER, |_| reversed.encode_for_journal())
                         .map_err(io_error)?;
                     push_bundle(&mut reverse, bytes.bytes(), &mut driver._receipt_owner)?;
@@ -1035,13 +1065,15 @@ fn undo_file_admitted(
             },
         )
         .map_err(|e| media_error("Undo preparation", e))?;
+    io_stage(admission::Stage::Work("Undo publication"));
     let published = prepared
-        .publish(&mut driver, &mut ())
+        .publish(&mut driver, &mut Trace)
         .map_err(|e| recovery(&change.path, e))?;
     let record = published.record().clone();
     verify_finish(&mut driver, &record).map_err(error)?;
+    io_stage(admission::Stage::Work("Undo retirement"));
     published
-        .retire(|_| Ok(()), &mut driver, &mut ())
+        .retire(|_| Ok(()), &mut driver, &mut Trace)
         .map_err(|e| media_error("retirement", e))
 }
 fn rollback_undo(
