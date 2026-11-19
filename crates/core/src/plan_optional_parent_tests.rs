@@ -163,4 +163,3 @@ fn retiring_directory_removes_only_matching_optional_descendants() {
     );
     validate().unwrap();
 }
-

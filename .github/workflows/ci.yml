@@ -27,6 +27,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -37,11 +45,6 @@ jobs:
       - run: npm run lint
       - run: npm run test:unit
       - run: npm run build
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
 
       # The `app` crate is a Tauri 2 desktop shell; on Linux it links against
       # GTK/WebKit/glib system libraries, which the runner doesn't ship.
@@ -66,9 +69,6 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Artwork picker UI tests
         run: npm run test:ui
-
-      - name: Check formatting
-        run: cargo fmt --all --check
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
