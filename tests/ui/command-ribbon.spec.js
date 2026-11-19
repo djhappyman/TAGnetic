@@ -400,7 +400,8 @@ test('Autonumber uses quiet controls, borderless actions and stable invalid inpu
   await expect(dialog.getByRole('button',{name:'Stage Edits',exact:true})).toBeEnabled();
   await expect(dialog.getByRole('switch')).toHaveCount(2);
   await expect(dialog.locator('.ribbon-tool-description,.ribbon-field-help,[role=alert]')).toHaveCount(0);
-  const before=await dialog.locator('.modal').boundingBox();
+  const before=await dialog.locator('.modal').evaluate(node=>({height:parseFloat(getComputedStyle(node).height)}));
+  await expect.poll(async()=>(await dialog.locator('.modal').boundingBox()).height).toBeCloseTo(before.height,0);
   await page.locator('#autonum-start').fill('');
   await expect(page.locator('#autonum-run')).toBeDisabled();await expect(page.locator('#autonum-write')).toBeDisabled();
   await page.locator('#autonum-start').fill('3');
@@ -424,7 +425,8 @@ test('Disc and Autonumber have independent validity, scope and display preferenc
   await page.locator('#ribbon-autonumber').click();
   const dialog=page.locator('#ribbon-number-dialog');
   await expect(dialog.getByRole('tab')).toHaveCount(3);
-  const height=(await dialog.locator('.modal').boundingBox()).height;
+  const height=await dialog.locator('.modal').evaluate(node=>parseFloat(getComputedStyle(node).height));
+  await expect.poll(async()=>(await dialog.locator('.modal').boundingBox()).height).toBeCloseTo(height,0);
   await page.locator('#autonum-start').fill('');
   await expect(page.locator('#autonum-run')).toBeDisabled();
   await page.getByRole('tab',{name:'Disc',exact:true}).click();
