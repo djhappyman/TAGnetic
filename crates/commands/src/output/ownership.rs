@@ -257,9 +257,12 @@ fn windows_witness(file: &File) -> io::Result<WindowsWitness> {
             {
                 return Err(io::Error::last_os_error());
             }
-            let end = filesystem.iter().position(|unit| *unit == 0).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "Unterminated filesystem name")
-            })?;
+            let end = filesystem
+                .iter()
+                .position(|unit| *unit == 0)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "Unterminated filesystem name")
+                })?;
             let filesystem = String::from_utf16_lossy(&filesystem[..end]);
             if !["FAT", "FAT32", "exFAT"]
                 .iter()
@@ -280,7 +283,10 @@ fn windows_witness(file: &File) -> io::Result<WindowsWitness> {
         Ok((native, basic.ChangeTime, basic.FileAttributes))
     }
 }
-pub(super) fn same_handles(left: &same_file::Handle, right: &same_file::Handle) -> io::Result<bool> {
+pub(super) fn same_handles(
+    left: &same_file::Handle,
+    right: &same_file::Handle,
+) -> io::Result<bool> {
     #[cfg(windows)]
     {
         Ok(windows_witness(left.as_file())?.0 == windows_witness(right.as_file())?.0)

@@ -127,3 +127,10 @@ Windows disposable-volume label is shortened and explicitly checked after the
 runner reported an illegal label. The output workflow also watches changes in
 the split ownership module. No local workload ran; all current runtime gates
 remain pending on the corrected head.
+
+Head `9d4bedbe` failed hosted formatting in two changed expressions. Apply its
+hosted patch without local formatting. CI now records formatting failure while
+continuing into the ordinary behavior tests; an unconditional final outcome
+check still fails the Linux job if formatting failed. Artifact generation no
+longer requires the job's aggregate failure flag. This preserves the merge gate
+and avoids losing all Linux behavior evidence to formatting-only differences.

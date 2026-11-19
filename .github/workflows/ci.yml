@@ -34,16 +34,18 @@ jobs:
 
       - name: Check formatting
         id: formatting
+        # Keep the behavior tests running; the final step still fails this job.
+        continue-on-error: true
         run: cargo fmt --all --check
 
       - name: Produce formatting correction when needed
-        if: failure() && steps.formatting.outcome == 'failure'
+        if: steps.formatting.outcome == 'failure'
         run: |
           cargo fmt --all
           git diff --binary > /tmp/backend-format.patch
 
       - name: Upload formatting correction
-        if: failure() && steps.formatting.outcome == 'failure'
+        if: steps.formatting.outcome == 'failure'
         uses: actions/upload-artifact@v7
         with:
           name: backend-format-correction
@@ -106,6 +108,12 @@ jobs:
       # dbus-run-session gives this step a private one.
       - name: Test the media session on a private D-Bus
         run: dbus-run-session -- cargo test -p tagrex mpris -- --ignored
+
+      - name: Enforce formatting gate
+        if: always() && steps.formatting.outcome == 'failure'
+        run: |
+          echo 'Formatting failed; see the hosted correction artifact.' >&2
+          exit 1
 
   # A second job that only compiles, on Windows (#223). A dependency can be
   # wrong for that platform alone — a feature flag it needs, a `cfg(windows)`
