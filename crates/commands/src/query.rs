@@ -720,15 +720,18 @@ impl QueryIndex {
         if !self.is_current() {
             return Err(QueryError::Cancelled);
         }
-        let mut index =
-            Self::from_shared_rows(rows).with_policy_from(self);
+        let mut index = Self::from_shared_rows(rows).with_policy_from(self);
         index._snapshot_ownership = RowOwnership {
             _lease: Some(Arc::new(lease)),
         };
         Ok(index)
     }
 
-    pub(crate) fn with_model_policy(mut self, owner: tagrex_core::model::ModelPolicy, revision: u64) -> Self {
+    pub(crate) fn with_model_policy(
+        mut self,
+        owner: tagrex_core::model::ModelPolicy,
+        revision: u64,
+    ) -> Self {
         self.read_policy_revision = revision;
         self.read_policy_owner = Some(owner);
         self
@@ -774,7 +777,11 @@ impl QueryIndex {
         self.valid.load(Ordering::Acquire) && self.read_policy_is_current()
     }
     pub(crate) fn read_policy_is_current(&self) -> bool {
-        self.read_policy_revision == self.read_policy_owner.as_ref().map_or_else(tagrex_core::model::read_policy_revision, tagrex_core::model::ModelPolicy::revision)
+        self.read_policy_revision
+            == self.read_policy_owner.as_ref().map_or_else(
+                tagrex_core::model::read_policy_revision,
+                tagrex_core::model::ModelPolicy::revision,
+            )
             && self.read_policy_revision != u64::MAX
     }
     pub fn known_field(&self, field: &str) -> bool {

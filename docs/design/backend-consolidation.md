@@ -52,3 +52,25 @@ native-field/text-codec foundations exist. Preserve upstream inline journal
 images and waveform APIs; do not copy the fork-only pooled journal wholesale.
 Existing open upstream contribution heads need recoverable source when local
 working branches are retired. No upstream acceptance is implied.
+
+## Development attachment
+
+Vite now runs as transient user unit `tagnetic-ui-main.service`, with working
+directory `/mnt/Games/Development/tagrex/personal-app` and port 1420. HTTP startup
+was verified. The native process was not restarted; session epoch, open-library
+state and staging revision 35 (zero staged files) were unchanged across the switch.
+The currently running native binary still predates this candidate: moving the
+frontend source does not load newly compiled Rust into that existing process.
+
+## Reconciliation details
+
+Retain #54's per-App policy rather than restoring the older process-global
+interpretation. Query snapshots, shared forks and computed views retain their
+originating policy owner so worker-thread TLS cannot spuriously invalidate them.
+The old invalidated-scope query canary now checks explicit error propagation
+instead of accepting an unusable snapshot; old views remain invalid. Service
+policy checks cover both peer isolation and owning-App settings invalidation.
+
+The first hosted candidate `98f6951f` failed formatting. Its hosted formatter
+patch was downloaded and applied without running a local formatter; further
+combined checks remain pending on the next head.

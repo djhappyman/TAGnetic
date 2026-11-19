@@ -425,7 +425,10 @@ fn query_after_same_owner_settings_change_rebuilds_pinned_old_snapshot() {
         app.apply_settings(&settings(" | "));
         assert!(!previously_published.is_current());
         let snapshot = app.query_snapshot();
-        assert!(snapshot.is_err(), "invalidated operation must refuse publishing its pinned old view");
+        assert!(
+            snapshot.is_err(),
+            "invalidated operation must refuse publishing its pinned old view"
+        );
         assert!(app.query_snapshot_id().is_none());
         pinned = Some(snapshot);
         Ok(())
@@ -453,7 +456,10 @@ fn failed_outer_scope_discards_both_old_display_and_query_cache() {
     });
     assert!(failure.is_err());
     assert_eq!(app.read_track(&p).unwrap().tags["artist"], "One | Two");
-    assert_eq!(app.query_snapshot().unwrap().rows[0].value("artist"), "One | Two");
+    assert_eq!(
+        app.query_snapshot().unwrap().rows[0].value("artist"),
+        "One | Two"
+    );
     assert_eq!(fs::read(&p).unwrap(), before);
 }
 
@@ -476,7 +482,10 @@ fn same_owner_settings_change_and_restore_does_not_restore_write_admission() {
         Ok(())
     }).unwrap();
     assert_eq!(app.read_track(&p).unwrap().tags["artist"], "One | Two");
-    assert_eq!(app.query_snapshot().unwrap().rows[0].value("artist"), "One | Two");
+    assert_eq!(
+        app.query_snapshot().unwrap().rows[0].value("artist"),
+        "One | Two"
+    );
     assert_eq!(fs::read(&p).unwrap(), before);
     let plan = app
         .preview_tag_edits(&[edit(&p, "title", "After")])
@@ -502,7 +511,10 @@ fn unwinding_outer_scope_does_not_keep_stale_policy_cache_or_write_scope() {
     }));
     assert!(unwind.is_err());
     assert_eq!(app.read_track(&p).unwrap().tags["artist"], "One | Two");
-    assert_eq!(app.query_snapshot().unwrap().rows[0].value("artist"), "One | Two");
+    assert_eq!(
+        app.query_snapshot().unwrap().rows[0].value("artist"),
+        "One | Two"
+    );
     assert_eq!(fs::read(&p).unwrap(), before);
     let plan = app
         .preview_tag_edits(&[edit(&p, "title", "After")])
@@ -764,9 +776,14 @@ fn query_workers_keep_the_originating_apps_policy_across_shared_views() {
         let fork = worker.fork_snapshot_rows(None).unwrap();
         assert!(fork.is_current());
         assert_eq!(fork.rows[0].value("artist"), "One | Two");
-    }).join().unwrap();
+    })
+    .join()
+    .unwrap();
     b.apply_settings(&settings(" :: "));
-    assert!(original.is_current(), "another App must not invalidate this snapshot");
+    assert!(
+        original.is_current(),
+        "another App must not invalidate this snapshot"
+    );
     a.apply_settings(&settings(" + "));
     assert!(!original.is_current());
 }

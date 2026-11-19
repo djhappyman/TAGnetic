@@ -177,7 +177,8 @@ impl ReadCache {
         let used_at = self.clock;
         let before = Fingerprint::of(path);
         if let Some(entry) = self.entries.get_mut(path) {
-            if policy_before != u64::MAX && before.as_ref() == Some(&entry.stamp)
+            if policy_before != u64::MAX
+                && before.as_ref() == Some(&entry.stamp)
                 && tagrex_core::model::read_policy_revision() == policy_before
             {
                 self.order.remove(&entry.used_at);

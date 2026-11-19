@@ -2960,7 +2960,9 @@ impl App {
             records.push((track, row));
         }
         preview_context::check()?;
-        if policy_revision == u64::MAX || tagrex_core::model::read_policy_revision() != policy_revision {
+        if policy_revision == u64::MAX
+            || tagrex_core::model::read_policy_revision() != policy_revision
+        {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "Metadata settings changed while listing rows; retry the operation",
@@ -2972,7 +2974,8 @@ impl App {
         self.invalidate_query();
         self.query_policy.set(policy_revision);
         *self.query_index.borrow_mut() = Some(std::sync::Arc::new(
-            query::QueryIndex::from_rows(rows).with_model_policy(self.model_policy.clone(), policy_revision),
+            query::QueryIndex::from_rows(rows)
+                .with_model_policy(self.model_policy.clone(), policy_revision),
         ));
         Ok(tracks)
     }
@@ -3192,7 +3195,9 @@ impl App {
             tracks.push(track);
         }
         preview_context::check()?;
-        if policy_revision == u64::MAX || tagrex_core::model::read_policy_revision() != policy_revision {
+        if policy_revision == u64::MAX
+            || tagrex_core::model::read_policy_revision() != policy_revision
+        {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "Metadata settings changed while reading rows; retry the operation",

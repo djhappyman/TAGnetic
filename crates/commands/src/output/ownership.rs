@@ -160,9 +160,12 @@ impl Descriptors {
         }
         let mut used = DESCRIPTORS.load(Ordering::Acquire);
         loop {
-            let next = used.checked_add(count).filter(|next| *next <= FD_LIMIT)
+            let next = used
+                .checked_add(count)
+                .filter(|next| *next <= FD_LIMIT)
                 .ok_or(AdmissionError::Busy)?;
-            match DESCRIPTORS.compare_exchange_weak(used, next, Ordering::AcqRel, Ordering::Acquire) {
+            match DESCRIPTORS.compare_exchange_weak(used, next, Ordering::AcqRel, Ordering::Acquire)
+            {
                 Ok(_) => break,
                 Err(current) => used = current,
             }

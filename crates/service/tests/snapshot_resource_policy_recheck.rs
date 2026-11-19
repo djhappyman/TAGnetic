@@ -199,12 +199,21 @@ fn new_service_snapshot_reinterprets_metadata_after_another_session_policy_chang
     assert_eq!(before["rows"][0]["tags"]["artist"], format!("A{original}B"));
     tagrex_core::model::set_multi_value_separator(" ~~ ");
     let peer = fixture.snapshot();
-    assert_eq!(fixture.page(&peer)["rows"][0]["tags"]["artist"], format!("A{original}B"),
-        "standalone peer settings must not change this App's interpretation");
-    fixture.app.lock().unwrap().as_ref().unwrap().apply_settings(&tagrex_commands::SettingsDto {
-        multi_value_separator: " ~~ ".into(),
-        ..Default::default()
-    });
+    assert_eq!(
+        fixture.page(&peer)["rows"][0]["tags"]["artist"],
+        format!("A{original}B"),
+        "standalone peer settings must not change this App's interpretation"
+    );
+    fixture
+        .app
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .apply_settings(&tagrex_commands::SettingsDto {
+            multi_value_separator: " ~~ ".into(),
+            ..Default::default()
+        });
     let second = fixture.snapshot();
     let after = fixture.page(&second);
     tagrex_core::model::set_multi_value_separator(&original);
