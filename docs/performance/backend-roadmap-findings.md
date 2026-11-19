@@ -51,7 +51,7 @@ PR scope; no whole-roadmap completion or release availability is claimed.
 
 ## Final FLAC publication compatibility review
 
-PR #54 (reviewed head `d1998ab2`) includes corrected per-App metadata policy,
+PR #54 (reviewed head `0ace5efe`) includes corrected per-App metadata policy,
 rollback after settings changes, valid-generation display/query caching and
 bounded compound native admission. The final policy review accepted 17 independent
 probes; admission review accepted 54 tests after correcting private-sink reentry

@@ -16,7 +16,7 @@ product feature checkboxes unchecked until the UI is implemented and verified.
 
 The authorized finish-and-pause boundary is protected Linux FLAC
 [PR #54](https://github.com/djhappyman/TAGnetic/pull/54), reviewed head
-`d1998ab2b6053e607bd9b24acca1e0cc59b10793`. Required hosted checks and merge
+`0ace5efebf2464df64fed2c10c228b257d58abe7`. Required hosted checks and merge
 records are linked there. Service authority/lifecycle
 [PR #50](https://github.com/djhappyman/TAGnetic/pull/50) merged at `67625add`
 after all four hosted checks passed.
