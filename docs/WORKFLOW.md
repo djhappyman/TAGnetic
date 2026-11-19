@@ -26,6 +26,21 @@ A parked task must have a recovery ref and a short resumption note.
 
 ## 2. Reach a feature checkpoint
 
+Before pushing a candidate, review the complete diff against its requested
+behavior and inspect each affected platform branch. Resolve requested independent
+review findings and run the permitted lightweight formatting, source/configuration
+and workflow/script syntax checks. For a substantive defect, add a regression
+that detects its specific old failure and proves the corrected behavior,
+including relevant cancellation, contention and recovery boundaries.
+
+Respect the owner's workload restrictions. When runtime verification is
+hosted-only, push a reviewed candidate for focused preflight and label it
+**CI pending**. Pass the focused regression/lint/pressure gate before starting
+the expensive full platform and installer matrix. Publication uses that exact
+verified commit; changed source requires fresh gates. A rerun alone is not proof
+that a defect was corrected. Installed-package smoke checks are a separate gate
+when available; build/upload success proves only its checked scope.
+
 Offer a commit message only when the scoped feature or code change is complete:
 
 - The intended behavior works and the diff contains only that concern.

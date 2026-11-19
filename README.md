@@ -17,6 +17,11 @@
   <a href="https://github.com/djhappyman/TAGnetic/issues">Report an issue</a>
 </p>
 
+**Latest release: [1.4.10](https://github.com/djhappyman/TAGnetic/releases/tag/personal-v1.4.10).**
+Separate track, disc and vinyl tools, simpler Format fields with coloured tag
+chips, and native validation for Stage Edits and Write. Installers are available
+for Windows x64/ARM64, universal macOS and Linux x64/ARM64.
+
 <p align="center">
   <img src="docs/img/tagnetic-workspace.svg" width="1000" alt="Tagnetic showing a music collection grouped by folder, online release results with cover artwork, and six staged changes ready to review.">
 </p>

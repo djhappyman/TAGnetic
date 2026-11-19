@@ -6,15 +6,24 @@ and [roadmap issue #49](https://github.com/djhappyman/TAGnetic/issues/49).
 
 ## Current checkpoint — native tools exposed in the workbench
 
-The 1.4.10 candidate connects the accepted Autonumber, Disc and Vinyl interface to
+Released [1.4.10](https://github.com/djhappyman/TAGnetic/releases/tag/personal-v1.4.10)
+connects the accepted Autonumber, Disc and Vinyl interface to
 Rust, retaining silent validation, displayed order, field locks and independent
 Stage/Write scope. Format fields exposes Build a field and Extract fields with
 reusable coloured tag chips. Shared toggles now visibly reflect checked state.
 See [numbering design](design/autonumber-dialog.md) for exact boundaries.
 
-The owner authorized a native rebuild/display, independent platform review,
-commit/push and a fresh all-platform release. Release readiness requires the
-current-head frontend, Linux, Windows, macOS, audit/output and package gates.
+Release source is `e7727116c665c7179661335aad7ed9a50ef1a82f`.
+[Platform validation and all five packaging jobs](https://github.com/djhappyman/TAGnetic/actions/runs/44612675866)
+passed; all eight published installer digests match the checksums and build
+provenance. The exact-head browser gate passed 63 Chromium and 45 WebKit cases;
+the focused native preflight passed all 75 concurrency stress trials across
+normal, single-CPU and disk-pressure profiles, including controlled recovery.
+
+Apply the pre-push and preflight-first gates in [WORKFLOW.md](WORKFLOW.md).
+Packaged-app launch/install smoke checks remain a tracked follow-up in
+[issue #49](https://github.com/djhappyman/TAGnetic/issues/49); installer creation
+and provenance verification do not establish installed-app launch behavior.
 Local rebuild authorization does not authorize stress against the user library.
 
 ## Earlier backend foundation and remaining scope
