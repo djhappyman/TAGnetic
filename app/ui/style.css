@@ -592,7 +592,7 @@ button {
 }
 
 /* Stateful controls own their checked colours, including under the pointer. */
-button:hover:not(:disabled):not([role="switch"], [role="checkbox"], [role="radio"]) {
+button:hover:not(:disabled):where(:not([role="switch"], [role="checkbox"], [role="radio"])) {
   background: var(--row-hover);
 }
 
