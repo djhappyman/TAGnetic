@@ -49,7 +49,7 @@
   function setSidebarClosed(value: boolean, persist = true) {
     sidebarClosed = value;
     document.body.classList.toggle('panel-collapsed', value);
-    if (value) { dock?.reveal('files'); document.getElementById('panel-toggle')?.focus({preventScroll:true}); }
+    if (value) { if (dock?.snapshot().compact) dock.reveal('files'); document.getElementById('panel-toggle')?.focus({preventScroll:true}); }
     if (persist) try { localStorage.setItem('tagrex.sidebarCollapsed', value ? '1' : '0'); } catch { /* Session-only preference. */ }
   }
   onMount(() => {
@@ -58,7 +58,7 @@
   function toggleSidebar() {
     const closed = !sidebarClosed;
     setSidebarClosed(closed);
-    if (!closed) dock?.reveal('inspector');
+    if (!closed && dock?.snapshot().compact) dock.reveal('inspector');
   }
   let moreOpen = $state(false);
   let applying = $state(false);

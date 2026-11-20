@@ -50,8 +50,18 @@ function showSeekLabel(position) {
   const text = `${fmtTime(position)} / ${fmtTime(plDuration)}`;
   if (text === seekLabel) return;
   seekLabel = text;
-  plTime.textContent = text;
+  renderSeekLabel(text);
   plSeek.setAttribute("aria-valuetext", text);
+}
+function renderSeekLabel(text) {
+  const [elapsed, total] = text.split(" / ");
+  const elapsedLabel = document.createElement("span");
+  elapsedLabel.className = "pl-time-elapsed";
+  elapsedLabel.textContent = elapsed;
+  const totalLabel = document.createElement("span");
+  totalLabel.className = "pl-time-total";
+  totalLabel.textContent = total;
+  plTime.replaceChildren(elapsedLabel, document.createTextNode(" / "), totalLabel);
 }
 function updateSeekDisplay(position) {
   const fraction = plDuration > 0 ? Math.min(1, Math.max(0, position / plDuration)) : 0;
@@ -133,12 +143,21 @@ function applyVolume(level, { persist = true } = {}) {
 // "Wish Mountain — Radio" answers that where "102_wish_mountain_-_radio.mp3"
 // doesn't. Falls back to the file name when the tags are empty or the row isn't
 // in the current table (a filtered-out or already-closed library).
-function playerLabel(path) {
+function showPlayerLabel(path) {
   const t = trackAt(path);
   const artist = ((t && t.tags && t.tags.artist) || "").trim();
   const title = ((t && t.tags && t.tags.title) || "").trim();
-  if (artist && title) return `${artist} — ${title}`;
-  return title || fileName(path);
+  const trackTitle = document.createElement("span");
+  trackTitle.className = "pl-track-title";
+  trackTitle.textContent = title || fileName(path);
+  if (artist && title) {
+    const artistLabel = document.createElement("span");
+    artistLabel.className = "pl-artist";
+    artistLabel.textContent = `${artist} - `;
+    plTitle.replaceChildren(artistLabel, trackTitle);
+  } else {
+    plTitle.replaceChildren(trackTitle);
+  }
 }
 
 // Arm the always-visible player once a library is open and start polling.
@@ -243,7 +262,7 @@ function playTrack(path) {
   playingPath = path;
   plPaused = false;
   plTitle.removeAttribute("data-i18n");
-  plTitle.textContent = playerLabel(path);
+  showPlayerLabel(path);
   plTitle.title = `${path}\n${t("player.findTrack")}`;
   playerBar.classList.remove("idle");
   setPlayerControlsEnabled(true);
@@ -299,7 +318,7 @@ async function pollPlayerStatus() {
 
   if (changed) {
     plTitle.removeAttribute("data-i18n");
-    plTitle.textContent = playerLabel(st.path);
+    showPlayerLabel(st.path);
     plTitle.title = `${st.path}\n${t("player.findTrack")}`;
     playerBar.classList.remove("idle");
       setPlayerControlsEnabled(true);

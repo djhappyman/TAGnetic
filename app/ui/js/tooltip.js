@@ -7,6 +7,9 @@ const labels = new WeakMap();
 let initialized = false;
 let ribbonAnchor = null;
 let ribbonTimer;
+let warmUntil = 0;
+const OPEN_DELAY = 450;
+const SKIP_DELAY = 400;
 
 function suppressTitle(target) {
   if (!(target instanceof Element) || !target.hasAttribute("title")) return;
@@ -45,7 +48,8 @@ function suppressTitles(root) {
 }
 
 // Retain the controller API used when menus open; it never restores a title.
-export function hideTooltip() {
+export function hideTooltip(keepWarm = false) {
+  if (!keepWarm) warmUntil = 0;
   clearTimeout(ribbonTimer);
   ribbonAnchor = null;
   const tip = document.getElementById("tooltip");
@@ -53,17 +57,22 @@ export function hideTooltip() {
 }
 
 function ribbonButton(target) {
-  return target instanceof Element ? target.closest('.command-ribbon button.ribbon-command, #query-mode-toggle, [data-tooltip]') : null;
+  if (!(target instanceof Element) || target.closest('.mode-tabs')) return null;
+  return target.closest('.command-ribbon button.ribbon-command, [data-tooltip]');
 }
 function revealRibbonHint(button, delay) {
   if (!button || ribbonAnchor === button) return;
-  hideTooltip();
+  const warm = performance.now() < warmUntil;
+  hideTooltip(true);
   ribbonAnchor = button;
   ribbonTimer = setTimeout(() => {
     if (ribbonAnchor !== button || !button.isConnected || button.closest('[hidden], [inert]')) return;
     const text = button.getAttribute('data-tooltip') || button.getAttribute('aria-description') || button.getAttribute('aria-label');
-    if (text) showControllerTooltip(button, text, '');
-  }, delay === 0 ? 0 : Number(button.getAttribute('data-tooltip-delay')) || delay);
+    if (text) {
+      showControllerTooltip(button, text, '');
+      warmUntil = Infinity;
+    }
+  }, delay === 0 || warm ? 0 : Number(button.getAttribute('data-tooltip-delay')) || delay);
 }
 
 export function initTooltips() {
@@ -72,18 +81,23 @@ export function initTooltips() {
   hideTooltip();
   suppressTitles(document.documentElement);
 
-  document.addEventListener('pointerover', event => revealRibbonHint(ribbonButton(event.target), 1000));
+  document.addEventListener('pointerover', event => {
+    if (event.pointerType !== 'touch') revealRibbonHint(ribbonButton(event.target), OPEN_DELAY);
+  });
   document.addEventListener('pointerout', event => {
     const button = ribbonButton(event.target);
-    if (button && !button.contains(event.relatedTarget)) hideTooltip();
+    if (button && !button.contains(event.relatedTarget)) {
+      if (warmUntil === Infinity) warmUntil = performance.now() + SKIP_DELAY;
+      hideTooltip(true);
+    }
   });
   document.addEventListener('focusin', event => revealRibbonHint(ribbonButton(event.target), 0));
   document.addEventListener('focusout', event => { if (ribbonButton(event.target)) hideTooltip(); });
-  document.addEventListener('pointerdown', hideTooltip, true);
+  document.addEventListener('pointerdown', () => hideTooltip(), true);
   document.addEventListener('keydown', event => { if (event.key === 'Escape') hideTooltip(); }, true);
-  document.addEventListener('scroll', hideTooltip, true);
-  window.addEventListener('resize', hideTooltip);
-  window.addEventListener('blur', hideTooltip);
+  document.addEventListener('scroll', () => hideTooltip(), true);
+  window.addEventListener('resize', () => hideTooltip());
+  window.addEventListener('blur', () => hideTooltip());
 
   // Menus, virtual rows, translations and button states all create or rewrite
   // titles after startup. Keep descriptions current without pointermove work.

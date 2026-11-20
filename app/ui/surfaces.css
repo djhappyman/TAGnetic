@@ -51,12 +51,12 @@
 .controller-context-content [role='separator'].ctx-sep { border: 0; height: 6px; margin: 0; background: none; }
 .controller-dialog-content[data-state='open'],
 .controller-popover-content[data-state='open'],
-.controller-context-content[data-state='open'] { animation: controller-enter 130ms cubic-bezier(.16, 1, .3, 1) both; }
+.controller-context-content[data-state='open'] { animation: controller-enter var(--motion-enter) var(--motion-ease) both; }
 .controller-dialog-content[data-state='closed'],
 .controller-popover-content[data-state='closed'],
-.controller-context-content[data-state='closed'] { animation: controller-exit 100ms ease-in both; pointer-events: none; }
-.controller-dialog-overlay[data-state='open'] { animation: controller-fade-in 130ms ease-out both; }
-.controller-dialog-overlay[data-state='closed'] { animation: controller-fade-out 100ms ease-in both; }
+.controller-context-content[data-state='closed'] { animation: controller-exit var(--motion-exit) ease-in both; pointer-events: none; }
+.controller-dialog-overlay[data-state='open'] { animation: controller-fade-in var(--motion-enter) ease-out both; }
+.controller-dialog-overlay[data-state='closed'] { animation: controller-fade-out var(--motion-exit) ease-in both; }
 @keyframes controller-enter { from { opacity: 0; scale: .975; } to { opacity: 1; scale: 1; } }
 @keyframes controller-exit { from { opacity: 1; scale: 1; } to { opacity: 0; scale: .985; } }
 @keyframes controller-fade-in { from { opacity: 0; } to { opacity: 1; } }

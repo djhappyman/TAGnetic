@@ -167,7 +167,7 @@ test('artwork importer uses a string or first-image option and stages without wr
   await page.locator('#artwork-import-first-control').click();
   await expect(page.locator('#artwork-import-pattern')).toBeDisabled();
   await page.locator('#artwork-import-first-control').click();
-  await expect(page.locator('#artwork-import-pattern')).toHaveValue('%album%.jpg');
+  await expect.poll(() => page.locator('#artwork-import-pattern').evaluate(node => node.value)).toBe('%album%.jpg');
   await page.locator('#ribbon-import-stage').click();
   await expect(page.locator('#ribbon-import-dialog')).toBeHidden();
   await expect(page.locator('#diff-apply')).toBeEnabled();
@@ -292,7 +292,8 @@ test('Write closes immediately, paints confirmed rows sequentially, and deselect
     await expect(rows.nth(index)).toHaveClass(/applying-current/);
     await page.evaluate(({path,done})=>window.quickProgress({path,done,total:6,completed:'tags'}), {path:targets[index],done:4+index});
     await expect(rows.nth(index)).not.toHaveClass(/selected/);
-    await expect(page.locator('#files-selected-count')).toHaveText(String(targets.length-index-1));
+    if(targets.length-index-1>1) await expect(page.locator('#files-selected-count')).toHaveText(String(targets.length-index-1));
+    else await expect(page.locator('#selection-summary')).toBeHidden();
     expect(await page.evaluate(()=>[...window.quickRows,...window.quickCells].every(n=>n.isConnected))).toBe(true);
   }
   await page.evaluate(()=>window.finishQuick());

@@ -165,6 +165,7 @@ body .table-selection-summary { position:absolute; z-index:15; contain:layout; b
 body .table-selection-summary[hidden] { display:none; }
 body .selection-summary-text { flex:1; min-width:0; text-align:center; }
 body .selection-summary-primary { color:var(--accent-ink); font-weight:var(--fw-medium); white-space:nowrap; font-variant-numeric:tabular-nums; }
+body #files-selected-count { display:inline-block; }
 body .selection-summary-detail { display:none; }
 body .table-selection-summary button { flex:none; width:28px; height:28px; min-height:28px; border-radius:var(--r-circle); padding:5px; }
 body .files-col:has(#selection-summary:not([hidden])) #files-view { padding-bottom:max(56px,var(--selection-summary-space,56px)); }

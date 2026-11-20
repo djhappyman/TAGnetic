@@ -223,7 +223,13 @@
     hide(); editor.focus(); draw(raw.slice(0, offset) + token + raw.slice(end), offset + token.length); publish();
     await tick(); editor.focus();
   }
-  function input() { if (composing) return; publish(false); suggest(); }
+  function input() {
+    if (composing) return;
+    // Browsers leave a caret-holder BR after Select All/Delete in an empty
+    // contenteditable. It is not a literal newline in the user's pattern.
+    if (editor.childNodes.length === 1 && editor.firstChild?.nodeName === 'BR') editor.replaceChildren();
+    publish(false); suggest();
+  }
   function moveHistory(direction: number) {
     const at = historyAt + direction;
     if (at < 0 || at >= history.length) return;
@@ -378,7 +384,7 @@
   .field-pattern-control:focus-within { outline:2px solid var(--accent); outline-offset:1px; }
   .field-pattern-invalid { outline:2px solid var(--error); }
   .field-pattern-disabled { opacity:.55; }
-  .field-pattern-editor { height:36px; overflow-x:auto; overflow-y:hidden; padding:6px 10px; box-sizing:border-box; outline:none; white-space:pre; font:inherit; line-height:24px; cursor:text; caret-color:var(--accent); scrollbar-width:thin; }
+  .field-pattern-editor { height:36px; overflow-x:auto; overflow-y:hidden; padding:6px 10px; box-sizing:border-box; outline:none; white-space:pre; font:inherit; font-family:var(--font-literal); line-height:24px; cursor:text; caret-color:var(--accent); scrollbar-width:thin; }
   .field-pattern-editor:empty::before { content:attr(data-placeholder); color:var(--muted); pointer-events:none; }
   .field-pattern-editor::selection, .field-pattern-editor :global(::selection) { background:var(--accent); color:var(--on-accent,#fff); }
 </style>

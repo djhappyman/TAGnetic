@@ -158,11 +158,12 @@ test('placeholder picker inserts a token and remains reusable after dismissal', 
   await openApp(page);
   await page.locator('.mode-tab[data-mode="renamer"]').click();
   await page.locator('#mask').fill('');
+  await expect.poll(() => page.locator('#mask').evaluate(node => node.value)).toBe('');
   await page.locator('[data-ph-target="mask"]').click();
   await expect(page.locator('#ph-menu')).toBeVisible();
   await page.locator('#ph-filter').fill('artist');
   await page.locator('#ph-menu [data-token="%artist%"]').click();
-  await expect(page.locator('#mask')).toHaveValue('%artist%');
+  await expect.poll(() => page.locator('#mask').evaluate(node => node.value)).toBe('%artist%');
   await expect(page.locator('#ph-menu')).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(page.locator('#ph-menu')).toBeHidden();

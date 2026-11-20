@@ -358,3 +358,33 @@ for (const [width,height] of [[600,600],[900,300],[300,900]]) {
     expect(metrics.shadow).not.toBe('none');expect(metrics.center).toBeCloseTo(metrics.wellCenter,0);
   });
 }
+
+
+test('lightbox expands from the editor thumbnail and returns without changing a draft', async ({page}) => {
+  await page.emulateMedia({reducedMotion:'no-preference'});
+  await page.locator('#editor-field-album').fill('Keep this draft');
+  await expect(page.locator('#diff-apply')).toBeEnabled();
+  const before=await page.evaluate(()=>JSON.stringify(window.tagrex.previewPlan));
+  await page.locator('.cover-main-image').focus();
+  await page.keyboard.press('Enter');
+  const dialog=page.getByRole('dialog',{name:'Cover art',exact:true});
+  const stage=dialog.locator('.cover-lightbox-stage');
+  await expect(dialog).toBeVisible();
+  await expect.poll(()=>stage.evaluate(n=>n.getAnimations().length)).toBe(1);
+  const frames=await stage.evaluate(n=>n.getAnimations()[0].effect.getKeyframes());
+  expect(frames[0].transform).not.toBe(frames.at(-1).transform);
+  expect(await dialog.evaluate(n=>getComputedStyle(n).backgroundColor)).toBe('rgba(0, 0, 0, 0)');
+  // Closing during entry must reverse from the current frame, with one player.
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(page.locator('.cover-main-image')).toBeFocused();
+  await expect(page.locator('.cover-main-image img')).toBeVisible();
+  expect(await page.evaluate(()=>JSON.stringify(window.tagrex.previewPlan))).toBe(before);
+  await expect(page.locator('#editor-field-album')).toHaveValue('Keep this draft');
+  await page.locator('.cover-main-image').click();
+  await expect(dialog).toBeVisible();
+  await expect.poll(()=>stage.evaluate(n=>n.getAnimations().length)).toBe(1);
+  await expect.poll(()=>stage.evaluate(n=>n.getAnimations().length)).toBe(0);
+  await dialog.click({position:{x:4,y:4}});
+  await expect(dialog).toBeHidden();
+});

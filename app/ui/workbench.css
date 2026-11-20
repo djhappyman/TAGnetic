@@ -13,8 +13,8 @@ body { height: 100dvh; }
 body button[data-slot="button"] {
   border-radius: var(--r-compact);
   box-shadow: none;
-  transition: background-color 150ms, border-color 150ms, color 150ms,
-    opacity 150ms, transform 150ms var(--workbench-ease);
+  transition: background-color var(--motion-feedback), border-color var(--motion-feedback), color var(--motion-feedback),
+    opacity var(--motion-feedback), translate var(--motion-press) var(--motion-ease);
 }
 /* Pills belong to standalone actions; menus, tabs and field tools keep
    their own control contours even when created through the same Button. */
@@ -22,8 +22,8 @@ body :is(.modal-actions, .panel-actions, .settings-foot, .pe-list-actions) > but
 body button[data-slot="button"].btn,
 body button[data-slot="button"].primary,
 body button[data-slot="button"][data-variant="default"] { border-radius:var(--r-pill); }
-body button[data-slot="button"]:active:not(:disabled):not([aria-haspopup]):not(:where(.aw-surface, .aw-thumb, .release-head, .release-cover, .path-open)) {
-  transform: translateY(1px);
+body button[data-slot="button"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-haspopup]):not([role="tab"]):not([role="separator"]):not(:where(.aw-surface, .aw-thumb, .release-head, .release-cover, .path-open)) {
+  translate: 0 1px;
 }
 body button[data-slot="button"].icon {
   border-radius: 50%;

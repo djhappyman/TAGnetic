@@ -64,7 +64,7 @@ body :is(footer, [data-slot='dialog-footer'], [data-slot='alert-dialog-footer'],
 }
 
 /* Shared by Format fields tokens and Online field-value chips. */
-  .field-value-chip { display:inline-flex; align-items:center; justify-content:center; height:24px; vertical-align:top; padding:0 8px; margin-inline:1px; border-radius:var(--r-compact,8px); color:var(--field-ink); background:color-mix(in srgb,var(--field-ink) 12%,var(--panel)); font-weight:500; line-height:1; white-space:nowrap; caret-color:transparent; user-select:all; -webkit-user-select:all; cursor:default; }
+  .field-value-chip { font-family:var(--font-ui); display:inline-flex; align-items:center; justify-content:center; height:24px; vertical-align:top; padding:0 8px; margin-inline:1px; border-radius:var(--r-compact,8px); color:var(--field-ink); background:color-mix(in srgb,var(--field-ink) 12%,var(--panel)); font-weight:500; line-height:1; white-space:nowrap; caret-color:transparent; user-select:all; -webkit-user-select:all; cursor:default; }
   .field-pattern-suggestions { position:absolute; z-index:20; max-height:224px; overflow:auto; overscroll-behavior:contain; padding:7px; border:1px solid var(--border); border-radius:var(--r-menu,16px); background:var(--panel); box-shadow:0 8px 24px #0003; }
   .field-pattern-suggestions [role=option] { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:32px; padding:4px 8px; box-sizing:border-box; border-radius:var(--r-menu-item,8px); cursor:pointer; }
   .field-pattern-suggestions [role=option]:hover, .field-pattern-suggestions [aria-selected=true] { background:var(--row-hover); }

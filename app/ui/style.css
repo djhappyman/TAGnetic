@@ -1,5 +1,11 @@
 /* Typography assets and licences: fonts.css and assets/FONT-PROVENANCE.md. */
 :root {
+  /* Shared motion roles; movement never delays an operation or changes its state. */
+  --motion-press: 80ms;
+  --motion-feedback: 140ms;
+  --motion-enter: 160ms;
+  --motion-exit: 100ms;
+  --motion-ease: cubic-bezier(.2,.8,.2,1);
   /* Opt every native control (scrollbars, <select> popups, checkboxes, range,
      spinners, focus rings) into the OS light/dark preference. Without this the
      app paints a dark theme via prefers-color-scheme while the browser still
@@ -1422,7 +1428,7 @@ body.diffing #tracks tbody tr.staged td.sel {
   height: 100%;
   width: 0;
   background: var(--accent-ink);
-  transition: width 0.12s linear;
+  transition: width var(--motion-feedback) var(--motion-ease);
 }
 .diff-actionbar .ab-file {
   min-width: 0;
@@ -6399,7 +6405,7 @@ body.drag-active #drop-overlay {
   height: 100%;
   width: 0;
   background: var(--accent-ink);
-  transition: width 0.12s linear;
+  transition: width var(--motion-feedback) var(--motion-ease);
 }
 #busy-text {
   flex: 1;
@@ -6987,3 +6993,7 @@ input.preset-name {
 button.release-cover { padding: 0; cursor: pointer; }
 button.release-cover:hover { border-color: var(--accent); }
 button.release-cover[aria-busy="true"] { opacity: 0.55; cursor: progress; }
+
+@media (prefers-reduced-motion: reduce) {
+  .diff-actionbar .ab-bar-fill, .busy-pill .ab-bar-fill { transition: none; }
+}

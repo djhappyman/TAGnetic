@@ -67,3 +67,24 @@ test('reduced motion skips spring and width animation',async({page})=>{
  await page.emulateMedia({reducedMotion:'reduce'});await select(page,2);await expect(summary(page)).toBeVisible();expect(await summary(page).evaluate(n=>n.getAnimations().length)).toBe(0);
  await page.locator('#selection-summary-clear').click();await expect(summary(page)).toBeHidden();
 });
+
+
+test('count changes acknowledge the newest value and dismissal never paints zero or one', async ({page}) => {
+ await select(page,2); await expect(summary(page)).toBeVisible(); await settled(page);
+ const changed=await page.evaluate(async()=>{
+  window.tagrex.selection.add(window.tagrex.tracks[2].path);window.tagrex.renderTracks();
+  await new Promise(requestAnimationFrame);
+  const count=document.getElementById('files-selected-count');
+  return {text:count.textContent, animations:count.getAnimations().length};
+ });
+ expect(changed).toEqual({text:'3',animations:1});
+ for(const amount of [0,1]){
+  await select(page,3);await expect(summary(page)).toBeVisible();await settled(page);
+  const samples=await page.evaluate(async amount=>{
+   window.tagrex.selection.clear();for(const t of window.tagrex.tracks.slice(0,amount))window.tagrex.selection.add(t.path);window.tagrex.renderTracks();
+   const samples=[];for(let i=0;i<12;i++){await new Promise(requestAnimationFrame);const n=document.getElementById('selection-summary');samples.push({visible:!n.hidden,text:document.getElementById('files-selected-count').textContent});}return samples;
+  },amount);
+  expect(samples.filter(s=>s.visible).every(s=>s.text==='3')).toBe(true);
+  await expect(summary(page)).toBeHidden();
+ }
+});

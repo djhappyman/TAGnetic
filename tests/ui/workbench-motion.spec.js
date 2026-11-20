@@ -1,0 +1,84 @@
+import { test, expect } from '@playwright/test';
+import { readFile } from 'node:fs/promises';
+import { resolve, sep } from 'node:path';
+const root = resolve('.test-dist');
+test.beforeEach(async ({ page }) => {
+  page.motionErrors = [];
+  page.on('pageerror', error => page.motionErrors.push(error.message));
+  await page.route('http://tagrex.test/**', async route => {
+    const path = resolve(root, '.' + new URL(route.request().url()).pathname);
+    if (!path.startsWith(root + sep)) return route.abort();
+    try { await route.fulfill({ body: await readFile(path), contentType: path.endsWith('.js') ? 'text/javascript' : path.endsWith('.css') ? 'text/css' : path.endsWith('.woff2') ? 'font/woff2' : 'text/html' }); }
+    catch { await route.fulfill({ status: 404 }); }
+  });
+  await page.goto('http://tagrex.test/app/ui/index.html');
+  await expect.poll(() => page.evaluate(() => typeof window.tagrex?.openLibrary)).toBe('function');
+});
+test.afterEach(async ({ page }) => expect(page.motionErrors).toEqual([]));
+
+test('toolbar hints warm only after a hint appears and Escape restores the first delay', async ({ page }) => {
+  await page.clock.install();
+  const first = page.locator('#ribbon-open-folder'), next = page.locator('#ribbon-add-folder');
+  await first.hover();
+  await page.clock.runFor(400);
+  await expect(page.locator('#controller-tooltip-content')).toBeHidden();
+  await page.clock.runFor(80);
+  await expect(page.locator('#controller-tooltip-content')).toBeVisible();
+  await next.hover();
+  await page.clock.runFor(20);
+  await expect(page.locator('#controller-tooltip-content')).toHaveText(await next.getAttribute('aria-description'));
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#controller-tooltip-content')).toBeHidden();
+  await first.hover();
+  await page.clock.runFor(100);
+  await expect(page.locator('#controller-tooltip-content')).toBeHidden();
+  await page.clock.runFor(400);
+  await expect(page.locator('#controller-tooltip-content')).toBeVisible();
+});
+
+for (const theme of ['light', 'dark']) test(`navigation settles on the latest tab without shifting the table (${theme})`, async ({ page }) => {
+  await page.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
+  const table = await page.locator('#files-view').boundingBox();
+  for (const mode of ['renamer', 'exporter', 'online', 'tagger']) await page.locator(`.mode-tab[data-mode="${mode}"]`).click();
+  const active = page.locator('.mode-tabs [aria-selected="true"]');
+  await expect(active).toHaveAttribute('data-mode', 'tagger');
+  const pill = page.locator('.mode-tabs .navigation-motion-pill');
+  await expect.poll(() => pill.evaluate(node => node.getAnimations().length)).toBe(0);
+  expect(await pill.boundingBox()).toEqual(await active.boundingBox());
+  expect(await page.locator('#files-view').boundingBox()).toEqual(table);
+  // Wrapping navigation must remeasure without stretching or clipping its fill.
+  await page.setViewportSize({ width: 640, height: 800 });
+  await expect.poll(async () => JSON.stringify(await pill.boundingBox())).toBe(JSON.stringify(await active.boundingBox()));
+  await page.locator('#settings-open').click();
+  await expect(page.getByRole('dialog', { name: 'Settings', exact: true })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#settings-open')).toBeFocused();
+});
+
+test('reduced motion keeps selection and progress legible with no movement', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.locator('.mode-tab[data-mode="exporter"]').click();
+  const pill = page.locator('.mode-tabs .navigation-motion-pill');
+  expect(await pill.evaluate(node => node.getAnimations().length)).toBe(0);
+  expect(await pill.boundingBox()).toEqual(await page.locator('.mode-tabs [aria-selected="true"]').boundingBox());
+  expect(await page.locator('#ab-bar-fill').evaluate(node => getComputedStyle(node).transitionDuration)).toBe('0s');
+  const button = page.locator('.mode-tab[data-mode="exporter"]');
+  await button.focus();
+  await expect(button).toBeFocused();
+  expect(await button.evaluate(node => getComputedStyle(node).transitionDuration)).toBe('0s');
+});
+
+
+test('main navigation never shows hover or keyboard tooltips', async ({ page }) => {
+  await page.clock.install();
+  for (const mode of ['tagger', 'online', 'renamer', 'deduplicator', 'exporter']) {
+    const tab = page.locator(`.mode-tab[data-mode="${mode}"]`);
+    await tab.hover();
+    await page.clock.runFor(1200);
+    await expect(page.locator('#controller-tooltip-content')).toBeHidden();
+    await tab.focus();
+    await page.clock.runFor(50);
+    await expect(page.locator('#controller-tooltip-content')).toBeHidden();
+    await expect(tab).not.toHaveAttribute('title');
+  }
+});

@@ -52,6 +52,7 @@ async function holdApply(page){
   });
   await page.locator('#diff-apply').click();
   await expect.poll(()=>page.evaluate(()=>typeof window.finishWrite)).toBe('function');
+  await expect(page.locator('#diff-apply')).toHaveAttribute('aria-busy','true');
 }
 const report=(page,event)=>page.evaluate(event=>window.writeProgress(event),event);
 async function stable(page){
@@ -61,6 +62,7 @@ async function stable(page){
 async function finish(page){
   await page.evaluate(()=>{window.progressObserver.disconnect();window.finishWrite();});
   await expect(page.locator('#diff-actionbar')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
+  await expect(page.locator('#diff-apply')).not.toHaveAttribute('aria-busy');
   await expect(page.locator('#diff-apply')).toBeDisabled();
   await expect.poll(()=>page.evaluate(()=>window.tagrex.previewPlan?.changes?.length || 0)).toBe(0);
   expect(await page.evaluate(()=>window.tagrex.selectedPaths())).toEqual([]);
@@ -80,13 +82,17 @@ for(const kind of ['tags','transfer'])test(`${kind} Apply patches values in orde
     const cell=kind==='tags'?row.locator('td[data-field="artist"]'):row.locator('.fname');
     await expect(cell).toContainText(kind==='tags'?change.tag_changes.find(field=>field.field==='artist').old:change.path.split('/').pop());
     await report(page,{path:change.path,done:changes.length+index,total:changes.length*2});
+    await expect(page.locator('#ab-bar-fill').locator('..')).toHaveAttribute('role','progressbar');
+    await expect(page.locator('#ab-bar-fill').locator('..')).toHaveAttribute('aria-valuenow',String(Math.round((changes.length+index)/(changes.length*2)*100)));
     await expect(row).toHaveClass(/applying-current/);
     await report(page,{path:change.path,done:changes.length+index+1,total:changes.length*2,completed:kind});
     await expect(cell).toContainText(kind==='tags'?'Written artist':change.rename_to.split('/').pop());
     await expect(row).not.toHaveClass(/selected/);await expect(row).toHaveAttribute('aria-disabled','true');
-    await expect(page.locator('#files-selected-count')).toHaveText(String(changes.length-index-1));
+    if(changes.length-index-1>1) await expect(page.locator('#files-selected-count')).toHaveText(String(changes.length-index-1));
+    else await expect(page.locator('#selection-summary')).toBeHidden();
     await report(page,{path:change.path,done:changes.length+index+1,total:changes.length*2,completed:kind});
-    await expect(page.locator('#files-selected-count')).toHaveText(String(changes.length-index-1));
+    if(changes.length-index-1>1) await expect(page.locator('#files-selected-count')).toHaveText(String(changes.length-index-1));
+    else await expect(page.locator('#selection-summary')).toBeHidden();
     await expect(row).not.toHaveClass(/applying-current/);
     await stable(page);
     if(index===0&&kind==='tags')for(const theme of ['light','dark']){
@@ -183,9 +189,9 @@ test('Files owns immediate counts and grows for large numbers without clipping',
   await expect(page.locator('#files-total-count')).toHaveText('3');
   await expect(page.locator('#files-selected-count')).toHaveText('3');
   await page.locator('#tracks-body tr[data-path]').first().click();
-  await expect(page.locator('#files-selected-count')).toHaveText('1');
+  await expect(page.locator('#selection-summary')).toBeHidden();
   await page.locator('#tracks-body tr[data-path]').first().click({modifiers:['Control']});
-  await expect(page.locator('#files-selected-count')).toHaveText('0');
+  await expect(page.locator('#selection-summary')).toBeHidden();
   await expect(page.locator('#selection-summary')).toBeHidden();
   await page.locator('#filter').fill('Radio');
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(1);
@@ -208,6 +214,7 @@ test('a same-frame rename burst visibly completes top to bottom before the previ
     window.finishWrite();
   },changes);
   await expect(page.locator('#diff-actionbar')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
+  await expect(page.locator('#diff-apply')).not.toHaveAttribute('aria-busy');
   await expect.poll(()=>page.evaluate(()=>window.tagrex.previewPlan?.changes?.length || 0)).toBe(0);
   const frames=await page.evaluate(()=>{window.recordBurst=false;window.progressObserver.disconnect();return window.burstFrames;});
   expect(frames.some(paths=>paths.length>0&&paths.length<changes.length)).toBe(true);

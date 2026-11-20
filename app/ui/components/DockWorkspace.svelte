@@ -36,37 +36,11 @@
     queueMicrotask(() => layout.ready());
     return () => { unsubscribe(); media.removeEventListener('change', adapt); cancelResize?.(); };
   });
-  // WebKit's subtree-wide inert/visibility updates can consume several frames.
-  // Prepare before opening; retire controls only after the closing slide. Each
-  // attachment run cancels its predecessor, including a rapid direction change.
+  // Update accessibility state once; CSS slides the existing composited layer.
+  // Keep controls mounted, with compact routing handled by the workspace.
   function drawerMotion(node: HTMLElement) {
-    const isDrawer = sidebarDrawer;
-    const targetClosed = closed;
-    let frame = 0;
-    let cancelled = false;
-    const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
-    if (!isDrawer || reduced) {
-      node.inert = isDrawer && targetClosed;
-      drawerClosed = targetClosed;
-    } else if (targetClosed) {
-      drawerClosed = true;
-      frame = requestAnimationFrame(() => {
-        const animations = node.getAnimations();
-        Promise.all(animations.map(animation => animation.finished.catch(() => {}))).then(() => {
-          if (!cancelled) node.inert = true;
-        });
-      });
-    } else {
-      const needsPreparation = node.inert;
-      node.inert = false;
-      // Allow the control subtree to update before moving its composited layer.
-      if (needsPreparation) {
-        frame = requestAnimationFrame(() => {
-          frame = requestAnimationFrame(() => { drawerClosed = false; });
-        });
-      } else drawerClosed = false;
-    }
-    return () => { cancelled = true; cancelAnimationFrame(frame); };
+    node.inert = sidebarDrawer && closed;
+    drawerClosed = closed;
   }
   function revealPane(id: string) {
     if (drawer && closed && id !== 'files') document.dispatchEvent(new CustomEvent('tagrex:reveal-module', {detail:id}));
