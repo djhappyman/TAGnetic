@@ -16244,6 +16244,31 @@ mod tests {
 
     #[test]
     fn what_the_lock_kept_out_of_the_plan_is_still_on_disk_after_apply() {
+        #[cfg(target_os = "linux")]
+        {
+            // Native Apply uses a bounded process-wide I/O admission queue.
+            // Unrelated parallel fixtures must not exhaust this test's queue.
+            const CHILD: &str = "TAGREX_LOCKED_APPLY_CHILD";
+            if std::env::var_os(CHILD).is_none() {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "tests::what_the_lock_kept_out_of_the_plan_is_still_on_disk_after_apply",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, "1")
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success()
+                        && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed;"),
+                    "isolated locked Apply fixture must run and pass exactly one test:\n{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                return;
+            }
+        }
         // The end of the whole chain, on a real file: lock a field, run an
         // operation that would have rewritten it, apply, and read the file
         // back. Green preview assertions above say the plan is right; this says
@@ -16270,6 +16295,48 @@ mod tests {
             Some("desert rain"),
             "the unlocked field should still have been rewritten"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn locked_apply_fixture_isolated_from_process_resource_pressure() {
+        const CHILD: &str = "TAGREX_LOCKED_APPLY_PRESSURE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::locked_apply_fixture_isolated_from_process_resource_pressure",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed;"),
+                "isolated pressure fixture must run and pass exactly one test:\n{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        // Confine pressure to this child so the regression does not deny jobs
+        // to unrelated tests running in the ordinary default-thread harness.
+        let budget = tagrex_core::resources::Budget::process();
+        let _held = budget
+            .try_acquire(tagrex_core::resources::Charge {
+                jobs: 8,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(matches!(
+            budget.try_acquire(tagrex_core::resources::Charge {
+                jobs: 1,
+                ..Default::default()
+            }),
+            Err(tagrex_core::resources::AdmissionError::Busy)
+        ));
+        what_the_lock_kept_out_of_the_plan_is_still_on_disk_after_apply();
     }
 
     #[test]
