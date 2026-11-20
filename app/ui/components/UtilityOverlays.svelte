@@ -126,7 +126,7 @@
                 <Button variant="ghost" size="icon-sm" id="mb-ref-clear" class="icon field-clear" type="button" data-i18n-title="ph.clearFilter" title="Clear the filter" data-i18n-aria-label="ph.clearFilter" aria-label="Clear the filter"><svg class="ico"><use href="#i-close"/></svg></Button>
               </div>
             </div>
-            <div id="mb-ref-body" class="ph-body mb-ref-body"></div>
+            <div id="mb-ref-body" class="ph-body mb-ref-body pattern-reference"></div>
             <p class="ph-foot muted"><span data-i18n="ph.foot">Click one to insert it at the caret.</span><Button variant="link" size="sm" class="ph-guide" data-i18n="ph.guide">Mask guide</Button></p>
           </aside>
         </div>
@@ -140,13 +140,13 @@
     <ControllerPopover id="ph-menu" class="ph-menu" label="Placeholders" labelKey="mask.placeholders">
       <div class="ph-head">
         <div class="field sm is-empty">
-          <Input id="ph-filter" type="search" data-i18n-placeholder="ph.filter" placeholder="Filter placeholders…" spellcheck="false" autocomplete="off"  />
+          <Input id="ph-filter" type="search" aria-label="Filter placeholders" data-i18n-aria-label="ph.filter" data-i18n-placeholder="ph.filter" placeholder="Filter placeholders…" spellcheck="false" autocomplete="off"  />
           <div class="field-tools">
             <Button variant="ghost" size="icon-sm" id="ph-filter-clear" class="icon field-clear" type="button" data-i18n-title="ph.clearFilter" title="Clear the filter" data-i18n-aria-label="ph.clearFilter" aria-label="Clear the filter"><svg class="ico"><use href="#i-close"/></svg></Button>
           </div>
         </div>
       </div>
-      <div id="ph-body" class="ph-body"></div>
+      <div class="ph-reference-wrap"><div id="ph-body" class="ph-body pattern-reference"></div></div>
       <p class="ph-foot muted"><span data-i18n="ph.foot">Click one to insert it at the caret.</span><Button variant="link" size="sm" class="ph-guide" data-i18n="ph.guide">Mask guide</Button></p>
     </ControllerPopover>
 

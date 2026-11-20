@@ -6686,23 +6686,23 @@ body.drag-active #drop-overlay {
 .mb-ref .mb-ref-search > input { background:transparent; }
 .mb-ref-body { min-height:0; flex:1; overflow:auto; overscroll-behavior:contain; padding:var(--sp-2); }
 .mb-ref .ph-foot { flex:none; margin:0; padding:var(--sp-2) var(--sp-3); border:0; font-size:var(--text-xs); line-height:var(--lh-snug); }
-.mb-ref-body .ph-tag-row { align-items:center; gap:var(--sp-2); min-height:36px; }
-.mb-ref-body .ph-tag-chip { flex:none; font-family:var(--font-ui); margin:0; }
+.pattern-reference .ph-tag-row { align-items:center; gap:var(--sp-2); min-height:36px; }
+.pattern-reference .ph-tag-chip { flex:none; font-family:var(--font-ui); margin:0; }
 /* Match the main inspector's 8px edge fades, below the sticky table header. */
-.mb-list,.mb-ref-body {
+.mb-list,.mb-ref-body,#ph-body {
   --scroll-fade-top:0px; --scroll-fade-bottom:0px; --scroll-fade-head:0px;
   -webkit-mask-image:linear-gradient(to bottom,#000 0,#000 var(--scroll-fade-head),transparent var(--scroll-fade-head),#000 calc(var(--scroll-fade-head) + var(--scroll-fade-top)),#000 calc(100% - var(--scroll-fade-bottom)),transparent 100%);
   mask-image:linear-gradient(to bottom,#000 0,#000 var(--scroll-fade-head),transparent var(--scroll-fade-head),#000 calc(var(--scroll-fade-head) + var(--scroll-fade-top)),#000 calc(100% - var(--scroll-fade-bottom)),transparent 100%);
   scrollbar-width:none; scrollbar-gutter:auto;
 }
-.mb-list[data-fade-top=true],.mb-ref-body[data-fade-top=true] { --scroll-fade-top:8px; }
-.mb-list[data-fade-bottom=true],.mb-ref-body[data-fade-bottom=true] { --scroll-fade-bottom:8px; }
-.mb-list::-webkit-scrollbar,.mb-ref-body::-webkit-scrollbar { width:0; height:0; }
+.mb-list[data-fade-top=true],.mb-ref-body[data-fade-top=true],#ph-body[data-fade-top=true] { --scroll-fade-top:8px; }
+.mb-list[data-fade-bottom=true],.mb-ref-body[data-fade-bottom=true],#ph-body[data-fade-bottom=true] { --scroll-fade-bottom:8px; }
+.mb-list::-webkit-scrollbar,.mb-ref-body::-webkit-scrollbar,#ph-body::-webkit-scrollbar { width:0; height:0; }
 
 /* Reference headings share the app's readable section hierarchy. */
-.mb-ref-body .ph-group-name { margin:var(--sp-5) var(--sp-2) var(--sp-2); font-family:var(--font-ui); font-size:var(--text-sm); font-weight:600; color:var(--label); text-transform:none; letter-spacing:normal; }
-.mb-ref-body .ph-group:first-child .ph-group-name { margin-top:var(--sp-1); }
-.mb-ref-body .ph-group + .ph-group { border:0; }
+.pattern-reference .ph-group-name { margin:var(--sp-5) var(--sp-2) var(--sp-2); font-family:var(--font-ui); font-size:var(--text-sm); font-weight:600; color:var(--label); text-transform:none; letter-spacing:normal; }
+.pattern-reference .ph-group:first-child .ph-group-name { margin-top:var(--sp-1); }
+.pattern-reference .ph-group + .ph-group { border:0; }
 
 /* Explicit edge and pane grips work in WebKit as well as Chromium. */
 .mb-resize-edge { position:absolute; z-index:15; top:var(--r-dialog); bottom:var(--r-dialog); width:10px; cursor:col-resize; touch-action:none; }

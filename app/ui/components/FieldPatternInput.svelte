@@ -339,7 +339,7 @@
 <svelte:document onselectionchange={selectionChanged} />
 
 <div data-search-editor={draft ? true : undefined} class={['field-pattern-control', {'field-pattern-invalid':invalid, 'field-pattern-disabled':disabled, 'field-pattern-multiline':multiline}]}>
-  <div {id} class="field-pattern-editor" data-pattern-input={controller || undefined} role="combobox" aria-label={label}
+  <div {id} class="field-pattern-editor" data-pattern-input={controller || undefined} data-pattern-functions={functions || undefined} role="combobox" aria-label={label}
     aria-autocomplete="list" aria-haspopup="listbox" aria-expanded={choices.length > 0}
     aria-controls={listId} aria-activedescendant={choices.length ? `${listId}-${active}` : undefined}
     aria-invalid={invalid} aria-disabled={disabled}

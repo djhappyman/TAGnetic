@@ -216,3 +216,10 @@ body #group-menu .group-more::before { content:''; width:12px; flex:0 0 12px; }
 .preset-menu .preset-save-row input { min-width:0; flex:1; }
 .preset-menu .preset-save-row button { flex:none; }
 .preset-menu .preset-empty { margin:0; padding:var(--sp-4) var(--sp-2); font-size:var(--type-help-size); }
+
+/* Placeholder picker uses the same continuous reference as the mask builder. */
+#ph-menu .ph-head { padding:0 0 var(--sp-2); }
+#ph-menu .ph-head .field { border-color:transparent; background:var(--panel); }
+#ph-menu .ph-reference-wrap { position:relative; display:flex; flex:1 1 auto; min-height:0; overflow:hidden; }
+#ph-menu #ph-body { margin:0; padding:var(--sp-1); }
+#ph-menu .ph-foot { border:0; }

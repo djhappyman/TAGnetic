@@ -15,6 +15,8 @@ import { t, tOr } from "./i18n.js";
 import { fieldHue } from './field-pattern.js';
 import { fieldLabel } from './fields.js';
 import { invoke } from "./invoke.js";
+import { loadTextFunctions } from "./function-pattern.js";
+import { initTableScrollbars } from "./overlay-scrollbars.js";
 
 // Fetched once and kept: the grammar can't change while the app runs, and the
 // popover has to open instantly on a click.
@@ -22,6 +24,7 @@ let cache = null;
 // The input the open popover inserts into, and the button it hangs off.
 let target = null;
 let anchor = null;
+let referenceFunctions = [];
 
 export async function catalogue() {
   if (!cache) cache = await invoke("mask_placeholders");
@@ -173,17 +176,28 @@ function popoverEntries(entries) {
   return directionOf(target) === "render" ? entries : entries.filter((entry) => entry.extract);
 }
 
+function paintReference(filter = '') {
+  renderReference(popoverEntries(cache), filter, el('ph-body'), directionOf(target), {tagChips:true, functions:referenceFunctions});
+}
+
 async function openReference(button, input) {
-  const entries = await catalogue();
-  const menu = el("ph-menu");
+  const menu = el('ph-menu');
   target = input;
   anchor = button;
-  el("ph-filter").value = "";
-  el("ph-filter").parentElement.classList.add("is-empty");
-  renderReference(popoverEntries(entries), "", el("ph-body"), directionOf(input));
+  referenceFunctions = [];
+  menu.returnFocusTo = button;
+  const [, functions] = await Promise.all([
+    catalogue(),
+    directionOf(input) === 'render' && input.hasAttribute('data-pattern-functions') ? loadTextFunctions().catch(()=>[]) : [],
+  ]);
+  if (target !== input || anchor !== button) return;
+  referenceFunctions = functions;
+  el('ph-filter').value = '';
+  el('ph-filter').parentElement.classList.add('is-empty');
+  paintReference();
   menu.hidden = false;
   place(menu, button);
-  el("ph-filter").focus();
+  el('ph-filter').focus();
 }
 
 // Insert at the caret of the mask input rather than appending: a pattern is
@@ -216,6 +230,8 @@ export function insertAt(target, token) {
 }
 
 export async function initPlaceholderReference() {
+  initTableScrollbars(el('ph-body'), {host:el('ph-body').parentElement, fadeEdges:true});
+  for (const rail of el('ph-body').parentElement.querySelectorAll('[role="scrollbar"]')) rail.setAttribute('aria-label', t('mask.placeholders'));
   // One delegated listener for every trigger, so a new mask input needs only the
   // button markup and no wiring.
   document.addEventListener("click", (e) => {
@@ -238,7 +254,13 @@ export async function initPlaceholderReference() {
     // them into its own field (#540).
     const row = e.target.closest?.("#ph-menu .ph-row[data-token]");
     if (row) {
-      insert(row.dataset.token);
+      if (row.dataset.textFunction && target) {
+        const input = target;
+        const name = row.dataset.textFunction;
+        closeReference();
+        // Keep the saved editor selection, as the builder sidebar does.
+        input.dispatchEvent(new CustomEvent('pattern:add-function', {detail:name}));
+      } else insert(row.dataset.token);
       // Stays open: inserting several placeholders in a row is the common case.
       return;
     }
@@ -254,7 +276,7 @@ export async function initPlaceholderReference() {
   });
   el("ph-filter").addEventListener("input", (e) => {
     e.target.parentElement.classList.toggle("is-empty", !e.target.value);
-    if (cache) renderReference(popoverEntries(cache), e.target.value, el("ph-body"), directionOf(target));
+    if (cache && target) paintReference(e.target.value);
   });
 
   document.addEventListener("keydown", (e) => {

@@ -2039,11 +2039,15 @@ function syncPanelCellMin() {
 // Sync the action footer (apply count + enabled) and the header select-all
 // tri-state to `applySelection`. Every changed file starts ticked; unticking
 // some narrows what a single Apply writes (#81).
+function syncRenamePreviewButton() {
+  el('preview').disabled = currentMode !== 'renamer' || !selectedPaths().length || applying || undoing || filterPending;
+}
 function updateDiffBar(scope) {
   updateSelectionSummary(rowSelectionSet().size);
   const hasWork = !!diffByPath?.size;
   el('diff-actionbar').dataset.hasWork = String(hasWork);
   el('diff-preview').disabled = !hasWork || applying || undoing || filterPending || commandMode === 'duplicates';
+  syncRenamePreviewButton();
   if (!hasWork) {
     applyBtn.disabled = true;
     const label = msg('action.apply');
@@ -3361,6 +3365,7 @@ async function addFolderToList(root) {
   finally { ribbonFolderBusy = false; appendTypedFolder = false; }
 }
 function syncRibbonSelection() {
+  syncRenamePreviewButton();
   updateRedoControl();
   const reviewing = usingReviewSelection();
   const count = reviewing ? applySelection.size : selection.size;
