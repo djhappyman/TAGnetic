@@ -1361,6 +1361,8 @@ function mockInvoke(cmd, args) {
       return Promise.resolve(
         [
           ["artist", "Track artist", "Tags", true, true],
+          ["album", "Album title", "Tags", true, true],
+          ["albumartist", "Album artist", "Tags", true, true],
           ["title", "Track title", "Tags", true, true],
           ["track", "Track number (pads to two digits)", "Tags", true, true],
           ["catalognumber", "Label catalogue number", "Tags", true, true],

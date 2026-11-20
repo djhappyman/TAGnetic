@@ -36,6 +36,7 @@ const SIZE_STORAGE_KEY = "tagrex.maskBuilderSize";
 const modal = el("mask-builder");
 const dialog = modal.querySelector(".mask-builder");
 const expr = el("mb-expr");
+const exprField = expr.closest(".mb-field");
 
 let entries = [];
 let timer = null;
@@ -318,7 +319,7 @@ async function drainRefresh() {
     if (!paths.length && requestedMode !== MODES.text) {
       if (!current()) return;
       el("mb-error").hidden = true;
-      expr.parentElement.classList.remove("has-error");
+      exprField.classList.remove("has-error");
       el("mb-summary").textContent = "";
       el("mb-list").innerHTML = `<p class="mb-empty muted">${escapeHtml(t("maskBuilder.noSelection"))}</p>`;
       return;
@@ -326,7 +327,7 @@ async function drainRefresh() {
     const result = await requestedMode.list(mask, paths.slice(0, LIMIT), paths.length);
     if (!current()) return;
     el("mb-error").hidden = true;
-    expr.parentElement.classList.remove("has-error");
+    exprField.classList.remove("has-error");
     el("mb-list").innerHTML = result.html;
     el("mb-summary").innerHTML = result.summary;
   } catch (e) {
@@ -334,7 +335,7 @@ async function drainRefresh() {
     // Keep the last parsed result while an expression is half-typed.
     el("mb-error").textContent = String(e);
     el("mb-error").hidden = false;
-    expr.parentElement.classList.add("has-error");
+    exprField.classList.add("has-error");
   } finally {
     activeRefresh = false;
     if (queuedRefresh && !modal.hidden) void drainRefresh();
@@ -395,7 +396,8 @@ function paintTransformButton() {
 // tells the field whether it is empty, which hides Clear (#546).
 const MAX_LINES = 5;
 function fitField() {
-  expr.parentElement.classList.toggle("is-empty", !expr.value);
+  if (expr.hasAttribute("data-pattern-input")) { exprField.classList.toggle("is-empty", !expr.value); return; }
+  exprField.classList.toggle("is-empty", !expr.value);
   expr.style.height = "auto";
   const line = parseFloat(getComputedStyle(expr).lineHeight) || 20;
   const chrome = expr.offsetHeight - expr.clientHeight;
@@ -419,6 +421,7 @@ function referenceDirection() {
 
 async function open(which) {
   mode = which;
+  expr.dispatchEvent(new CustomEvent("pattern:direction", {detail:referenceDirection()}));
   dialog.classList.toggle("is-extract", mode !== MODES.render);
   el("mb-title").textContent = t(mode.title);
   restoreSize();

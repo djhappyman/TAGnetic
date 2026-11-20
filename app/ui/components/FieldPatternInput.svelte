@@ -1,12 +1,13 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
   import { placeFloating } from '../js/popup-position.js';
+  import { connectPatternController } from '../js/pattern-input.js';
   import { patternParts, fieldSuggestions, fieldHue } from '../js/field-pattern.js';
   type Field = { key: string; label: string };
-  let { id, label, value = '', fields = [], disabled = false, invalid = false,
+  let { id, label, value = $bindable(''), fields = [], disabled = false, invalid = false, controller = false, multiline = false,
     placeholder = 'Type a tag name', onchange }: {
     id: string; label: string; value?: string; fields?: Field[]; disabled?: boolean;
-    invalid?: boolean; placeholder?: string; onchange: (value: string) => void;
+    invalid?: boolean; controller?: boolean; multiline?: boolean; placeholder?: string; onchange?: (value: string) => void;
   } = $props();
   let editor = $state<HTMLDivElement>(null!);
   let choices = $state<Field[]>([]);
@@ -18,6 +19,20 @@
   let history: { value: string; caret: number }[] = [];
   let historyAt = -1;
   let renderedFields: Field[];
+  let savedSelection = { start:0, end:0 };
+  let composingValue = '';
+  function selectionOffsets() {
+    const range = selection();
+    return range ? {start:textBefore(range), end:caret()} : savedSelection;
+  }
+  function selectRange(start: number, end: number) {
+    putCaret(start); const from = selection()?.cloneRange();
+    putCaret(end); const to = selection();
+    if (from && to) { from.setEnd(to.endContainer, to.endOffset); window.getSelection()?.removeAllRanges(); window.getSelection()?.addRange(from); }
+    savedSelection = {start, end};
+  }
+  function selectionChanged() { if (editor && selection()) savedSelection = selectionOffsets(); normalizeCaret(); }
+  function blur() { savedSelection = selectionOffsets(); hide(); }
   const listId = $derived(`${id}-suggestions`);
 
   function placeSuggestions(node: HTMLDivElement) {
@@ -104,9 +119,10 @@
       if (part.field) {
         if (!nodes.length || (nodes.at(-1) instanceof HTMLElement && (nodes.at(-1) as HTMLElement).dataset.pattern)) nodes.push(caretStop());
         const chip = document.createElement('span');
-        chip.className = 'field-pattern-chip field-token-tone'; chip.contentEditable = 'false';
+        chip.className = 'field-pattern-chip field-value-chip field-token-tone'; chip.contentEditable = 'false';
         chip.style.setProperty('--field-hue', String(fieldHue(part.field.key)));
-        chip.dataset.pattern = part.text; chip.textContent = part.field.label;
+        chip.dataset.pattern = part.text; chip.textContent = part.field.label + (part.width ? ` · ${part.width}` : '');
+        chip.title = part.text;
         nodes.push(chip);
       } else nodes.push(document.createTextNode(part.text));
     }
@@ -120,7 +136,17 @@
     if (history[historyAt]?.value === next.value) return;
     history = [...history.slice(0, historyAt + 1), next].slice(-100); historyAt = history.length - 1;
   }
-  function publish() { remember(); onchange(text(editor)); }
+  function publish(emit = true) {
+    const raw = text(editor);
+    const offset = caret();
+    const expected = patternParts(raw, fields).filter(part => part.field).map(part => part.text);
+    const actual = [...editor.querySelectorAll<HTMLElement>('[data-pattern]')].map(node => node.dataset.pattern);
+    if (JSON.stringify(expected) !== JSON.stringify(actual)) draw(raw, offset);
+    remember();
+    if (controller) value = raw;
+    onchange?.(raw);
+    if (controller && emit) editor.dispatchEvent(new Event('input', {bubbles:true}));
+  }
   function suggest() {
     hide();
     const range = selection();
@@ -152,19 +178,19 @@
     hide(); editor.focus(); draw(raw.slice(0, offset) + token + raw.slice(end), offset + token.length); publish();
     await tick(); editor.focus();
   }
-  function input() { if (composing) return; publish(); suggest(); }
+  function input() { if (composing) return; publish(false); suggest(); }
   function moveHistory(direction: number) {
     const at = historyAt + direction;
     if (at < 0 || at >= history.length) return;
-    historyAt = at; const entry = history[at]; hide(); draw(entry.value, entry.caret); onchange(entry.value);
+    historyAt = at; const entry = history[at]; hide(); draw(entry.value, entry.caret); if (controller) value = entry.value; onchange?.(entry.value); if (controller) editor.dispatchEvent(new Event('input', {bubbles:true}));
   }
   function keydown(event: KeyboardEvent) {
     if (composing || event.isComposing || disabled) return;
     if ((event.ctrlKey || event.metaKey) && ['z', 'y'].includes(event.key.toLowerCase())) {
-      event.preventDefault(); event.stopPropagation(); moveHistory(event.key.toLowerCase() === 'y' || event.shiftKey ? 1 : -1); return;
+      event.preventDefault(); event.stopImmediatePropagation(); moveHistory(event.key.toLowerCase() === 'y' || event.shiftKey ? 1 : -1); return;
     }
     if (choices.length && ['ArrowDown', 'ArrowUp', 'Enter', 'Escape'].includes(event.key)) {
-      event.preventDefault(); event.stopPropagation();
+      event.preventDefault(); event.stopImmediatePropagation();
       if (event.key === 'Escape') hide();
       else if (event.key === 'Enter') void choose(choices[active]);
       else {
@@ -211,7 +237,7 @@
     if (disabled) return;
     const range = selection(); if (!range) return;
     const raw = text(editor); const start = textBefore(range); const end = caret();
-    const pasted = event.clipboardData?.getData('text/plain') || '';
+    const pasted = (event.clipboardData?.getData('text/plain') || '').replace(/[\r\n]+/g, '');
     hide(); draw(raw.slice(0, start) + pasted + raw.slice(end), start + pasted.length); publish();
   }
   function copy(event: ClipboardEvent, cut = false) {
@@ -223,7 +249,13 @@
     // Attach once: tracking value here would remount the editable DOM on every
     // keystroke, losing the caret and the local undo history.
     untrack(() => { editor = node; draw(value); history = [{value, caret:value.length}]; historyAt = 0; });
-    return () => clearTimeout(timer);
+    node.addEventListener('keydown', keydown);
+    const disconnect = controller ? connectPatternController(node, {
+      read: () => text(editor),
+      write: (next: string) => { hide(); value = next; draw(next); remember(); },
+      selection: selectionOffsets, select: selectRange,
+    }) : () => {};
+    return () => { clearTimeout(timer); node.removeEventListener('keydown', keydown); disconnect(); };
   }
   $effect(() => {
     // Read both dependencies before branching: an external value reset must
@@ -235,22 +267,22 @@
   });
 </script>
 
-<svelte:document onselectionchange={normalizeCaret} />
+<svelte:document onselectionchange={selectionChanged} />
 
-<div class={['field-pattern-control', {'field-pattern-invalid':invalid, 'field-pattern-disabled':disabled}]}>
-  <div {id} class="field-pattern-editor" role="combobox" aria-label={label}
+<div class={['field-pattern-control', {'field-pattern-invalid':invalid, 'field-pattern-disabled':disabled, 'field-pattern-multiline':multiline}]}>
+  <div {id} class="field-pattern-editor" data-pattern-input={controller || undefined} role="combobox" aria-label={label}
     aria-autocomplete="list" aria-haspopup="listbox" aria-expanded={choices.length > 0}
     aria-controls={listId} aria-activedescendant={choices.length ? `${listId}-${active}` : undefined}
     aria-invalid={invalid} aria-disabled={disabled}
     contenteditable={!disabled} tabindex={disabled ? -1 : 0} spellcheck="false" data-placeholder={placeholder}
-    {@attach connect} onbeforeinput={beforeinput} oninput={input} onkeydown={keydown} onpaste={paste}
+    {@attach connect} onbeforeinput={beforeinput} oninput={input} onpaste={paste}
     ondrop={event => { event.preventDefault(); }}
     oncopy={event => copy(event)} oncut={event => copy(event, true)}
-    onpointerdown={pointerdown} onblur={hide}
-    oncompositionstart={() => { composing = true; hide(); }}
-    oncompositionend={() => { composing = false; input(); }}></div>
+    onpointerdown={pointerdown} onblur={blur}
+    oncompositionstart={() => { composingValue = text(editor); composing = true; hide(); }}
+    oncompositionend={() => { composing = false; if (text(editor) !== composingValue) { input(); if (controller) editor.dispatchEvent(new Event('input', {bubbles:true})); } }}></div>
   {#if choices.length}
-    <div id={listId} class="field-pattern-suggestions" {@attach placeSuggestions} role="listbox" aria-label="Tag suggestions">
+    <div id={listId} class="field-pattern-suggestions" data-controller-popup {@attach placeSuggestions} role="listbox" aria-label="Tag suggestions">
       {#each choices as field, index (field.key)}
         {@const parts = highlight(field.label)}
         <div id={`${listId}-${index}`} role="option" class="field-token-tone" style:--field-hue={fieldHue(field.key)} aria-label={field.label} aria-selected={active === index} tabindex="-1"
@@ -265,18 +297,14 @@
 </div>
 
 <style>
-  .field-pattern-control { position:relative; min-width:0; background:var(--panel); border-radius:var(--input-radius,10px); color:var(--text); }
+  .field-pattern-control { position:relative; min-width:0; background:var(--panel); border-radius:var(--input-radius,10px); color:var(--text); flex:1; width:100%; }
+  .field-pattern-multiline .field-pattern-editor { height:auto; min-height:36px; max-height:140px; white-space:pre-wrap; overflow-wrap:anywhere; overflow-y:auto; }
+  :global(.field) > .field-pattern-control { background:transparent; }
+  :global(.field) > .field-pattern-control:focus-within { outline:none; }
   .field-pattern-control:focus-within { outline:2px solid var(--accent); outline-offset:1px; }
   .field-pattern-invalid { outline:2px solid var(--error); }
   .field-pattern-disabled { opacity:.55; }
   .field-pattern-editor { height:36px; overflow-x:auto; overflow-y:hidden; padding:6px 10px; box-sizing:border-box; outline:none; white-space:pre; font:inherit; line-height:24px; cursor:text; caret-color:var(--accent); scrollbar-width:thin; }
   .field-pattern-editor:empty::before { content:attr(data-placeholder); color:var(--muted); pointer-events:none; }
   .field-pattern-editor::selection, .field-pattern-editor :global(::selection) { background:var(--accent); color:var(--on-accent,#fff); }
-  .field-pattern-editor :global(.field-pattern-chip) { display:inline-flex; align-items:center; justify-content:center; height:24px; vertical-align:top; padding:0 8px; margin-inline:1px; border-radius:var(--r-compact,8px); color:var(--field-ink); background:color-mix(in srgb,var(--field-ink) 12%,var(--panel)); font-weight:500; line-height:1; white-space:nowrap; caret-color:transparent; user-select:all; -webkit-user-select:all; cursor:default; }
-  .field-pattern-suggestions { position:absolute; z-index:20; max-height:224px; overflow:auto; overscroll-behavior:contain; padding:7px; border:1px solid var(--border); border-radius:var(--r-menu,16px); background:var(--panel); box-shadow:0 8px 24px #0003; }
-  .field-pattern-suggestions [role=option] { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:32px; padding:4px 8px; box-sizing:border-box; border-radius:var(--r-menu-item,8px); cursor:pointer; }
-  .field-pattern-suggestions [role=option]:hover, .field-pattern-suggestions [aria-selected=true] { background:var(--row-hover); }
-  .field-suggestion-label { color:var(--field-ink); }
-  .field-pattern-suggestions mark { color:inherit; background:color-mix(in srgb,var(--field-ink) 12%,transparent); border-radius:3px; font-weight:600; }
-  .field-pattern-suggestions small { font-size:var(--text-xs); color:var(--muted); }
 </style>

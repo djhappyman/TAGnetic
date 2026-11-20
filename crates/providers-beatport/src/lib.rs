@@ -158,11 +158,12 @@ impl MetadataProvider for BeatportProvider {
         "Beatport"
     }
 
-    /// One free-text search box, so every field the query carries is folded into
-    /// `q`. The media-type filter (#103) is deliberately ignored: everything
+    /// Legacy text fields are folded into `q`; explicit filter chips use the
+    /// separate release-search parameters. The media-type filter is ignored: everything
     /// here is digital, so filtering by Vinyl or CD could only ever return
     /// nothing.
     fn search(&self, query: &SearchQuery) -> Result<Vec<ReleaseCandidate>, ProviderError> {
+        let filters = query.native_filters("beatport")?;
         let joined = [
             query.artist.as_deref(),
             query.album.as_deref(),
@@ -186,6 +187,7 @@ impl MetadataProvider for BeatportProvider {
             params.push(("per_page", &per_page));
         }
 
+        params.extend(filters);
         let body = self.get(&format!("{API_BASE}/catalog/search/"), &params)?;
         parse_search_response(&body)
     }

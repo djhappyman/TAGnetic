@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PatternInput from './PatternInput.svelte';
   import { onMount } from 'svelte';
   import { t } from '../js/i18n.js';
   import { FolderOpen, FolderPlus, Undo2, Redo2, ListChecks, ListX, ArrowDown, ArrowUp, Group, ChevronDown, PanelRightOpen, PanelRightClose } from '@lucide/svelte';
@@ -14,6 +15,7 @@
   import QueryFeedback from './QueryFeedback.svelte';
   import DuplicateScanControls from './DuplicateScanControls.svelte';
   import ImportFields from './ImportFields.svelte';
+  import OnlineSearchInput from './OnlineSearchInput.svelte';
   import NativeCheckbox from './controls/NativeCheckbox.svelte';
   import NativeSlider from './controls/NativeSlider.svelte';
   import * as Tabs from '$lib/components/ui/tabs/index.js';
@@ -22,6 +24,12 @@
   import { Input } from '$lib/components/ui/input/index.js';
   import { Textarea } from '$lib/components/ui/textarea/index.js';
   import { NativeSelect, NativeSelectOption } from '$lib/components/ui/native-select/index.js';
+  let exportNameIsPattern = $state(false);
+  function exportPatternMode(node: HTMLElement) {
+    const update = (event: Event) => { exportNameIsPattern = !!(event as CustomEvent).detail; };
+    node.addEventListener('pattern:enabled', update);
+    return () => node.removeEventListener('pattern:enabled', update);
+  }
   let dock = $state<WorkspaceLayout>();
   let mode = $state<WorkspaceMode>('tagger');
   let subtab = $state<WorkspaceSubtab>('online');
@@ -341,7 +349,7 @@
         <h2 data-i18n="renamer.heading">Rename files</h2>
         <div class="mask-row">
           <div class="field">
-            <Input id="mask" type="text" value="%artist% - %title%" spellcheck="false" placeholder="%artist% - %title%" />
+            <PatternInput id="mask" label="Rename pattern" value="%artist% - %title%" />
             <div class="field-tools">
               <Button variant="ghost" size="icon-sm" class="icon ph-btn" type="button" data-ph-target="mask" data-i18n-title="mask.placeholders" title="Placeholders" data-i18n-aria-label="mask.placeholdersAria" aria-label="Placeholder reference"><svg class="ico"><use href="#i-help"/></svg></Button>
               <Button variant="ghost" size="icon-sm" class="icon preset-btn" type="button" data-preset-target="mask" data-i18n-title="preset.title" title="Mask presets" data-i18n-aria-label="preset.title" aria-label="Mask presets"><svg class="ico"><use href="#i-presets"/></svg></Button>
@@ -454,7 +462,7 @@
 
             <div id="query-box" class="query field">
               <ImportFields />
-              <Input id="discogs-query" type="text" data-i18n-aria-label="online.queryPlaceholder" aria-label="Artist, album, or catalogue number" data-i18n-placeholder="online.queryPlaceholder" placeholder="artist / album / catalog no." spellcheck="false" />
+              <OnlineSearchInput />
               <div class="field-tools">
                 <Button variant="ghost" size="icon-sm" id="discogs-clear" class="icon query-clear" type="button" data-i18n-title="online.clearSearch" title="Clear search and results" data-i18n-aria-label="online.clearSearch" aria-label="Clear search and results" hidden><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></Button>
                 <Button variant="ghost" size="icon-sm" id="query-presets" class="icon" type="button" data-i18n-title="online.presets" title="Queries this selection can build" data-i18n-aria-label="online.presets" aria-label="Queries this selection can build" aria-expanded="false"><svg class="ico"><use href="#i-caret-down"/></svg></Button>
@@ -547,7 +555,7 @@
         <div class="from-name-scroll"><div class="panel-block">
           <div class="mask-row">
             <div class="field">
-              <Input id="from-name-mask" aria-label="Pattern" data-i18n-aria-label="inspector.pattern" type="text" value="%artist% - %title%" spellcheck="false" placeholder="%artist% - %title%" />
+              <PatternInput id="from-name-mask" label="From Name pattern" value="%artist% - %title%" direction="extract" />
               <div class="field-tools">
                 <Button variant="ghost" size="icon-sm" class="icon ph-btn" type="button" data-ph-target="from-name-mask" data-i18n-title="mask.placeholders" title="Placeholders" data-i18n-aria-label="mask.placeholdersAria" aria-label="Placeholder reference"><svg class="ico"><use href="#i-help"/></svg></Button>
                 <Button variant="ghost" size="icon-sm" class="icon preset-btn" type="button" data-preset-target="from-name-mask" data-i18n-title="preset.title" title="Mask presets" data-i18n-aria-label="preset.title" aria-label="Mask presets"><svg class="ico"><use href="#i-presets"/></svg></Button>
@@ -570,7 +578,7 @@
         <div class="from-name-scroll"><div class="panel-block">
           <div class="mask-row">
             <div class="field">
-              <Input id="from-text-mask" aria-label="Pattern" data-i18n-aria-label="inspector.pattern" type="text" value="%track%. %artist% - %title%" spellcheck="false" placeholder="%track%. %artist% - %title%" />
+              <PatternInput id="from-text-mask" label="From Text pattern" value="%track%. %artist% - %title%" direction="text" />
               <div class="field-tools">
                 <Button variant="ghost" size="icon-sm" class="icon ph-btn" type="button" data-ph-target="from-text-mask" data-i18n-title="mask.placeholders" title="Placeholders" data-i18n-aria-label="mask.placeholdersAria" aria-label="Placeholder reference"><svg class="ico"><use href="#i-help"/></svg></Button>
                 <Button variant="ghost" size="icon-sm" class="icon preset-btn" type="button" data-preset-target="from-text-mask" data-i18n-title="preset.title" title="Mask presets" data-i18n-aria-label="preset.title" aria-label="Mask presets"><svg class="ico"><use href="#i-presets"/></svg></Button>
@@ -673,16 +681,16 @@
             <label for="export-mask" data-i18n="exporter.mask">Mask</label>
 
             <div class="field">
-              <Input id="export-mask" type="text" value="%artist% - %title%" spellcheck="false" />
+              <PatternInput id="export-mask" label="Report pattern" value="%artist% - %title%" />
               <div class="field-tools">
                 <Button variant="ghost" size="icon-sm" class="icon ph-btn" type="button" data-ph-target="export-mask" data-i18n-title="mask.placeholders" title="Placeholders" data-i18n-aria-label="mask.placeholdersAria" aria-label="Placeholder reference"><svg class="ico"><use href="#i-help"/></svg></Button>
                 <Button variant="ghost" size="icon-sm" class="icon preset-btn" type="button" data-preset-target="export-mask" data-i18n-title="preset.title" title="Mask presets" data-i18n-aria-label="preset.title" aria-label="Mask presets"><svg class="ico"><use href="#i-presets"/></svg></Button>
               </div>
             </div>
           </div>
-          <div class="exp-row">
+          <div class="exp-row" {@attach exportPatternMode}>
             <label for="export-name" id="export-name-label">File name</label>
-            <Input id="export-name" type="text" spellcheck="false" />
+            <PatternInput id="export-name" label="Export filename" enabled={exportNameIsPattern} />
           </div>
         </div>
 

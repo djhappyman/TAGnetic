@@ -64,6 +64,7 @@ function reflectExportKind() {
   // Splitting turns the file name into a mask rendered per group, so the field
   // says which of the two it is rather than leaving the difference implicit.
   const splitting = exportKind === "playlist" && exportSplit;
+  el("export-name").dispatchEvent(new CustomEvent("pattern:enabled", {bubbles:true, detail:!!splitting}));
   el("export-name-label").textContent = t(splitting ? "exporter.nameMask" : "exporter.name");
   el("export-hint").innerHTML = splitting
     ? t("exporter.hint.split", { grouping: t(`exporter.grouping.${exportSplit}`) })

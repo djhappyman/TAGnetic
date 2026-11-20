@@ -183,6 +183,7 @@ impl MetadataProvider for BandcampProvider {
     }
 
     fn search(&self, query: &SearchQuery) -> Result<Vec<ReleaseCandidate>, ProviderError> {
+        query.native_filters("bandcamp")?;
         // The single search box maps to `album` as free text (see the frontend).
         let text = query.album.as_deref().unwrap_or("").trim();
         if text.is_empty() {

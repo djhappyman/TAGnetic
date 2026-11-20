@@ -5,10 +5,12 @@ export function patternParts(value, fields) {
   const parts = [];
   let start = 0;
   for (const match of value.matchAll(/%([^%]+)%/g)) {
-    const field = known.get(match[1].toLowerCase());
+    const key = match[1].toLowerCase();
+    const width = key.match(/^(.*):([0-9]+)$/);
+    const field = known.get(key) || (width && known.get(width[1]));
     if (!field) continue;
     if (match.index > start) parts.push({ text: value.slice(start, match.index) });
-    parts.push({ text: match[0], field });
+    parts.push({ text: match[0], field, width:width && !known.has(key) ? width[2] : null });
     start = match.index + match[0].length;
   }
   if (start < value.length) parts.push({ text: value.slice(start) });

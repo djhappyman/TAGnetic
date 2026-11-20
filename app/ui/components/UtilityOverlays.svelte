@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PatternInput from './PatternInput.svelte';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
   import { NativeSelect, NativeSelectOption } from '$lib/components/ui/native-select/index.js';
@@ -67,7 +68,7 @@
           <label class="colmask-row">
             <span data-i18n="colmask.pattern">Pattern</span>
             <div class="colmask-pattern field">
-              <Input id="colmask-pattern" type="text" class="mono" spellcheck="false" placeholder="%artist% - %title%"  />
+              <PatternInput id="colmask-pattern" label="Column pattern" />
               <div class="field-tools">
                 <Button variant="ghost" size="icon-sm" class="icon ph-btn" type="button" data-ph-target="colmask-pattern" data-i18n-title="mask.placeholders" title="Placeholders" data-i18n-aria-label="mask.placeholdersAria" aria-label="Placeholder reference"><svg class="ico"><use href="#i-help"/></svg></Button>
               </div>
@@ -99,7 +100,7 @@
         <div class="mb-body">
           <div class="mb-main">
             <div class="field multi mb-field">
-              <Textarea id="mb-expr" rows={1} spellcheck="false" autocomplete="off" data-i18n-aria-label="maskBuilder.expression" aria-label="Mask"></Textarea>
+              <PatternInput id="mb-expr" label="Mask" multiline />
               <div class="field-tools">
                 <Button variant="ghost" size="icon-sm" id="mb-clear" class="icon field-clear" type="button" data-i18n-title="maskBuilder.clear" title="Clear the mask" data-i18n-aria-label="maskBuilder.clear" aria-label="Clear the mask"><svg class="ico"><use href="#i-close"/></svg></Button>
                 <span class="field-sep" aria-hidden="true"></span>

@@ -193,6 +193,7 @@ impl MetadataProvider for SoundeoProvider {
     }
 
     fn search(&self, query: &SearchQuery) -> Result<Vec<ReleaseCandidate>, ProviderError> {
+        query.native_filters("soundeo")?;
         let text = query.album.as_deref().unwrap_or("").trim();
         if text.is_empty() {
             return Ok(Vec::new());

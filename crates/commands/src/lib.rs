@@ -1557,6 +1557,8 @@ pub struct RecoveryBatchDto {
 /// What to search a provider for.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SearchQueryDto {
+    #[serde(default)]
+    pub filters: std::collections::BTreeMap<String, String>,
     pub artist: Option<String>,
     pub title: Option<String>,
     pub album: Option<String>,
@@ -2183,6 +2185,7 @@ impl ProviderHub {
         query: &SearchQueryDto,
     ) -> Result<Vec<CandidateDto>, AppError> {
         let search = query.to_search_query();
+        search.native_filters(source)?;
         let candidates = self.with_retry(source, || {
             Ok(match source {
                 "musicbrainz" => self.musicbrainz_provider()?.search(&search)?,
@@ -9149,6 +9152,7 @@ impl From<&BatchHeader> for BatchDto {
 impl SearchQueryDto {
     fn to_search_query(&self) -> SearchQuery {
         SearchQuery {
+            filters: self.filters.clone(),
             artist: self.artist.clone(),
             title: self.title.clone(),
             album: self.album.clone(),

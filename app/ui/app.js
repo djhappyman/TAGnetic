@@ -345,7 +345,7 @@ const componentEscapeEvents = new WeakSet();
 function componentOwnsEscape(event) {
   if (componentEscapeEvents.has(event)) return true;
   const target = event.target instanceof Element ? event.target : null;
-  const owned = !!target?.closest("[data-controller-popup]") ||
+  const owned = !!target?.closest("[data-controller-popup],[data-search-editor]") ||
     [...document.querySelectorAll('[data-slot="select-content"], [data-slot="popover-content"], [data-slot="dropdown-menu-content"]')]
       .some((node) => !node.matches('[hidden], [data-state="closed"], [data-closed]') && node.getClientRects().length > 0);
   if (owned) componentEscapeEvents.add(event);
@@ -5179,6 +5179,6 @@ window.tagrex = {
 document.addEventListener('keydown', event => {
   if (applying || undoing) return;
   if (!(event.ctrlKey || event.metaKey) || event.shiftKey || event.key.toLowerCase() !== 'z') return;
-  if (event.target.closest('input,textarea,[contenteditable="true"]')) return;
+  if (event.target.closest('input,textarea,[contenteditable="true"],[data-search-editor]')) return;
   if (undoLiveImport()) { event.preventDefault(); event.stopImmediatePropagation(); refreshFieldEditor({force:true}); }
 }, true);
