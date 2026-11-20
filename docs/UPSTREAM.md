@@ -295,6 +295,8 @@ accepted upstream contribution.
   styling, pattern/function/search chips and Rename controls are shared interface
   behaviour for `next`. Remaining curation waits for compatible workbench
   foundations; no additional upstream submissions are claimed here.
+- The function-chip parser's equivalent `Option` propagation cleanup fixes the
+  stable-Clippy release gate and follows the same pending function-chip curation.
 - Provider search request changes in the earlier fork checkpoints need a separate
   shared-backend contribution to `main` against compatible provider foundations;
   they must not carry the fork's UI or identity into upstream.

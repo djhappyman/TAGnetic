@@ -69,9 +69,7 @@ fn call_at(chars: &[char], start: usize) -> Option<(usize, String, Vec<String>)>
         if closed == Some(')') {
             break;
         }
-        if closed.is_none() {
-            return None;
-        }
+        closed?;
     }
     Some((end, function.name().to_string(), args))
 }
