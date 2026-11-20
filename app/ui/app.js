@@ -329,7 +329,7 @@ const componentEscapeEvents = new WeakSet();
 function componentOwnsEscape(event) {
   if (componentEscapeEvents.has(event)) return true;
   const target = event.target instanceof Element ? event.target : null;
-  const owned = !!target?.closest("[data-controller-popup]") ||
+  const owned = !!target?.closest("[data-controller-popup],[data-artwork-ui]") ||
     [...document.querySelectorAll('[data-slot="select-content"], [data-slot="popover-content"], [data-slot="dropdown-menu-content"]')]
       .some((node) => !node.matches('[hidden], [data-state="closed"], [data-closed]') && node.getClientRects().length > 0);
   if (owned) componentEscapeEvents.add(event);

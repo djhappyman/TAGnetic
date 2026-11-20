@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { artworkLightboxMotion } from '$lib/artwork-lightbox-motion';
   import * as Menu from '$lib/components/ui/dropdown-menu/index.js';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
@@ -15,6 +16,39 @@
   let lightbox = $state(false);
   let decoded = $state.raw<{ src: string; width: number; height: number } | null>(null);
   let failure = $state('');
+  let thumbnail = $state<HTMLButtonElement>();
+  let stage = $state<HTMLDivElement>();
+  let opening = $state(false);
+  let closing = false;
+  let motion: ReturnType<typeof artworkLightboxMotion> | undefined;
+  $effect(() => {
+    if (!lightbox || !decoded || !stage) return;
+    const host = stage;
+    let secondFrame = 0;
+    const frame = requestAnimationFrame(() => {
+      secondFrame = requestAnimationFrame(() => {
+        const origin = thumbnail?.querySelector('img');
+        if (!origin) { opening = false; return; }
+        motion = artworkLightboxMotion(host, origin);
+        void motion.enter();
+        opening = false;
+      });
+    });
+    return () => { cancelAnimationFrame(frame); cancelAnimationFrame(secondFrame); motion?.destroy(); motion = undefined; };
+  });
+  async function closePreview() {
+    if (!lightbox || closing) return;
+    closing = true;
+    const version = ++generation;
+    await motion?.exit();
+    if (version === generation) lightbox = false;
+    closing = false;
+  }
+  function outsideImage(event: MouseEvent) {
+    if (event.detail === 0 || (event.target as Element).closest('.aw-tools, [data-slot="dialog-close"]')) return;
+    const hero = stage?.querySelector('img')?.getBoundingClientRect();
+    if (hero && (event.clientX < hero.left || event.clientX > hero.right || event.clientY < hero.top || event.clientY > hero.bottom)) void closePreview();
+  }
   let generation = 0;
   let returnFocus: HTMLElement | null = null;
   const image = $derived(model.images[active]);
@@ -28,7 +62,9 @@
     if (!image || model.loading) return;
     const current = image;
     const version = ++generation;
-    returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    returnFocus = thumbnail || null;
+    opening = true;
+    closing = false;
     failure = '';
     lightbox = true;
     decoded = null;
@@ -37,7 +73,7 @@
       if (version !== generation || !lightbox) return;
       decoded = { src: uri(current), width: picture.naturalWidth, height: picture.naturalHeight };
     } catch {
-      if (version === generation && lightbox) failure = t('artwork.failed');
+      if (version === generation && lightbox) { failure = t('artwork.failed'); opening = false; }
     }
   }
   // Canvas rotates its own inspection view; this preview never stages rotation.
@@ -61,7 +97,7 @@
     </Menu.Root>
   </div>
   {#if image}
-    <button type="button" class="cover-main-image" aria-label={t('artwork.title')} disabled={model.loading} onclick={preview}>
+    <button type="button" class="cover-main-image" bind:this={thumbnail} aria-label={t('artwork.title')} disabled={model.loading} onclick={preview}>
       <img src={uri(image)} alt={model.mixed ? t('cover.multiple') : image.description || t('cover.frontCover')} draggable="false" />
     </button>
     {#if model.mixed}<p class="cover-compact-note">{t('cover.multiple')} · {t('cover.withCover', { with_cover: model.withCover, n: model.selected })}</p>
@@ -74,11 +110,11 @@
     </button>
   {/if}
 </div>
-<Dialog.Root bind:open={lightbox} onOpenChange={(open) => { if (!open) generation++; }}>
-  <Dialog.Content class="cover-lightbox" data-artwork-ui onCloseAutoFocus={(event) => { event.preventDefault(); if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true }); }}>
-    <Dialog.Title>{t('editor.coverArt')}</Dialog.Title>
+<Dialog.Root open={lightbox} onOpenChange={(open) => { if (!open) void closePreview(); }}>
+  <Dialog.Content class="cover-lightbox" data-artwork-ui overlayProps={{ class: "cover-lightbox-veil" }} onclick={outsideImage} onEscapeKeydown={(event) => { event.preventDefault(); event.stopPropagation(); void closePreview(); }} onCloseAutoFocus={(event) => { event.preventDefault(); if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true }); }}>
+    <Dialog.Title class="sr-only">{t('editor.coverArt')}</Dialog.Title>
     <Dialog.Description class="sr-only">{t('artwork.canvas')}</Dialog.Description>
-    <div class="cover-lightbox-stage">
+    <div class="cover-lightbox-stage" bind:this={stage} style:opacity={opening ? 0 : 1}>
       {#if decoded}
         <ArtworkCanvas src={decoded.src} width={decoded.width} height={decoded.height} label={t('editor.coverArt')} onrotate={previewRotation} />
       {:else if failure}<p role="alert">{failure}</p><Button variant="outline" onclick={preview}>{t('artwork.retry')}</Button>
