@@ -12,7 +12,11 @@ import { upgradeComponentMarkup } from "../lib/component-elements.js";
 // same tables the parser reads. A name shown here parses, by construction.
 import { placeFloating, el, escapeHtml } from "./dom.js";
 import { t, tOr } from "./i18n.js";
+import { fieldHue } from './field-pattern.js';
+import { fieldLabel } from './fields.js';
 import { invoke } from "./invoke.js";
+import { loadTextFunctions } from "./function-pattern.js";
+import { initTableScrollbars } from "./overlay-scrollbars.js";
 
 // Fetched once and kept: the grammar can't change while the app runs, and the
 // popover has to open instantly on a click.
@@ -20,6 +24,7 @@ let cache = null;
 // The input the open popover inserts into, and the button it hangs off.
 let target = null;
 let anchor = null;
+let referenceFunctions = [];
 
 export async function catalogue() {
   if (!cache) cache = await invoke("mask_placeholders");
@@ -60,19 +65,22 @@ export function directionOf(input) {
   return "render";
 }
 
-function grammarRows(direction) {
+function grammarRows(direction, chips = false) {
   return GRAMMAR[direction]
     .map((rule) => {
       const token = escapeHtml(t(`ph.grammar.${rule}.token`));
       const desc = escapeHtml(t(`ph.grammar.${rule}`));
-      const note = GRAMMAR_NOTE[rule] ? `<span class="ph-dir">${escapeHtml(t(GRAMMAR_NOTE[rule]))}</span>` : "";
+      const note = GRAMMAR_NOTE[rule] && !(chips && GRAMMAR_NOTE[rule]==='ph.nameOnly') ? `<span class="ph-dir">${escapeHtml(t(GRAMMAR_NOTE[rule]))}</span>` : "";
       const skeleton = GRAMMAR_SKELETON[rule];
+      const shown = chips && skeleton && /^%(?:track|disc|side)(?::[0-9]+)?%/.test(skeleton)
+        ? skeleton.replace(/%([^%]+)%/g,(_,spec)=>{const [key,width]=spec.split(':');return `<span class="field-value-chip field-token-tone ph-tag-chip" style="--field-hue:${fieldHue(key)}">${escapeHtml(fieldLabel(key))}${width?` · ${width}`:''}</span>`;})
+        : token;
       return skeleton
         ? `<button type="button" class="ph-row" data-token="${escapeHtml(skeleton)}">
-            <span class="ph-token">${token}</span><span class="ph-desc">${desc}</span>${note}
+            <span class="ph-token">${shown}</span><span class="ph-desc">${desc}</span>${note}
           </button>`
         : `<div class="ph-row ph-row-static">
-            <span class="ph-token">${token}</span><span class="ph-desc">${desc}</span>${note}
+            <span class="ph-token">${shown}</span><span class="ph-desc">${desc}</span>${note}
           </div>`;
     })
     .join("");
@@ -90,27 +98,31 @@ function describe(entry) {
   return tOr(entry.code, entry.description);
 }
 
-function rows(entries) {
-  return entries
-    .map(
-      (entry) => `<button type="button" class="ph-row" data-token="${escapeHtml(entry.token)}">
-        <span class="ph-token">${escapeHtml(entry.token)}</span>
-        <span class="ph-desc">${escapeHtml(describe(entry))}</span>
-        ${directionNote(entry) ? `<span class="ph-dir">${directionNote(entry)}</span>` : ""}
-      </button>`,
-    )
-    .join("");
+function rows(entries, tagChips = false, direction = "render", functions = []) {
+  return entries.map(entry => {
+    const fn=functions.find(fn=>fn.key===entry.name);
+    const chip = tagChips && (/^%[^%]+%$/.test(entry.token) && (direction==='render'?entry.render:entry.extract) || !!fn);
+    const label=fn?.label||fieldLabel(entry.name);
+    const token = chip
+      ? `<span class="field-value-chip field-token-tone ph-tag-chip" style="--field-hue:${fieldHue(fn?'function':entry.name)}" title="${escapeHtml(entry.token)}">${escapeHtml(label)}</span>`
+      : `<span class="ph-token">${escapeHtml(entry.token)}</span>`;
+    return `<button type="button" class="ph-row${chip ? ' ph-tag-row' : ''}" data-token="${escapeHtml(entry.token)}"${fn ? ` data-text-function="${fn.key}"` : ''}>
+      ${token}<span class="ph-desc">${escapeHtml(fn?.description||describe(entry))}</span>
+      ${directionNote(entry) && !(tagChips&&entry.render) ? `<span class="ph-dir">${directionNote(entry)}</span>` : ''}
+    </button>`;
+  }).join('');
 }
 
 // Into the popover's body, or into `body` for the mask builder (#540), which
 // keeps the same reference open beside its expression.
-export function renderReference(entries, filter, body = el("ph-body"), direction = "render") {
+export function renderReference(entries, filter, body = el("ph-body"), direction = "render", { tagChips = false, functions = [] } = {}) {
   const needle = filter.trim().toLowerCase();
   const matching = needle
     ? entries.filter(
         (entry) =>
           entry.name.toLowerCase().includes(needle) ||
-          describe(entry).toLowerCase().includes(needle),
+          describe(entry).toLowerCase().includes(needle) ||
+          (tagChips && `${functions.find(fn=>fn.key===entry.name)?.label||fieldLabel(entry.name)} ${functions.find(fn=>fn.key===entry.name)?.description||''}`.toLowerCase().includes(needle)),
       )
     : entries;
   if (!matching.length) {
@@ -130,7 +142,7 @@ export function renderReference(entries, filter, body = el("ph-body"), direction
     ? ""
     : `<div class="ph-group ph-grammar">
         <div class="ph-group-name">${escapeHtml(t("ph.grammar"))}</div>
-        ${grammarRows(direction)}
+        ${grammarRows(direction, tagChips)}
       </div>`;
   body.innerHTML =
     grammar +
@@ -138,7 +150,7 @@ export function renderReference(entries, filter, body = el("ph-body"), direction
       .map(
         (group) => `<div class="ph-group">
           <div class="ph-group-name">${escapeHtml(group.name)}</div>
-          ${rows(group.entries)}
+          ${rows(group.entries, tagChips, direction, functions)}
         </div>`,
       )
       .join("");
@@ -164,17 +176,28 @@ function popoverEntries(entries) {
   return directionOf(target) === "render" ? entries : entries.filter((entry) => entry.extract);
 }
 
+function paintReference(filter = '') {
+  renderReference(popoverEntries(cache), filter, el('ph-body'), directionOf(target), {tagChips:true, functions:referenceFunctions});
+}
+
 async function openReference(button, input) {
-  const entries = await catalogue();
-  const menu = el("ph-menu");
+  const menu = el('ph-menu');
   target = input;
   anchor = button;
-  el("ph-filter").value = "";
-  el("ph-filter").parentElement.classList.add("is-empty");
-  renderReference(popoverEntries(entries), "", el("ph-body"), directionOf(input));
+  referenceFunctions = [];
+  menu.returnFocusTo = button;
+  const [, functions] = await Promise.all([
+    catalogue(),
+    directionOf(input) === 'render' && input.hasAttribute('data-pattern-functions') ? loadTextFunctions().catch(()=>[]) : [],
+  ]);
+  if (target !== input || anchor !== button) return;
+  referenceFunctions = functions;
+  el('ph-filter').value = '';
+  el('ph-filter').parentElement.classList.add('is-empty');
+  paintReference();
   menu.hidden = false;
   place(menu, button);
-  el("ph-filter").focus();
+  el('ph-filter').focus();
 }
 
 // Insert at the caret of the mask input rather than appending: a pattern is
@@ -207,6 +230,8 @@ export function insertAt(target, token) {
 }
 
 export async function initPlaceholderReference() {
+  initTableScrollbars(el('ph-body'), {host:el('ph-body').parentElement, fadeEdges:true});
+  for (const rail of el('ph-body').parentElement.querySelectorAll('[role="scrollbar"]')) rail.setAttribute('aria-label', t('mask.placeholders'));
   // One delegated listener for every trigger, so a new mask input needs only the
   // button markup and no wiring.
   document.addEventListener("click", (e) => {
@@ -229,7 +254,13 @@ export async function initPlaceholderReference() {
     // them into its own field (#540).
     const row = e.target.closest?.("#ph-menu .ph-row[data-token]");
     if (row) {
-      insert(row.dataset.token);
+      if (row.dataset.textFunction && target) {
+        const input = target;
+        const name = row.dataset.textFunction;
+        closeReference();
+        // Keep the saved editor selection, as the builder sidebar does.
+        input.dispatchEvent(new CustomEvent('pattern:add-function', {detail:name}));
+      } else insert(row.dataset.token);
       // Stays open: inserting several placeholders in a row is the common case.
       return;
     }
@@ -245,7 +276,7 @@ export async function initPlaceholderReference() {
   });
   el("ph-filter").addEventListener("input", (e) => {
     e.target.parentElement.classList.toggle("is-empty", !e.target.value);
-    if (cache) renderReference(popoverEntries(cache), e.target.value, el("ph-body"), directionOf(target));
+    if (cache && target) paintReference(e.target.value);
   });
 
   document.addEventListener("keydown", (e) => {

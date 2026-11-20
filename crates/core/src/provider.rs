@@ -58,11 +58,12 @@ pub const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 /// they support.
 #[derive(Debug, Clone, Default)]
 pub struct SearchQuery {
+    /// One explicit provider-supported field constraint.
+    pub filters: std::collections::BTreeMap<String, String>,
     pub artist: Option<String>,
     pub title: Option<String>,
     pub album: Option<String>,
-    /// Catalog number or barcode — first-class because it is the highest
-    /// precision key on Discogs.
+    /// Catalogue number. Barcode is a separate provider filter.
     pub catalog_number: Option<String>,
     /// Media-type filter (#103): `CD` / `Vinyl` / `LP` / `File`, or `None` for
     /// no filter. Maps to the Discogs `format` search param; MusicBrainz folds it
@@ -76,7 +77,74 @@ pub struct SearchQuery {
     pub per_page: u32,
 }
 
+/// Provider field catalogue shared with the frontend. Native parameter names
+/// stay here so suggestions cannot drift away from the request adapter.
+#[derive(Debug, Clone, Copy)]
+pub struct SearchField {
+    pub key: &'static str,
+    pub parameter: &'static str,
+    pub label: &'static str,
+    pub kind: &'static str,
+    pub values: &'static str,
+}
+
+pub fn search_fields(source: &str) -> impl Iterator<Item = SearchField> + '_ {
+    include_str!("search-fields.tsv")
+        .lines()
+        .filter_map(move |line| {
+            let mut columns = line.split('\t');
+            if columns.next()? != source {
+                return None;
+            }
+            Some(SearchField {
+                key: columns.next()?,
+                parameter: columns.next()?,
+                label: columns.next()?,
+                kind: columns.next()?,
+                values: columns.next().unwrap_or(""),
+            })
+        })
+}
+
 impl SearchQuery {
+    /// Reject unsupported constraints instead of quietly broadening a search.
+    pub fn native_filters(&self, source: &str) -> Result<Vec<(&'static str, &str)>, ProviderError> {
+        if self.filters.len() > 1 {
+            return Err(ProviderError::Other(
+                "Only one search filter is allowed".into(),
+            ));
+        }
+        let mut result = Vec::new();
+        for (key, value) in &self.filters {
+            let field = search_fields(source)
+                .find(|field| field.key == key)
+                .ok_or_else(|| {
+                    ProviderError::Other(format!("Unsupported {source} search filter: {key}"))
+                })?;
+            let value = value.trim();
+            if value.is_empty() || value.len() > 1024 {
+                return Err(ProviderError::Other(
+                    "Enter a search filter value (up to 1024 bytes)".into(),
+                ));
+            }
+            if (field.kind == "choice" && !field.values.split('|').any(|allowed| allowed == value))
+                || (field.kind == "number" && !value.parse::<u32>().is_ok_and(|n| n > 0))
+            {
+                return Err(ProviderError::Other(format!(
+                    "Invalid {} filter value",
+                    field.label
+                )));
+            }
+            if self.format.is_some() {
+                return Err(ProviderError::Other(
+                    "Only one search filter is allowed".into(),
+                ));
+            }
+            result.push((field.parameter, value));
+        }
+        Ok(result)
+    }
+
     /// The page this query asks for, cut out of a result list the provider got
     /// all at once (#400). Some sources answer a search with one ranked set and
     /// no paging of their own; handing all of it back ignored the page size, so
@@ -384,5 +452,66 @@ mod tests {
         assert_eq!(retry_after_at(value, date), Some(0));
         let late = date + Duration::from_secs(5);
         assert_eq!(retry_after_at(value, late), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod search_filter_tests {
+    use super::*;
+
+    #[test]
+    fn source_filters_map_to_native_fields_and_reject_unsupported_sources() {
+        let query = SearchQuery {
+            filters: [("label".into(), "React".into())].into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            query.native_filters("discogs").unwrap(),
+            vec![("label", "React")]
+        );
+        assert_eq!(
+            query.native_filters("musicbrainz").unwrap(),
+            vec![("label", "React")]
+        );
+        assert_eq!(
+            query.native_filters("beatport").unwrap(),
+            vec![("label_name", "React")]
+        );
+        for source in ["bandcamp", "soundeo", "freedb", "gnudb"] {
+            assert!(query.native_filters(source).is_err());
+        }
+    }
+
+    #[test]
+    fn a_second_filter_or_implicit_second_format_is_rejected() {
+        let mut query = SearchQuery {
+            filters: [
+                ("label".into(), "React".into()),
+                ("artist".into(), "Hixxy".into()),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        assert!(query.native_filters("discogs").is_err());
+        query.filters = [("medium".into(), "CD".into())].into();
+        query.format = Some("Vinyl".into());
+        assert!(query.native_filters("discogs").is_err());
+    }
+
+    #[test]
+    fn invalid_values_are_not_sent_as_broad_queries() {
+        for (source, field, value) in [
+            ("discogs", "label", " "),
+            ("discogs", "classification", "not a format"),
+            ("musicbrainz", "tracks", "0"),
+            ("musicbrainz", "tracks", "2 OR 3"),
+            ("beatport", "release_title", "Bonkers"),
+        ] {
+            let query = SearchQuery {
+                filters: [(field.into(), value.into())].into(),
+                ..Default::default()
+            };
+            assert!(query.native_filters(source).is_err());
+        }
     }
 }

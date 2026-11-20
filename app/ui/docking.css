@@ -190,8 +190,8 @@ body .dock-frame[data-sidebar-drawer='true'][data-sidebar-closed='true'] .dock-r
   transform:translate3d(calc(100% + 14px),0,0); pointer-events:none;
 }
 body .dock-frame[data-sidebar-drawer='true'] { container-type:inline-size; }
-/* Animate the existing rounded boundary, keeping the native table viewport
-   at its full fixed width inside it. Only the smaller surrounding controls reflow. */
+/* Resize the surrounding chrome with the drawer. The native table viewport
+   below remains full width, so data columns never resize during the slide. */
 body .dock-frame[data-sidebar-drawer='true'] #dock-module-files > .dock-module-body > :is(.files-col,.ribbon-strip) {
   width:calc(100% - var(--sidebar-width));
   transition:width var(--sidebar-duration) var(--sidebar-ease);

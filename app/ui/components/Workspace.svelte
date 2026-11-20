@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PatternInput from './PatternInput.svelte';
   import { onMount } from 'svelte';
   import { t } from '../js/i18n.js';
   import { FolderOpen, FolderPlus, Undo2, Redo2, ListChecks, ListX, ArrowDown, ArrowUp, Group, ChevronDown, PanelRightOpen, PanelRightClose } from '@lucide/svelte';
@@ -14,6 +15,7 @@
   import QueryFeedback from './QueryFeedback.svelte';
   import DuplicateScanControls from './DuplicateScanControls.svelte';
   import ImportFields from './ImportFields.svelte';
+  import OnlineSearchInput from './OnlineSearchInput.svelte';
   import NativeCheckbox from './controls/NativeCheckbox.svelte';
   import NativeSlider from './controls/NativeSlider.svelte';
   import * as Tabs from '$lib/components/ui/tabs/index.js';
@@ -22,6 +24,12 @@
   import { Input } from '$lib/components/ui/input/index.js';
   import { Textarea } from '$lib/components/ui/textarea/index.js';
   import { NativeSelect, NativeSelectOption } from '$lib/components/ui/native-select/index.js';
+  let exportNameIsPattern = $state(false);
+  function exportPatternMode(node: HTMLElement) {
+    const update = (event: Event) => { exportNameIsPattern = !!(event as CustomEvent).detail; };
+    node.addEventListener('pattern:enabled', update);
+    return () => node.removeEventListener('pattern:enabled', update);
+  }
   let dock = $state<WorkspaceLayout>();
   let mode = $state<WorkspaceMode>('tagger');
   let subtab = $state<WorkspaceSubtab>('online');
@@ -41,7 +49,7 @@
   function setSidebarClosed(value: boolean, persist = true) {
     sidebarClosed = value;
     document.body.classList.toggle('panel-collapsed', value);
-    if (value) { dock?.reveal('files'); document.getElementById('panel-toggle')?.focus({preventScroll:true}); }
+    if (value) { if (dock?.snapshot().compact) dock.reveal('files'); document.getElementById('panel-toggle')?.focus({preventScroll:true}); }
     if (persist) try { localStorage.setItem('tagrex.sidebarCollapsed', value ? '1' : '0'); } catch { /* Session-only preference. */ }
   }
   onMount(() => {
@@ -50,7 +58,7 @@
   function toggleSidebar() {
     const closed = !sidebarClosed;
     setSidebarClosed(closed);
-    if (!closed) dock?.reveal('inspector');
+    if (!closed && dock?.snapshot().compact) dock.reveal('inspector');
   }
   let moreOpen = $state(false);
   let applying = $state(false);
@@ -337,67 +345,61 @@
 
 
     <Tabs.Content value="renamer" id="panel-renamer" aria-labelledby="workspace-renamer-tab" class="mode-panel" hidden>
-      <div class="panel-block">
-        <h2 data-i18n="renamer.heading">Rename files</h2>
-        <div class="mask-row">
-          <div class="field">
-            <Input id="mask" type="text" value="%artist% - %title%" spellcheck="false" placeholder="%artist% - %title%" />
-            <div class="field-tools">
-              <Button variant="ghost" size="icon-sm" class="icon ph-btn" type="button" data-ph-target="mask" data-i18n-title="mask.placeholders" title="Placeholders" data-i18n-aria-label="mask.placeholdersAria" aria-label="Placeholder reference"><svg class="ico"><use href="#i-help"/></svg></Button>
-              <Button variant="ghost" size="icon-sm" class="icon preset-btn" type="button" data-preset-target="mask" data-i18n-title="preset.title" title="Mask presets" data-i18n-aria-label="preset.title" aria-label="Mask presets"><svg class="ico"><use href="#i-presets"/></svg></Button>
-
-              <Button variant="ghost" size="icon-sm" id="mask-builder-open" class="icon" type="button" data-i18n-title="maskBuilder.open" title="Open the mask builder" data-i18n-aria-label="maskBuilder.open" aria-label="Open the mask builder"><svg class="ico"><use href="#i-builder"/></svg></Button>
+      <div class="panel-block rename-workspace">
+        <div class="rename-heading">
+          <h2 id="rename-filename-heading" data-i18n="renamer.heading">Rename filenames</h2>
+          <Button variant="ghost" size="sm" id="mask-builder-open" class="rename-builder" type="button" data-i18n-title="maskBuilder.open" title="Open the mask builder"><svg class="ico" aria-hidden="true"><use href="#i-builder"/></svg><span data-i18n="renamer.builder">Mask builder</span></Button>
+        </div>
+        <section class="rename-section" aria-labelledby="rename-filename-heading">
+          <div class="mask-row">
+            <div class="field">
+              <PatternInput id="mask" label="Rename pattern" value="%artist% - %title%" />
+              <div class="field-tools">
+                <Button variant="ghost" size="icon-sm" class="icon ph-btn" type="button" data-ph-target="mask" data-i18n-title="mask.placeholders" title="Placeholders" data-i18n-aria-label="mask.placeholdersAria" aria-label="Placeholder reference"><svg class="ico"><use href="#i-help"/></svg></Button>
+                <Button variant="ghost" size="icon-sm" class="icon preset-btn" type="button" data-preset-target="mask" data-i18n-title="preset.title" title="Mask presets" data-i18n-aria-label="preset.title" aria-label="Mask presets"><svg class="ico"><use href="#i-presets"/></svg></Button>
+              </div>
             </div>
           </div>
-        </div>
+          <div class="rename-example" role="group" aria-label="Filename preview" data-i18n-aria-label="renamer.filenamePreview">
+            <span id="mask-example" class="rename-example-value" aria-live="polite"></span>
+            <p id="mask-example-note" class="rename-example-note" hidden></p>
+          </div>
+        </section>
 
-        <p id="mask-example" class="hint mono mask-example" aria-live="polite"></p>
-
-        <details class="panel-help">
-          <summary data-i18n="renamer.hintSummary">How masks work</summary>
-          <p class="hint mask-hint" data-i18n="renamer.maskHint" data-i18n-html>The <span class="hint-tool">?</span> button lists placeholders, optional parts, widths and folders. The builder tries the mask on every selected file. Add <code>/</code> to sort files into folders.</p>
-        </details>
-
-        <label class="rule-flag" data-i18n-title="settings.sidecarsHint" title="Same-named files (lyrics, cue sheets, per-track covers) move with a renamed or moved track, and undo restores them together. A file already at the destination is never overwritten.">
-          <NativeCheckbox id="carry-sidecars" checked /><span data-i18n="renamer.carrySidecars">Carry same-named files (lyrics, cue sheets…)</span>
-        </label>
-        <label class="rule-flag" data-i18n-title="renamer.reorganizeToggleTitle" title="Move or copy the renamed files into another folder">
-          <NativeCheckbox id="reorganize-toggle" /><span data-i18n="renamer.reorganizeToggle">Move or copy into another folder</span>
-        </label>
-
-        <div id="reorganize-options" hidden>
-
-          <label class="export-row"
-            ><span data-i18n="renamer.into">Into</span>
-
-            <span class="field is-path">
-              <Input id="move-dest" type="text" spellcheck="false" data-i18n-placeholder="renamer.intoPlaceholder" placeholder="the opened library" readonly data-i18n-title="renamer.chooseTitle" title="Choose a destination folder" />
-              <span class="field-tools">
+        <section class="rename-section" aria-labelledby="rename-destination-heading">
+          <h3 id="rename-destination-heading" data-i18n="renamer.destination">Destination</h3>
+          <NativeSelect id="rename-destination-mode" aria-label="Destination mode" data-i18n-aria-label="renamer.destinationMode">
+            <NativeSelectOption value="keep" data-i18n="renamer.keepFolders">Keep current folders</NativeSelectOption>
+            <NativeSelectOption value="move" data-i18n="renamer.moveTo">Move to folder</NativeSelectOption>
+            <NativeSelectOption value="copy" data-i18n="renamer.copyTo">Copy to folder</NativeSelectOption>
+          </NativeSelect>
+          <p id="rename-destination-note" class="rename-help" data-i18n="renamer.folderMaskHint">Use / in the mask to create subfolders.</p>
+          <div id="reorganize-options" hidden>
+            <div class="field is-path">
+              <Input id="move-dest" type="text" aria-label="Destination folder" data-i18n-aria-label="renamer.destinationFolder" spellcheck="false" data-i18n-placeholder="renamer.intoPlaceholder" placeholder="the opened library" readonly data-i18n-title="renamer.chooseTitle" title="Choose a destination folder" />
+              <div class="field-tools">
                 <Button variant="ghost" size="icon-sm" id="move-dest-clear" class="icon field-clear" type="button" data-i18n-title="renamer.backToLibrary" title="Back to the opened library" data-i18n-aria-label="renamer.backToLibrary" aria-label="Back to the opened library"><svg class="ico"><use href="#i-close"/></svg></Button>
                 <span class="field-sep" aria-hidden="true"></span>
                 <Button variant="ghost" size="icon-sm" id="move-dest-pick" class="icon" type="button" data-i18n-title="renamer.chooseTitle" title="Choose a destination folder" data-i18n-aria-label="renamer.chooseTitle" aria-label="Choose a destination folder"><svg class="ico"><use href="#i-folder"/></svg></Button>
-              </span>
-            </span>
-          </label>
-          <div class="export-row move-mode-row">
-            <span data-i18n="renamer.files">Files</span>
-            <div class="seg" id="move-mode" role="tablist" data-i18n-aria-label="renamer.moveOrCopy" aria-label="Move or copy">
-              <Button variant="ghost" size="sm" class="seg-btn active" type="button" data-move-mode="move" data-i18n="renamer.move">Move</Button>
-              <Button variant="ghost" size="sm" class="seg-btn" type="button" data-move-mode="copy" data-i18n="renamer.copy">Copy</Button>
+              </div>
             </div>
-            <label class="rule-flag" data-i18n-title="renamer.pruneTitle" title="Remove folders this move leaves empty. Undo puts them back.">
+            <label id="move-prune-option" class="rule-flag" data-i18n-title="renamer.pruneTitle" title="Remove folders this move leaves empty. Undo puts them back.">
               <NativeCheckbox id="move-prune" /><span data-i18n="renamer.prune">Tidy up empty folders</span>
             </label>
           </div>
+        </section>
 
-          <label class="rule-flag carry-extras-flag" data-i18n-title="settings.extrasHint" title="When a reorganize empties a folder, everything left in it (a rip log, loose artwork, a Scans subfolder) moves to the same destination. A folder that still holds other music, or files that scatter to several destinations, is left alone.">
-            <NativeCheckbox id="carry-extras" checked /><span data-i18n="renamer.carryExtras">Carry the rest of the folder (art, rip log, scans)</span>
+        <section class="rename-section rename-related" aria-labelledby="rename-related-heading">
+          <h3 id="rename-related-heading" data-i18n="renamer.related">Related files</h3>
+          <label class="rule-flag" data-i18n-title="settings.sidecarsHint" title="Same-named files move or copy with the track. Existing destination files are never overwritten.">
+            <NativeCheckbox id="carry-sidecars" checked />
+            <span class="rename-option-copy"><span data-i18n="renamer.companionFiles">Same-named companion files</span><span class="rename-help" data-i18n="renamer.companionHint">Lyrics, cue sheets and per-track artwork</span></span>
           </label>
-        </div>
-
-        <div class="panel-actions">
-          <Button variant="default" size="sm" id="preview" class="primary" data-i18n="renamer.previewRename">Preview</Button>
-        </div>
+          <label id="carry-extras-option" class="rule-flag carry-extras-flag" hidden data-i18n-title="settings.extrasHint" title="When a whole folder can move together, include its artwork, rip logs and scans. Folders that still contain other music stay untouched.">
+            <NativeCheckbox id="carry-extras" checked />
+            <span class="rename-option-copy"><span data-i18n="renamer.folderFiles">Folder artwork and other files</span><span class="rename-help" data-i18n="renamer.folderFilesHint">Carry the rest of the folder when it can travel together</span></span>
+          </label>
+        </section>
       </div>
     </Tabs.Content>
 
@@ -454,7 +456,7 @@
 
             <div id="query-box" class="query field">
               <ImportFields />
-              <Input id="discogs-query" type="text" data-i18n-aria-label="online.queryPlaceholder" aria-label="Artist, album, or catalogue number" data-i18n-placeholder="online.queryPlaceholder" placeholder="artist / album / catalog no." spellcheck="false" />
+              <OnlineSearchInput />
               <div class="field-tools">
                 <Button variant="ghost" size="icon-sm" id="discogs-clear" class="icon query-clear" type="button" data-i18n-title="online.clearSearch" title="Clear search and results" data-i18n-aria-label="online.clearSearch" aria-label="Clear search and results" hidden><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></Button>
                 <Button variant="ghost" size="icon-sm" id="query-presets" class="icon" type="button" data-i18n-title="online.presets" title="Queries this selection can build" data-i18n-aria-label="online.presets" aria-label="Queries this selection can build" aria-expanded="false"><svg class="ico"><use href="#i-caret-down"/></svg></Button>
@@ -547,7 +549,7 @@
         <div class="from-name-scroll"><div class="panel-block">
           <div class="mask-row">
             <div class="field">
-              <Input id="from-name-mask" aria-label="Pattern" data-i18n-aria-label="inspector.pattern" type="text" value="%artist% - %title%" spellcheck="false" placeholder="%artist% - %title%" />
+              <PatternInput id="from-name-mask" label="From Name pattern" value="%artist% - %title%" direction="extract" />
               <div class="field-tools">
                 <Button variant="ghost" size="icon-sm" class="icon ph-btn" type="button" data-ph-target="from-name-mask" data-i18n-title="mask.placeholders" title="Placeholders" data-i18n-aria-label="mask.placeholdersAria" aria-label="Placeholder reference"><svg class="ico"><use href="#i-help"/></svg></Button>
                 <Button variant="ghost" size="icon-sm" class="icon preset-btn" type="button" data-preset-target="from-name-mask" data-i18n-title="preset.title" title="Mask presets" data-i18n-aria-label="preset.title" aria-label="Mask presets"><svg class="ico"><use href="#i-presets"/></svg></Button>
@@ -570,7 +572,7 @@
         <div class="from-name-scroll"><div class="panel-block">
           <div class="mask-row">
             <div class="field">
-              <Input id="from-text-mask" aria-label="Pattern" data-i18n-aria-label="inspector.pattern" type="text" value="%track%. %artist% - %title%" spellcheck="false" placeholder="%track%. %artist% - %title%" />
+              <PatternInput id="from-text-mask" label="From Text pattern" value="%track%. %artist% - %title%" direction="text" />
               <div class="field-tools">
                 <Button variant="ghost" size="icon-sm" class="icon ph-btn" type="button" data-ph-target="from-text-mask" data-i18n-title="mask.placeholders" title="Placeholders" data-i18n-aria-label="mask.placeholdersAria" aria-label="Placeholder reference"><svg class="ico"><use href="#i-help"/></svg></Button>
                 <Button variant="ghost" size="icon-sm" class="icon preset-btn" type="button" data-preset-target="from-text-mask" data-i18n-title="preset.title" title="Mask presets" data-i18n-aria-label="preset.title" aria-label="Mask presets"><svg class="ico"><use href="#i-presets"/></svg></Button>
@@ -673,16 +675,16 @@
             <label for="export-mask" data-i18n="exporter.mask">Mask</label>
 
             <div class="field">
-              <Input id="export-mask" type="text" value="%artist% - %title%" spellcheck="false" />
+              <PatternInput id="export-mask" label="Report pattern" value="%artist% - %title%" />
               <div class="field-tools">
                 <Button variant="ghost" size="icon-sm" class="icon ph-btn" type="button" data-ph-target="export-mask" data-i18n-title="mask.placeholders" title="Placeholders" data-i18n-aria-label="mask.placeholdersAria" aria-label="Placeholder reference"><svg class="ico"><use href="#i-help"/></svg></Button>
                 <Button variant="ghost" size="icon-sm" class="icon preset-btn" type="button" data-preset-target="export-mask" data-i18n-title="preset.title" title="Mask presets" data-i18n-aria-label="preset.title" aria-label="Mask presets"><svg class="ico"><use href="#i-presets"/></svg></Button>
               </div>
             </div>
           </div>
-          <div class="exp-row">
+          <div class="exp-row" {@attach exportPatternMode}>
             <label for="export-name" id="export-name-label">File name</label>
-            <Input id="export-name" type="text" spellcheck="false" />
+            <PatternInput id="export-name" label="Export filename" enabled={exportNameIsPattern} />
           </div>
         </div>
 
@@ -721,7 +723,8 @@
   <div class="sb-right">
     <div id="diff-actionbar" class="diff-actionbar">
       <span class="ab-summary sr-only"><span id="ab-state">files ready</span><span class="ab-plan" id="ab-plan"></span></span>
-      <Button variant="outline" size="sm" id="diff-preview" class="btn" disabled data-i18n="staging.preview">Preview</Button>
+      <Button variant="outline" size="sm" id="preview" class="btn" hidden={mode !== 'renamer'} disabled data-i18n="renamer.previewRename">Preview</Button>
+      <Button variant="outline" size="sm" id="diff-preview" class="btn" hidden={mode === 'renamer'} disabled data-i18n="staging.preview">Preview</Button>
       <span class="ab-progress" id="ab-progress"><span class="ab-bar"><span class="ab-bar-fill" id="ab-bar-fill"></span></span><span class="ab-file" id="ab-file"></span></span>
       <Button variant="outline" size="sm" id="diff-cancel-apply" class="btn" data-i18n="action.cancel">Cancel</Button>
       <Button variant="default" size="sm" id="diff-apply" class="btn primary" disabled><span id="ab-apply-label">Apply changes</span><span id="ab-count" class="sr-only">0</span></Button>

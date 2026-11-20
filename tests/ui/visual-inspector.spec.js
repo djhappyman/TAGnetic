@@ -131,7 +131,7 @@ test('every mode panel and Tagger tab uses the shared heading, body and help rol
   }
   // Help and secondary prose sit one step down; no important label drops to 10px.
   await mode(page, 'renamer');
-  expect(number((await style(page, '#panel-renamer .panel-help', ['fontSize'])).fontSize)).toBe(12);
+  expect(number((await style(page, '#rename-destination-note', ['fontSize'])).fontSize)).toBe(12);
   await mode(page, 'tagger');
   await tab(page, 'editor');
   for (const selector of ['#fields-body .fe-label', '#fields-body .fe-duo-label']) {

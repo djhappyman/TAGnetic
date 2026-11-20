@@ -1,3 +1,4 @@
+import { TEXT_FUNCTIONS, readFunction, argumentDisplay, buildFunction } from './mock-function-pattern.js';
 import { mockNumberingEdits } from './mock-numbering.js';
 import { mockMatches, mockSuggestions } from './query-mock.js';
 // The browser-only fake of the Rust command layer (#143 split it out of app.js).
@@ -470,7 +471,7 @@ function mockInvoke(cmd, args) {
         else if (!args.firstImage && (!args.pattern || args.pattern.includes('missing'))) result.missing.push(path);
         else paths.push(path);
       }
-      if (paths.length) result.assignments.push({ paths, cover: {mime:'image/png', data_base64:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC'} });
+      if (paths.length) result.assignments.push({ paths, cover: {mime:'image/png', data_base64:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMQ7i39DwAD4QIVpEsIfQAAAABJRU5ErkJggg=='} });
       return Promise.resolve(result);
     }
     case "read_cover_image":
@@ -479,7 +480,7 @@ function mockInvoke(cmd, args) {
       return Promise.resolve({
         mime: "image/png",
         data_base64:
-          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMQ7i39DwAD4QIVpEsIfQAAAABJRU5ErkJggg==",
       });
     // Nothing hands paths to a browser tab (#51).
     case "take_launch_paths":
@@ -1357,10 +1358,29 @@ function mockInvoke(cmd, args) {
     // The placeholder reference (#148). A trimmed stand-in: enough of each group
     // for the popover's grouping, filtering and insertion to be exercised in the
     // browser. The real list comes off the parser's own tables.
+    case 'pattern_text_functions': return Promise.resolve(TEXT_FUNCTIONS);
+    case 'pattern_function_layout': {
+      const value=args.pattern;const spans=[];let quoted=false;
+      for(let at=0;at<value.length;at++) {
+        if(value[at]==="'"){quoted=!quoted;continue;}
+        if(quoted||value[at]!=='$')continue;
+        const call=readFunction(value,at);if(!call)continue;
+        if(TEXT_FUNCTIONS.some(fn=>fn.key===call.key&&fn.args.length===call.args.length))spans.push({...call,start:at,display_args:call.args.map(argumentDisplay)});
+        at=call.end-1;
+      }
+      return Promise.resolve(spans);
+    }
+    case 'build_pattern_function': {
+      const original=args.original&&readFunction(args.original);
+      if(original&&original.key===args.key&&original.args.every((value,index)=>argumentDisplay(value)===args.args[index]))return Promise.resolve(original.raw);
+      return Promise.resolve(buildFunction(args.key,args.args,(original?.args||[]).map(raw=>({raw,value:argumentDisplay(raw)}))));
+    }
     case "mask_placeholders":
       return Promise.resolve(
         [
           ["artist", "Track artist", "Tags", true, true],
+          ["album", "Album title", "Tags", true, true],
+          ["albumartist", "Album artist", "Tags", true, true],
           ["title", "Track title", "Tags", true, true],
           ["track", "Track number (pads to two digits)", "Tags", true, true],
           ["catalognumber", "Label catalogue number", "Tags", true, true],
@@ -1665,7 +1685,7 @@ function mockInvoke(cmd, args) {
       return Promise.resolve({
         mime: "image/png",
         data_base64:
-          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMQ7i39DwAD4QIVpEsIfQAAAABJRU5ErkJggg==",
       });
     case "preview_import": {
       const sideCounters = {}; // per-disc running track number for bare vinyl sides

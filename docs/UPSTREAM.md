@@ -1,5 +1,12 @@
 # Upstream relationship and contribution ledger
 
+## Current policy — 2026-11-20
+
+Upstream contributions are discontinued. Development, pull requests and releases
+are confined to `djhappyman/TAGnetic`. Upstream changes may be inspected or
+imported only when explicitly requested. Historical entries below record past
+work; they do not authorise new or updated upstream pull requests.
+
 Tagnetic builds on [tagrex/tagrex](https://github.com/tagrex/tagrex). This fork's `main` is the canonical personal interface; upstream contributions use separate, curated branches. Personal branding, README, roadmap, versioning and release automation stay in the fork.
 
 ## Current coverage
@@ -281,3 +288,11 @@ Source review is complete; hosted red/green regression, pressure profiles and
 full current-head platform
 gates remain required. This candidate is not yet a published release or an
 accepted upstream contribution.
+
+
+## Workbench interactions and editor refinements — 1.4.11
+
+All changes remain in Tagnetic. The earlier artwork draft #806 was withdrawn
+when the no-contributions policy was clarified. No additional upstream pull
+requests were published. Compatibility fixes, release versions and personal-tag
+update parsing ship through the fork's release process only.

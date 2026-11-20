@@ -79,6 +79,9 @@ test('built-in menu offers Copy only, copy is editable and rename stays in sideb
   await expect(page.locator('.pe-list-row.active .pe-list-name')).toHaveText('My cleanup');
   await expect(page.locator('#pe-rules .rule-toggle')).toHaveCount(2);
   await page.locator('.pe-rule-open').first().click();
+  await page.locator('.is-expanded .pe-inline-editor').evaluate(async node=>{
+    await Promise.all(node.getAnimations({subtree:true}).map(animation=>animation.finished.catch(()=>{})));
+  });
   await page.locator('.is-expanded .pe-rule-field input').nth(0).fill('Moon');
   await page.locator('.is-expanded .pe-rule-field input').nth(1).fill('Sun');
   await page.locator('.is-expanded').getByRole('checkbox',{name:'Pattern matching',exact:true}).uncheck();

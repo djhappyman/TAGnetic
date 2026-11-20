@@ -2,8 +2,11 @@
 
 Before planning a change, delegating work, proposing a commit, opening or merging
 a PR, or retiring a branch, read [docs/WORKFLOW.md](docs/WORKFLOW.md).
-Orchestrators must include its scope, completion gate and upstream route in each
+Orchestrators must include its scope, completion gate and publication target in each
 worker brief and check the worker's evidence before integration.
+
+Publish work to this fork. Upstream contributions are discontinued; bring in
+upstream changes only on an explicit user request, following the workflow.
 
 Use the installed `codebase-memory` skill for structural code discovery, checking
 coverage and reading source where coverage is incomplete. Use `tagrex-ui-iteration`

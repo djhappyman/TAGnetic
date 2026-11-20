@@ -415,7 +415,11 @@ for (const theme of ['light','dark']) test(`header search grows with the window 
  const before=await page.locator('.files-col').boundingBox();
  const selected=page.locator('.mode-tab[aria-selected="true"]');
  expect(await selected.evaluate(n=>getComputedStyle(n,'::after').content)).toBe('none');
- expect(await selected.evaluate(n=>getComputedStyle(n).backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
+ const highlight=page.locator('.mode-tabs .navigation-motion-pill');
+ await expect(highlight).toBeVisible();
+ expect(await highlight.evaluate(n=>getComputedStyle(n).backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
+ const activeBox=await selected.boundingBox();
+ await expect.poll(()=>highlight.boundingBox()).toEqual(activeBox);
  await chip(page,'hardcore','Genre: Hardcore');
  const after=await page.locator('.files-col').boundingBox();
  expect(after.y).toBeCloseTo(before.y,0);expect(after.height).toBeCloseTo(before.height,0);

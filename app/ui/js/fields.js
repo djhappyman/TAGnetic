@@ -85,6 +85,10 @@ const VIRTUAL_COLUMNS = [
 // editor all rename together with the interface. An unknown key answers itself,
 // which is what a raw custom frame should show.
 function fieldLabel(key) {
+  const placeholders={filename:'Filename',fileext:'Extension',filenameext:'Full Filename',filepath:'File Path',
+    foldername:'Folder',foldername2:'Parent Folder',foldername3:'Grandparent Folder',_length:'Duration',_length_sec:'Duration Seconds',
+    _bitrate:'Bitrate',_samplerate:'Sample Rate',_channels:'Channels',_codec:'Codec',_filesize:'File Size',_filesize_bytes:'File Bytes',_filedate:'Modified Date',side:'Side',skip:'Skip Text'};
+  if(Object.hasOwn(placeholders,key))return placeholders[key];
   if (key.startsWith('custom:')) return titleCaseTagLabel(customLabel(key.slice(7).toUpperCase()) || readableTagName(key));
   const catalogued = t(`field.${key}`);
   if (catalogued !== `field.${key}`) return titleCaseTagLabel(catalogued);

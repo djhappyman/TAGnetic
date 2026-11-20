@@ -1,5 +1,11 @@
 /* Typography assets and licences: fonts.css and assets/FONT-PROVENANCE.md. */
 :root {
+  /* Shared motion roles; movement never delays an operation or changes its state. */
+  --motion-press: 80ms;
+  --motion-feedback: 140ms;
+  --motion-enter: 160ms;
+  --motion-exit: 100ms;
+  --motion-ease: cubic-bezier(.2,.8,.2,1);
   /* Opt every native control (scrollbars, <select> popups, checkboxes, range,
      spinners, focus rings) into the OS light/dark preference. Without this the
      app paints a dark theme via prefers-color-scheme while the browser still
@@ -1422,7 +1428,7 @@ body.diffing #tracks tbody tr.staged td.sel {
   height: 100%;
   width: 0;
   background: var(--accent-ink);
-  transition: width 0.12s linear;
+  transition: width var(--motion-feedback) var(--motion-ease);
 }
 .diff-actionbar .ab-file {
   min-width: 0;
@@ -6399,7 +6405,7 @@ body.drag-active #drop-overlay {
   height: 100%;
   width: 0;
   background: var(--accent-ink);
-  transition: width 0.12s linear;
+  transition: width var(--motion-feedback) var(--motion-ease);
 }
 #busy-text {
   flex: 1;
@@ -6661,322 +6667,102 @@ body.drag-active #drop-overlay {
   flex: 1;
 }
 
-/* ---- mask builder (#540, laid out in the house style in #546) -------------
-   One grid, two columns, three rows, so every pair of cells in a row shares
-   its top edge and field ↔ filter, status ↔ hint and list ↔ reference line up
-   without per-element offsets:
-     row 1  auto   .mb-field      | #mb-ref-filter
-     row 2  auto   .mb-status     | .ph-foot
-     row 3  1fr    .mb-list       | .mb-ref-body
-   .mb-main and .mb-ref stay in the markup (display: contents) so the ids and
-   the JS are untouched. Nearly the whole window by default and resizable from
-   its corner (#541); maskbuilder.js remembers a size the user drags it to. */
+/* ---- Batch pattern preview: dark chrome and continuous working surfaces. */
 .mask-builder {
-  box-sizing: border-box;
-  max-width: calc(100vw - 24px);
-  max-height: calc(100vh - 24px);
-  min-width: 720px;
-  min-height: 420px;
-  width: calc(100vw - 64px);
-  height: calc(100vh - 64px);
-  padding: var(--space-5);
-  gap: var(--space-4);
-  resize: both;
-  overflow: hidden;
+  position:relative; box-sizing:border-box; background:var(--panel); color:var(--text);
+  max-width:calc(100vw - 24px); max-height:calc(100dvh - 24px);
+  min-width:min(720px,calc(100vw - 24px)); min-height:min(420px,calc(100dvh - 24px));
+  width:calc(100vw - 48px); height:calc(100dvh - 48px);
+  padding:var(--sp-5); gap:var(--sp-4); resize:both; overflow:hidden;
 }
-.mb-body {
-  flex: 1;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 340px;
-  grid-template-rows: auto auto minmax(0, 1fr);
-  column-gap: var(--space-6);
-  row-gap: var(--space-2);
+.mb-body { display:grid; flex:1; min-height:0; min-width:0; grid-template-columns:minmax(0,1fr) 16px var(--mb-sidebar-width,280px); gap:0; }
+.mb-main { display:flex; flex-direction:column; min-width:0; min-height:0; gap:var(--sp-2); }
+.mask-builder .mb-field { min-width:0; flex:none; border:0; }
+#mb-expr { font-family:var(--font-literal); font-size:var(--text-sm); }
+.mb-status { flex:none; min-width:0; display:flex; flex-direction:column; gap:var(--sp-1); }
+.mb-status:has(> .mb-error[hidden]) { display:none; }
+.mb-error { margin:0; font-size:var(--text-xs); line-height:var(--lh-snug); color:var(--del); overflow-wrap:anywhere; }
+.mb-error[hidden] { display:none; }
+.mb-preview { flex:1; position:relative; min-height:0; min-width:0; overflow:hidden; border-radius:var(--r-inset); background:var(--bg); }
+.mb-list { height:100%; min-height:0; overflow:auto; overscroll-behavior:contain; font-family:var(--font-value); font-size:var(--tracklist-font-size,var(--text-sm)); }
+.mb-list:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; border-radius:var(--r-inset); }
+.mb-list[aria-busy=true] { cursor:progress; }
+.mb-ref { position:relative; display:flex; flex-direction:column; min-height:0; min-width:0; border-radius:var(--r-inset); background:var(--bg); overflow:hidden; }
+.mb-ref .mb-ref-search { flex:none; margin:var(--sp-3) var(--sp-3) var(--sp-2); background:var(--panel); border-color:transparent; }
+.mb-ref .mb-ref-search > input { background:transparent; }
+.mb-ref-body { min-height:0; flex:1; overflow:auto; overscroll-behavior:contain; padding:var(--sp-2); }
+.mb-ref .ph-foot { flex:none; margin:0; padding:var(--sp-2) var(--sp-3); border:0; font-size:var(--text-xs); line-height:var(--lh-snug); }
+.pattern-reference .ph-tag-row { align-items:center; gap:var(--sp-2); min-height:36px; }
+.pattern-reference .ph-tag-chip { flex:none; font-family:var(--font-ui); margin:0; }
+/* Match the main inspector's 8px edge fades, below the sticky table header. */
+.mb-list,.mb-ref-body,#ph-body {
+  --scroll-fade-top:0px; --scroll-fade-bottom:0px; --scroll-fade-head:0px;
+  -webkit-mask-image:linear-gradient(to bottom,#000 0,#000 var(--scroll-fade-head),transparent var(--scroll-fade-head),#000 calc(var(--scroll-fade-head) + var(--scroll-fade-top)),#000 calc(100% - var(--scroll-fade-bottom)),transparent 100%);
+  mask-image:linear-gradient(to bottom,#000 0,#000 var(--scroll-fade-head),transparent var(--scroll-fade-head),#000 calc(var(--scroll-fade-head) + var(--scroll-fade-top)),#000 calc(100% - var(--scroll-fade-bottom)),transparent 100%);
+  scrollbar-width:none; scrollbar-gutter:auto;
 }
-.mb-main,
-.mb-ref {
-  display: contents;
-}
+.mb-list[data-fade-top=true],.mb-ref-body[data-fade-top=true],#ph-body[data-fade-top=true] { --scroll-fade-top:8px; }
+.mb-list[data-fade-bottom=true],.mb-ref-body[data-fade-bottom=true],#ph-body[data-fade-bottom=true] { --scroll-fade-bottom:8px; }
+.mb-list::-webkit-scrollbar,.mb-ref-body::-webkit-scrollbar,#ph-body::-webkit-scrollbar { width:0; height:0; }
 
-/* 1 · The mask field: a .field.multi (#547) placed in the grid, the mask in
-   the bundled mono; its tools are the field's own. */
-.mb-field {
-  grid-column: 1;
-  grid-row: 1;
-}
-#mb-expr {
-  font-family: var(--font-literal);
-  font-size: var(--text-sm);
-}
+/* Reference headings share the app's readable section hierarchy. */
+.pattern-reference .ph-group-name { margin:var(--sp-5) var(--sp-2) var(--sp-2); font-family:var(--font-ui); font-size:var(--text-sm); font-weight:600; color:var(--label); text-transform:none; letter-spacing:normal; }
+.pattern-reference .ph-group:first-child .ph-group-name { margin-top:var(--sp-1); }
+.pattern-reference .ph-group + .ph-group { border:0; }
 
-/* 2 · Status line ↔ reference hint: one-line captions in the same row, the
-   error (when the mask doesn't parse) above the summary on the left. */
-.mb-status {
-  grid-column: 1;
-  grid-row: 2;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.mb-error {
-  margin: 0;
-  font-size: var(--text-xs);
-  line-height: var(--lh-snug);
-  color: var(--del);
-  overflow-wrap: anywhere;
-}
-.mb-error[hidden] {
-  display: none;
-}
-.mb-summary {
-  margin: 0;
-  min-height: 1lh;
-  font-size: var(--text-xs);
-  line-height: var(--lh-snug);
-  color: var(--muted);
-}
-.mb-summary .mb-sum-clash,
-.mb-summary .mb-sum-missing {
-  color: var(--del);
-}
-/* The reference's filter, a .field with its clear button (#549). */
-.mb-ref-search {
-  grid-column: 2;
-  grid-row: 1;
-  align-self: start;
-}
-.mb-ref .ph-foot {
-  grid-column: 2;
-  grid-row: 2;
-  margin: 0;
-  font-size: var(--text-xs);
-  line-height: var(--lh-snug);
-}
+/* Explicit edge and pane grips work in WebKit as well as Chromium. */
+.mb-resize-edge { position:absolute; z-index:15; top:var(--r-dialog); bottom:var(--r-dialog); width:10px; cursor:col-resize; touch-action:none; }
+.mb-resize-edge[data-resize-edge=left] { left:0; }
+.mb-resize-edge[data-resize-edge=right] { right:0; }
+.mb-divider { position:relative; min-height:0; cursor:col-resize; touch-action:none; border-radius:var(--r-compact); }
+.mb-divider::after { content:''; position:absolute; width:3px; height:40px; border-radius:var(--r-pill); background:var(--border); top:50%; left:50%; transform:translate(-50%,-50%); }
+.mb-divider:hover::after,.mb-divider:focus-visible::after { background:var(--muted); }
+.mb-resize-edge:focus-visible,.mb-divider:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+.mask-builder.mb-is-resizing,.mask-builder.mb-is-resizing * { cursor:col-resize; user-select:none; }
+.mb-ref .ph-desc { overflow-wrap:anywhere; }
 
-/* 3 · List ↔ reference body: one surface recipe for both, same top and
-   bottom; only the list scrolls sideways. */
-.mb-list,
-.mb-ref-body {
-  min-height: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--panel);
-}
-.mb-list {
-  grid-column: 1;
-  grid-row: 3;
-  overflow: auto;
-  padding: var(--space-1) 0;
-  font-family: var(--font-value);
-  font-size: var(--text-xs);
-}
-.mb-ref-body {
-  grid-column: 2;
-  grid-row: 3;
-  overflow-y: auto;
-  padding: var(--space-1);
-}
+/* Shared preview table follows the file table's density, quiet stripes and
+   sticky header, while every preview cell remains read-only. */
+.mb-table { border-collapse:separate; border-spacing:0; width:max-content; min-width:0; font:inherit; }
+.mb-table th,.mb-table td { max-width:none; overflow:visible; text-overflow:clip; padding:4px 12px; text-align:left; white-space:nowrap; vertical-align:middle; border:0; line-height:var(--lh-snug); }
+.mb-table td { color:var(--text); background:var(--bg); }
+.mb-table thead th { position:sticky; top:0; z-index:2; height:28px; box-sizing:border-box; background:var(--bg); font-family:var(--font-ui); font-size:var(--text-xs); font-weight:400; text-transform:none; letter-spacing:normal; color:var(--label); }
+.mb-table tbody tr:nth-child(even) > td { background:var(--row-stripe,color-mix(in srgb,var(--text) 3%,var(--bg))); }
+.mb-table tbody tr:hover > td { background:var(--row-hover); }
+.mb-table :is(th,td):last-child { width:auto; }
+.mb-table .mb-old { color:var(--muted); }
+.mb-rename-table .mb-old { min-width:28ch; max-width:52ch; overflow:hidden; text-overflow:ellipsis; }
+.mb-rename-table .mb-new { min-width:32ch; }
+.mb-table .mb-index { min-width:44px; width:44px; box-sizing:border-box; text-align:right; color:var(--muted); font-family:var(--font-ui); font-variant-numeric:tabular-nums; }
+.mb-table .mb-result-status { min-width:100px; font-family:var(--font-ui); font-size:var(--text-xs); font-weight:400; color:var(--muted); }
+.mb-changed .mb-new { font-weight:var(--fw-medium); }
+.mb-table .mb-changed .mb-result-status { color:var(--accent-ink); }
+.mb-table .mb-unchanged > td { color:var(--muted); }
+.mb-table tr.mb-clash > td { background:var(--error-tint); }
+.mb-table tr.mb-clash:hover > td { background:color-mix(in srgb,var(--del) 18%,var(--bg)); }
+.mb-table :is(.mb-clash,.mb-unrendered) :is(.mb-new,.mb-result-status) { color:var(--del); }
+.mb-empty { margin:0; padding:var(--sp-4); font-family:var(--font-ui); font-size:var(--text-sm); }
 
-/* Rows: one line per file, as wide as its longest name (#541), the old name a
-   fixed column so every arrow lines up. States follow the in-table diff: a
-   change reads like a dirty value (medium weight, no colour), a problem reads
-   in --del, and only a clash, the one state that would make two files one,
-   takes the --error-tint fill as .fe-row.error does. */
-.mb-row {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-3);
-  padding: 3px 10px;
-  width: max-content;
-  min-width: 100%;
-  box-sizing: border-box;
-  white-space: nowrap;
-}
-.mb-row:hover {
-  background: var(--row-hover);
-}
-.mb-old {
-  flex: 0 0 38ch;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: var(--muted);
-}
-.mb-arrow {
-  flex: none;
-  color: var(--muted);
-}
-.mb-new {
-  flex: none;
-  color: var(--text);
-}
-.mb-changed .mb-new {
-  font-weight: var(--fw-medium);
-}
-.mb-unchanged .mb-old,
-.mb-unchanged .mb-arrow,
-.mb-unchanged .mb-new {
-  color: var(--muted);
-}
-.mb-unchanged .mb-new {
-  font-family: var(--font-ui);
-  font-style: italic;
-}
-.mb-unrendered .mb-new {
-  font-family: var(--font-ui);
-  font-style: italic;
-  color: var(--del);
-}
-.mb-unrendered .mb-new code {
-  font-family: var(--font-value);
-  font-style: normal;
-}
-.mb-clash {
-  background: var(--error-tint);
-}
-.mb-clash:hover {
-  background: color-mix(in srgb, var(--del) 18%, transparent);
-}
-.mb-clash .mb-new {
-  font-weight: var(--fw-medium);
-  color: var(--del);
-}
-.mb-note {
-  flex: none;
-  font-family: var(--font-ui);
-  font-size: var(--text-2xs);
-  color: var(--del);
-}
-.mb-empty {
-  margin: 0;
-  padding: var(--space-3) 10px;
-  font-family: var(--font-ui);
-}
+/* Extraction retains its native columns and per-value diagnostics. */
+.mask-builder.is-extract .mb-table .mb-old { position:sticky; left:0; z-index:1; }
+.mask-builder.is-extract .mb-table thead .mb-old { z-index:3; }
+.mb-table .mb-old > span { display:inline-block; max-width:38ch; overflow:hidden; text-overflow:ellipsis; vertical-align:bottom; }
+.mb-table .mb-old > .mb-arrow { margin-left:var(--sp-3); color:var(--muted); }
+.mask-builder.is-extract .mb-table tbody td:not(.mb-old) { font-weight:var(--fw-medium); }
+.mb-table tbody :is(td.mb-same,td.mb-none) { font-weight:400; color:var(--muted); }
+.mb-table tbody tr > td.mb-tidied { background:var(--dirty-tint); }
+.mb-table tbody tr > td.mb-bad { background:var(--error-tint); color:var(--del); }
+.mb-table tbody :is(td.mb-miss,td.mb-nofile) { font-family:var(--font-ui); font-weight:400; color:var(--del); }
+.mb-table tbody td.mb-target { color:var(--muted); font-weight:400; }
+.mask-builder .modal-actions { justify-content:space-between; }
 
-/* ---- mask builder, extract mode (#548) -------------------------------------
-   The same window for FROM NAME: only the list changes, a table instead of
-   old → new rows, set on .mask-builder.is-extract. It reads left to right the
-   way the grammar runs: the file name, then a column for every tag the mask
-   names, in mask order. The file-name cell is sticky, so it stays put while the
-   tag columns scroll sideways. */
-.mask-builder.is-extract .mb-list {
-  padding: 0;
+@media (max-width:760px) {
+  .mask-builder { padding:var(--sp-3); gap:var(--sp-3); }
+  .mb-body { grid-template-columns:minmax(0,1fr) 16px var(--mb-sidebar-width,240px); }
 }
-.mb-table {
-  border-collapse: separate;
-  border-spacing: 0;
-  width: max-content;
-  min-width: 100%;
-  font-family: var(--font-value);
-  font-size: var(--text-xs);
-}
-.mb-table th,
-.mb-table td {
-  padding: 3px 10px;
-  text-align: left;
-  white-space: nowrap;
-  vertical-align: baseline;
-}
-.mb-table td {
-  color: var(--text);
-}
-.mb-table thead th {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  padding-top: 6px;
-  padding-bottom: 4px;
-  border-bottom: 1px solid var(--border);
-  background: var(--panel);
-  font-family: var(--font-ui);
-  font-size: var(--text-2xs);
-  font-weight: var(--fw-medium);
-  letter-spacing: var(--ls-caps);
-  text-transform: uppercase;
-  color: var(--muted);
-}
-/* The last column takes the slack so the hover band runs to the list's edge. */
-.mb-table th:last-child,
-.mb-table td:last-child {
-  width: 100%;
-}
-.mb-table tbody tr:first-child > * {
-  padding-top: 5px;
-}
-.mb-table tbody tr:hover {
-  background: var(--row-hover);
-}
-/* File name + arrow: sticky on the left, opaque so values slide under it. */
-.mb-table .mb-old {
-  position: sticky;
-  left: 0;
-  z-index: 1;
-  padding-right: 6px;
-  background: var(--panel);
-  color: var(--muted);
-}
-.mb-table thead .mb-old {
-  z-index: 2;
-}
-.mb-table tbody tr:hover > .mb-old {
-  background: var(--row-hover);
-}
-.mb-table .mb-old > span {
-  display: inline-block;
-  max-width: 38ch;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  vertical-align: bottom;
-}
-.mb-table .mb-old > .mb-arrow {
-  margin-left: var(--space-3);
-}
-/* Value states, render mode's words per value: a value that will be written is
-   medium weight; one equal to the tag already there, or an optional part that
-   is absent, is muted; one a Transform rule changed has the dirty tint (the
-   reading is in its tooltip); one the field cannot hold is red on the error
-   tint and is not written. */
-.mb-table tbody td:not(.mb-old) {
-  font-weight: var(--fw-medium);
-}
-.mb-table tbody td.mb-same,
-.mb-table tbody td.mb-none {
-  font-weight: 400;
-  color: var(--muted);
-}
-.mb-table td.mb-tidied {
-  background: var(--dirty-tint);
-}
-.mb-table td.mb-bad {
-  background: var(--error-tint);
-  color: var(--del);
-}
-/* A name the pattern does not fit: one red italic line across the tag columns,
-   no fill, the file left alone, like render mode's empty placeholder. */
-.mb-table tbody td.mb-miss {
-  font-family: var(--font-ui);
-  font-style: italic;
-  font-weight: 400;
-  color: var(--del);
-}
-.mb-nomatch > .mb-old {
-  color: var(--text);
-}
-.mb-summary .mb-sum-tidied {
-  color: var(--accent-ink);
-}
-/* FROM TEXT (#550): the subject is the line, and the file it lands on is a
-   muted column of its own, so the table still reads subject → tags. A track
-   with no file left for it says so in that column. */
-.mb-table tbody td.mb-target {
-  color: var(--muted);
-  font-weight: 400;
-}
-.mb-table tbody td.mb-nofile {
-  font-family: var(--font-ui);
-  font-style: italic;
-  color: var(--del);
+@media (max-width:560px) {
+  .mb-body { grid-template-columns:minmax(0,1fr); grid-template-rows:minmax(0,1.2fr) minmax(0,1fr); gap:var(--sp-3); }
+  .mb-divider { display:none; }
 }
 
 /* ---- panel hints and the reference's grammar (#557) ------------------------
@@ -7207,3 +6993,7 @@ input.preset-name {
 button.release-cover { padding: 0; cursor: pointer; }
 button.release-cover:hover { border-color: var(--accent); }
 button.release-cover[aria-busy="true"] { opacity: 0.55; cursor: progress; }
+
+@media (prefers-reduced-motion: reduce) {
+  .diff-actionbar .ab-bar-fill, .busy-pill .ab-bar-fill { transition: none; }
+}

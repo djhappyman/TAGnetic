@@ -433,8 +433,6 @@ See [development notes](docs/development.md), [build instructions](docs/BUILDING
 
 </details>
 
-## Built on TagRex
+## Licence
 
-Tagnetic is an independent project built on [TagRex](https://github.com/tagrex/tagrex), created by [ThaVip3r](https://github.com/ThaVip3r) and its contributors. Their tagging engine, player and recovery work made this project possible.
-
-Original copyright notices and the [GPL-3.0-only licence](LICENSE) are retained. The [original TagRex README](docs/upstream/README.md) is preserved. Shared improvements are tracked in the [upstream contribution ledger](docs/UPSTREAM.md).
+Tagnetic is licensed under [GPL-3.0-only](LICENSE).

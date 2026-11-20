@@ -17,15 +17,29 @@ function baseName(path) {
   return String(path || "").split(/[\\/]/).pop();
 }
 
+function paintMeter(id, done, total, label) {
+  const fill = el(id), meter = fill.parentElement;
+  const percent = total > 0 ? Math.max(0, Math.min(100, Math.round(done / total * 100))) : 0;
+  fill.style.width = `${percent}%`;
+  meter.setAttribute('role', 'progressbar');
+  meter.setAttribute('aria-label', label);
+  meter.setAttribute('aria-valuemin', '0');
+  meter.setAttribute('aria-valuemax', '100');
+  if (total > 0) meter.setAttribute('aria-valuenow', String(percent));
+  else meter.removeAttribute('aria-valuenow');
+  return percent;
+}
+
 function paint(progress) {
   const total = progress.total || 0;
-  el("ab-bar-fill").style.width = total ? `${Math.round((progress.done / total) * 100)}%` : "0%";
+  paintMeter("ab-bar-fill", progress.done, total, el("diff-apply").getAttribute("aria-label") || t("apply.checking"));
   if (!el("diff-cancel-apply").disabled) el("ab-file").textContent = baseName(progress.path);
 }
 
 export async function beginApplyProgress(onProgress = () => {}) {
   const bar = el("diff-actionbar");
-  el("ab-bar-fill").style.width = "0%";
+  el("diff-apply").setAttribute("aria-busy", "true");
+  paintMeter("ab-bar-fill", 0, 0, t("apply.checking"));
   el("ab-file").textContent = t("apply.checking");
   el("diff-cancel-apply").disabled = false;
   showTimer = setTimeout(() => bar.classList.add("applying"), SHOW_AFTER_MS);
@@ -47,15 +61,14 @@ let undoTimer = null;
 export async function beginUndoProgress(labelKey = "undo.running") {
   // A rollback can't be stopped, so the pill shows no Stop (#558).
   el("busy-stop").hidden = true;
-  el("busy-fill").style.width = "0%";
+  paintMeter("busy-fill", 0, 0, t(labelKey));
   el("busy-text").textContent = t(labelKey);
   undoTimer = setTimeout(() => (el("busy-pill").hidden = false), SHOW_AFTER_MS);
   const events = window.__TAURI__ && window.__TAURI__.event;
   if (events) {
     undoUnlisten = await events.listen(EVENT, (e) => {
       const { done, total } = e.payload;
-      const percent = total ? Math.round((done / total) * 100) : 0;
-      el("busy-fill").style.width = `${percent}%`;
+      const percent = paintMeter("busy-fill", done, total, t(labelKey));
       el("busy-text").textContent = `${t(labelKey)} ${percent}%`;
     });
   }
@@ -74,6 +87,7 @@ export function endApplyProgress() {
   showTimer = null;
   if (unlisten) unlisten();
   unlisten = null;
+  el("diff-apply").removeAttribute("aria-busy");
   el("diff-actionbar").classList.remove("applying", "cancelling");
 }
 

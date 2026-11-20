@@ -37,3 +37,23 @@
   --radius-xl: var(--r-dialog);
   --font-sans: var(--font-ui);
 }
+
+/* Shared, quiet feedback for controls; popup triggers and tabs keep their anchor. */
+body [data-slot='button'] {
+  transition: background-color var(--motion-feedback) ease-out, color var(--motion-feedback) ease-out,
+    border-color var(--motion-feedback) ease-out, translate var(--motion-press) ease-out;
+}
+body [data-slot='button'][aria-disabled='true'] { translate: none; }
+body [data-motion-navigation] { position: relative; isolation: isolate; }
+body [data-motion-navigation] > button { position: relative; z-index: 1; }
+body [data-motion-navigation] > button:is([aria-selected='true'], .active) { background: transparent !important; }
+body .navigation-motion-pill { position: absolute; pointer-events: none; z-index: 0; border-radius: var(--r-compact); background: var(--sel-tint); }
+body .navigation-motion-pill[hidden] { display: none; }
+body .settings-row .seg-btn { transition: background-color var(--motion-feedback) ease-out, color var(--motion-feedback) ease-out; }
+body [data-slot='slider-thumb']:hover { box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 12%, transparent); }
+@media (prefers-reduced-motion: reduce) {
+  body [data-slot='button'], body [data-slot='tabs-trigger'], body .settings-row .seg-btn,
+  body [data-slot='switch'], body [data-slot='switch-thumb'], body [data-slot='slider-thumb'] { transition: none; }
+  body [data-slot='button']:active { translate: none !important; }
+  body [data-slot='tooltip-content'] { animation: none !important; }
+}

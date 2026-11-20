@@ -159,6 +159,7 @@ impl MetadataProvider for DiscogsProvider {
     }
 
     fn search(&self, query: &SearchQuery) -> Result<Vec<ReleaseCandidate>, ProviderError> {
+        let filters = query.native_filters("discogs")?;
         let mut params: Vec<(&str, &str)> = vec![("type", "release")];
         if let Some(artist) = &query.artist {
             params.push(("artist", artist));
@@ -189,6 +190,7 @@ impl MetadataProvider for DiscogsProvider {
             params.push(("per_page", &per_page));
         }
 
+        params.extend(filters);
         let body = self.get(&format!("{API_BASE}/database/search"), &params)?;
         parse_search_response(&body)
     }

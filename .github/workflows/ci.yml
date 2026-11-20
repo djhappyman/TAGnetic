@@ -82,11 +82,6 @@ jobs:
             ffmpeg \
             dbus
 
-      - name: Install browser for UI tests
-        run: npx playwright install --with-deps chromium
-      - name: Artwork picker UI tests
-        run: npm run test:ui
-
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 

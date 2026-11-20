@@ -4,7 +4,7 @@
   import FormatFieldsDialog from './FormatFieldsDialog.svelte';
   import AutonumberDialog from './AutonumberDialog.svelte';
   import { Button } from '$lib/components/ui/button/index.js';
-  import { Input } from '$lib/components/ui/input/index.js';
+  import PatternInput from './PatternInput.svelte';
   import NativeCheckbox from './controls/NativeCheckbox.svelte';
   import { NativeSelect, NativeSelectOption } from '$lib/components/ui/native-select/index.js';
   import { runRibbonAction } from '../js/ribbon-actions.js';
@@ -79,7 +79,7 @@
       <Button variant="ghost" size="icon-sm" disabled={working} aria-label="Close dialog" onclick={() => close('import')}><X size={17}/></Button>
     </div>
     <div class="ribbon-dialog-fields">
-      <label class="ribbon-field" for="artwork-import-pattern">Filename pattern<Input id="artwork-import-pattern" bind:value={pattern} disabled={firstImage || working} placeholder="folder.jpg" spellcheck="false"/></label>
+      <label class="ribbon-field" for="artwork-import-pattern">Filename pattern<PatternInput id="artwork-import-pattern" label="Artwork filename pattern" bind:value={pattern} disabled={firstImage || working} placeholder="folder.jpg"/></label>
       <p class="ribbon-field-help">Use a filename or tags, such as %album%.jpg.</p>
       <div class="ribbon-options-grid">
         <label class="ribbon-option"><NativeCheckbox id="artwork-import-first" checked={firstImage} onchange={event => { firstImage = (event.currentTarget as HTMLInputElement).checked; }} disabled={working}/><span><strong>First image in folder</strong><small>Use filename order instead of a pattern.</small></span></label>

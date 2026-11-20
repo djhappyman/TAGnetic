@@ -18,7 +18,7 @@ test.afterEach(async({page})=>expect(page.errors).toEqual([]));
 const box=(page,selector)=>page.locator(selector).boundingBox();
 async function settled(page){await page.evaluate(async()=>{await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));await Promise.all(document.getAnimations().map(animation=>animation.finished.catch(()=>{})));await new Promise(requestAnimationFrame);});}
 
-for(const theme of ['light','dark'])test(`${theme}: drawer overlays a stable table and address bar animates independently`,async({page},info)=>{
+for(const theme of ['light','dark'])test(`${theme}: drawer and surrounding controls animate over a stable table`,async({page},info)=>{
   await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
   const toggle=page.locator('#panel-toggle');
   await expect(toggle).toHaveAttribute('aria-expanded','true');
@@ -37,7 +37,7 @@ for(const theme of ['light','dark'])test(`${theme}: drawer overlays a stable tab
   });
   expect(middle.width).toBeGreaterThanOrEqual(address.width);
   expect(middle.width).toBeLessThan(1280);
-  expect(middle.transition).toContain('0.2s');
+  expect(middle.transition).toBe('0.18s');
   await settled(page);
   await expect(page.locator('.dock-right')).not.toBeInViewport();
   const closed=await box(page,'.library-header');
@@ -238,7 +238,7 @@ test('desktop sidebar stays 420px wide without a resize handle and ignores old d
   await expect(page.locator('.dock-right')).toHaveCSS('width','420px');
 });
 
-test('rounded boundary stretches while the native table viewport stays fixed',async({page})=>{
+test('boundary and player resize while the native table viewport stays fixed',async({page})=>{
   await page.emulateMedia({reducedMotion:'no-preference'});
   await page.locator('#group-btn').click();await page.locator('#group-menu [data-group="folder"]').click();
   const result=await page.evaluate(async()=>{
@@ -276,7 +276,7 @@ test('keyboard navigation reveals the final cell to the left of the open sidebar
   expect(await page.locator('.files-col').evaluate(n=>getComputedStyle(n,'::after').content)).toBe('none');
 });
 
-test('sidebar accessibility work stays outside the slide and interrupted toggles settle correctly',async({page})=>{
+test('sidebar accessibility follows the toggle and rapid slide reversals settle correctly',async({page})=>{
   await settled(page);
   const closing=await page.evaluate(async()=>{
     const drawer=document.querySelector('.dock-right');
@@ -285,7 +285,7 @@ test('sidebar accessibility work stays outside the slide and interrupted toggles
     return {moving:drawer.getAnimations().some(a=>a.transitionProperty==='transform'),inert:drawer.inert};
   });
   expect(closing.moving).toBe(true);
-  expect(closing.inert).toBe(false);
+  expect(closing.inert).toBe(true);
   await settled(page);
   await expect(page.locator('.dock-right')).toHaveJSProperty('inert',true);
   await page.evaluate(async()=>{
@@ -317,4 +317,17 @@ for(const theme of ['light','dark'])test(`${theme}: every workspace reverses the
     expect(result).toEqual({same:true,widthStable:true,inert:false});
     await expect(page.locator('#panel-toggle')).toHaveAttribute('aria-expanded','true');
   }
+});
+
+
+test('sidebar resizes chrome without animating table geometry or repainting desktop dock modules',async({page})=>{
+ const metrics=await page.evaluate(async()=>{
+  const modules=[...document.querySelectorAll('[data-dock-module]')];let mutations=0;
+  const observer=new MutationObserver(records=>mutations+=records.length);
+  modules.forEach(n=>observer.observe(n,{attributes:true}));
+  document.getElementById('panel-toggle').click();await new Promise(requestAnimationFrame);await new Promise(requestAnimationFrame);
+  observer.disconnect();
+  return {mutations,animations:document.getAnimations().filter(a=>a.effect.target?.closest('#tracks, #files-view')&&['width','flexBasis','--footer-aside-width'].some(k=>k in a.effect.getKeyframes()[0])).length,drawerDuration:getComputedStyle(document.querySelector('.dock-right')).transitionDuration};
+ });
+ expect(metrics).toEqual({mutations:0,animations:0,drawerDuration:'0.18s'});
 });

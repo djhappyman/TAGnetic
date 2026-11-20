@@ -1,4 +1,5 @@
 import { openTagSource } from './navigation.js';
+import { waitForScrollIdle } from './scrolling.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -412,9 +413,17 @@ test('wheel scrolling can unmount the focused row while keyboard navigation rema
   const bounds = await wrap.boundingBox();
   await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
   await page.mouse.wheel(0, 5000);
-  await expect.poll(() => wrap.evaluate((element) => element.scrollTop)).toBeGreaterThan(4000);
   await expect(page.locator('#tracks-body tr[data-path="/dropped/track-000.mp3"]')).toHaveCount(0);
   await expect(page.locator('#tracks')).toBeFocused();
+  // WebKit can end the current wheel gesture when its focused row unmounts.
+  // Verify another gesture continues scrolling with focus on the stable grid.
+  for (let gesture=0; gesture<4 && await wrap.evaluate(element=>element.scrollTop)<=4000; gesture++) {
+    const before=await wrap.evaluate(element=>element.scrollTop);
+    await page.mouse.wheel(0, 5000);
+    await expect.poll(()=>wrap.evaluate(element=>element.scrollTop)).toBeGreaterThan(before);
+  }
+  await expect.poll(() => wrap.evaluate((element) => element.scrollTop)).toBeGreaterThan(4000);
+  await waitForScrollIdle(wrap);
   const afterWheel = await wrap.evaluate((element) => element.scrollTop);
   await page.locator('#filter').focus();
   await page.keyboard.press('ArrowDown');

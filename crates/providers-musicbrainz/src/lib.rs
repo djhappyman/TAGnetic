@@ -166,6 +166,7 @@ impl MetadataProvider for MusicBrainzProvider {
     }
 
     fn search(&self, query: &SearchQuery) -> Result<Vec<ReleaseCandidate>, ProviderError> {
+        query.native_filters("musicbrainz")?;
         let (query_str, dismax) = build_query(query);
         // An empty query would make MusicBrainz reject the request; nothing to
         // search for, so return no candidates.
@@ -244,6 +245,18 @@ fn build_query(query: &SearchQuery) -> (String, bool) {
     // fielded query (dismax can't carry a fielded term).
     let format_term = non_empty(query.format.as_deref())
         .map(|value| format!("format:{}", lucene_phrase(mb_format(value))));
+    // The search entry point validates the one provider-specific filter first.
+    for (key, value) in &query.filters {
+        if let Some(field) =
+            tagrex_core::provider::search_fields("musicbrainz").find(|field| field.key == key)
+        {
+            fielded.push(format!(
+                "{}:{}",
+                field.parameter,
+                lucene_phrase(value.trim())
+            ));
+        }
+    }
     let album = non_empty(query.album.as_deref());
     if fielded.is_empty() && format_term.is_none() {
         // Free-text only → hand the plain query to dismax.
@@ -754,6 +767,27 @@ mod tests {
                     .to_string(),
                 false
             )
+        );
+    }
+
+    #[test]
+    fn label_chip_and_text_use_separate_escaped_conjunctive_terms() {
+        let query = SearchQuery {
+            album: Some("Bonkers".into()),
+            filters: [("label".into(), "React".into())].into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_query(&query),
+            ("label:\"React\" AND \"Bonkers\"".into(), false)
+        );
+        let quoted = SearchQuery {
+            filters: [("label".into(), "React\" OR artist:*".into())].into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_query(&quoted),
+            ("label:\"React\\\" OR artist:*\"".into(), false)
         );
     }
 

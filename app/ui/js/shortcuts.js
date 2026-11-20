@@ -251,7 +251,7 @@ function actionLabel(id) {
 
 function typingIn(node) {
   if (!node || !(node instanceof Element)) return false;
-  if (node.isContentEditable) return true;
+  if (node.isContentEditable || node.closest("[data-search-editor]")) return true;
   if (node.tagName === "TEXTAREA" || node.tagName === "SELECT") return true;
   if (node.tagName !== "INPUT") return false;
   return !["checkbox", "radio", "range", "button", "submit", "color", "file"].includes(node.type);

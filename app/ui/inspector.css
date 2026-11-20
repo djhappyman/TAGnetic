@@ -1353,3 +1353,27 @@ body .mode-col .editor-scroll.can-scroll-up:not([data-fade-top-focus]) { --edito
 body .mode-col .editor-scroll.can-scroll-down:not([data-fade-focus]) { --editor-fade-bottom:8px; }
 body .mode-col .editor-scroll > .transformations-scroll { padding:0; margin:0; gap:0; }
 body .mode-col .editor-scroll > .transformations-scroll + .panel-block { margin-top:var(--sp-3); }
+
+/* Rename: the filename and its result lead, then destination and companions. */
+body .mode-col #panel-renamer > .rename-workspace { gap:0; }
+body .rename-workspace .rename-heading { display:flex; align-items:center; justify-content:space-between; gap:var(--sp-2); margin-bottom:var(--sp-2); }
+body .rename-workspace .rename-heading h2 { margin:0; }
+body .rename-workspace .rename-section { display:flex; flex-direction:column; gap:var(--sp-2); min-width:0; }
+body .rename-workspace .rename-section + .rename-section { margin-top:var(--sp-5); }
+body .rename-workspace h3 { margin:0; font-size:var(--type-body-size); font-weight:600; line-height:1.4; color:var(--text); }
+body .rename-workspace .rename-builder { height:28px; min-height:28px; padding:var(--sp-1) var(--sp-2); gap:var(--sp-1); font-size:var(--type-help-size); color:var(--muted); border:0; box-shadow:none; }
+body .rename-builder .ico { width:14px; height:14px; }
+body .rename-workspace .field { border-color:transparent; background:var(--bg); }
+body .rename-workspace .app-select { width:100%; }
+body .rename-workspace .rename-example { display:flex; flex-direction:column; gap:var(--sp-1); padding:var(--sp-2) var(--sp-3); border-radius:var(--r-control); background:var(--bg); min-width:0; }
+body .rename-workspace .rename-example-value { min-width:0; font-family:var(--font-value); font-size:var(--type-body-size); line-height:1.5; overflow-wrap:anywhere; }
+body .rename-workspace #mask-example { min-height:0; color:var(--text); }
+body .rename-workspace .rename-example[data-state='changed'] #mask-example { color:var(--accent-ink); }
+body .rename-workspace .rename-example[data-state='error'] :is(#mask-example,.rename-example-note) { color:var(--del); }
+body .rename-workspace .rename-example:is([data-state='empty'],[data-state='loading']) #mask-example { color:var(--muted); font-family:var(--font-ui); font-size:var(--type-help-size); }
+body .rename-workspace :is(.rename-help,.rename-example-note) { margin:0; color:var(--muted); font-size:var(--type-help-size); line-height:1.5; }
+body .rename-workspace .rule-flag { align-items:flex-start; gap:var(--sp-2); }
+body .rename-workspace .rule-flag > .compat-native { margin-top:2px; }
+body .rename-workspace .rename-option-copy { display:flex; flex-direction:column; gap:2px; min-width:0; }
+body .rename-workspace .rename-related { gap:var(--sp-3); }
+body .rename-workspace [hidden] { display:none; }

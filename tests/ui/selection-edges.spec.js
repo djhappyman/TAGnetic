@@ -88,7 +88,7 @@ for(const width of [375,900,1800])test(`column chooser stays compact and inside 
   await page.setViewportSize({width,height:800});const header=page.locator('th[data-sort="file"]');await header.click({button:'right'});const menu=page.locator('#columns-menu');await expect(menu).toBeVisible();const box=await menu.boundingBox();expect(box.width).toBeLessThanOrEqual(280);expect(box.x).toBeGreaterThanOrEqual(0);expect(box.x+box.width).toBeLessThanOrEqual(width+1);expect(box.y+box.height).toBeLessThanOrEqual(793);expect(box.height).toBeGreaterThanOrEqual(Math.min(500,793-box.y)-1);await page.keyboard.press('Escape');
 });
 test('group selection cannot send F2 to a previously focused cell in another group',async({page})=>{
-  await pack(page,2);await rows(page).last().locator('td[data-field="artist"]').click();const group=page.locator('tr.group-head').first();await group.locator('.group-label').click({button:'right'});await group.focus();await page.keyboard.press('F2');await expect(page.locator('[contenteditable="true"]')).toHaveCount(0);expect(await page.evaluate(()=>[...window.tagrex.selection].every(path=>path.startsWith('/dropped/A/')))).toBe(true);
+  await pack(page,2);await rows(page).last().locator('td[data-field="artist"]').click();const group=page.locator('tr.group-head').first();await group.locator('.group-label').click({button:'right'});await group.focus();await page.keyboard.press('F2');await expect(page.locator('#tracks-body [contenteditable="true"]')).toHaveCount(0);expect(await page.evaluate(()=>[...window.tagrex.selection].every(path=>path.startsWith('/dropped/A/')))).toBe(true);
 });
 
 test('column chooser uses available height and scrolls its quiet list inside a fixed header and button footer',async({page})=>{

@@ -1,3 +1,4 @@
+import { onlineSearchDrafts, searchRequestFor } from './search-filter.js';
 import { prepareImportPreferences } from './import-preferences.js';
 import { getOnlineOptions } from './online-options.js';
 import { beginLiveImport, finishLiveImport, isLiveImportCurrent, replaceLiveImport, adoptLiveCoverPlan } from "./live-preview.js";
@@ -83,19 +84,22 @@ async function loadMoreResults() {
 }
 
 function syncClearSearch() {
-  el('discogs-clear').hidden = !el('discogs-query').value && !releaseCandidates.length && !searchBusy();
+  el('discogs-clear').hidden = !el('discogs-query').value && !onlineSearchDrafts.get(el('online-source').value).filter && !releaseCandidates.length && !searchBusy();
 }
-function clearSearch() {
+function resetSearchResults() {
   searchGen++;
   loadingResults = false; prefetching = false; pagingPaused = true;
   searchPage = 0; searchHasMore = false; searchFailed = false; searchRequest = null;
   releaseCandidates = [];
   releaseCache.clear(); coverCache.clear(); artworkChoices.clear(); artworkRotations.clear();
   artworkImages.clear(); imageCache.clear(); expandedIds.clear(); artworkMenuRequest++;
-  el('discogs-query').value = '';
   closeQueryPresets();
   renderReleaseList(); updateLoadMoreUi();
   if (onlineScroll) onlineScroll.scrollTop = 0;
+}
+function clearSearch() {
+  document.dispatchEvent(new Event('tagrex:online-clear'));
+  resetSearchResults();
   el('discogs-query').focus();
 }
 
@@ -130,7 +134,7 @@ async function providerToken(source) {
 async function runSearch(reset) {
   if (reset) {
     releaseSource = el("online-source").value;
-    searchRequest = { album: el("discogs-query").value.trim(), format: el("search-format").value || null };
+    searchRequest = searchRequestFor(releaseSource, el("discogs-query").value, el("search-format").value);
     searchPerPage = getOnlineOptions().perPage;
     searchPage = 0;
     searchHasMore = false;
@@ -493,6 +497,7 @@ function toggleQueryPresets() {
     row.addEventListener("click", () => {
       closeQueryPresets();
       el("discogs-query").value = offer.text;
+      el("discogs-query").dispatchEvent(new Event("input", {bubbles:true}));
       discogsSearch();
     });
     menu.appendChild(row);
@@ -1541,7 +1546,14 @@ el("discogs-search").addEventListener("click", () => {
 });
 el("discogs-clear").addEventListener("click", clearSearch);
 el("discogs-query").addEventListener("input", syncClearSearch);
-el("discogs-query").addEventListener("keydown", (e) => e.key === "Enter" && discogsSearch());
+document.addEventListener('tagrex:online-submit', () => discogsSearch());
+document.addEventListener('tagrex:online-filter-edit', event => {
+  el('discogs-search').disabled = event.detail;
+});
+document.addEventListener('tagrex:online-search-change', event => {
+  if (event.detail.reason !== 'text') resetSearchResults();
+  syncClearSearch();
+});
 el("query-presets").addEventListener("click", (e) => {
   e.stopPropagation();
   toggleQueryPresets();
@@ -1559,11 +1571,7 @@ document.addEventListener("tagrex:online-page-size", () => {
   if (releaseCandidates.length) discogsSearch();
 });
 
-// Media-type filter (#103): re-run the search from page 1 when it changes and
-// there's already a query in play.
-el("search-format").addEventListener("change", () => {
-  if (releaseCandidates.length || el("discogs-query").value.trim()) discogsSearch();
-});
+// Medium selection is converted to the same single editable chip by OnlineSearchInput.
 
 async function openReleaseArtworkMenu(event) {
   const trigger = event.target.closest('.release-cover');

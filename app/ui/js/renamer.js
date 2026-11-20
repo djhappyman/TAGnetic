@@ -7,10 +7,10 @@
 // instead of leaving files where they sit. Both directions produce an
 // ordinary plan, so preview, apply and undo work exactly like every other
 // change.
-import { el, toast } from "./dom.js";
+import { el, toast, fileName } from "./dom.js";
 import { t, tn } from "./i18n.js";
 import { invoke } from "./invoke.js";
-import { activeRuleCount, onChainChanged, runChainOverPlan } from "./chains.js";
+import { onChainChanged, runChainOverPlan } from "./chains.js";
 import { hooks } from "./hooks.js";
 import {
   previewPlan,
@@ -127,26 +127,34 @@ function updatePreviewLabel() {
 
 function setReorganize(on) {
   reorganize = on;
-  el("reorganize-toggle").checked = on;
-  el("reorganize-options").hidden = !on;
+  syncDestinationMode();
   updatePreviewLabel();
   writeStored(REORGANIZE_STORAGE_KEY, on ? "1" : "");
   scheduleMaskExample();
 }
 
 // Move or copy. Pruning only means anything for a move — a copy empties
-// nothing — so the checkbox goes inert rather than quietly doing nothing.
+// nothing — so its cleanup option is hidden and disabled for copies.
 function setMoveMode(mode) {
   moveMode = mode;
-  el("move-mode")
-    .querySelectorAll(".seg-btn")
-    .forEach((b) => b.classList.toggle("active", b.dataset.moveMode === mode));
-  const prune = el("move-prune");
-  prune.disabled = mode === "copy";
-  prune.closest(".rule-flag").classList.toggle("off", mode === "copy");
+  syncDestinationMode();
   updatePreviewLabel();
   writeStored(MOVE_MODE_STORAGE_KEY, mode);
   scheduleMaskExample();
+}
+
+function syncDestinationMode() {
+  const input = el('rename-destination-mode');
+  const value = reorganize ? moveMode : 'keep';
+  if (input.value !== value) {
+    input.value = value;
+    // Keep the native select binding and its visible proxy in sync on restore.
+    input.dispatchEvent(new CustomEvent('change', {bubbles:true, detail:{renamerSync:true}}));
+  }
+  el('reorganize-options').hidden = !reorganize;
+  el('carry-extras-option').hidden = !reorganize;
+  el('move-prune-option').hidden = !reorganize || moveMode === 'copy';
+  el('move-prune').disabled = !reorganize || moveMode === 'copy';
 }
 
 function writeStored(key, value) {
@@ -225,45 +233,38 @@ function syncCarryToggles() {
 // the same idea as FROM NAME's own probe (extraction rather than rendering,
 // but the same "show, don't make me click Preview" point) — a per-keystroke
 // round trip, debounced.
+let maskExampleVersion = 0;
 async function refreshMaskExample() {
-  const box = el("mask-example");
-  if (!box) return;
+  const box = el('mask-example');
+  const sample = box.closest('.rename-example');
+  const note = el('mask-example-note');
+  const version = maskExampleVersion;
   const path = selectedPaths()[0];
-  if (!path) {
-    // Said, not left blank (#567): an empty reserved line read as a stray gap.
-    box.textContent = t("renamer.exampleSelect");
-    box.classList.add("muted");
-    return;
-  }
+  note.hidden = true;
+  box.removeAttribute('title');
+  sample.dataset.state = path ? 'loading' : 'empty';
+  sample.setAttribute('aria-busy', String(!!path));
+  box.textContent = t(path ? 'renamer.exampleLoading' : 'renamer.exampleSelect');
+  if (!path) return;
   try {
-    // Through the same chain Preview runs (#383), or the example and the plan
-    // disagree — the example said "The X Factor - Desert Rain" while the plan,
-    // lower-cased and underscored by the wand's rules, said something else.
     const plan = await (reorganize ? movePlan([path]) : renamePlan([path]));
-    const out = await runChainOverPlan(plan, "renamer");
+    const out = await runChainOverPlan(plan, 'renamer');
+    if (version !== maskExampleVersion || selectedPaths()[0] !== path) return;
     const change = out.changes[0];
     const to = change?.rename_to;
-    // No target because a required placeholder is empty for this file (#411):
-    // name it, and how to make it optional, rather than a bare "No change".
     const missing = !to && out.unrendered?.[0]?.field;
-    box.textContent = to
-      ? maskPart(to, change.rename_root)
-      : missing
-        ? t("renamer.exampleUnrendered", { field: `%${missing}%` })
-        : t("renamer.exampleUnchanged");
-    box.classList.toggle("muted", !to);
-    // The ticked presets' rules run on every rename without being on this panel,
-    // so the example says so — otherwise its result reads as the mask's alone.
-    const rules = activeRuleCount("renamer");
-    if (rules) {
-      const note = document.createElement("span");
-      note.className = "mask-example-chain";
-      note.textContent = ` · ${t("renamer.exampleChain", { rules: tn("unit.rule", rules) })}`;
-      box.append(note);
-    }
-  } catch (e) {
-    box.textContent = String(e);
-    box.classList.add("muted");
+    box.textContent = to ? maskPart(to, change.rename_root) : fileName(path);
+    box.title = to || path;
+    sample.dataset.state = missing ? 'error' : to ? 'changed' : 'unchanged';
+    note.textContent = missing ? t('renamer.exampleUnrendered', {field:`%${missing}%`})
+      : '';
+    note.hidden = !note.textContent;
+  } catch (error) {
+    if (version !== maskExampleVersion || selectedPaths()[0] !== path) return;
+    sample.dataset.state = 'error';
+    box.textContent = String(error);
+  } finally {
+    if (version === maskExampleVersion) sample.setAttribute('aria-busy','false');
   }
 }
 
@@ -284,6 +285,7 @@ function maskPart(fullPath, root) {
 
 let maskExampleTimer = null;
 function scheduleMaskExample() {
+  maskExampleVersion += 1;
   if (el("panel-renamer").hidden) return;
   clearTimeout(maskExampleTimer);
   maskExampleTimer = setTimeout(refreshMaskExample, 180);
@@ -295,16 +297,17 @@ el("mask").addEventListener("input", () => {
   writeStored(MASK_STORAGE_KEY, el("mask").value);
   scheduleMaskExample();
 });
-el("reorganize-toggle").addEventListener("change", (e) => setReorganize(e.target.checked));
+el('rename-destination-mode').addEventListener('change', (event) => {
+  if (event.detail?.renamerSync) return;
+  const value = event.target.value;
+  if (value !== 'keep') setMoveMode(value === 'copy' ? 'copy' : 'move');
+  setReorganize(value !== 'keep');
+});
 el("move-dest-pick").addEventListener("click", pickDestination);
 // The path is read-only: clicking it picks a folder, like the folder button
 // beside it (#547).
 el("move-dest").addEventListener("click", pickDestination);
 el("move-dest-clear").addEventListener("click", () => setDestination(""));
-el("move-mode").addEventListener("click", (e) => {
-  const btn = e.target.closest(".seg-btn");
-  if (btn) setMoveMode(btn.dataset.moveMode);
-});
 el("carry-sidecars").addEventListener("change", (e) => setCarry("carry_sidecars", e.target.checked));
 el("carry-extras").addEventListener("change", (e) => setCarry("carry_folder_extras", e.target.checked));
 el("move-prune").addEventListener("change", () => {

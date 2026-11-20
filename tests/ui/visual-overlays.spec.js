@@ -50,7 +50,13 @@ for (const theme of ['light', 'dark']) for (const width of [600, 360]) {
       })).toBe(true);
       await expect(row).toHaveCSS('border-radius', '8px');
     }
-    await page.keyboard.press('Tab');
+    // Custom scrollbars are keyboard-operable stops between content and footer.
+    for (let step = 0; step < 3; step++) {
+      await page.keyboard.press('Tab');
+      if (await menu.locator('.ph-guide').evaluate(node => node === document.activeElement)) break;
+      const focused = menu.locator(':focus');
+      await expect(focused).toHaveAttribute('role', 'scrollbar');
+    }
     await expect(menu.locator('.ph-guide')).toBeFocused();
     await page.keyboard.press('Escape');
     await expect(menu).toBeHidden();

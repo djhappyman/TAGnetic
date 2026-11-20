@@ -21,7 +21,7 @@
 }
 .controller-dialog-body { display: contents; }
 .controller-dialog-body > .modal { width: min(var(--controller-modal-width, 420px), calc(100vw - 24px)); max-width: calc(100vw - 24px); }
-.controller-dialog-body > .mask-builder { --controller-modal-width: 1000px; }
+.controller-dialog-body > .mask-builder { --controller-modal-width: min(1400px, calc(100vw - 48px)); }
 .controller-dialog-body > .pe-editor { --controller-modal-width: 900px; }
 .controller-dialog-body > .transform-modal { --controller-modal-width: 740px; }
 .controller-dialog-overlay { z-index: 81; background: rgb(0 0 0 / .42); }
@@ -51,12 +51,12 @@
 .controller-context-content [role='separator'].ctx-sep { border: 0; height: 6px; margin: 0; background: none; }
 .controller-dialog-content[data-state='open'],
 .controller-popover-content[data-state='open'],
-.controller-context-content[data-state='open'] { animation: controller-enter 130ms cubic-bezier(.16, 1, .3, 1) both; }
+.controller-context-content[data-state='open'] { animation: controller-enter var(--motion-enter) var(--motion-ease) both; }
 .controller-dialog-content[data-state='closed'],
 .controller-popover-content[data-state='closed'],
-.controller-context-content[data-state='closed'] { animation: controller-exit 100ms ease-in both; pointer-events: none; }
-.controller-dialog-overlay[data-state='open'] { animation: controller-fade-in 130ms ease-out both; }
-.controller-dialog-overlay[data-state='closed'] { animation: controller-fade-out 100ms ease-in both; }
+.controller-context-content[data-state='closed'] { animation: controller-exit var(--motion-exit) ease-in both; pointer-events: none; }
+.controller-dialog-overlay[data-state='open'] { animation: controller-fade-in var(--motion-enter) ease-out both; }
+.controller-dialog-overlay[data-state='closed'] { animation: controller-fade-out var(--motion-exit) ease-in both; }
 @keyframes controller-enter { from { opacity: 0; scale: .975; } to { opacity: 1; scale: 1; } }
 @keyframes controller-exit { from { opacity: 1; scale: 1; } to { opacity: 0; scale: .985; } }
 @keyframes controller-fade-in { from { opacity: 0; } to { opacity: 1; } }
@@ -172,3 +172,54 @@ body #group-menu #group-more-options[hidden] { display:none; }
 @media(prefers-reduced-motion:reduce) { body #group-menu .group-more > .ico:last-child { transition:none; } }
 
 body #group-menu .group-more::before { content:''; width:12px; flex:0 0 12px; }
+
+/* Saved masks: choose first, save the current pattern beneath the list. */
+.preset-menu .preset-search {
+  flex:none; gap:var(--sp-2); margin:0 0 var(--sp-1);
+  padding-inline:var(--sp-2); border-color:transparent; background:var(--panel);
+}
+.preset-menu .preset-search > .ico { flex:none; color:var(--muted); }
+.preset-menu .preset-search input { min-width:0; padding-inline:0; }
+.preset-menu .preset-list-wrap { position:relative; flex:1 1 auto; min-height:0; overflow:hidden; }
+.preset-menu .preset-list {
+  max-height:300px; height:100%; min-height:0; overflow:auto;
+  overscroll-behavior:contain; padding:0; scrollbar-width:none;
+}
+.preset-menu .preset-list::-webkit-scrollbar { display:none; }
+.preset-menu .preset-row { align-items:center; gap:var(--sp-1); margin-bottom:0; }
+.preset-menu .preset-row:last-child { margin-bottom:0; }
+.preset-menu .preset-row.is-current { background:var(--sel-tint); }
+.preset-menu .preset-apply {
+  height:auto; padding:var(--sp-1) var(--sp-2); gap:2px; align-items:stretch;
+  border-radius:var(--r-menu-item); white-space:normal; line-height:1.5;
+}
+.preset-menu .preset-title-line { display:flex; align-items:center; gap:var(--sp-2); min-width:0; }
+.preset-menu .preset-name { flex:1; color:var(--text); font-size:var(--type-help-size); font-weight:500; }
+.preset-menu .preset-mask {
+  display:flex; flex-wrap:wrap; align-items:center; gap:2px;
+  white-space:pre-wrap; overflow:visible; min-width:0; line-height:1.5;
+}
+.preset-menu .preset-mask .field-value-chip {
+  display:inline; height:auto; margin:0; padding:0; border:0; border-radius:0;
+  background:none; font:inherit; max-width:100%; overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap;
+}
+.preset-menu .preset-literal { min-width:0; overflow-wrap:anywhere; }
+.preset-menu .preset-del { margin-right:var(--sp-1); color:var(--muted); }
+.preset-menu .preset-del:hover { color:var(--del); }
+.preset-menu .preset-save-section { flex:none; display:flex; justify-content:center; padding:var(--sp-2) 0 0; }
+.preset-menu #preset-new { justify-content:center; gap:var(--sp-1); width:auto; border:0; box-shadow:none; background:transparent; }
+.preset-menu #preset-new:hover { background:var(--row-hover); }
+.preset-menu #preset-save-form { width:100%; }
+.preset-menu #preset-save-form > label { display:block; margin:0 0 var(--sp-1) var(--sp-1); color:var(--muted); font-size:var(--type-help-size); }
+.preset-menu .preset-save-row { display:flex; align-items:center; gap:var(--sp-2); }
+.preset-menu .preset-save-row input { min-width:0; flex:1; }
+.preset-menu .preset-save-row button { flex:none; }
+.preset-menu .preset-empty { margin:0; padding:var(--sp-4) var(--sp-2); font-size:var(--type-help-size); }
+
+/* Placeholder picker uses the same continuous reference as the mask builder. */
+#ph-menu .ph-head { padding:0 0 var(--sp-2); }
+#ph-menu .ph-head .field { border-color:transparent; background:var(--panel); }
+#ph-menu .ph-reference-wrap { position:relative; display:flex; flex:1 1 auto; min-height:0; overflow:hidden; }
+#ph-menu #ph-body { margin:0; padding:var(--sp-1); }
+#ph-menu .ph-foot { border:0; }

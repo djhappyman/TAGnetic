@@ -146,18 +146,20 @@ test('a mask save conflict preserves the typed draft and shows success only afte
   await page.locator('.mode-tab[data-mode="renamer"]').click();
   await page.locator('#mask').fill('%artist% - %title%');
   await page.locator('.preset-btn[data-preset-target="mask"]').click();
+  await page.locator('#preset-new').click();
   await page.locator('#preset-name').fill('Human mask');
   await page.evaluate(() => { window.mcpFixture.state.failNextSettingsSave = true; });
   await page.locator('#preset-save').click();
   await expect(page.locator('#toast')).toContainText('Settings changed elsewhere');
   await expect(page.locator('#preset-name')).toHaveValue('Human mask');
-  await expect(page.locator('#mask')).toHaveValue('%artist% - %title%');
+  await expect.poll(() => page.locator('#mask').evaluate(node => node.value)).toBe('%artist% - %title%');
   await expect(page.locator('#preset-list')).toContainText('Agent mask');
   await expect(page.locator('#preset-list')).not.toContainText('Human mask');
   await page.locator('#preset-save').click();
   await expect(page.locator('#preset-list')).toContainText('Human mask');
   await expect(page.locator('#preset-list')).toContainText('Agent mask');
-  await expect(page.locator('#preset-name')).toHaveValue('');
+  await expect(page.locator('#preset-save-form')).toBeHidden();
+  await expect.poll(() => page.evaluate(async () => (await window.__TAURI__.core.invoke('load_settings', {})).mask_presets.find(item => item.name === 'Human mask'))).toEqual({ name: 'Human mask', mask: '%artist% - %title%' });
 });
 
 test('agent fields appear live in Files, Staged and Inspector without changing focus or selection', async ({ page }) => {

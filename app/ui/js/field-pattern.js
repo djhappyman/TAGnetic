@@ -5,10 +5,12 @@ export function patternParts(value, fields) {
   const parts = [];
   let start = 0;
   for (const match of value.matchAll(/%([^%]+)%/g)) {
-    const field = known.get(match[1].toLowerCase());
+    const key = match[1].toLowerCase();
+    const width = key.match(/^(.*):([0-9]+)$/);
+    const field = known.get(key) || (width && known.get(width[1]));
     if (!field) continue;
     if (match.index > start) parts.push({ text: value.slice(start, match.index) });
-    parts.push({ text: match[0], field });
+    parts.push({ text: match[0], field, width:width && !known.has(key) ? width[2] : null });
     start = match.index + match[0].length;
   }
   if (start < value.length) parts.push({ text: value.slice(start) });
@@ -44,7 +46,8 @@ export function operationFields(operation, fields) {
 export function fieldHue(key) {
   const hues = {artist:255, albumartist:295, title:85, album:210, genre:150,
     year:45, track:255, tracktotal:255, disc:295, disctotal:295,
-    comment:345, composer:170, publisher:45, bpm:150, key:295};
+    comment:345, composer:170, publisher:45, bpm:150, key:295,
+    isrc:15, catalognumber:65, url:195, media:320};
   if (Object.hasOwn(hues, key)) return hues[key];
   let hash = 0;
   for (const character of key.toLowerCase()) hash = (hash * 31 + character.codePointAt(0)) >>> 0;

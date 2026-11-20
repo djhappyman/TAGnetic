@@ -129,15 +129,34 @@ test('suggestions overlay a stable dialog and chips are centred with matching mu
   expect((await dialog.boundingBox()).height).toBeCloseTo(before.height,0);
 });
 
-test('footer actions explain direct Write and staging only after the longer hover delay',async({page})=>{
+test('footer hints delay a fresh hover, warm neighbouring actions and explain keyboard focus immediately',async({page})=>{
   const stage=page.locator('#ribbon-format-stage');
+  const tip=page.locator('#controller-tooltip-content');
   await expect(stage).toHaveText('Stage Edits');
   await expect(page.locator('#ribbon-format-write')).toHaveText('Write');
+  // Opening the dialog can leave its toolbar trigger focused and its hint warm.
+  // Move into the editor to start a fresh pointer interaction in either browser.
+  await editor(page).click();
+  await expect(tip).toBeHidden();
+  const time=new Date('2026-01-01T00:00:00Z');
+  await page.clock.install({time});
+  await page.clock.pauseAt(new Date(time.getTime()+1000));
   await stage.hover();
-  await expect(page.locator('#controller-tooltip-content')).toBeHidden();
-  await expect(page.locator('#controller-tooltip-content')).toContainText('Review them before using Apply',{timeout:4000});
+  await page.clock.runFor(1500);
+  await expect(tip).toBeHidden();
+  await page.clock.runFor(150);
+  await expect(tip).toBeVisible();
+  await expect(tip).toContainText('Review them before using Apply');
   await page.locator('#ribbon-format-write').hover();
-  await expect(page.locator('#controller-tooltip-content')).toContainText('Bypass staging and write changes immediately.',{timeout:4000});
+  await page.clock.runFor(20);
+  await expect(tip).toContainText('Bypass staging and write changes immediately.');
+  await editor(page).click();
+  await page.clock.runFor(200);
+  await expect(tip).toBeHidden();
+  await stage.focus();
+  await page.clock.runFor(20);
+  await expect(tip).toBeVisible();
+  await expect(tip).toContainText('Review them before using Apply');
 });
 
 test('caret stays outside chips on click and commit, and Backspace deletes the whole tag',async({page})=>{

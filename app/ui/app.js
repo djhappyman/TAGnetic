@@ -116,6 +116,7 @@ import { EXTENDED_FIELDS, KNOWN_CUSTOM_LABELS, VIRTUAL_COLUMNS, fieldLabel } fro
 import { initPlaceholderReference } from "./js/placeholders.js";
 import { initMaskPresets } from "./js/maskpresets.js";
 import { initTooltips } from "./js/tooltip.js";
+import { initWorkbenchMotion } from "./js/workbench-motion.js";
 import { comboOf, formatCombo, initShortcuts } from "./js/shortcuts.js";
 import { bpmRunning, invalidateBpm, retranslateBpm, stopBpm } from "./js/bpm.js";
 import { isFieldLocked, loadFieldLocks, pushFieldLocks } from "./js/locks.js";
@@ -345,7 +346,7 @@ const componentEscapeEvents = new WeakSet();
 function componentOwnsEscape(event) {
   if (componentEscapeEvents.has(event)) return true;
   const target = event.target instanceof Element ? event.target : null;
-  const owned = !!target?.closest("[data-controller-popup]") ||
+  const owned = !!target?.closest("[data-controller-popup],[data-search-editor],[data-artwork-ui]") ||
     [...document.querySelectorAll('[data-slot="select-content"], [data-slot="popover-content"], [data-slot="dropdown-menu-content"]')]
       .some((node) => !node.matches('[hidden], [data-state="closed"], [data-closed]') && node.getClientRects().length > 0);
   if (owned) componentEscapeEvents.add(event);
@@ -1443,7 +1444,12 @@ function renderWindow({ force = false, refreshGrid = true, scrollOnly = false, p
     for(const row of desired){if(row===cursor)cursor=cursor.nextElementSibling;else tracksBody.insertBefore(row,cursor);}
     for(const row of [...tracksBody.children])if(!wanted.has(row))dropRow(row);
     if(force)patchMountedFields();
-    setSpacerHeights();measureRenderedRows();if(refreshGrid)spreadsheet?.refresh({scrollOnly});return;
+    setSpacerHeights();
+    // WebKit can clamp scrolling while the table temporarily contains fewer
+    // rows. Restore the captured viewport after its spacers are consistent,
+    // before measured-height corrections adjust that same viewport.
+    if (tableWrap.scrollTop !== viewportTop) tableWrap.scrollTop = viewportTop;
+    measureRenderedRows();if(refreshGrid)spreadsheet?.refresh({scrollOnly});return;
   }
   if (!force && overlaps) {
     spreadsheet?.beforePaint();
@@ -1466,6 +1472,7 @@ function renderWindow({ force = false, refreshGrid = true, scrollOnly = false, p
       bottomSpacer.before(buildItemRow(renderedLast));
     }
     setSpacerHeights();
+    if (tableWrap.scrollTop !== viewportTop) tableWrap.scrollTop = viewportTop;
     measureRenderedRows();
     if (refreshGrid) spreadsheet?.refresh({scrollOnly});
     return;
@@ -1478,6 +1485,7 @@ function renderWindow({ force = false, refreshGrid = true, scrollOnly = false, p
   for (let i = first; i <= last; i++) frag.appendChild(buildItemRow(i));
   frag.appendChild(spacerRow(TABLE_END_SPACE + itemOffsets.top(viewItems.length) - itemOffsets.top(Math.min(last + 1, viewItems.length))));
   tracksBody.replaceChildren(frag);
+  if (tableWrap.scrollTop !== viewportTop) tableWrap.scrollTop = viewportTop;
   measureRenderedRows();
   if (refreshGrid) spreadsheet?.refresh({scrollOnly});
 }
@@ -1626,8 +1634,6 @@ function updateStatus(selected = selectedPaths().length, publish = true) {
   const total = tracks.length;
   updateSelectionSummary(selected);
   el('files-total-count').textContent = total.toLocaleString();
-  const countLabel = selected.toLocaleString();
-  if (el('files-selected-count').textContent !== countLabel) el('files-selected-count').textContent = countLabel;
   const files = filterText || filterConditions.length
     ? `${matchingTrackCount}/${tn("unit.file", total)}` : tn("unit.file", total);
   const summary = `${files} · ${tn("count.selected", selected)}`;
@@ -1643,6 +1649,7 @@ let selectionSummaryCount = 0;
 let selectionSummaryVisible = false;
 let selectionSummaryAnimation = null;
 let selectionSummaryWidthAnimation = null;
+let selectionSummaryCountAnimation = null;
 let selectionSummaryOldWidth = 0;
 let selectionSummarySizeSignature = '';
 let selectionSummaryEpoch = 0;
@@ -1661,6 +1668,9 @@ function setSelectionSummaryVisible(show) {
   const reversing = !!selectionSummaryAnimation;
   const from = reversing ? {transform:getComputedStyle(summary).transform, opacity:getComputedStyle(summary).opacity} : null;
   selectionSummaryVisible = show;
+  summary.inert = !show;
+  summary.setAttribute('aria-hidden', String(!show));
+  if (!show) { selectionSummaryCountAnimation?.cancel(); selectionSummaryCountAnimation = null; }
   const epoch = ++selectionSummaryEpoch;
   selectionSummaryAnimation?.cancel();
   selectionSummaryAnimation = null;
@@ -1702,6 +1712,29 @@ function animateSelectionSummaryWidth(oldWidth) {
   }, () => {});
 }
 function paintSelectionSummary(count) {
+  // Keep the last multiple-selection label throughout exit. Writing 0 or 1
+  // before the fade ends makes an otherwise correct hidden state flash on screen.
+  if (count > 1) {
+    const number = el('files-selected-count');
+    const label = count.toLocaleString();
+    if (number.textContent !== label) {
+      const increasing = count > Number(number.dataset.count || 0);
+      selectionSummaryCountAnimation?.cancel();
+      selectionSummaryCountAnimation = null;
+      number.textContent = label;
+      number.dataset.count = String(count);
+      if (selectionSummaryVisible && !matchMedia('(prefers-reduced-motion: reduce)').matches && number.animate) {
+        const animation = number.animate([
+          { opacity: .35, transform: `translateY(${increasing ? 4 : -4}px)` },
+          { opacity: 1, transform: 'translateY(0)' },
+        ], { duration: 140, easing: 'cubic-bezier(.2,.8,.2,1)' });
+        selectionSummaryCountAnimation = animation;
+        animation.finished.then(() => {
+          if (selectionSummaryCountAnimation === animation) selectionSummaryCountAnimation = null;
+        }, () => {});
+      }
+    }
+  }
   const review = usingReviewSelection();
   const kind = review ? 'included for Apply' : 'selected';
   if (el('selection-summary-kind').textContent !== kind) el('selection-summary-kind').textContent = kind;
@@ -2039,11 +2072,15 @@ function syncPanelCellMin() {
 // Sync the action footer (apply count + enabled) and the header select-all
 // tri-state to `applySelection`. Every changed file starts ticked; unticking
 // some narrows what a single Apply writes (#81).
+function syncRenamePreviewButton() {
+  el('preview').disabled = currentMode !== 'renamer' || !selectedPaths().length || applying || undoing || filterPending;
+}
 function updateDiffBar(scope) {
   updateSelectionSummary(rowSelectionSet().size);
   const hasWork = !!diffByPath?.size;
   el('diff-actionbar').dataset.hasWork = String(hasWork);
   el('diff-preview').disabled = !hasWork || applying || undoing || filterPending || commandMode === 'duplicates';
+  syncRenamePreviewButton();
   if (!hasWork) {
     applyBtn.disabled = true;
     const label = msg('action.apply');
@@ -3361,6 +3398,7 @@ async function addFolderToList(root) {
   finally { ribbonFolderBusy = false; appendTypedFolder = false; }
 }
 function syncRibbonSelection() {
+  syncRenamePreviewButton();
   updateRedoControl();
   const reviewing = usingReviewSelection();
   const count = reviewing ? applySelection.size : selection.size;
@@ -5107,6 +5145,7 @@ applyStaticText();
 syncCssLabels();
 // Keep useful title text accessible without hover bubbles covering controls.
 initTooltips();
+initWorkbenchMotion();
 // Keyboard shortcuts (#432): one registry, rebindable in Settings. Select-all
 // has no button to press, so it hands its own handler in.
 initShortcuts({
@@ -5179,6 +5218,6 @@ window.tagrex = {
 document.addEventListener('keydown', event => {
   if (applying || undoing) return;
   if (!(event.ctrlKey || event.metaKey) || event.shiftKey || event.key.toLowerCase() !== 'z') return;
-  if (event.target.closest('input,textarea,[contenteditable="true"]')) return;
+  if (event.target.closest('input,textarea,[contenteditable="true"],[data-search-editor]')) return;
   if (undoLiveImport()) { event.preventDefault(); event.stopImmediatePropagation(); refreshFieldEditor({force:true}); }
 }, true);

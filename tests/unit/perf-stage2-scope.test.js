@@ -17,7 +17,7 @@ function harness(overrides = {}) {
   const node = () => ({ dataset: {}, textContent: '', setAttribute(k, v) { this[k] = v; }, getAttribute(k) { return this[k] ?? null; } });
   const calls = { validity: 0, scope: 0, event: 0, panels: 0, save: 0, paints: [], sets: 0 };
   const c = vm.createContext({
-    filterPending: false, filterError: false, commandMode: 'search', stagedView: true, applying:false, undoing:false, syncRibbonSelection: () => {}, updateSelectionSummary: () => {}, publishDuplicateSelection: () => {},
+    currentMode: 'tagger', filterPending: false, filterError: false, commandMode: 'search', stagedView: true, applying:false, undoing:false, syncRibbonSelection: () => {}, updateSelectionSummary: () => {}, publishDuplicateSelection: () => {},
     calls, previewPlan: { changes: [{ path: 'a', tag_changes: [] }] }, automaticPlan: null,
     sharedRenderedPlan: null, previewInputPlan: null, sharedStageSync: null,
     automaticVersion: 0, automaticTimer: null, automaticQueuedRun: null, clearTimeout() {},
@@ -50,7 +50,7 @@ function harness(overrides = {}) {
   for (const [file, names] of [
     ['app/ui/js/live-preview.js', ['hasInvalidPreview', 'hasInvalidLiveFields']],
     ['app/ui/js/generator.js', ['isAutomaticTransformPreview', 'automaticTransformScope', 'cancelAutomaticRequest', 'announceAutomaticScope', 'invalidateAutomaticTransformPreview']],
-    ['app/ui/app.js', ['editablePreview', 'usingReviewSelection', 'updateDiffBar', 'updateTransformScope', 'syncSelectionUI']],
+    ['app/ui/app.js', ['editablePreview', 'usingReviewSelection', 'syncRenamePreviewButton', 'updateDiffBar', 'updateTransformScope', 'syncSelectionUI']],
     ['app/ui/js/cover.js', ['renderPendingCoverSummary']],
   ]) for (const name of names) vm.runInContext(source(file, name), c);
   vm.runInContext(`const validate = hasInvalidPreview; hasInvalidPreview = plan => { calls.validity++; return validate(plan); };

@@ -1,0 +1,25 @@
+# source	key	parameter	label	kind	values
+discogs	artist	artist	Artist	text
+discogs	release_title	release_title	Release title	text
+discogs	label	label	Label	text
+discogs	catalog_number	catno	Catalogue number	text
+discogs	medium	format	Medium	choice	CD|Vinyl|LP|Cassette|File
+discogs	classification	format	Classification	choice	Album|Single|EP|Compilation|Mixed|Sampler
+musicbrainz	artist	artist	Artist	text
+musicbrainz	release_title	release	Release title	text
+musicbrainz	label	label	Label	text
+musicbrainz	catalog_number	catno	Catalogue number	text
+musicbrainz	barcode	barcode	Barcode	text
+musicbrainz	country	country	Country	text
+musicbrainz	date	date	Release date	text
+musicbrainz	medium	format	Medium	choice	CD|Vinyl|Cassette|Digital Media
+musicbrainz	primary_type	primarytype	Primary type	choice	Album|Single|EP|Broadcast|Other
+musicbrainz	secondary_type	secondarytype	Secondary type	choice	Compilation|DJ-mix|Mixtape/Street|Soundtrack|Spokenword|Interview|Audiobook|Audio drama|Live|Remix|Demo|Field recording
+musicbrainz	packaging	packaging	Packaging	text
+musicbrainz	language	lang	Language	text
+musicbrainz	tracks	tracks	Track count	number
+beatport	artist	artist_name	Artist	text
+beatport	label	label_name	Label	text
+beatport	barcode	upc	UPC	text
+beatport	publish_date	publish_date	Publish date	text
+beatport	pre_order_date	pre_order_date	Pre-order date	text

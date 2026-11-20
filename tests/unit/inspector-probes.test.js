@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
+import { searchRequestFor } from '../../app/ui/js/search-filter.js';
 import { setImmediate as flush } from 'node:timers/promises';
 
 function functions(file, names) {
@@ -92,7 +93,7 @@ function searchSetup(invoke) {
   const notices=[];
   const cache=()=>new Map();
   const context=vm.createContext({
-    el:id=>nodes[id],invoke,providerToken:async()=>'',t:key=>key,toast:message=>notices.push(message),
+    searchRequestFor,el:id=>nodes[id],invoke,providerToken:async()=>'',t:key=>key,toast:message=>notices.push(message),
     prefetchReleaseCounts(){},renderReleaseList(){},syncClearSearch(){},getOnlineOptions:()=>({perPage:5}),onlineScroll:{setAttribute(){},scrollTop:0},scheduleTracklistWindows(){},
     releaseCache:cache(),coverCache:cache(),artworkChoices:cache(),artworkRotations:cache(),artworkImages:cache(),imageCache:cache(),expandedIds:cache(),
   });
