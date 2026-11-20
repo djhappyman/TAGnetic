@@ -90,15 +90,20 @@ test('long masks wrap, lists scroll with overlay rails, and save stays reachable
   await open(page);
   for(let i=0;i<7;i++)await save(page,`A very long saved mask name ${i}`, '%albumartist% / %album% / %disc:2% - %track:3% - %artist% - %title%');
   for(const theme of ['light','dark']) {
+    await page.setViewportSize({width:1280,height:800});
     await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
     await page.setViewportSize({width:480,height:600});
     await expect(page.locator('.preset-search')).toHaveCSS('background-color',await page.locator('.mb-ref-search').evaluate(node=>getComputedStyle(node).backgroundColor));
-    const bounds=await page.locator('#preset-menu').evaluate(menu=>{
-      const list=document.getElementById('preset-list'),r=menu.getBoundingClientRect();
-      return {left:r.left,right:r.right,bottom:r.bottom,width:innerWidth,height:innerHeight,listWidth:list.clientWidth,contentWidth:list.scrollWidth,scrolls:list.scrollHeight>list.clientHeight};
-    });
-    expect(bounds.left).toBeGreaterThanOrEqual(7);expect(bounds.right).toBeLessThanOrEqual(bounds.width-7);expect(bounds.bottom).toBeLessThanOrEqual(bounds.height-7);
-    expect(bounds.contentWidth).toBeLessThanOrEqual(bounds.listWidth);expect(bounds.scrolls).toBe(true);
+    // setViewportSize can resolve before WebKit delivers resize and the popup's
+    // scheduled placement frame. Retry the geometry, retaining every bound.
+    await expect(async()=>{
+      const bounds=await page.locator('#preset-menu').evaluate(menu=>{
+        const list=document.getElementById('preset-list'),r=menu.getBoundingClientRect();
+        return {left:r.left,right:r.right,bottom:r.bottom,width:innerWidth,height:innerHeight,listWidth:list.clientWidth,contentWidth:list.scrollWidth,scrolls:list.scrollHeight>list.clientHeight};
+      });
+      expect(bounds.left).toBeGreaterThanOrEqual(7);expect(bounds.right).toBeLessThanOrEqual(bounds.width-7);expect(bounds.bottom).toBeLessThanOrEqual(bounds.height-7);
+      expect(bounds.contentWidth).toBeLessThanOrEqual(bounds.listWidth);expect(bounds.scrolls).toBe(true);
+    }).toPass({timeout:5000});
     await expect(page.locator('.preset-list-wrap .inspector-scrollbar.is-vertical')).toBeVisible();
     await expect(page.locator('#preset-new')).toBeInViewport();
     await page.locator('#preset-new').click();
