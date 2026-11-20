@@ -144,8 +144,9 @@ test('alternating row tints are plain full-width bands and indicators survive a 
 test('group labels and collapse carets remain visible when the file table scrolls horizontally', async ({ page }) => {
   await page.setViewportSize({width:900,height:800});
   const wrap = page.locator('#files-view');
-  await wrap.evaluate(node => { node.scrollLeft = 400; });
-  await expect.poll(() => wrap.evaluate(node => node.scrollLeft)).toBeGreaterThan(100);
+  await expect.poll(() => wrap.evaluate(node => node.scrollWidth-node.clientWidth)).toBeGreaterThan(0);
+  await wrap.evaluate(node => { node.scrollLeft = node.scrollWidth; });
+  await expect.poll(() => wrap.evaluate(node => node.scrollLeft)).toBeGreaterThan(0);
   const group = page.locator('#tracks-body tr.group-head').first();
   // Resizing schedules a virtual-window repaint. Read the header and its
   // scrollport in one browser turn, retrying while that replacement settles.

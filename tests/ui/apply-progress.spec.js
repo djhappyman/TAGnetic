@@ -1,4 +1,5 @@
 import { openTagSource } from './navigation.js';
+import { waitForScrollIdle } from './scrolling.js';
 import {test,expect} from '@playwright/test';
 import {readFile} from 'node:fs/promises';
 import {resolve,sep} from 'node:path';
@@ -168,6 +169,7 @@ test('large batches allow manual scrolling and remounted rows retain their compl
   await expect.poll(()=>page.locator('#files-view').evaluate(node=>node.scrollTop)).toBeGreaterThan(3000);
   await expect(page.locator('#tracks-body tr[data-path]').first()).toHaveAttribute('aria-disabled','true');
   await expect(page.locator('#tracks-body td[data-field="artist"]').first()).toContainText('Written artist');
+  await waitForScrollIdle(page.locator('#files-view'));
   const scroll=await page.locator('#files-view').evaluate(node=>node.scrollTop);
   await report(page,{path:changes[399].path,done:799,total:800});
   expect(await page.locator('#files-view').evaluate(node=>node.scrollTop)).toBe(scroll);

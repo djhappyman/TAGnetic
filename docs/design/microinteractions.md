@@ -50,3 +50,7 @@ compact layouts, fixed table/column geometry, native-control event semantics,
 Apply/cancel recovery, Undo and read-only artwork inspection. Browser fixtures
 prove frontend behaviour; native playback/file writes and release packages have
 separate gates. Tests never write to the user's music library.
+
+## Popup resize delivery
+
+`npm ci` applies `tools/patch-floating-resize.mjs` to Floating UI 1.8.0 and Bits UI 2.21.0. Their ResizeObserver callbacks otherwise perform layout writes during delivery, which WebKit reports as undelivered notifications while animated selects settle. The idempotent, version-checked fixes coalesce only resize-driven layout into a cancellable animation frame. Initial placement and scroll-driven placement retain their existing timing. Keep both dependencies pinned until this patch is reviewed or replaced by an upstream fix; do not suppress browser errors in the regression tests.

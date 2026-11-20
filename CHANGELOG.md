@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Cleared pattern editors no longer retain a hidden browser newline, and literal
   pattern text keeps its Mono font while chips use the interface font.
 - New rename and mask-builder labels are available in every interface language.
+- Virtual table updates retain their scroll position in WebKit.
+- Animated dropdowns avoid WebKit resize-observer feedback errors.
+- Update notices recognise the personal release tags used by this fork.
 
 ## [1.4.10] - 2026-11-19
 

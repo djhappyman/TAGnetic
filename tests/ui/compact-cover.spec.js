@@ -299,6 +299,7 @@ test('native cancellation is inert and a valid image only stages a preview', asy
   await page.locator('.cover-empty-target').click();
   await expect.poll(() => page.evaluate(() => window.__cover.calls.length)).toBe(1);
   await expect.poll(() => page.evaluate(() => !!window.tagrex.previewPlan)).toBe(true);
+  await page.locator('.cover-main-image img').evaluate(image => image.decode());
   expect(await page.evaluate(() => window.tagrex.tracks[1].covers?.length || 0)).toBe(0);
 });
 

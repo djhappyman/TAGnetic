@@ -471,7 +471,7 @@ function mockInvoke(cmd, args) {
         else if (!args.firstImage && (!args.pattern || args.pattern.includes('missing'))) result.missing.push(path);
         else paths.push(path);
       }
-      if (paths.length) result.assignments.push({ paths, cover: {mime:'image/png', data_base64:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC'} });
+      if (paths.length) result.assignments.push({ paths, cover: {mime:'image/png', data_base64:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMQ7i39DwAD4QIVpEsIfQAAAABJRU5ErkJggg=='} });
       return Promise.resolve(result);
     }
     case "read_cover_image":
@@ -480,7 +480,7 @@ function mockInvoke(cmd, args) {
       return Promise.resolve({
         mime: "image/png",
         data_base64:
-          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMQ7i39DwAD4QIVpEsIfQAAAABJRU5ErkJggg==",
       });
     // Nothing hands paths to a browser tab (#51).
     case "take_launch_paths":
@@ -1685,7 +1685,7 @@ function mockInvoke(cmd, args) {
       return Promise.resolve({
         mime: "image/png",
         data_base64:
-          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMQ7i39DwAD4QIVpEsIfQAAAABJRU5ErkJggg==",
       });
     case "preview_import": {
       const sideCounters = {}; // per-disc running track number for bare vinyl sides

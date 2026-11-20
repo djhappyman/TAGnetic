@@ -53,7 +53,12 @@ test('zero and full turns preserve the exact cover object and bytes without deco
 for (const degrees of [90, 180, 270, -90, 450]) {
   test(`rotates all nonsquare PNG edge pixels and alpha at ${degrees} degrees`, async ({ page }) => {
     const result = await page.evaluate(async degrees => {
-      const cover = window.rotationFixture(); const before = await window.rotationPixels(cover);
+      const cover = window.rotationFixture();
+      // Compare equal codec round trips: WebKit rounds premultiplied alpha on
+      // each PNG encode. The unrotated reference keeps the coordinate oracle
+      // independent without mistaking encoder rounding for moved edge pixels.
+      const image = await window.artworkRotation.decodeArtwork(cover);
+      const before = await window.rotationPixels(await window.rotationLegacy(cover, 0, image));
       const output = await window.artworkRotation.rotateArtwork(cover, degrees);
       return { before, after: await window.rotationPixels(output), mime: output.mime };
     }, degrees);

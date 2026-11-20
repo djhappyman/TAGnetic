@@ -1444,7 +1444,12 @@ function renderWindow({ force = false, refreshGrid = true, scrollOnly = false, p
     for(const row of desired){if(row===cursor)cursor=cursor.nextElementSibling;else tracksBody.insertBefore(row,cursor);}
     for(const row of [...tracksBody.children])if(!wanted.has(row))dropRow(row);
     if(force)patchMountedFields();
-    setSpacerHeights();measureRenderedRows();if(refreshGrid)spreadsheet?.refresh({scrollOnly});return;
+    setSpacerHeights();
+    // WebKit can clamp scrolling while the table temporarily contains fewer
+    // rows. Restore the captured viewport after its spacers are consistent,
+    // before measured-height corrections adjust that same viewport.
+    if (tableWrap.scrollTop !== viewportTop) tableWrap.scrollTop = viewportTop;
+    measureRenderedRows();if(refreshGrid)spreadsheet?.refresh({scrollOnly});return;
   }
   if (!force && overlaps) {
     spreadsheet?.beforePaint();
@@ -1467,6 +1472,7 @@ function renderWindow({ force = false, refreshGrid = true, scrollOnly = false, p
       bottomSpacer.before(buildItemRow(renderedLast));
     }
     setSpacerHeights();
+    if (tableWrap.scrollTop !== viewportTop) tableWrap.scrollTop = viewportTop;
     measureRenderedRows();
     if (refreshGrid) spreadsheet?.refresh({scrollOnly});
     return;
@@ -1479,6 +1485,7 @@ function renderWindow({ force = false, refreshGrid = true, scrollOnly = false, p
   for (let i = first; i <= last; i++) frag.appendChild(buildItemRow(i));
   frag.appendChild(spacerRow(TABLE_END_SPACE + itemOffsets.top(viewItems.length) - itemOffsets.top(Math.min(last + 1, viewItems.length))));
   tracksBody.replaceChildren(frag);
+  if (tableWrap.scrollTop !== viewportTop) tableWrap.scrollTop = viewportTop;
   measureRenderedRows();
   if (refreshGrid) spreadsheet?.refresh({scrollOnly});
 }

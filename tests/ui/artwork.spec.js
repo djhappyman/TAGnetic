@@ -170,6 +170,9 @@ const numeric = (page, attr) => viewer(page).getAttribute(attr).then(Number);
 
 test('wheel overzoom, left-drag and reset tween; switching images always recentres', async ({ page }) => {
   await open(page);
+  await dialog(page).evaluate(async node=>{
+    await Promise.all(node.getAnimations({subtree:true}).map(animation=>animation.finished.catch(()=>{})));
+  });
   const bounds = await surface(page).boundingBox();
   const fitted = await surface(page).evaluate((node) => Math.min((node.clientWidth - 36) / 600, (node.clientHeight - 36) / 600, 1));
   await expect.poll(() => numeric(page, 'data-scale')).toBeCloseTo(fitted, 2);
@@ -178,22 +181,14 @@ test('wheel overzoom, left-drag and reset tween; switching images always recentr
   await expect.poll(() => numeric(page, 'data-scale')).toBeGreaterThan(fitted * 1.4);
   await page.mouse.wheel(0, -180);
   await expect.poll(() => numeric(page, 'data-scale')).toBeGreaterThan(1);
+  await expect.poll(() => numeric(page, 'data-scale')).toBeCloseTo(fitted*Math.exp(.9), 2);
   await page.mouse.down({ button: 'left' });
   await page.mouse.move(bounds.x + bounds.width / 2 + 180, bounds.y + bounds.height / 2 + 90, { steps: 8 });
   await page.mouse.up({ button: 'left' });
   await expect.poll(() => numeric(page, 'data-pan-x')).toBeGreaterThan(150);
   const reset = dialog(page).getByRole('button', { name: 'Reset view', exact: true });
-  await page.evaluate(() => {
-    window.resetSamples = [];
-    window.resetObserver = new MutationObserver(() => {
-      const canvas = document.querySelector('.aw-frame:not([inert]) .aw-viewer');
-      if (canvas) window.resetSamples.push(Number(canvas.dataset.panX));
-    });
-    window.resetObserver.observe(document.querySelector('.aw-frame:not([inert]) .aw-viewer'), { attributes: true, attributeFilter: ['data-pan-x'] });
-  });
   await reset.click();
   await expect.poll(() => numeric(page, 'data-pan-x')).toBeCloseTo(0, 2);
-  expect(await page.evaluate(() => { window.resetObserver.disconnect(); return window.resetSamples.some((x) => x > 1 && x < 150); })).toBe(true);
   await expect.poll(() => numeric(page, 'data-pan-y')).toBeCloseTo(0, 2);
   await expect.poll(() => numeric(page, 'data-scale')).toBeCloseTo(fitted, 2);
   // Pan far away again, then switch and come back: each new canvas starts fit.
@@ -207,6 +202,34 @@ test('wheel overzoom, left-drag and reset tween; switching images always recentr
   await tile(page, 1).click(); await expect(cta(page)).toBeEnabled();
   await expect.poll(() => numeric(page, 'data-pan-x')).toBeCloseTo(0, 2);
   await expect.poll(() => numeric(page, 'data-scale')).toBeCloseTo(fitted, 2);
+});
+
+test('reset animates through an intermediate pan before returning to the fitted view', async ({ page }) => {
+  const time=new Date('2026-01-01T00:00:00Z');
+  await page.clock.install({time});
+  await open(page);
+  await surface(page).evaluate(node=>node.addEventListener('pointerdown',event=>{
+    window.resetPointer={id:event.pointerId,x:event.clientX,y:event.clientY};
+  },{once:true}));
+  const bounds=await surface(page).boundingBox();
+  await page.mouse.move(bounds.x+bounds.width/2,bounds.y+bounds.height/2);
+  await page.mouse.down();
+  await surface(page).evaluate(node=>{
+    const pointer=window.resetPointer;
+    node.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,pointerId:pointer.id,pointerType:'mouse',buttons:1,clientX:pointer.x+180,clientY:pointer.y+90}));
+  });
+  await page.mouse.up();
+  await expect.poll(()=>numeric(page,'data-pan-x')).toBeCloseTo(180,2);
+  await dialog(page).evaluate(async node=>{
+    await Promise.all(node.getAnimations({subtree:true}).map(animation=>animation.finished.catch(()=>{})));
+  });
+  await page.clock.pauseAt(new Date(time.getTime()+60000));
+  await dialog(page).getByRole('button',{name:'Reset view',exact:true}).click();
+  await page.clock.runFor(116);
+  expect(await numeric(page,'data-pan-x')).toBeGreaterThan(0);
+  expect(await numeric(page,'data-pan-x')).toBeLessThan(180);
+  await page.clock.runFor(200);
+  await expect.poll(()=>numeric(page,'data-pan-x')).toBeCloseTo(0,2);
 });
 
 test('rotation affects the selected image pixels, preserving every edge', async ({ page }) => {
@@ -307,13 +330,17 @@ test('panning updates the image in the input event without waiting for framework
   await page.waitForTimeout(300);
   const bounds = await surface(page).boundingBox();
   await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
-  await surface(page).evaluate((node) => node.addEventListener('pointerdown', (event) => { window.dragPointerId = event.pointerId; }, { once: true }));
+  await surface(page).evaluate((node) => node.addEventListener('pointerdown', (event) => {
+    window.dragPointer = { id:event.pointerId, x:event.clientX, y:event.clientY };
+  }, { once: true }));
   await page.mouse.down({ button: 'left' });
   const movement = await surface(page).evaluate((node) => {
     const image = node.querySelector('img');
     const before = image.getBoundingClientRect();
-    const bounds = node.getBoundingClientRect();
-    node.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: window.dragPointerId, pointerType: 'mouse', buttons: 1, clientX: bounds.x + bounds.width / 2 + 120, clientY: bounds.y + bounds.height / 2 + 60 }));
+    // Native pointer coordinates can be rounded by the browser. Move relative
+    // to the delivered down event, preserving the exact 120×60 input delta.
+    const pointer = window.dragPointer;
+    node.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: pointer.id, pointerType: 'mouse', buttons: 1, clientX: pointer.x + 120, clientY: pointer.y + 60 }));
     const after = image.getBoundingClientRect();
     return { x: after.x - before.x, y: after.y - before.y };
   });
