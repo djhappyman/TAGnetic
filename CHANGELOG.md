@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.11] - 2026-11-20
+
+### Added
+
+- Provider-specific search field chips and reusable function-expression chips
+  in pattern editors, with saved masks and a table-based mask builder.
+- Inspector artwork lightbox that expands from its thumbnail and returns on
+  close, while preserving zoom, pan and pending edits.
+
+### Changed
+
+- Rename tools use a clearer destination layout and shared placeholder pickers.
+- Sidebar, surrounding controls and player resize together over a stable table;
+  desktop toggles avoid redundant dock updates.
+- Navigation highlights, selection counts, buttons, menus and tooltips share
+  restrained feedback and respect reduced motion. Main tabs have no tooltips.
+- Player styling separates artist/title and elapsed/total time, with slimmer
+  seek and volume controls that preserve native keyboard behaviour.
+
+### Fixed
+
+- Selection-summary dismissal no longer flashes a zero or single-file count.
+- Escape closes artwork preview without discarding a pending draft.
+- Apply and Undo progress expose labelled, measured accessibility states.
+- Cleared pattern editors no longer retain a hidden browser newline, and literal
+  pattern text keeps its Mono font while chips use the interface font.
+- New rename and mask-builder labels are available in every interface language.
+
 ## [1.4.10] - 2026-11-19
 
 ### Added

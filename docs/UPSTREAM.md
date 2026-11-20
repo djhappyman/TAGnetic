@@ -281,3 +281,22 @@ Source review is complete; hosted red/green regression, pressure profiles and
 full current-head platform
 gates remain required. This candidate is not yet a published release or an
 accepted upstream contribution.
+
+
+## Workbench interactions and editor refinements — 1.4.11
+
+- Artwork lightbox and Escape/draft preservation: **proposed** in
+  [#806](https://github.com/tagrex/tagrex/pull/806), based on the clean #729 head
+  `fc3a197fbf5a108cf6f946e6181efa8261992d40`. Merge #729 first, then rebase this
+  focused UI follow-up onto `next`. The contribution changes only five UI/test
+  files over that foundation; it preserves inline journals and stable waveform
+  APIs. Submission is not acceptance.
+- Coordinated fixed-table sidebar motion, selection/toolbar feedback, player
+  styling, pattern/function/search chips and Rename controls are shared interface
+  behaviour for `next`. Remaining curation waits for compatible workbench
+  foundations; no additional upstream submissions are claimed here.
+- Provider search request changes in the earlier fork checkpoints need a separate
+  shared-backend contribution to `main` against compatible provider foundations;
+  they must not carry the fork's UI or identity into upstream.
+- Personal version/release changes remain fork-only. The release PR records the
+  exact fork feature and release commits and their hosted verification state.
