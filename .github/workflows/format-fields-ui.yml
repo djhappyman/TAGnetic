@@ -1,25 +1,7 @@
 name: Format fields UI
+# Browser fixtures are an explicit opt-in; native release validation runs in CI.
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - 'app/ui/**'
-      - 'crates/core/src/search-fields.tsv'
-      - 'tests/ui/**'
-      - 'tests/unit/**'
-      - '.github/workflows/format-fields-ui.yml'
-      - 'playwright.config.js'
-      - 'playwright.webkit.config.js'
-  pull_request:
-    paths:
-      - 'app/ui/**'
-      - 'crates/core/src/search-fields.tsv'
-      - 'tests/ui/**'
-      - 'tests/unit/**'
-      - '.github/workflows/format-fields-ui.yml'
-      - 'playwright.config.js'
-      - 'playwright.webkit.config.js'
 permissions:
   contents: read
 concurrency:

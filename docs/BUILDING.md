@@ -2,6 +2,9 @@
 
 ## Routine development
 
+Development and releases follow the [fork-only workflow](WORKFLOW.md). Upstream
+contribution work is discontinued; upstream intake requires an explicit user request.
+
 Push a feature branch and open a PR against this fork's `main`. GitHub Actions checks Linux, Windows and macOS, runs the frontend tests and audits dependencies. Exact-head results matter: a new push invalidates an older green result.
 
 A push to `main` runs those same reusable CI checks through **Build and release**, then packages the same commit into development artifacts. PR validation contains only applicable checks; packaging is a dependent job in the separate build workflow. Download them from the successful **Build and release** run's **Artifacts** section. These are development builds, not published releases.
@@ -45,7 +48,7 @@ Keep personal state separate from upstream and test writes on disposable media. 
 
 GitHub documentation: [workflow triggers](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows), [reusable workflows](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows), [artifacts](https://docs.github.com/en/actions/tutorials/store-and-share-data).
 
-For feature checkpoints, paired upstream contributions and branch retirement,
+For feature checkpoints, explicit upstream intake and branch retirement,
 see the [contribution workflow](WORKFLOW.md).
 
 Uncheck **publish_release** for an artifact-only manual build. Main pushes remain artifact-only. An upstream repository is rejected by the release planner; all publication targets `djhappyman/TAGnetic` explicitly.
