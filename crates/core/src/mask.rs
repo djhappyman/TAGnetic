@@ -48,6 +48,7 @@
 //! placeholder names — `Custom` fields aren't addressable from a mask yet.
 //! Deferred rather than ignored, same as scripting in architecture.md.
 
+pub mod function_presentation;
 mod functions;
 
 use std::borrow::Cow;

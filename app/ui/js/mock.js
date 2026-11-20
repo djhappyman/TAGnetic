@@ -1,3 +1,4 @@
+import { TEXT_FUNCTIONS, readFunction, argumentDisplay, buildFunction } from './mock-function-pattern.js';
 import { mockNumberingEdits } from './mock-numbering.js';
 import { mockMatches, mockSuggestions } from './query-mock.js';
 // The browser-only fake of the Rust command layer (#143 split it out of app.js).
@@ -1357,6 +1358,23 @@ function mockInvoke(cmd, args) {
     // The placeholder reference (#148). A trimmed stand-in: enough of each group
     // for the popover's grouping, filtering and insertion to be exercised in the
     // browser. The real list comes off the parser's own tables.
+    case 'pattern_text_functions': return Promise.resolve(TEXT_FUNCTIONS);
+    case 'pattern_function_layout': {
+      const value=args.pattern;const spans=[];let quoted=false;
+      for(let at=0;at<value.length;at++) {
+        if(value[at]==="'"){quoted=!quoted;continue;}
+        if(quoted||value[at]!=='$')continue;
+        const call=readFunction(value,at);if(!call)continue;
+        if(TEXT_FUNCTIONS.some(fn=>fn.key===call.key&&fn.args.length===call.args.length))spans.push({...call,start:at,display_args:call.args.map(argumentDisplay)});
+        at=call.end-1;
+      }
+      return Promise.resolve(spans);
+    }
+    case 'build_pattern_function': {
+      const original=args.original&&readFunction(args.original);
+      if(original&&original.key===args.key&&original.args.every((value,index)=>argumentDisplay(value)===args.args[index]))return Promise.resolve(original.raw);
+      return Promise.resolve(buildFunction(args.key,args.args,(original?.args||[]).map(raw=>({raw,value:argumentDisplay(raw)}))));
+    }
     case "mask_placeholders":
       return Promise.resolve(
         [

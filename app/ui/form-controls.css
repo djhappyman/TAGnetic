@@ -83,3 +83,17 @@ body #query-box.has-error { border-color:var(--del); outline-color:var(--del); }
 .online-filter-entry { display:flex; align-items:center; gap:4px; min-width:0; flex-wrap:wrap; }
 .online-filter-entry input { flex:1 1 100px; min-width:80px; }
 .online-filter-entry button { flex:none; }
+
+/* Text functions share the editor's existing field surfaces and token palette. */
+.field-suggestion-copy { display:flex; flex-direction:column; gap:3px; min-width:0; }
+.function-suggestion-description { font-size:var(--text-xs); color:var(--muted); font-weight:400; }
+.function-expression-chip { max-width:360px; overflow:hidden; text-overflow:ellipsis; cursor:pointer; }
+.function-composer { position:absolute; box-sizing:border-box; padding:var(--sp-2); border:1px solid var(--border); border-radius:var(--r-menu); background:var(--panel); color:var(--text); box-shadow:0 8px 24px #0003; overflow:auto; scrollbar-width:thin; z-index:25; }
+.function-argument-row { display:grid; align-items:center; gap:var(--sp-2); min-width:360px; }
+.function-argument { min-width:0; }
+.function-composer .function-argument > .field-pattern-control { background:var(--bg); }
+.function-composer .function-operation { background:var(--bg); border-color:transparent; font:inherit; width:100%; }
+.function-composer-actions { display:flex; align-items:center; gap:var(--sp-1); }
+.function-composer-actions button { border:0; }
+body [data-pattern-blocked] { opacity:.5; cursor:default; }
+.function-composer-error { margin:var(--sp-2) var(--sp-1) 0; color:var(--del); font-size:var(--text-xs); }

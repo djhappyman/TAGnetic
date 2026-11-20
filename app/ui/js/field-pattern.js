@@ -46,7 +46,8 @@ export function operationFields(operation, fields) {
 export function fieldHue(key) {
   const hues = {artist:255, albumartist:295, title:85, album:210, genre:150,
     year:45, track:255, tracktotal:255, disc:295, disctotal:295,
-    comment:345, composer:170, publisher:45, bpm:150, key:295};
+    comment:345, composer:170, publisher:45, bpm:150, key:295,
+    isrc:15, catalognumber:65, url:195, media:320};
   if (Object.hasOwn(hues, key)) return hues[key];
   let hash = 0;
   for (const character of key.toLowerCase()) hash = (hash * 31 + character.codePointAt(0)) >>> 0;

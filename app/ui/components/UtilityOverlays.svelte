@@ -93,6 +93,10 @@
 
     <ControllerDialog id="mask-builder" labelledby="mb-title" closeId="mb-close">
       <div class="modal mask-builder">
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard-operable resize separator; handlers are registered by the controller.) -->
+        <div id="mb-resize-left" class="mb-resize-edge" data-resize-edge="left" role="separator" tabindex="0" aria-orientation="vertical" aria-label="Resize dialog from left" aria-controls="mask-builder" aria-valuenow="1000"></div>
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard-operable resize separator; handlers are registered by the controller.) -->
+        <div id="mb-resize-right" class="mb-resize-edge" data-resize-edge="right" role="separator" tabindex="0" aria-orientation="vertical" aria-label="Resize dialog from right" aria-controls="mask-builder" aria-valuenow="1000"></div>
         <div class="modal-head">
           <h2 id="mb-title">Mask builder</h2>
           <Button variant="ghost" size="icon-sm" id="mb-close" class="icon" type="button" data-i18n-title="action.cancel" title="Cancel" data-i18n-aria-label="action.cancel" aria-label="Cancel"><svg class="ico"><use href="#i-close"/></svg></Button>
@@ -105,25 +109,26 @@
                 <Button variant="ghost" size="icon-sm" id="mb-clear" class="icon field-clear" type="button" data-i18n-title="maskBuilder.clear" title="Clear the mask" data-i18n-aria-label="maskBuilder.clear" aria-label="Clear the mask"><svg class="ico"><use href="#i-close"/></svg></Button>
                 <span class="field-sep" aria-hidden="true"></span>
                 <Button variant="ghost" size="icon-sm" class="icon preset-btn" type="button" data-preset-target="mb-expr" data-i18n-title="preset.title" title="Mask presets" data-i18n-aria-label="preset.title" aria-label="Mask presets"><svg class="ico"><use href="#i-presets"/></svg></Button>
-                <Button variant="ghost" size="icon-sm" id="mb-transform" class="icon" type="button" title="Transform values" aria-label="Transform values"><svg class="ico"><use href="#i-wand"/></svg><span id="mb-rules" class="field-count"></span></Button>
               </div>
             </div>
             <div class="mb-status">
               <p id="mb-error" class="mb-error" role="alert" hidden></p>
-              <p id="mb-summary" class="mb-summary" aria-live="polite"></p>
             </div>
-            <div id="mb-list" class="mb-list"></div>
+            <!-- svelte-ignore a11y_no_noninteractive_tabindex (This scroll region needs keyboard scrolling.) -->
+            <div class="mb-preview"><div id="mb-list" class="mb-list" tabindex="0" role="region" aria-label="File preview"></div></div>
           </div>
-          <div class="mb-ref">
+          <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard-operable resize separator; handlers are registered by the controller.) -->
+        <div id="mb-pane-divider" class="mb-divider" role="separator" tabindex="0" aria-orientation="vertical" aria-label="Resize preview and reference" aria-controls="mb-list mb-ref-body" aria-valuenow="600"></div>
+          <aside class="mb-ref" aria-label="Placeholder reference">
             <div class="field is-empty mb-ref-search">
-              <Input id="mb-ref-filter" type="search" data-i18n-placeholder="ph.filter" placeholder="Filter placeholders…" spellcheck="false" autocomplete="off"  />
+              <Input id="mb-ref-filter" type="search" aria-label="Filter placeholders" data-i18n-placeholder="ph.filter" placeholder="Filter placeholders…" spellcheck="false" autocomplete="off"  />
               <div class="field-tools">
                 <Button variant="ghost" size="icon-sm" id="mb-ref-clear" class="icon field-clear" type="button" data-i18n-title="ph.clearFilter" title="Clear the filter" data-i18n-aria-label="ph.clearFilter" aria-label="Clear the filter"><svg class="ico"><use href="#i-close"/></svg></Button>
               </div>
             </div>
             <div id="mb-ref-body" class="ph-body mb-ref-body"></div>
             <p class="ph-foot muted"><span data-i18n="ph.foot">Click one to insert it at the caret.</span><Button variant="link" size="sm" class="ph-guide" data-i18n="ph.guide">Mask guide</Button></p>
-          </div>
+          </aside>
         </div>
         <div class="modal-actions">
           <Button variant="outline" size="sm" id="mb-cancel" type="button" data-i18n="action.cancel">Cancel</Button>
@@ -146,12 +151,22 @@
     </ControllerPopover>
 
     <ControllerPopover id="preset-menu" class="ph-menu preset-menu" label="Mask presets" labelKey="preset.title">
-      <div class="ph-head preset-save-row">
-        <Input id="preset-name" type="text" data-i18n-placeholder="preset.namePlaceholder" placeholder="Name this mask" spellcheck="false" autocomplete="off"  />
-        <Button variant="outline" size="sm" id="preset-save" class="btn" type="button" data-i18n="preset.save">Save</Button>
+      <div class="field preset-search">
+        <svg class="ico" aria-hidden="true"><use href="#i-search"/></svg>
+        <Input id="preset-filter" type="search" placeholder="Search presets" aria-label="Search presets" data-i18n-placeholder="preset.search" data-i18n-aria-label="preset.search" spellcheck="false" autocomplete="off" />
       </div>
-      <div id="preset-list" class="ph-body preset-list"></div>
-      <p class="ph-foot muted" data-i18n="preset.foot">Click a preset to use it in this field.</p>
+      <div class="preset-list-wrap"><div id="preset-list" class="preset-list overlay-scrollport"></div></div>
+      <div class="preset-save-section">
+        <Button variant="ghost" size="sm" id="preset-new" type="button" aria-expanded="false" aria-controls="preset-save-form"><svg class="ico" aria-hidden="true"><use href="#i-plus"/></svg><span data-i18n="preset.saveCurrent">Save preset</span></Button>
+        <div id="preset-save-form" hidden>
+          <label for="preset-name" data-i18n="preset.nameLabel">Mask name</label>
+          <div class="preset-save-row">
+            <Input id="preset-name" type="text" data-i18n-placeholder="preset.namePlaceholder" placeholder="Name this mask" spellcheck="false" autocomplete="off" />
+            <Button variant="default" size="sm" id="preset-save" type="button" data-i18n="preset.save">Save</Button>
+            <Button variant="ghost" size="icon-sm" id="preset-save-cancel" type="button" title="Cancel" aria-label="Cancel" data-i18n-title="action.cancel" data-i18n-aria-label="action.cancel"><svg class="ico"><use href="#i-close"/></svg></Button>
+          </div>
+        </div>
+      </div>
     </ControllerPopover>
 
     <ControllerDialog id="transform-modal" labelledby="transform-modal-title" closeId="transform-modal-close">

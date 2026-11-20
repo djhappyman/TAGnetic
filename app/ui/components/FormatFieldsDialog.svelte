@@ -16,6 +16,7 @@
   let fields = $state<{key:string;label:string}[]>([]);
   let opened = $state(false);
   let working = $state(false);
+  let patternPending = $state(false);
   let loading = $state(false);
   let error = $state('');
   let result = $state<any>(null);
@@ -23,7 +24,7 @@
   let request = 0;
   let root: HTMLElement;
   const pattern = $derived(kind === 'build' ? buildPattern : extractPattern);
-  const canStage = $derived(!!result && !result.invalid && !loading && !working && !busy && selected > 0 && result.unmatched < result.total);
+  const canStage = $derived(!!result && !patternPending && !result.invalid && !loading && !working && !busy && selected > 0 && result.unmatched < result.total);
 
   function close() { if (!working) root.hidden = true; }
   function switchTab(event: KeyboardEvent, other: string) {
@@ -109,7 +110,7 @@
         <label for="ribbon-format-pattern" onpointerdown={() => document.getElementById('ribbon-format-pattern')?.focus()}>{kind === 'build' ? 'Values' : 'Pattern'}</label>
         {#key kind}
           <FieldPatternInput id="ribbon-format-pattern" label={kind === 'build' ? 'Values' : 'Pattern'} value={pattern} {fields} disabled={working || !opened}
-            invalid={!!error} onchange={value => { if (kind === 'build') buildPattern = value; else extractPattern = value; }}/>
+            invalid={!!error} functions={kind==='build'} onpendingchange={value=>{patternPending=value;}} onchange={value => { if (kind === 'build') buildPattern = value; else extractPattern = value; }}/>
         {/key}
       </div>
       <div class="format-result" aria-busy={loading} aria-live="polite">

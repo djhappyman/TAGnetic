@@ -2660,6 +2660,23 @@ fn mask_placeholders() -> Vec<PlaceholderDto> {
     tagrex_commands::mask_placeholders()
 }
 
+#[tauri::command]
+fn pattern_text_functions() -> Vec<serde_json::Value> {
+    tagrex_core::mask::function_presentation::text_functions().into_iter().map(|function|serde_json::json!({"key":function.key,"label":function.label,"description":function.description,"args":function.args})).collect()
+}
+#[tauri::command]
+fn pattern_function_layout(pattern: String) -> Result<Vec<serde_json::Value>, String> {
+    Ok(tagrex_core::mask::function_presentation::function_spans(&pattern)?.into_iter().map(|span|serde_json::json!({"start":span.start,"end":span.end,"key":span.key,"args":span.args,"display_args":span.display_args,"raw":span.raw})).collect())
+}
+#[tauri::command]
+fn build_pattern_function(
+    key: String,
+    args: Vec<String>,
+    original: Option<String>,
+) -> Result<String, String> {
+    tagrex_core::mask::function_presentation::build_text_function(&key, &args, original.as_deref())
+}
+
 /// Every field an online import can write (#152), for the setting that picks
 /// which of them it may. Read-only, like the placeholder reference.
 #[tauri::command]
@@ -3025,6 +3042,9 @@ fn main() {
             builtin_action_groups,
             transform_sample,
             mask_placeholders,
+            pattern_text_functions,
+            pattern_function_layout,
+            build_pattern_function,
             import_fields,
             render_column,
             render_columns,

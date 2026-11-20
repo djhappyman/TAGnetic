@@ -16,7 +16,8 @@ function scheduleScrollbars(measure) {
 }
 
 // Wheel/trackpad scrolling stays native. Only the overlaid thumbs are custom.
-export function initTableScrollbars(wrap, { host = null } = {}) {
+export function initTableScrollbars(wrap, { host = null, fadeEdges = false } = {}) {
+  let fadeHeader = 0;
   let dirty = true;
   const removers = [];
   const listen = (node,type,handler,options) => {
@@ -94,7 +95,9 @@ export function initTableScrollbars(wrap, { host = null } = {}) {
       const table = host ? null : wrap.querySelector('table');
       const filler = table?.querySelector('th.table-fill')?.getBoundingClientRect().width || 0;
       const terminalSpace = table ? Math.ceil(Math.max(0,covered-filler)) : 0;
-      const head = host ? 0 : wrap.querySelector('thead')?.getBoundingClientRect().height || 0;
+      const tableHead = !host || fadeEdges ? wrap.querySelector('thead')?.getBoundingClientRect().height || 0 : 0;
+      const head = host ? 0 : tableHead;
+      if (fadeEdges) fadeHeader = tableHead;
       const bounds = host ? wrap.getBoundingClientRect() : null;
       const origin = host?.getBoundingClientRect();
       geometry = {
@@ -104,7 +107,17 @@ export function initTableScrollbars(wrap, { host = null } = {}) {
       };
     }
     const positions = [wrap.scrollTop,Math.abs(wrap.scrollLeft)];
+    const focus = fadeEdges && document.activeElement !== wrap && wrap.contains(document.activeElement)
+      ? document.activeElement.getBoundingClientRect() : null;
+    const bounds = focus ? wrap.getBoundingClientRect() : null;
+    const topFade = fadeEdges && positions[0] > 1 && !(focus && focus.top < bounds.top + fadeHeader + 8 && focus.bottom > bounds.top + fadeHeader);
+    const bottomFade = fadeEdges && wrap.scrollHeight - positions[0] - height > 1 && !(focus && focus.bottom > bounds.bottom - 8 && focus.top < bounds.bottom);
     return () => {
+      if (fadeEdges) {
+        attribute(wrap, 'data-fade-top', topFade);
+        attribute(wrap, 'data-fade-bottom', bottomFade);
+        if (geometry) wrap.style.setProperty('--scroll-fade-head', `${fadeHeader}px`);
+      }
       let remeasure = false;
       if (geometry?.table && geometry.table.style.marginInlineEnd !== `${geometry.terminalSpace}px`) {
         geometry.table.style.marginInlineEnd = `${geometry.terminalSpace}px`;
@@ -139,6 +152,10 @@ export function initTableScrollbars(wrap, { host = null } = {}) {
       }
       dirty = remeasure;
     };
+  }
+  if (fadeEdges) {
+    listen(wrap, 'focusin', () => schedule());
+    listen(wrap, 'focusout', () => schedule());
   }
   listen(wrap,'scroll',() => {
     for (const axis of axes) {

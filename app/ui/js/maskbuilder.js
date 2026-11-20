@@ -14,14 +14,16 @@
 // column for every tag the mask names, each value marked as the preview would
 // treat it. A mode says which box the mask comes from and goes back to, how the
 // list is computed and what OK stages.
+import { loadTextFunctions } from './function-pattern.js';
+import { connectBuilderSizing } from './mask-builder-sizing.js';
+import { initTableScrollbars } from './overlay-scrollbars.js';
 import { el, escapeHtml } from "./dom.js";
-import { t, tn } from "./i18n.js";
+import { t } from "./i18n.js";
 import { invoke } from "./invoke.js";
-import { activeRuleCount, chainHasRules, onChainChanged, runChainOverPlan } from "./chains.js";
+import { chainHasRules, onChainChanged, runChainOverPlan } from "./chains.js";
 import { columnLabel } from "./columns.js";
 import { previewTagsFromName } from "./fromname.js";
 import { previewTagsFromText, visibleSubject } from "./fromtext.js";
-import { openTransformModal } from "./generator.js";
 import { catalogue, insertAt, renderReference } from "./placeholders.js";
 import { maskPart, planForMask, preview } from "./renamer.js";
 import { captureSelection, isSelectionCurrent, tracks } from "./state.js";
@@ -39,6 +41,7 @@ const expr = el("mb-expr");
 const exprField = expr.closest(".mb-field");
 
 let entries = [];
+let referenceFunctions = [];
 let timer = null;
 // Which refresh is the latest, so a slow answer to an older expression never
 // paints over the answer to a newer one.
@@ -48,30 +51,6 @@ let queuedRefresh = null;
 
 function baseName(path) {
   return String(path).split(/[\\/]/).pop();
-}
-
-// The ticked presets' share in what the list shows (#543), said as the
-// one-file example under the RENAMER mask box says it.
-function rulesNote() {
-  const rules = activeRuleCount(mode.context);
-  return rules ? escapeHtml(t("renamer.exampleChain", { rules: tn("unit.rule", rules) })) : "";
-}
-
-// As markup: the counts of the two problems are marked in red (#546), the way
-// their rows are.
-function summary(rows, total) {
-  const count = (kind) => rows.filter((row) => row.kind === kind).length;
-  const parts = [];
-  const plain = (text) => escapeHtml(text);
-  const marked = (text, kind) => `<span class="mb-sum-${kind}">${escapeHtml(text)}</span>`;
-  const changed = rows.filter((row) => row.kind === "changed" || row.kind === "clash").length;
-  if (changed) parts.push(plain(tn("maskBuilder.changed", changed)));
-  if (count("unchanged")) parts.push(plain(tn("maskBuilder.unchangedCount", count("unchanged"))));
-  if (count("unrendered")) parts.push(marked(tn("maskBuilder.missingCount", count("unrendered")), "missing"));
-  if (count("clash")) parts.push(marked(tn("maskBuilder.clashCount", count("clash")), "clash"));
-  if (total > rows.length) parts.push(plain(t("maskBuilder.limited", { shown: rows.length, total })));
-  if (rulesNote()) parts.push(rulesNote());
-  return parts.join(" · ");
 }
 
 // One row per file: what it is called now and what the mask calls it, marked
@@ -93,7 +72,7 @@ function rowsFor(plan, paths) {
   return paths.map((path) => {
     const change = changes.get(path);
     if (missing.has(path)) return { path, kind: "unrendered", field: missing.get(path) };
-    if (!change?.rename_to) return { path, kind: "unchanged" };
+    if (!change?.rename_to || change.rename_to === path) return { path, kind: "unchanged" };
     const target = maskPart(change.rename_to, change.rename_root);
     const clash = landing.get(change.rename_to.toLowerCase()) > 1;
     return { path, kind: clash ? "clash" : "changed", target };
@@ -101,31 +80,31 @@ function rowsFor(plan, paths) {
 }
 
 function rowsHtml(rows) {
-  return rows
-    .map((row) => {
-      // The empty placeholder keeps its code face inside the sentence (#546).
-      const token = `%${row.field}%`;
-      const after =
-        row.kind === "unrendered"
-          ? escapeHtml(t("maskBuilder.needs", { field: token })).replace(
-              escapeHtml(token),
-              `<code>${escapeHtml(token)}</code>`
-            )
-          : escapeHtml(row.kind === "unchanged" ? t("maskBuilder.unchanged") : row.target);
-      const note = row.kind === "clash" ? `<span class="mb-note">${escapeHtml(t("maskBuilder.clash"))}</span>` : "";
-      return `<div class="mb-row mb-${row.kind}">
-        <span class="mb-old" title="${escapeHtml(row.path)}">${escapeHtml(baseName(row.path))}</span>
-        <span class="mb-arrow" aria-hidden="true">→</span>
-        <span class="mb-new">${after}</span>${note}
-      </div>`;
-    })
-    .join("");
+  const body = rows.map((row, index) => {
+    const token = `%${row.field}%`;
+    const after = row.kind === 'unrendered'
+      ? escapeHtml(t('maskBuilder.needs', {field:token}))
+      : escapeHtml(row.kind === 'unchanged' ? baseName(row.path) : row.target);
+    const label = row.kind === 'changed' ? t('maskBuilder.statusChanged')
+      : row.kind === 'clash' ? t('maskBuilder.statusClash')
+      : row.kind === 'unrendered' ? t('maskBuilder.statusMissing') : t('maskBuilder.unchanged');
+    return `<tr class="mb-row mb-${row.kind}">
+      <td class="mb-index">${index + 1}</td>
+      <td class="mb-old" data-tooltip="${escapeHtml(row.path)}" title="${escapeHtml(row.path)}">${escapeHtml(baseName(row.path))}</td>
+      <td class="mb-new" data-tooltip="${row.kind === 'unchanged' ? escapeHtml(row.path) : row.kind === 'unrendered' ? '' : escapeHtml(row.target)}" title="${row.kind === 'unchanged' ? escapeHtml(row.path) : row.kind === 'unrendered' ? '' : escapeHtml(row.target)}">${after}</td>
+      <td class="mb-result-status" title="${row.kind === 'clash' ? escapeHtml(t('maskBuilder.clash')) : escapeHtml(label)}">${escapeHtml(label)}</td>
+    </tr>`;
+  }).join('');
+  return `<table class="mb-table mb-rename-table" aria-label="${escapeHtml(t('maskBuilder.renamePreview'))}">
+    <thead><tr><th scope="col" class="mb-index">#</th><th scope="col">${escapeHtml(t('maskBuilder.currentName'))}</th>
+    <th scope="col">${escapeHtml(t('maskBuilder.proposedName'))}</th><th scope="col">${escapeHtml(t('maskBuilder.status'))}</th></tr></thead>
+    <tbody>${body}</tbody></table>`;
 }
 
 // Render mode (RENAMER): the plan Preview would stage, one row per file.
-async function renderList(mask, shown, total) {
+async function renderList(mask, shown) {
   const rows = rowsFor(await planForMask(mask, shown), shown);
-  return { html: rowsHtml(rows), summary: summary(rows, total) };
+  return { html: rowsHtml(rows) };
 }
 
 // Extract mode (FROM NAME #548, FROM TEXT #550): what the mask reads out of
@@ -158,7 +137,6 @@ async function readingsTable({ fields, rows, subjectHeader, extraColumn, missLab
     });
   }
   const current = new Map(tracks.map((track) => [track.path, track.tags || {}]));
-  const counts = { read: 0, noFit: 0, tidied: 0, bad: 0 };
   const extraHead = extraColumn ? `<th>${escapeHtml(t("maskBuilder.fileHeader"))}</th>` : "";
   const head = `<tr><th class="mb-old">${escapeHtml(subjectHeader)}</th>${extraHead}${fields
     .map((field) => `<th>${escapeHtml(columnLabel(field))}</th>`)
@@ -167,11 +145,9 @@ async function readingsTable({ fields, rows, subjectHeader, extraColumn, missLab
     .map((row, index) => {
       const subject = `<td class="mb-old" title="${escapeHtml(row.title)}"><span>${row.subject}</span><span class="mb-arrow" aria-hidden="true">→</span></td>`;
       if (!row.matched) {
-        counts.noFit += 1;
         const span = Math.max(1, fields.length + (extraColumn ? 1 : 0));
         return `<tr class="mb-nomatch">${subject}<td class="mb-miss" colspan="${span}">${escapeHtml(missLabel)}</td></tr>`;
       }
-      counts.read += 1;
       const extra = extraColumn
         ? row.path
           ? `<td class="mb-target" title="${escapeHtml(row.path)}">${escapeHtml(baseName(row.path))}</td>`
@@ -182,11 +158,9 @@ async function readingsTable({ fields, rows, subjectHeader, extraColumn, missLab
         if (raw === undefined) return `<td class="mb-none">—</td>`;
         const value = tidied[index].get(field) ?? raw;
         if (row.invalid.includes(field)) {
-          counts.bad += 1;
           return `<td class="mb-bad" title="${escapeHtml(t("maskBuilder.cantWrite"))}">${escapeHtml(value)}</td>`;
         }
         if (value !== raw) {
-          counts.tidied += 1;
           return `<td class="mb-tidied" title="${escapeHtml(t("maskBuilder.readAs", { raw }))}">${escapeHtml(value)}</td>`;
         }
         const same = row.path && (current.get(row.path)?.[field] ?? "") === value;
@@ -195,22 +169,11 @@ async function readingsTable({ fields, rows, subjectHeader, extraColumn, missLab
       return `<tr>${subject}${extra}${cells.join("")}</tr>`;
     })
     .join("");
-  return { html: `<table class="mb-table"><thead>${head}</thead><tbody>${body}</tbody></table>`, counts };
-}
-
-// The tail every extract summary shares: tidied and unwritable values, the
-// cap, and the rules that ran.
-function readingsSummaryTail(counts, shown, total) {
-  const parts = [];
-  if (counts.tidied) parts.push(`<span class="mb-sum-tidied">${escapeHtml(tn("maskBuilder.tidiedCount", counts.tidied))}</span>`);
-  if (counts.bad) parts.push(`<span class="mb-sum-clash">${escapeHtml(tn("maskBuilder.badCount", counts.bad))}</span>`);
-  if (total > shown) parts.push(escapeHtml(t("maskBuilder.limited", { shown, total })));
-  if (rulesNote()) parts.push(rulesNote());
-  return parts;
+  return { html: `<table class="mb-table"><thead>${head}</thead><tbody>${body}</tbody></table>` };
 }
 
 // FROM NAME (#548): one row per selected file.
-async function extractList(mask, shown, total) {
+async function extractList(mask, shown) {
   const probes = await invoke("probe_tags_from_names", { mask, paths: shown });
   const rows = probes.files.map((probe, index) => ({
     subject: escapeHtml(baseName(shown[index])),
@@ -220,18 +183,14 @@ async function extractList(mask, shown, total) {
     readings: new Map(probe.fields),
     invalid: probe.invalid || [],
   }));
-  const { html, counts } = await readingsTable({
+  const { html } = await readingsTable({
     fields: probes.fields,
     rows,
     subjectHeader: t("maskBuilder.fileName"),
     extraColumn: false,
     missLabel: t("maskBuilder.noFit"),
   });
-  const parts = [escapeHtml(tn("unit.file", total))];
-  if (counts.read) parts.push(escapeHtml(tn("maskBuilder.readCount", counts.read)));
-  if (counts.noFit) parts.push(`<span class="mb-sum-missing">${escapeHtml(tn("maskBuilder.noFitCount", counts.noFit))}</span>`);
-  parts.push(...readingsSummaryTail(counts, shown.length, total));
-  return { html, summary: parts.join(" · ") };
+  return { html };
 }
 
 // FROM TEXT (#550): one row per line of the list, the nth track on the nth
@@ -239,9 +198,9 @@ async function extractList(mask, shown, total) {
 // the mask does not fit, skipped. Tracks left without a file and files left
 // without a track are counted, since that is a list and a selection that do
 // not match.
-async function textList(mask, shown, total) {
+async function textList(mask, shown) {
   if (!el("from-text-lines").value.trim()) {
-    return { html: `<p class="mb-empty muted">${escapeHtml(t("fromText.noLines"))}</p>`, summary: "" };
+    return { html: `<p class="mb-empty muted">${escapeHtml(t("fromText.noLines"))}</p>` };
   }
   const probe = await invoke("probe_text_lines", { mask, text: el("from-text-lines").value, paths: shown });
   const rows = probe.lines.map((line) => ({
@@ -252,20 +211,14 @@ async function textList(mask, shown, total) {
     readings: new Map(line.fields),
     invalid: line.invalid || [],
   }));
-  const { html, counts } = await readingsTable({
+  const { html } = await readingsTable({
     fields: probe.fields,
     rows,
     subjectHeader: t("maskBuilder.lineHeader"),
     extraColumn: true,
     missLabel: t("maskBuilder.notTrack"),
   });
-  const noFile = rows.filter((row) => row.matched && !row.path).length;
-  const parts = [escapeHtml(tn("maskBuilder.trackCount", counts.read))];
-  if (counts.noFit) parts.push(escapeHtml(tn("maskBuilder.skippedCount", counts.noFit)));
-  if (noFile) parts.push(`<span class="mb-sum-missing">${escapeHtml(tn("maskBuilder.noFileCount", noFile))}</span>`);
-  if (probe.spare_files) parts.push(`<span class="mb-sum-missing">${escapeHtml(tn("maskBuilder.spareFilesCount", probe.spare_files))}</span>`);
-  parts.push(...readingsSummaryTail(counts, shown.length, total));
-  return { html, summary: parts.join(" · ") };
+  return { html };
 }
 
 const MODES = {
@@ -300,6 +253,8 @@ let mode = MODES.render;
 
 function refresh() {
   if (modal.hidden) return;
+  el("mb-list").setAttribute("aria-busy", "true");
+  el("mb-ok").disabled = true;
   queuedRefresh = { mine: ++generation, subject: captureSelection(), mode, mask: expr.value };
   void drainRefresh();
 }
@@ -320,16 +275,15 @@ async function drainRefresh() {
       if (!current()) return;
       el("mb-error").hidden = true;
       exprField.classList.remove("has-error");
-      el("mb-summary").textContent = "";
       el("mb-list").innerHTML = `<p class="mb-empty muted">${escapeHtml(t("maskBuilder.noSelection"))}</p>`;
       return;
     }
-    const result = await requestedMode.list(mask, paths.slice(0, LIMIT), paths.length);
+    const result = await requestedMode.list(mask, paths.slice(0, LIMIT));
     if (!current()) return;
     el("mb-error").hidden = true;
     exprField.classList.remove("has-error");
     el("mb-list").innerHTML = result.html;
-    el("mb-summary").innerHTML = result.summary;
+    el("mb-ok").disabled = false;
   } catch (e) {
     if (!current()) return;
     // Keep the last parsed result while an expression is half-typed.
@@ -337,12 +291,14 @@ async function drainRefresh() {
     el("mb-error").hidden = false;
     exprField.classList.add("has-error");
   } finally {
+    if (current()) el("mb-list").setAttribute("aria-busy", "false");
     activeRefresh = false;
     if (queuedRefresh && !modal.hidden) void drainRefresh();
   }
 }
 
 function schedule() {
+  el("mb-ok").disabled = true;
   generation++; // Reject the previous answer immediately, during the debounce.
   queuedRefresh = null;
   clearTimeout(timer);
@@ -378,20 +334,6 @@ function rememberSize() {
   }
 }
 
-// The Transform button says how many rules run (#545): the count beside the
-// wand (#546) and, the way the toolbar's own wand does, its tooltip.
-function paintTransformButton() {
-  const button = el("mb-transform");
-  const count = activeRuleCount(mode.context);
-  el("mb-rules").textContent = count ? String(count) : "";
-  button.classList.toggle("is-on", count > 0);
-  button.title = count
-    ? t("generator.chainBtn.some", { rules: tn("unit.rule", count) })
-    : t("generator.chainBtn.none");
-  button.setAttribute("aria-label", button.title);
-  if (button.dataset.tipText) button.dataset.tipText = button.title;
-}
-
 // One line, then as many as the mask wraps to, up to MAX_LINES (#545). Also
 // tells the field whether it is empty, which hides Clear (#546).
 const MAX_LINES = 5;
@@ -419,18 +361,32 @@ function referenceDirection() {
   return mode === MODES.render ? "render" : mode === MODES.text ? "text" : "extract";
 }
 
+const sizing = connectBuilderSizing({dialog, body:dialog.querySelector('.mb-body'),
+  sidebar:dialog.querySelector('.mb-ref'), divider:el('mb-pane-divider'),
+  edges:[el('mb-resize-left'),el('mb-resize-right')], onSizeChange:rememberSize});
+let scrollbarsReady = false;
+function connectPreviewScrollbars() {
+  if (scrollbarsReady) return;
+  scrollbarsReady = true;
+  for (const id of ['mb-list', 'mb-ref-body']) {
+    const port = el(id);
+    initTableScrollbars(port, {host:port.parentElement, fadeEdges:true});
+  }
+}
+
 async function open(which) {
   mode = which;
   expr.dispatchEvent(new CustomEvent("pattern:direction", {detail:referenceDirection()}));
   dialog.classList.toggle("is-extract", mode !== MODES.render);
   el("mb-title").textContent = t(mode.title);
   restoreSize();
-  paintTransformButton();
   expr.value = el(mode.source).value;
   el("mb-ref-filter").value = "";
   el("mb-ref-filter").parentElement.classList.add("is-empty");
   el("mb-error").hidden = true;
   modal.hidden = false;
+  sizing.sync();
+  connectPreviewScrollbars();
   fitField();
   const { width, height } = dialog.getBoundingClientRect();
   openedSize = { width, height };
@@ -439,7 +395,8 @@ async function open(which) {
   refresh();
   try {
     entries = await catalogue();
-    renderReference(referenceEntries(), "", el("mb-ref-body"), referenceDirection());
+    referenceFunctions = mode===MODES.render ? await loadTextFunctions().catch(()=>[]) : [];
+    renderReference(referenceEntries(), "", el("mb-ref-body"), referenceDirection(), {tagChips:true, functions:referenceFunctions});
   } catch (e) {
     el("mb-ref-body").textContent = String(e);
   }
@@ -457,6 +414,7 @@ function close() {
 // The mask goes into the box the way typing it there would (it is stored and
 // the one-file example follows), and the preview is staged as Preview would.
 function accept() {
+  if (el("mb-ok").disabled) return;
   const mask = el(mode.source);
   mask.value = expr.value;
   mask.dispatchEvent(new Event("input", { bubbles: true }));
@@ -505,13 +463,14 @@ el("mb-ref-clear").addEventListener("click", () => {
 });
 el("mb-ref-filter").addEventListener("input", (e) => {
   e.target.parentElement.classList.toggle("is-empty", !e.target.value);
-  renderReference(referenceEntries(), e.target.value, el("mb-ref-body"), referenceDirection());
+  renderReference(referenceEntries(), e.target.value, el("mb-ref-body"), referenceDirection(), {tagChips:true, functions:referenceFunctions});
 });
 el("mb-ref-body").addEventListener("click", (e) => {
   const row = e.target.closest(".ph-row[data-token]");
-  if (row) insertAt(expr, row.dataset.token);
+  if (row?.dataset.textFunction) {
+    expr.dispatchEvent(new CustomEvent('pattern:add-function',{detail:row.dataset.textFunction}));
+  } else if (row) insertAt(expr, row.dataset.token);
 });
-el("mb-transform").addEventListener("click", openTransformModal);
 // A narrower or wider window wraps the mask differently.
 new ResizeObserver(() => {
   if (!modal.hidden) fitField();
@@ -520,7 +479,6 @@ new ResizeObserver(() => {
 for (const context of ["renamer", "fromname"]) {
   onChainChanged(context, () => {
     if (modal.hidden || mode.context !== context) return;
-    paintTransformButton();
     schedule();
   });
 }

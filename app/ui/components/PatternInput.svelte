@@ -22,4 +22,4 @@
   });
 </script>
 
-<FieldPatternInput {id} {label} bind:value {fields} {disabled} {multiline} {placeholder} {onchange} controller />
+<FieldPatternInput {id} {label} bind:value {fields} {disabled} {multiline} {placeholder} {onchange} functions={enabled&&(mode||direction)==='render'} controller />

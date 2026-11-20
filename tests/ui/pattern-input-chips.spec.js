@@ -55,7 +55,7 @@ test('rename suggestions, atomic Delete and local Undo preserve the library and 
 test('From Name and From Text offer extraction fields and detected patterns render as chips',async({page})=>{
   for(const [source,id] of [['filename','from-name-mask'],['fromtext','from-text-mask']]) {
     await openTagSource(page,source);
-    await choose(page,id,'skip','Skip');
+    await choose(page,id,'skip','Skip Text');
     await page.locator('#'+id).fill('filename');
     await expect(page.locator('#'+id+'-suggestions')).toHaveCount(0);
     await page.locator('#'+id).fill('upper');
@@ -92,6 +92,7 @@ test('focused chips and field tools remain reachable in both themes at narrow wi
 test('presets refresh chips and builder Clear can be undone without changing the source pattern',async({page})=>{
   await page.locator('.mode-tab[data-mode="renamer"]').click();
   await page.locator('[data-preset-target="mask"]').click();
+  await page.locator('#preset-new').click();
   await page.locator('#preset-name').fill('Chip regression');
   await page.locator('#preset-save').click();
   await page.locator('#preset-menu .preset-apply').first().click();
