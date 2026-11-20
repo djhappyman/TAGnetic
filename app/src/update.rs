@@ -25,7 +25,7 @@ pub const RELEASES_PAGE: &str = "https://github.com/djhappyman/TAGnetic/releases
 pub struct UpdateCheckDto {
     /// The version this build is.
     pub current: String,
-    /// The latest published release, without a leading `v`.
+    /// The latest published numeric version, without the release tag prefix.
     pub latest: String,
     /// Whether `latest` is newer than `current`.
     pub newer: bool,
@@ -38,10 +38,17 @@ pub struct UpdateCheckDto {
 #[derive(Default)]
 pub struct PendingUpdate(pub Mutex<Option<Update>>);
 
-/// `0.21.0`, `v0.21.0` or `0.21.0-rc1` as numbers, the pre-release suffix
+fn release_version(text: &str) -> &str {
+    let tag = text.trim();
+    tag.strip_prefix("personal-")
+        .unwrap_or(tag)
+        .trim_start_matches('v')
+}
+
+/// `0.21.0`, `v0.21.0`, `personal-v1.4.11` or `0.21.0-rc1` as numbers, the pre-release suffix
 /// dropped. `None` for anything that does not start with a dotted number.
 fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
-    let core = text.trim().trim_start_matches('v');
+    let core = release_version(text);
     let core = core.split(['-', '+']).next().unwrap_or(core);
     let mut parts = core.split('.');
     let major = parts.next()?.parse().ok()?;
@@ -90,7 +97,7 @@ pub fn check(proxy: &str) -> Result<UpdateCheckDto, String> {
         .get("tag_name")
         .and_then(|value| value.as_str())
         .ok_or_else(|| "GitHub's answer has no release tag".to_string())?;
-    let latest = tag.trim_start_matches('v').to_string();
+    let latest = release_version(tag).to_string();
     Ok(UpdateCheckDto {
         newer: is_newer(&latest, current),
         current: current.to_string(),
@@ -222,6 +229,7 @@ pub fn run_installer_elevated(
 mod tests {
     use super::{
         elevated_installer_parameters, is_newer, parse_version, proxy_url, refuses_writes,
+        release_version,
     };
 
     #[test]
@@ -231,6 +239,16 @@ mod tests {
         assert_eq!(parse_version("0.21.0-rc1"), Some((0, 21, 0)));
         assert_eq!(parse_version("0.21"), Some((0, 21, 0)));
         assert_eq!(parse_version("nightly"), None);
+    }
+
+    #[test]
+    fn personal_release_tags_compare_with_numeric_app_versions() {
+        assert_eq!(release_version("personal-v1.4.11"), "1.4.11");
+        assert_eq!(parse_version("personal-v1.4.11"), Some((1, 4, 11)));
+        assert!(is_newer("personal-v1.4.11", "1.4.10"));
+        assert!(!is_newer("personal-v1.4.10", "1.4.11"));
+        assert!(!is_newer("personal-v1.4.11", "1.4.11"));
+        assert_eq!(parse_version("personal-nightly"), None);
     }
 
     #[test]
