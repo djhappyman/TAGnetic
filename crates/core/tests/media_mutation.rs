@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Condvar, Mutex,
+        Arc, Condvar, Mutex, MutexGuard,
     },
     time::{Duration, Instant},
 };
@@ -17,6 +17,13 @@ use tagrex_core::{
     },
     resources::{Budget, Limits as ResourceLimits},
 };
+// A fork temporarily inherits other threads' open-file descriptions, including
+// flock locks, until exec closes them. Keep subprocess tests separate from tests
+// that require dropping the final Store handle to permit an immediate reopen.
+static PROCESS_BOUNDARY: Mutex<()> = Mutex::new(());
+fn process_boundary() -> MutexGuard<'static, ()> {
+    PROCESS_BOUNDARY.lock().unwrap()
+}
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
@@ -78,6 +85,40 @@ fn prepare(store: &Store, path: &Path, bytes: &[u8]) -> media::Prepared {
             },
         )
         .unwrap()
+}
+#[test]
+fn process_boundary_isolation_prevents_inherited_store_lock_contention() {
+    use std::os::unix::{net::UnixStream, process::CommandExt};
+    let _boundary = process_boundary();
+    let f = Fixture::new();
+    let store = f.store(limits(), budget());
+    let (mut parent, mut child_gate) = UnixStream::pair().unwrap();
+    parent
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    child_gate
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let child = std::thread::spawn(move || {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.arg("--help").stdout(std::process::Stdio::null());
+        // Only pipe I/O occurs between fork and exec.
+        unsafe {
+            command.pre_exec(move || {
+                child_gate.write_all(b"r")?;
+                child_gate.read_exact(&mut [0])
+            });
+        }
+        command.spawn().unwrap().wait().unwrap()
+    });
+    parent.read_exact(&mut [0]).unwrap();
+    drop(store);
+    let inherited_lock = Store::open(&f.0.join("store"), limits(), budget());
+    parent.write_all(b"x").unwrap();
+    assert!(child.join().unwrap().success());
+    assert!(matches!(inherited_lock, Err(Error::Capacity)));
+    let reopened = f.store(limits(), budget());
+    assert!(reopened.records().unwrap().is_empty());
 }
 #[test]
 fn publishing_grows_and_shrinks_the_same_inode_and_retirement_requires_durable_confirmation() {
@@ -242,6 +283,7 @@ fn callback_errors_panics_and_preintent_faults_leave_original_and_release_all_ch
 }
 #[test]
 fn intent_acknowledgement_failure_and_postwrite_failure_retain_recovery_images() {
+    let _boundary = process_boundary();
     for failure in [Phase::Publishing, Phase::Published] {
         let f = Fixture::new();
         let path = f.put("original.flac", b"before");
@@ -807,6 +849,7 @@ fn every_sync_failure_before_retirement_is_conservative() {
 }
 #[test]
 fn corrupt_manifests_refuse_reopen_without_deleting_or_mutating_any_evidence() {
+    let _boundary = process_boundary();
     let f = Fixture::new();
     let path = f.put("x.flac", b"before");
     let store = f.store(limits(), budget());
@@ -951,6 +994,7 @@ fn process_kill_child() {
 #[test]
 fn actual_process_kill_at_every_copy_state_and_sync_boundary_retains_evidence_or_finished_cleanup()
 {
+    let _boundary = process_boundary();
     let original = vec![b'A'; 2 * BUFFER_BYTES + 3];
     let after = vec![b'B'; 2 * BUFFER_BYTES + 11];
     let baseline = Fixture::new();
@@ -1341,6 +1385,7 @@ fn protected_artifact_child() {
 
 #[test]
 fn recovery_object_identity_exclusion_survives_cross_store_aliases_hardlinks_and_processes() {
+    let _boundary = process_boundary();
     use std::os::unix::fs::symlink;
     let f = Fixture::new();
     let path = f.put("original.flac", b"original");
