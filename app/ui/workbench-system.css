@@ -97,7 +97,7 @@ body .statusbar .footer-feedback > span { padding:2px 0; font-size:var(--text-xs
 body .statusbar .footer-feedback .ab-locked { color:var(--muted); }
 body .statusbar .footer-feedback > [hidden] { display:none; }
 body .statusbar .sb-right:has(#diff-actionbar[hidden]) #ab-locked { display:none; }
-body .statusbar .sb-right:not(:has(#diff-actionbar:not([hidden]),#busy-pill:not([hidden]),#status-transform-scope:not([hidden]))) { display:none; }
+body .statusbar .sb-right:not(:has(#diff-actionbar:not([hidden]),#status-transform-scope:not([hidden]))) { display:none; }
 body .statusbar .sb-right { grid-row:1; }
 body .statusbar .diff-actionbar { justify-content:end; }
 /* Fixed sidebar geometry also aligns the footer, without DOM measurements. */
@@ -167,20 +167,12 @@ body .statusbar .diff-actionbar { position:static; inset:auto; transform:none; d
 body .statusbar .diff-actionbar[hidden] { display:none; }
 body .statusbar .diff-actionbar .btn { height:var(--ctl-h); min-height:var(--ctl-h); padding:var(--sp-1) var(--sp-3); border-radius:var(--r-compact); font-size:var(--text-xs); }
 body .statusbar :is(#diff-preview, #preview) { grid-column:2; border:0; background:var(--bg); color:var(--text); }
-body .statusbar .diff-actionbar.applying #diff-preview:not([hidden]) { display:inline-flex; }
 body .statusbar #diff-apply { gap:var(--sp-2); padding-inline:var(--sp-4); border-radius:var(--r-pill); max-width:100%; min-width:0; height:auto; min-height:var(--ctl-h); white-space:normal; line-height:1.3; text-align:center; }
-body .statusbar #diff-cancel-apply { grid-column:3; }
-body .statusbar .diff-actionbar.applying .toggle-old { display:none; }
-body .statusbar .diff-actionbar.applying .ab-progress { grid-column:1 / 3; min-width:0; width:100%; gap:8px; }
-body .statusbar .diff-actionbar .ab-bar { width:60px; max-width:24%; }
-body .statusbar .diff-actionbar .ab-file { max-width:none; flex:1; }
 @container (max-width:280px) {
   body .statusbar .diff-actionbar { grid-template-columns:minmax(0,1fr) auto; gap:4px; }
   body .statusbar .diff-actionbar .btn { padding-inline:8px; }
   body .statusbar #diff-apply { grid-column:2; justify-self:end; }
   body .statusbar :is(#diff-preview, #preview) { grid-column:1; justify-self:end; }
-  body .statusbar #diff-cancel-apply { grid-column:2; }
-  body .statusbar .diff-actionbar.applying .ab-progress { grid-column:1; }
 }
 @media (max-width:1050px) {
   body .topbar-main { grid-template-columns:auto minmax(0,1fr) auto; column-gap:var(--sp-2); }
@@ -289,8 +281,5 @@ body #files-view::-webkit-scrollbar-button { display:none; width:0; height:0; }
 /* Preview-state feedback uses field validation and the existing toast system. */
 body #status-transform-scope { display:none!important; }
 
-body .statusbar .diff-actionbar.applying #diff-apply { display:inline-flex; }
-body .statusbar .diff-actionbar.applying .ab-progress { position:absolute; inset-inline:96px 12px; bottom:calc(100% + 4px); width:auto; height:24px; background:var(--panel); }
-body .statusbar .diff-actionbar.applying #diff-cancel-apply { position:absolute; inset-inline-start:9px; bottom:calc(100% + 4px); height:24px; min-height:24px; }
 
 @media(prefers-reduced-motion:reduce) { body .statusbar { transition:none; } }

@@ -240,6 +240,9 @@ async function progressiveFixture(page,size=4){
 
 test('verified groups appear during scanning under track names and retain focused copy rows',async({page})=>{
  await progressiveFixture(page);
+ await expect(page.locator('#activity-title')).toHaveText('Scanning for duplicates…');
+ await expect(page.locator('#activity-detail')).toContainText('2 of 4 files');
+ await expect(page.locator('#activity-meter')).not.toHaveAttribute('aria-valuenow');
  await expect(page.locator('#filter-feedback')).toHaveAttribute('data-scan-status','running');
  await expect(page.locator('tr.duplicate-group .group-label')).toHaveText('Recording 1');
  await expect(rows(page).first().locator('td[data-field="title"]')).toContainText('Recording 1');
@@ -249,6 +252,7 @@ test('verified groups appear during scanning under track names and retain focuse
  await expect(page.locator('tr.duplicate-group .group-label')).toHaveText(['Recording 1','Recording 2']);
  expect(await page.evaluate(()=>({row:window.retainedCopy===document.querySelector('#tracks-body tr[data-path]'),connected:window.retainedCopy.isConnected,focus:document.activeElement===window.retainedCell,selected:JSON.stringify([...window.tagrex.selection])===JSON.stringify(window.retainedSelection)}))).toEqual({row:true,connected:true,focus:true,selected:true});
  await expect(page.locator('#filter-feedback')).toHaveAttribute('data-scan-status','complete');
+ await expect(page.locator('#activity-title')).toHaveText('Duplicate scan complete');
 });
 
 test('running suggestions use verified groups and Cancel clears partial results and stale replies',async({page})=>{
@@ -264,7 +268,8 @@ test('running suggestions use verified groups and Cancel clears partial results 
   };
  });
  await page.locator('#filter').fill('Recording');await expect.poll(()=>page.evaluate(()=>typeof window.releaseOldQuery)).toBe('function');
- await page.locator('#query-duplicate-cancel').click();await expect(rows(page)).toHaveCount(0);
+ await page.locator('#activity-stop').click();await expect(rows(page)).toHaveCount(0);
+ await expect(page.locator('#activity-title')).toHaveText('Duplicate scan cancelled');
  await page.evaluate(()=>window.releaseOldQuery());await page.waitForTimeout(400);
  await expect(rows(page)).toHaveCount(0);await expect(page.locator('#filter-feedback')).toHaveAttribute('data-scan-status','cancelled');
 });

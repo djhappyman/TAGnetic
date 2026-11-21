@@ -61,7 +61,7 @@ test('reduced motion keeps selection and progress legible with no movement', asy
   const pill = page.locator('.mode-tabs .navigation-motion-pill');
   expect(await pill.evaluate(node => node.getAnimations().length)).toBe(0);
   expect(await pill.boundingBox()).toEqual(await page.locator('.mode-tabs [aria-selected="true"]').boundingBox());
-  expect(await page.locator('#ab-bar-fill').evaluate(node => getComputedStyle(node).transitionDuration)).toBe('0s');
+  expect(await page.locator('#activity-fill').evaluate(node => getComputedStyle(node).transitionDuration)).toBe('0s');
   const button = page.locator('.mode-tab[data-mode="exporter"]');
   await button.focus();
   await expect(button).toBeFocused();

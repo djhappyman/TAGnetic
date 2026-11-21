@@ -114,6 +114,15 @@ platform rasterization and OS scaling require separate evidence before claims.
 Keep one compact recessed **Staged edits** summary pinned at the inspector's
 bottom, aligned with the table bottom. It appears only while the actual plan
 contains changes and shows the unique file count plus an × to clear the draft.
+On Apply, this same surface grows and crossfades into live activity: checking,
+confirmed write progress and finishing. Progress paints at most once per frame;
+file counts include combined tag/rename writes only once. The action rail stays
+fixed and Stop remains reachable while edits are frozen. Confirmed success holds
+for 1.4 seconds, then fades and collapses; remaining staged work returns instead
+of disappearing. Errors and cancellation remain until dismissed. Reduced motion
+preserves the hold and feedback without spatial movement.
+Online paging keeps an in-flow loading indicator with a stable footprint, manual
+More/Retry access and capped entry motion for newly appended cards only.
 Below it, show non-zero counts of transformed tags and other tag changes. Each
 field counts once, with the final transformed value taking precedence. These
 counts describe pending field edits, not enabled presets or rule executions.

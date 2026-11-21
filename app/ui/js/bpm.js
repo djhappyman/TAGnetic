@@ -4,14 +4,15 @@
 // The measuring takes seconds a file, so it runs in the backend while the window
 // stays usable. The toolbar button is one toggling slot, like the online search
 // (#111): it starts a run, and while one is going it is a Stop that ends it at
-// the current file, staging what was measured before. Progress goes in the
-// status bar's busy pill, the one undo uses.
+// the current file, staging what was measured before. The shared activity
+// card tracks its progress and offers the same Stop action.
 //
 // Settings can switch the whole thing off (#538), which hides the button; the
 // shortcut presses the button, so it goes quiet with it.
 import { el, report, toast } from "./dom.js";
 import { invoke } from "./invoke.js";
 import { t, tn } from "./i18n.js";
+import { beginBackgroundActivity } from './staged-activity.js';
 import { hooks } from "./hooks.js";
 import { applyColumns } from "./columns.js";
 import { liveInputRevision } from "./live-preview.js";
@@ -32,6 +33,7 @@ let running = false;
 let stopping = false;
 let operationRevision = 0;
 let activeRun = 0;
+let activity = null;
 
 // Title and label come from here rather than from data-i18n attributes: they
 // change with the run, and a language switch would otherwise put the idle text
@@ -43,11 +45,12 @@ function paintButton() {
   button.setAttribute("aria-label", running ? t("toolbar.detectBpmStop") : t("toolbar.detectBpm"));
 }
 
-function paintProgress(done, total) {
-  el("busy-fill").style.width = total ? `${Math.round((done / total) * 100)}%` : "0%";
-  el("busy-text").textContent = stopping
-    ? t("bpm.stopping")
-    : t("bpm.progress", { done: Math.min(done + 1, total), total });
+function paintProgress(done, total, path) {
+  if (stopping) return;
+  const filename = path?.split(/[\\/]/).pop();
+  const count = t('bpm.progress', { done, total });
+  activity?.progress(total > 0 ? Math.min(99, Math.round(done / total * 100)) : null,
+    filename ? `${count} · ${filename}` : count);
 }
 
 // The report after a run (#558): what was staged as the headline, then a line
@@ -69,11 +72,8 @@ export function stopBpm() {
   if (!running || stopping) return;
   stopping = true;
   paintButton();
-  // Stopping (#558): the count freezes, the bar goes muted, Stop is spent.
-  el("busy-pill").classList.add("stopping");
-  el("busy-stop").disabled = true;
-  el("busy-text").textContent = t("bpm.stopping");
-  invoke("cancel_detect_bpm", {});
+  activity?.stopping(t('bpm.stopping'), '');
+  void invoke('cancel_detect_bpm', {}).catch(error => toast(String(error), true));
 }
 
 export function bpmRunning() {
@@ -107,17 +107,13 @@ async function detectBpm() {
   running = true;
   stopping = false;
   paintButton();
+  activity = beginBackgroundActivity({ title: t('toolbar.detectBpm'), stop: stopBpm });
   paintProgress(0, paths.length);
-  // Stop at the end of the run, where it is watched (#558), as well as on the
-  // toolbar button that started it.
-  el("busy-stop").hidden = false;
-  el("busy-stop").disabled = false;
-  el("busy-pill").hidden = false;
   const events = window.__TAURI__ && window.__TAURI__.event;
-  let unlisten = null;
+  let unlisten = null, outcome = null, title, detail;
   try {
     unlisten = events
-      ? await events.listen(EVENT, (e) => { if (current()) paintProgress(e.payload.done, e.payload.total); })
+      ? await events.listen(EVENT, (e) => { if (current()) paintProgress(e.payload.done, e.payload.total, e.payload.path); })
       : null;
     if (!current()) return;
     const result = await invoke("detect_bpm", { paths });
@@ -135,17 +131,20 @@ async function detectBpm() {
       hooks.renderPreview(previewPlan);
     }
     reportRun(result, paths.length);
+    const staged = result.plan.changes.length;
+    title = staged ? t('toast.bpm.staged', { files: tn('unit.file', staged) }) : t('toast.bpm.unchanged');
+    if (result.cancelled) detail = t('toast.bpm.stopped', { done: result.analysed, total: paths.length });
+    outcome = result.cancelled ? 'cancelled' : 'success';
   } catch (e) {
-    if (current()) toast(String(e), true);
+    if (current()) { outcome = 'error'; title = t('toolbar.detectBpm'); detail = String(e); }
   } finally {
     if (unlisten) unlisten();
     if (activeRun !== run) return;
     activeRun = 0;
     running = false;
     stopping = false;
-    el("busy-pill").hidden = true;
-    el("busy-pill").classList.remove("stopping");
-    el("busy-stop").hidden = true;
+    activity?.finish(outcome, title, detail);
+    activity = null;
     paintButton();
   }
 }
@@ -159,7 +158,6 @@ export function setBpmEnabled(on) {
 }
 
 button.addEventListener("click", detectBpm);
-el("busy-stop").addEventListener("click", stopBpm);
 paintButton();
 invoke("load_settings", {})
   .then((settings) => setBpmEnabled(!settings || settings.bpm_detection !== false))

@@ -197,3 +197,31 @@ test('Clear and a new provider reject a late card expansion with the same releas
   await expect(page.locator('.release-card').first().locator('.tk-t')).toHaveText('Current track');
   await expect(page.locator('.release-card')).toHaveCount(5);
 });
+
+test('paging shows an animated inline loader and appends only new card animations', async ({ page }, info) => {
+  await page.emulateMedia({reducedMotion:'no-preference'});
+  await search(page); await page.locator('.release-card').first().evaluate(node => window.originalCard = node);
+  await expect(page.locator('#load-more')).toBeVisible();
+  await page.evaluate(() => window.pagingMode = 'hold'); await bottom(page);
+  await expect(page.locator('#release-loading')).toBeVisible();
+  await expect(page.locator('#release-loading')).toHaveText('Loading more releases…');
+  expect(await page.locator('.release-loading-spinner').evaluate(node => node.getAnimations().length)).toBe(1);
+  const scroll = await page.locator('.online-scroll').evaluate(node => node.scrollTop);
+  await page.locator('.online-scroll').screenshot({path:info.outputPath('online-loading.png')});
+  // Record animations as they are authored; avoid timing-dependent sampling.
+  await page.evaluate(() => {
+    window.pageAnimations = [];
+    const animate = Element.prototype.animate;
+    Element.prototype.animate = function(frames, options) {
+      if (this.classList.contains('release-card')) window.pageAnimations.push(this.dataset.id);
+      return animate.call(this, frames, options);
+    };
+    window.pendingPages.shift()();
+  });
+  await expect(page.locator('.release-card')).toHaveCount(10);
+  expect(await page.evaluate(() => window.pageAnimations.length)).toBe(5);
+  expect(await page.evaluate(() => window.pageAnimations.includes(window.originalCard.dataset.id))).toBe(false);
+  expect(await page.evaluate(() => window.originalCard === document.querySelector('.release-card'))).toBe(true);
+  expect(await page.locator('.online-scroll').evaluate(node => node.scrollTop)).toBe(scroll);
+  await expect(page.locator('#release-loading')).toBeHidden();
+});

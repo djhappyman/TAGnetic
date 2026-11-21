@@ -53,9 +53,10 @@ import { initLaunchOpen } from "./js/dragdrop.js";
 import { readSession, saveSession, clearSession, beginResume, clearResumeAttempt } from "./js/session-resume.js";
 import {
   beginApplyProgress,
-  beginUndoProgress,
+  beginHistoryProgress,
   endApplyProgress,
-  endUndoProgress,
+  finishingWriteProgress,
+  endHistoryProgress,
 } from "./js/applyprogress.js";
 import { initUpdateCheck } from "./js/updatecheck.js";
 import "./js/tablegestures.js";
@@ -118,6 +119,7 @@ import { initMaskPresets } from "./js/maskpresets.js";
 import { initTooltips } from "./js/tooltip.js";
 import { initWorkbenchMotion } from "./js/workbench-motion.js";
 import { comboOf, formatCombo, initShortcuts } from "./js/shortcuts.js";
+import { beginBackgroundActivity } from './js/staged-activity.js';
 import { bpmRunning, invalidateBpm, retranslateBpm, stopBpm } from "./js/bpm.js";
 import { isFieldLocked, loadFieldLocks, pushFieldLocks } from "./js/locks.js";
 import {
@@ -638,7 +640,7 @@ function applyPreset(p) {
     const nextMode=p.commandMode==='duplicates'?'duplicates':'search';
     const nextKind=['exact','same_audio','likely'].includes(p.duplicateKind)?p.duplicateKind:'exact';
     if(nextMode!==commandMode||nextKind!==duplicateKind){
-      if(commandMode==='duplicates'){duplicateJobs.cancel();duplicateJobs.invalidate();}
+      if(commandMode==='duplicates'){duplicateJobs.cancel();invalidateDuplicateScan();}
       duplicateGroups=[];duplicateMessage='';duplicateScanStarted=false;duplicateScanning=false;duplicateStatus='not_scanned';duplicateFoundCount=0;resetDuplicatePublications();
     }
     commandMode=nextMode;duplicateKind=nextKind;
@@ -2586,7 +2588,7 @@ async function afterOpen(label, version = openVersion, savedView = null) {
   setManualOrder(false);
   redoViews.length = 0; batchHandOrders.clear(); redoCount = 0; updateRedoControl();
   filterConditions = [];
-  filterRoot=emptyRoot();nativeMatchPaths=null;duplicateGroups=[];duplicateJobs.invalidate();duplicateScanStarted=false;duplicateScanning=false;duplicateStatus='not_scanned';duplicateFoundCount=0;duplicateMessage='';resetDuplicatePublications();libraryQueryClient.invalidate();nativeMatchRevision=-1;scheduledQueryRevision=-1;
+  filterRoot=emptyRoot();nativeMatchPaths=null;duplicateGroups=[];invalidateDuplicateScan();duplicateScanStarted=false;duplicateScanning=false;duplicateStatus='not_scanned';duplicateFoundCount=0;duplicateMessage='';resetDuplicatePublications();libraryQueryClient.invalidate();nativeMatchRevision=-1;scheduledQueryRevision=-1;
   filterConditionMode = "all";
   setFilterText("");
   el("filter").value = "";
@@ -2751,7 +2753,7 @@ function remapTransformSelection(paths) {
 }
 
 function freezeMutationSurfaces({ scrollableFiles = false } = {}) {
-  const surfaces = [...document.querySelectorAll('.mode-col, #files-view')];
+  const surfaces = [...document.querySelectorAll('.mode-col > :not(#staged-edits), #files-view')];
   const states = surfaces.map(node => [node, node.inert]);
   const controls = surfaces.flatMap(node => [...node.querySelectorAll('input,textarea,select,button')]).map(node => [node,node.disabled]);
   for (const [node] of states) node.inert = scrollableFiles && node.id === 'files-view' ? false : true;
@@ -2813,6 +2815,7 @@ async function apply() {
     rowForPath: renderedRow, artworkLabel: state => msg(`table.artwork.${state}`),
     onComplete: path => { if (sourceTracks === tracks && remainingSelected.delete(path)) updateStatus(remainingSelected.size, false); },
   });
+  let outcome = "error", activityError = "";
   const feedback = createApplyFeedback(review, appliedPlan.changes);
   activeApplyReview = review;
   for (const row of renderedRows.values()) review.paint(row);
@@ -2823,11 +2826,11 @@ async function apply() {
       // once the executor starts the sequential write pass.
       if (!progress.completed && progress.done < appliedPlan.changes.length) return;
       feedback.progress(progress);
-    });
+    }, appliedPlan.changes);
     if (sharedStageSync) await sharedStageSync.flush();
     const batch = await invoke("apply_plan", { plan: appliedPlan, ...(sharedStageSync ? { stageRevision: sharedStageSync.revision() } : {}) });
+    finishingWriteProgress();
     sharedStageSync?.completed(appliedPlan);
-    el("diff-cancel-apply").disabled = true;
     await feedback.finish();
     review.completeAll();
     if (sourceTracks !== tracks) return;
@@ -2870,19 +2873,21 @@ async function apply() {
     else exitDiffState();
     refreshCustomColumnCells();
     await refreshHistory();
+    outcome = "success";
   } catch (e) {
+    activityError = String(e);
     feedback.cancel();
     activeApplyReview = null;
     review.restore();
     // A cancel is the user's own doing and left everything as it was: say so
     // rather than raising it as a failure (#437).
     const code = e && e.failure && e.failure.message && e.failure.message.code;
-    if (code === "error.plan.cancelled") toast(msg("toast.applyCancelled"));
+    if (code === "error.plan.cancelled") { outcome = "cancelled"; activityError = ""; toast(msg("toast.applyCancelled")); }
     else toast(String(e), true);
   } finally {
     feedback.cancel();
     activeApplyReview = null;
-    endApplyProgress();
+    endApplyProgress(outcome, activityError);
     applying = false;
     void sharedStageSync?.refresh();
     updateStatus(rowSelectionSet().size);
@@ -2919,6 +2924,7 @@ async function undo() {
   undoing = true;
   const releaseMutationSurfaces = freezeMutationSurfaces();
   const sourceTracks = tracks;
+  let outcome = null, activityError = "";
   pauseAutomaticTransformPreview();
   try {
     if (!historyLoaded) await refreshHistory();
@@ -2926,14 +2932,14 @@ async function undo() {
     if (batchId === null) return;
     const redoView = {scope:batchRefreshScopes.get(batchId) ?? null, order:handOrder()};
     const order = batchHandOrders.get(batchId) ?? handOrder();
-    await beginUndoProgress();
+    await beginHistoryProgress('undo');
     let result;
     try {
       result = await invoke("undo", { batchId });
     } catch (e) {
       const failure = e && e.failure && e.failure.message;
       if (!failure || failure.code !== "error.plan.changedSinceApplied") throw e;
-      endUndoProgress();
+      endHistoryProgress();
       const path = (failure.args && failure.args.path) || "";
       const choice = await choiceDialog(msg("undo.changed.title"), {
         subject: fileName(path),
@@ -2943,12 +2949,13 @@ async function undo() {
         cancel: msg("undo.changed.cancel"),
       });
       if (!choice) return;
-      await beginUndoProgress();
+      await beginHistoryProgress('undo');
       result = await invoke("undo", {
         batchId,
         mode: choice === "primary" ? "keep_changed" : "overwrite",
       });
     }
+    finishingWriteProgress();
     if (sourceTracks !== tracks) return;
     const kept = (result && result.kept) || [];
     const renamed = automaticRenameBatches.get(batchId);
@@ -2956,8 +2963,7 @@ async function undo() {
       remapTransformSelection(renamed);
       automaticRenameBatches.delete(batchId);
     }
-    if (kept.length === 0) toast(msg("app.undid"));
-    else report(msg("app.undid"), undoKeptParts(kept));
+    if (kept.length > 0) report(msg("app.undid"), undoKeptParts(kept));
     resetEdits();
     const readback = await refreshBatchTracks(batchRefreshScopes.get(batchId) ?? null, sourceTracks);
     if (!readback) return;
@@ -2969,10 +2975,12 @@ async function undo() {
     exitDiffState();
     refreshCustomColumnCells();
     await refreshHistory();
+    outcome = "success";
   } catch (e) {
-    toast(String(e), true);
+    outcome = "error"; activityError = String(e);
+    toast(activityError, true);
   } finally {
-    endUndoProgress();
+    endHistoryProgress(outcome, activityError);
     undoing = false;
     releaseMutationSurfaces();
     syncRibbonSelection();
@@ -2988,10 +2996,12 @@ async function redo() {
   const releaseMutationSurfaces = freezeMutationSurfaces();
   const sourceTracks = tracks;
   const view = redoViews.at(-1);
+  let outcome = null, activityError = "";
   pauseAutomaticTransformPreview();
   try {
-    await beginUndoProgress('redo.running');
+    await beginHistoryProgress('redo');
     const batch = await invoke('redo', {});
+    finishingWriteProgress();
     if (!batch || tracks !== sourceTracks) return;
     const readback = await refreshBatchTracks(view?.scope ?? null, sourceTracks);
     if (!readback) return;
@@ -3004,11 +3014,12 @@ async function redo() {
     if (!hasLiveInputs()) exitDiffState();
     else renderTracks();
     refreshCustomColumnCells();
-    toast(msg('app.redid'));
+    outcome = 'success';
   } catch (error) {
-    toast(String(error), true);
+    outcome = 'error'; activityError = String(error);
+    toast(activityError, true);
   } finally {
-    endUndoProgress();
+    endHistoryProgress(outcome, activityError);
     undoing = false;
     releaseMutationSurfaces();
     syncRibbonSelection();
@@ -3052,7 +3063,7 @@ function setMode(name) {
   // restores the normal table view.
   const dedup=name==='deduplicator';
   const changed=commandMode!==(dedup?'duplicates':'search');
-  if(commandMode==='duplicates'&&!dedup){duplicateJobs.cancel();duplicateJobs.invalidate();duplicateGroups=[];duplicateMessage='';}
+  if(commandMode==='duplicates'&&!dedup){duplicateJobs.cancel();invalidateDuplicateScan();duplicateGroups=[];duplicateMessage='';}
   commandMode=dedup?'duplicates':'search';
   if(changed){
     filterRoot=emptyRoot();filterConditions=[];filterConditionMode='all';
@@ -3475,19 +3486,19 @@ async function writeQuickPlan(plan) {
     rowForPath:renderedRow, artworkLabel:state => msg(`table.artwork.${state}`),
     onComplete:path => { if (sourceTracks === tracks && remainingSelected.delete(path)) updateStatus(remainingSelected.size, false); },
   });
+  let outcome = "error", activityError = "";
   const feedback = createApplyFeedback(review, plan.changes);
   activeApplyReview = review;
   for (const row of renderedRows.values()) review.paint(row);
   el('diff-actionbar').hidden = false;
-  el('diff-actionbar').classList.add('applying');
   syncRibbonSelection();
   try {
     await beginApplyProgress(progress => {
       if (!progress.completed && progress.done < plan.changes.length) return;
       feedback.progress(progress);
-    });
+    }, plan.changes);
     const result = await invoke('quick_write', {plan, stagedPlan:staged});
-    el('diff-cancel-apply').disabled = true;
+    finishingWriteProgress();
     await feedback.finish();
     review.completeAll();
     activeApplyReview = null;
@@ -3505,13 +3516,15 @@ async function writeQuickPlan(plan) {
     refreshCustomColumnCells();
     refreshFieldEditor();
     await refreshHistory();
+    outcome = 'success';
     toast(`Wrote changes to ${plan.changes.length} ${plan.changes.length === 1 ? 'file' : 'files'}. Staged edits kept.`);
   } catch (error) {
     feedback.cancel(); activeApplyReview = null; review.restore();
-    if (error?.failure?.message?.code === 'error.plan.cancelled') toast(msg('toast.applyCancelled'));
+    activityError = String(error);
+    if (error?.failure?.message?.code === 'error.plan.cancelled') { outcome = 'cancelled'; activityError = ''; toast(msg('toast.applyCancelled')); }
     else throw error;
   } finally {
-    feedback.cancel(); activeApplyReview = null; endApplyProgress();
+    feedback.cancel(); activeApplyReview = null; endApplyProgress(outcome, activityError);
     applying = false; release();
     el('diff-actionbar').hidden = false;
     updateDiffBar();
@@ -4642,6 +4655,16 @@ document.addEventListener('tagrex:filter-conditions', event => {
     scheduleFilterRender();
   } catch (error) { toast(error.message, true); }
 });
+let duplicateActivity = null;
+function invalidateDuplicateScan() {
+  duplicateJobs.invalidate();
+  duplicateActivity?.finish();
+  duplicateActivity = null;
+}
+function stopDuplicateScan() {
+  duplicateActivity?.stopping(msg('bpm.stopping'), '');
+  return duplicateJobs.cancel();
+}
 const duplicateJobs=createDuplicateJobs(invoke,state=>{
   duplicateScanning=state.status==='running';
   duplicateStatus=state.status==='error'?'failed':state.status;
@@ -4649,6 +4672,19 @@ const duplicateJobs=createDuplicateJobs(invoke,state=>{
   const phase={stamping:'Checking files',hashing:'Checking file contents',decoding:'Reading decoded audio',fingerprinting:'Reading audio fingerprints',comparing:'Comparing recordings'}[state.phase]||'Scanning files';
   const progress=state.phase==='comparing'?`${phase} · ${duplicateFoundCount} groups found`:`${phase}: ${state.processed||0} of ${state.total||tracks.length} files · ${duplicateFoundCount} groups found`;
   duplicateMessage=commandMode!=='duplicates'?'':state.status==='error'?state.error:state.status==='failed'?(state.message||'Scan failed. Retry with a narrower library.'):state.status==='running'?progress:state.status==='cancelled'?'Scan cancelled.':`${duplicateFoundCount} groups · ${state.skipped||0} skipped · ${state.errors||0} errors`;
+  if (state.status === 'running' && commandMode === 'duplicates') {
+    duplicateActivity ??= beginBackgroundActivity({ title: msg('duplicates.scan'), stop: stopDuplicateScan });
+    // Native scan phases have different denominators. Show the current phase
+    // and count without presenting them as an overall percentage.
+    duplicateActivity.progress(null, progress);
+  } else if (duplicateActivity) {
+    const outcome = state.status === 'cancelled' ? 'cancelled'
+      : (state.status === 'error' || state.status === 'failed') ? 'error' : 'success';
+    const title = outcome === 'success' ? msg('duplicates.complete')
+      : outcome === 'cancelled' ? msg('duplicates.cancelled') : msg('duplicates.failed');
+    duplicateActivity.finish(commandMode === 'duplicates' ? outcome : null, title, duplicateMessage);
+    duplicateActivity = null;
+  }
   if(state.groupsRevision!=null)duplicateLatestRevision=Math.max(duplicateLatestRevision,state.groupsRevision);
   if(state.status==='cancelled'||state.status==='error'||state.status==='failed'){
     // A query may already hold a pre-cancel publication. Reject its response
@@ -4676,10 +4712,10 @@ document.addEventListener('tagrex:query-mode',event=>{
   else setMode(previousQueryMode==='deduplicator'?'tagger':previousQueryMode);
 });
 document.addEventListener('tagrex:query-duplicate-kind',event=>{
-  duplicateJobs.cancel();duplicateJobs.invalidate();duplicateKind=event.detail.kind;duplicateScanStarted=false;duplicateScanning=false;duplicateGroups=[];duplicateStatus='not_scanned';duplicateFoundCount=0;duplicateMessage='';resetDuplicatePublications();syncFilterControls();scheduleFilterRender();
+  duplicateJobs.cancel();invalidateDuplicateScan();duplicateKind=event.detail.kind;duplicateScanStarted=false;duplicateScanning=false;duplicateGroups=[];duplicateStatus='not_scanned';duplicateFoundCount=0;duplicateMessage='';resetDuplicatePublications();syncFilterControls();scheduleFilterRender();
 });
 document.addEventListener('tagrex:query-scan',runDuplicateScan);
-document.addEventListener('tagrex:query-scan-cancel',()=>duplicateJobs.cancel());
+document.addEventListener('tagrex:query-scan-cancel', stopDuplicateScan);
 document.addEventListener('tagrex:filter-root',event=>{
   try{filterRoot=normalizeRoot(event.detail.root);filterConditions=filterRoot.children;filterConditionMode=filterRoot.mode;syncFilterControls();scheduleFilterRender();}
   catch(error){event.preventDefault();toast(error.message,true);}

@@ -111,7 +111,7 @@ test('late BPM results preserve a different preview created during detection', a
   expect(await page.evaluate(() => window.tagrex.previewPlan)).toEqual(newer);
 });
 
-test('the desktop footer keeps BPM Stop reachable alongside staged edits', async ({ page }, testInfo) => {
+test('the shared card keeps BPM Stop reachable while staged edits are pending', async ({ page }, testInfo) => {
   await page.setViewportSize({width:1024,height:800});
   await page.locator('#tracks-body tr[data-path]').first().click();
   await openTagSource(page, 'editor');
@@ -119,11 +119,11 @@ test('the desktop footer keeps BPM Stop reachable alongside staged edits', async
   await expect(page.locator('#diff-apply')).toBeEnabled();
   await expect(page.locator('#staged-edits')).toBeVisible();
   await startScan(page);
-  const stop=page.locator('#busy-stop');
+  const stop=page.locator('#activity-stop');
   await expect(stop).toBeVisible();
   await expect(stop).toBeInViewport({ratio:1});
   expect(await stop.evaluate(node=>{const b=node.getBoundingClientRect();const hit=document.elementFromPoint(b.x+b.width/2,b.y+b.height/2);return node===hit||node.contains(hit);})).toBe(true);
-  await page.screenshot({path:testInfo.outputPath("bpm-busy-footer.png")});
+  await page.screenshot({path:testInfo.outputPath("bpm-activity.png")});
   await stop.click();
   await expect.poll(()=>page.evaluate(()=>window.__bpm.cancels)).toBe(1);
   await finishScan(page);

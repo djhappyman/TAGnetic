@@ -201,18 +201,18 @@ test('importing a different selected track retains the previous track’s pendin
 });
 
 
-test('compact Apply freezes mutation inputs while leaving Cancel reachable',async({page})=>{
+test('compact Apply freezes mutation inputs while leaving Stop reachable',async({page})=>{
   await page.setViewportSize({width:375,height:750});
   await page.getByRole('tab',{name:'Inspector',exact:true}).click();
   await field(page,'title').fill('Safe pending edit');await ready(page);
   await expect(page.locator('#diff-apply')).toBeInViewport({ratio:1});
   await page.evaluate(()=>window.liveDelayApply=true);
   await page.locator('#diff-apply').click();
-  await expect(page.locator('#mode-col')).toHaveAttribute('inert','');
+  await expect(page.locator('#panel-tagger')).toHaveAttribute('inert','');
   await expect(page.locator('#files-view')).not.toHaveAttribute('inert',''); // scrolling remains available
-  await expect(page.locator('#diff-cancel-apply')).toBeInViewport({ratio:1});
-  await expect(page.locator('#diff-cancel-apply')).toBeEnabled();
-  await expect.poll(()=>page.locator('#mode-col').evaluate(node=>node.inert)).toBe(false);
+  await expect(page.locator('#activity-stop')).toBeInViewport({ratio:1});
+  await expect(page.locator('#activity-stop')).toBeEnabled();
+  await expect.poll(()=>page.locator('#panel-tagger').evaluate(node=>node.inert)).toBe(false);
 });
 
 test('manual cover removal composes with pending Editor values and transformations in one Apply',async({page})=>{

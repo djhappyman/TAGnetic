@@ -1377,3 +1377,44 @@ body .rename-workspace .rule-flag > .compat-native { margin-top:2px; }
 body .rename-workspace .rename-option-copy { display:flex; flex-direction:column; gap:2px; min-width:0; }
 body .rename-workspace .rename-related { gap:var(--sp-3); }
 body .rename-workspace [hidden] { display:none; }
+
+/* The staged surface becomes live activity, without moving the action rail. */
+body .mode-col .staged-edits { position:relative; box-sizing:border-box; }
+.staged-activity[hidden], #staged-draft[hidden] { display:none; }
+.activity-head { display:flex; align-items:center; gap:var(--sp-2); min-height:28px; }
+.activity-head h3 { flex:1; min-width:0; margin:0; font-size:var(--type-body-size); font-weight:var(--fw-strong); }
+.activity-head button { flex:none; border:0; box-shadow:none; background:transparent; }
+.activity-indicator { display:grid; place-items:center; flex:none; width:14px; height:14px; border:2px solid var(--border); border-top-color:var(--accent-ink); border-radius:var(--r-circle); animation:activity-spin 1250ms linear infinite; }
+.activity-indicator .ico { display:none; width:14px; height:14px; }
+.activity-meter { position:relative; width:100%; height:4px; margin-top:var(--sp-2); overflow:hidden; border-radius:var(--r-pill); background:var(--border); }
+#activity-fill { display:block; width:100%; height:100%; background:var(--accent-ink); transform:scaleX(0); transform-origin:left; transition:transform 420ms cubic-bezier(.22,1,.36,1); }
+#activity-percent { font-size:var(--type-help-size); font-variant-numeric:tabular-nums; color:var(--muted); }
+.activity-detail { margin:var(--sp-2) 0 0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:var(--type-help-size); color:var(--muted); }
+/* The highlight shows activity independently of the confirmed progress fill.
+   It can keep moving while the executor is on a single slow file. */
+.staged-edits:is([data-activity='checking'],[data-activity='writing'],[data-activity='finishing'],[data-activity='cancelling']) .activity-meter::after {
+  content:"";
+  position:absolute;
+  inset-block:0;
+  inset-inline-start:0;
+  width:36%;
+  pointer-events:none;
+  background:linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent-ink) 45%, var(--text)), transparent);
+  opacity:.38;
+  animation:activity-glide 2400ms linear infinite;
+}
+.staged-edits:is([data-activity='success'],[data-activity='error'],[data-activity='cancelled']) .activity-indicator { animation:none; border-color:transparent; color:var(--accent-ink); }
+.staged-edits[data-activity='success'] .activity-check { display:block; }
+.staged-edits:is([data-activity='error'],[data-activity='cancelled']) .activity-alert { display:block; }
+.staged-edits:is([data-activity='error'],[data-activity='cancelled']) .activity-meter { display:none; }
+.staged-edits[data-activity='error'] .activity-detail { white-space:normal; overflow-wrap:anywhere; max-height:5em; overflow-y:auto; }
+.staged-edits[data-activity='cancelling'] #activity-fill { background:var(--muted); }
+@keyframes activity-spin { to { transform:rotate(360deg); } }
+@keyframes activity-glide { from { transform:translateX(-100%); } to { transform:translateX(278%); } }
+@media(prefers-reduced-motion:reduce) {
+  .activity-indicator { animation:none; }
+  .staged-edits[data-activity] .activity-meter::after { content:none; }
+  #activity-fill { transition:none; }
+}
+
+.activity-detail:empty { margin:0; }

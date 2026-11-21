@@ -1,5 +1,6 @@
 import { el } from './dom.js';
 import { createStagingSummary } from './staging-summary.js';
+import { syncStagedVisibility, initStagedActivity } from './staged-activity.js';
 import { tn } from './i18n.js';
 
 const summarize = createStagingSummary();
@@ -17,11 +18,12 @@ export function renderStaging(plan, isNativeTransformed, delta) {
     if (node.textContent !== text) node.textContent = text;
   }
   const badge = count ? String(count) : '';
-  if (el('staged-edits').hidden !== hidden) el('staged-edits').hidden = hidden;
+  syncStagedVisibility(!hidden);
   if (el('staged-count').textContent !== label) el('staged-count').textContent = label;
   if (el('staged-tab-count').textContent !== badge) el('staged-tab-count').textContent = badge;
 }
 export function initStaging({ onClear, isBusy }) {
   el('diff-discard').addEventListener('click', () => { if (!isBusy()) onClear(); });
+  initStagedActivity();
   renderStaging(null);
 }
