@@ -12,3 +12,10 @@ export function tableViewportBounds(wrap) {
   const left = rect.left+wrap.clientLeft, top = rect.top+wrap.clientTop;
   return {left,top,right:left+width,bottom:top+wrap.clientHeight,width,height:wrap.clientHeight};
 }
+
+// The virtual body inserts complete data, group and spacer rows. Their cells
+// are managed by the table and contain no enhanced controls or popup roots.
+// Ignore these batches in the document-wide control lifecycle observers.
+export function isTableRowMutation(record) {
+  return record.target instanceof HTMLTableSectionElement && record.target.id === 'tracks-body';
+}

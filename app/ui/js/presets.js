@@ -48,6 +48,7 @@ let deletedOrigin = null;
 let deleteTimer;
 let menuReturnFocus = null;
 const collapsedGroups = new Set();
+const sidebarSections = new Map();
 // Listeners told when a preset's rules or name change, so a panel that runs
 // presets can refresh what it shows (#392 hangs the shared set off this).
 const changeListeners = [];
@@ -300,9 +301,15 @@ let pressedPresetMenu = null;
 
 function presetRow(group) {
   const wrap = document.createElement("div"); wrap.className = "pe-list-item";
+  if (renaming === group.name && !group.builtin) {
+    const input = createComponentElement("input"); input.type = "text"; input.id = "pe-name"; input.value = group.name; input.setAttribute("aria-label", t("presets.name"));
+    input.addEventListener("keydown", event => { if (event.isComposing) return; if (["Enter", "Escape"].includes(event.key)) { event.preventDefault(); event.stopImmediatePropagation(); finishRename(event.key === "Escape"); } });
+    input.addEventListener("input", refreshSaveState);
+    // Losing focus keeps the unconfirmed name editable. Only Enter commits it.
+    wrap.append(input);
+    return wrap;
+  }
   const row = createComponentElement("button"); row.type = "button"; row.className = "pe-list-row";
-  const active = current?.name === group.name && current.builtin === !!group.builtin;
-  row.classList.toggle("active", active); row.setAttribute("aria-pressed", String(active));
   const name = document.createElement("span"); name.className = "pe-list-name"; name.textContent = presetLabel(group);
   const icon = document.createElement("span"); icon.className = "pe-preset-icon"; icon.setAttribute("aria-hidden", "true");
   const builtinIcons = { "standard values": "sliders", "discogs cleanup": "db", "normalize english": "rename", "general latin": "doc", "no dash": "eraser", "no underscore": "eraser", "lower case": "rename", "file extension": "doc", "ftp format": "folder" };
@@ -333,46 +340,86 @@ function presetRow(group) {
     if (event.key === "F2" && !group.builtin) { event.preventDefault(); select(group.name, false); startRename(); }
     if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) openMenu(event);
   });
-  if (renaming === group.name && !group.builtin) {
-    const input = createComponentElement("input"); input.type = "text"; input.id = "pe-name"; input.value = group.name; input.setAttribute("aria-label", t("presets.name"));
-    input.addEventListener("keydown", event => { if (event.isComposing) return; if (["Enter", "Escape"].includes(event.key)) { event.preventDefault(); event.stopImmediatePropagation(); finishRename(event.key === "Escape"); } });
-    input.addEventListener("input", refreshSaveState);
-    // Losing focus keeps the unconfirmed name editable. Only Enter commits it.
-    wrap.append(input);
-  } else wrap.append(row, more);
+  wrap.append(row, more);
   return wrap;
 }
 
-function renderList() {
-  const box = el("pe-list"); box.replaceChildren();
-  function section(id, labelKey, groups) {
-    const section = document.createElement("section"); section.className = "pe-sidebar-group";
-    const heading = document.createElement("h3");
-    const button = createComponentElement("button"); button.type = "button"; button.className = "text-btn pe-group-toggle";
-    button.setAttribute("aria-controls", "pe-group-" + id);
-    const label = document.createElement("span"); label.textContent = t(labelKey);
-    button.append(label); heading.append(button);
-    if (id === "personal") {
-      const add = createComponentElement("button"); add.type = "button"; add.id = "pe-new"; add.className = "icon pe-new";
-      add.innerHTML = ico("plus"); add.setAttribute("aria-label", t("presets.newAction")); add.title = t("presets.newAction");
-      add.addEventListener("click", newPreset); heading.append(add);
-    }
-    const panel = document.createElement("div"); panel.id = "pe-group-" + id; panel.className = "pe-group-panel";
-    const content = document.createElement("div"); content.className = "pe-group-content";
-    const query = el("pe-search").value.trim().toLocaleLowerCase();
-    groups = groups.filter(group => !query || presetLabel(group).toLocaleLowerCase().includes(query));
-    if (!groups.length) { const empty = document.createElement("p"); empty.className = "pe-list-empty"; empty.textContent = t(query ? "presets.noMatches" : "presets.noneYet"); content.append(empty); }
-    for (const group of groups) content.append(presetRow(group));
-    panel.append(content);
-    const setState = () => {
-      const expanded = !collapsedGroups.has(id);
-      section.classList.toggle("is-collapsed", !expanded); panel.inert = !expanded; panel.setAttribute("aria-hidden", String(!expanded)); button.setAttribute("aria-expanded", String(expanded));
-    };
-    button.addEventListener("click", () => { if (collapsedGroups.has(id)) collapsedGroups.delete(id); else collapsedGroups.add(id); setState(); });
-    setState(); section.append(heading, panel); box.append(section);
+function presetSection(id, labelKey, language) {
+  const node = document.createElement("section"); node.className = "pe-sidebar-group";
+  const heading = document.createElement("h3");
+  const button = createComponentElement("button"); button.type = "button"; button.className = "text-btn pe-group-toggle";
+  button.setAttribute("aria-controls", "pe-group-" + id);
+  const label = document.createElement("span"); label.textContent = t(labelKey);
+  button.append(label); heading.append(button);
+  if (id === "personal") {
+    const add = createComponentElement("button"); add.type = "button"; add.id = "pe-new"; add.className = "icon pe-new";
+    add.innerHTML = ico("plus"); add.setAttribute("aria-label", t("presets.newAction")); add.title = t("presets.newAction");
+    add.addEventListener("click", newPreset); heading.append(add);
   }
-  section("personal", "presets.yours", draftGroups);
-  if (builtinGroups.length) section("builtin", "chain.builtIn", builtinGroups);
+  const panel = document.createElement("div"); panel.id = "pe-group-" + id; panel.className = "pe-group-panel";
+  const content = document.createElement("div"); content.className = "pe-group-content";
+  const empty = document.createElement("p"); empty.className = "pe-list-empty";
+  panel.append(content);
+  const setState = () => {
+    const expanded = !collapsedGroups.has(id);
+    node.classList.toggle("is-collapsed", !expanded); panel.inert = !expanded; panel.setAttribute("aria-hidden", String(!expanded)); button.setAttribute("aria-expanded", String(expanded));
+  };
+  button.addEventListener("click", () => { if (collapsedGroups.has(id)) collapsedGroups.delete(id); else collapsedGroups.add(id); setState(); });
+  node.append(heading, panel);
+  return {node, content, empty, setState, language, rows:new Map()};
+}
+
+function renderList() {
+  const box = el("pe-list");
+  const language = document.documentElement.lang;
+  const query = el("pe-search").value.trim().toLocaleLowerCase();
+  function renderSection(id, labelKey, groups) {
+    let section = sidebarSections.get(id);
+    if (section?.language !== language) {
+      section?.node.remove();
+      section = presetSection(id, labelKey, language);
+      sidebarSections.set(id, section);
+      if (id === "personal") box.prepend(section.node);
+      else box.append(section.node);
+    }
+    section.setState();
+    const {content, empty, rows} = section;
+    const matching = groups.filter(group => !query || presetLabel(group).toLocaleLowerCase().includes(query));
+    const names = new Set(matching.map(group => group.name));
+    for (const [name, entry] of rows) {
+      if (names.has(name) && entry.editing === (id === "personal" && renaming === name)) continue;
+      entry.node.remove();
+      rows.delete(name);
+    }
+    if (!matching.length) {
+      empty.textContent = t(query ? "presets.noMatches" : "presets.noneYet");
+      if (!empty.isConnected) content.append(empty);
+      return;
+    }
+    empty.remove();
+    let cursor = content.firstElementChild;
+    for (const group of matching) {
+      let entry = rows.get(group.name);
+      if (!entry) {
+        entry = {node:presetRow(group), editing:!group.builtin && renaming === group.name};
+        rows.set(group.name, entry);
+      }
+      if (!entry.editing) {
+        const row = entry.node.firstElementChild;
+        const active = current?.name === group.name && current.builtin === !!group.builtin;
+        row.classList.toggle("active", active);
+        if (row.getAttribute("aria-pressed") !== String(active)) row.setAttribute("aria-pressed", String(active));
+      }
+      if (entry.node === cursor) cursor = cursor.nextElementSibling;
+      else content.insertBefore(entry.node, cursor);
+    }
+  }
+  renderSection("personal", "presets.yours", draftGroups);
+  if (builtinGroups.length) renderSection("builtin", "chain.builtIn", builtinGroups);
+  else if (sidebarSections.has("builtin")) {
+    sidebarSections.get("builtin").node.remove();
+    sidebarSections.delete("builtin");
+  }
 }
 
 function addPreset(group) {

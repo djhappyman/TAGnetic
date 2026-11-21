@@ -180,7 +180,7 @@ export function initRowSelection(options) {
     event.preventDefault();
     event.stopImmediatePropagation();
   }
-  function scrolled() { schedulePaint(); }
+  function scrolled() { if (gesture?.active) schedulePaint(); }
   wrap.addEventListener('mousedown', pressed);
   wrap.addEventListener('click', clicked, true);
   wrap.addEventListener('dblclick', doubleClicked, true);

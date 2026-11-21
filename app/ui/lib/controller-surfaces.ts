@@ -4,6 +4,7 @@ import ControllerDialog from '../components/ControllerDialog.svelte';
 import { toast as sonnerToast } from 'svelte-sonner';
 import ControllerToast from '../components/ControllerToast.svelte';
 import ControllerPopover from '../components/ControllerPopover.svelte';
+import { isTableRowMutation } from '../js/table-viewport.js';
 
 /** Keep the imperative controllers' hidden contract while Bits owns presence/focus. */
 export function connectControllerSurface(root: HTMLElement, update: (open: boolean) => void) {
@@ -127,6 +128,7 @@ export function initControllerSurfaces() {
     const added = new Set<HTMLElement>();
     const removed = new Set<HTMLElement>();
     for (const record of records) {
+      if (isTableRowMutation(record)) continue;
       for (const node of record.addedNodes) if (node instanceof HTMLElement) added.add(node);
       for (const node of record.removedNodes) if (node instanceof HTMLElement) removed.add(node);
     }

@@ -123,11 +123,14 @@ export function paintStagedActivity({ phase, percent, detail }) {
   }
   if (el('activity-title').textContent !== title) el('activity-title').textContent = title;
   if (el('activity-detail').textContent !== detail) el('activity-detail').textContent = detail;
-  el('activity-percent').textContent = percent == null ? '' : `${percent}%`;
-  if (percent == null) el('activity-meter').removeAttribute('aria-valuenow');
+  const meter = el('activity-meter');
+  const value = percent == null ? null : String(percent);
+  if (meter.getAttribute('aria-valuenow') === value) return;
+  el('activity-percent').textContent = value == null ? '' : `${value}%`;
+  if (value == null) meter.removeAttribute('aria-valuenow');
   else {
     el('activity-fill').style.transform = `scaleX(${percent / 100})`;
-    el('activity-meter').setAttribute('aria-valuenow', String(percent));
+    meter.setAttribute('aria-valuenow', value);
   }
 }
 export function stopStagedActivity(title = t('apply.cancelling'), detail = t('apply.stopping')) {

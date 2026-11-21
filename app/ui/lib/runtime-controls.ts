@@ -1,6 +1,7 @@
 import { buttonVariants } from './components/ui/button/index.js';
 import { enhanceSelect, releaseDetachedSelects } from './select-enhancer';
 import { enhanceNativeControl, releaseDetachedNativeControls } from './native-controls-enhancer';
+import { isTableRowMutation } from '../js/table-viewport.js';
 
 // File rows, provider cards and editor fields are produced by the existing
 // workflow controllers. Share the same component recipes without moving or
@@ -41,6 +42,7 @@ export function initComponentControls() {
   const observer = new MutationObserver((records) => {
     const added = new Set<Element>();
     for (const record of records) {
+      if (isTableRowMutation(record)) continue;
       for (const node of record.addedNodes) if (node instanceof Element) added.add(node);
       for (const node of record.removedNodes) if (node instanceof Element) removed.add(node);
     }

@@ -26,7 +26,8 @@ test.beforeEach(async({page})=>{
       let body=await readFile(path);
       if(path.endsWith('.js'))body=Buffer.from(body.toString()
         .replace(/case\s*["'\x60]provider_search["'\x60]:/g,'case "provider_search": if(window.pagingHarness) return window.pagingHarness(arguments[1]);')
-        .replace(/case\s*["'\x60]provider_fetch_release["'\x60]:/g,'case "provider_fetch_release": if(window.detailHarness) return window.detailHarness(arguments[1]);'));
+        .replace(/case\s*["'\x60]provider_fetch_release["'\x60]:/g,'case "provider_fetch_release": if(window.detailHarness) return window.detailHarness(arguments[1]);')
+        .replace(/case\s*["'\x60]provider_fetch_image["'\x60]:/g,'case "provider_fetch_image": if(window.imageHarness) return window.imageHarness(arguments[1]);'));
       await route.fulfill({body,contentType:path.endsWith('.js')?'text/javascript':path.endsWith('.css')?'text/css':path.endsWith('.woff2')?'font/woff2':'text/html'});
     }catch{await route.fulfill({status:404,body:'Missing fixture'});}
   });
@@ -224,4 +225,41 @@ test('paging shows an animated inline loader and appends only new card animation
   expect(await page.evaluate(() => window.originalCard === document.querySelector('.release-card'))).toBe(true);
   expect(await page.locator('.online-scroll').evaluate(node => node.scrollTop)).toBe(scroll);
   await expect(page.locator('#release-loading')).toBeHidden();
+});
+
+test('detail prefetch shares the pending thumbnail request and retains its image node', async ({page}) => {
+  await page.evaluate(() => {
+    window.pagingHarness = () => Promise.resolve([{
+      id:'600001', artist:'Artist', title:'Thumbnail fixture', year:2004, format:'CD',
+      thumb_url:'https://fixture.invalid/thumb.png',
+    }]);
+    window.detailHarness = () => Promise.resolve({
+      id:'600001', artist:'Artist', title:'Thumbnail fixture', year:2004, format:'CD',
+      labels:[], images:[], tracks:[],
+    });
+    window.thumbnailCalls = [];
+    window.imageHarness = args => new Promise(resolve => {
+      window.thumbnailCalls.push(args.url);
+      window.finishThumbnail = () => resolve({mime:'image/png',data_base64:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jUa0AAAAASUVORK5CYII='});
+    });
+  });
+  await page.locator('#discogs-query').fill('Thumbnail fixture');
+  await page.locator('#discogs-query').press('Enter');
+  await expect(page.locator('.release-card')).toHaveCount(1);
+  await expect(page.locator('#discogs-search')).not.toHaveClass(/busy/);
+  expect(await page.evaluate(() => window.thumbnailCalls)).toEqual(['https://fixture.invalid/thumb.png']);
+  await page.evaluate(() => {
+    window.thumbnailMounts = 0;
+    const cover = document.querySelector('.release-cover');
+    const observer = new MutationObserver(records => {
+      for (const record of records) {
+        for (const node of record.addedNodes) if (node.nodeName === 'IMG') window.thumbnailMounts++;
+      }
+    });
+    observer.observe(cover, {childList:true});
+    window.finishThumbnail();
+  });
+  await expect(page.locator('.release-cover img')).toHaveCount(1);
+  await settle(page);
+  expect(await page.evaluate(() => window.thumbnailMounts)).toBe(1);
 });

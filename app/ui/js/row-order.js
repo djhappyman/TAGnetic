@@ -6,9 +6,29 @@ export function movableDirections(groups, selected) {
     const before = selected.has(paths[i - 1]), current = selected.has(paths[i]);
     if (current && !before) up = true;
     if (before && !current) down = true;
+    if (up && down) return { up, down };
   }
   return { up, down };
 }
+// Sparse selections can find their neighbours without walking every file.
+export function indexedMovableDirections(paths, indexByPath, selected, groupByPath = null) {
+  let up = false, down = false;
+  for (const path of selected) {
+    const index = indexByPath.get(path);
+    if (index === undefined) continue;
+    const group = groupByPath?.get(path);
+    const previous = paths[index - 1], next = paths[index + 1];
+    if (!up && previous !== undefined && (!groupByPath || groupByPath.get(previous) === group)) {
+      up = !selected.has(previous);
+    }
+    if (!down && next !== undefined && (!groupByPath || groupByPath.get(next) === group)) {
+      down = !selected.has(next);
+    }
+    if (up && down) break;
+  }
+  return { up, down };
+}
+
 export function shiftSelectedOrder(tracks, groups, selected, direction) {
   const replacements = new Map();
   for (const paths of groups) {

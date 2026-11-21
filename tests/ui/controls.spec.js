@@ -111,6 +111,115 @@ test('a complete theme uses the shared select control and retains keyboard focus
   await expect(page.getByRole('dialog',{name:'Settings',exact:true})).toBeVisible();
 });
 
+async function mountSelectFixture(page, optionCount) {
+  await page.evaluate(count => {
+    const form = document.createElement('form');
+    form.id = 'select-fixture-form';
+    form.style.cssText = 'position:fixed;top:60px;left:20px;z-index:110';
+    const label = document.createElement('label');
+    const caption = document.createElement('span');
+    caption.textContent = 'Fixture choices';
+    const select = document.createElement('select');
+    select.id = 'select-fixture';
+    for (let index = 0; index < count; index++) {
+      const value = index === 1 || index === 2 ? 'duplicate' : `value-${index}`;
+      select.add(new Option(`Choice ${index}`, value, index === 0));
+    }
+    label.append(caption, select);
+    form.append(label);
+    document.body.append(form);
+  }, optionCount);
+  const trigger = page.locator('#select-fixture-control');
+  await expect(trigger).toHaveAccessibleName('Fixture choices');
+  return trigger;
+}
+
+test('silent native select writes avoid rereading option and label metadata', async ({ page }) => {
+  const trigger = await mountSelectFixture(page, 500);
+  const work = await page.locator('#select-fixture').evaluate(select => {
+    const label = select.closest('label');
+    const text = Object.getOwnPropertyDescriptor(Node.prototype, 'textContent');
+    const clone = label.cloneNode;
+    let optionReads = 0;
+    let labelClones = 0;
+    Object.defineProperty(HTMLOptionElement.prototype, 'textContent', {
+      configurable: true,
+      get() {
+        if (select.contains(this)) optionReads++;
+        return text.get.call(this);
+      },
+      set: text.set,
+    });
+    label.cloneNode = function (deep) {
+      labelClones++;
+      return clone.call(this, deep);
+    };
+    const events = [];
+    for (const type of ['input', 'change']) select.addEventListener(type, () => events.push(type));
+    try {
+      for (let index = 3; index < 103; index++) select.value = `value-${index}`;
+      select.selectedIndex = 499;
+    } finally {
+      delete HTMLOptionElement.prototype.textContent;
+      delete label.cloneNode;
+    }
+    return { optionReads, labelClones, events };
+  });
+  expect(work).toEqual({ optionReads: 0, labelClones: 0, events: [] });
+  await expect(trigger).toHaveText('Choice 499');
+});
+
+test('animated select preserves duplicate options, form reset and live metadata', async ({ page }) => {
+  const trigger = await mountSelectFixture(page, 4);
+  const native = page.locator('#select-fixture');
+  await native.evaluate(select => { select.selectedIndex = 2; });
+  await expect(trigger).toHaveText('Choice 2');
+  await expect(native).toHaveValue('duplicate');
+  await native.evaluate(select => { select.value = 'duplicate'; });
+  await expect(trigger).toHaveText('Choice 1');
+  await native.evaluate(select => {
+    window.selectFixtureEvents = [];
+    for (const type of ['input', 'change']) select.addEventListener(type, () => window.selectFixtureEvents.push(type));
+  });
+  await page.locator('#select-fixture-form label > span').first().click();
+  await page.getByRole('option', { name: 'Choice 2', exact: true }).click();
+  await expect(native).toHaveJSProperty('selectedIndex', 2);
+  await expect(trigger).toBeFocused();
+  expect(await page.evaluate(() => window.selectFixtureEvents)).toEqual(['input', 'change']);
+  await native.evaluate(select => select.form.reset());
+  await expect(trigger).toHaveText('Choice 0');
+
+  await native.evaluate(select => { select.closest('label').firstElementChild.textContent = 'Renamed choices'; });
+  await expect(trigger).toHaveAccessibleName('Renamed choices');
+  await native.evaluate(select => {
+    select.options[0].textContent = 'Updated choice';
+    select.setAttribute('aria-label', 'Explicit choices');
+  });
+  await expect(trigger).toHaveText('Updated choice');
+  await expect(trigger).toHaveAccessibleName('Explicit choices');
+
+  await trigger.press('Enter');
+  await expect(trigger).toHaveAttribute('aria-expanded', 'true');
+  await native.evaluate(select => { select.selectedIndex = 1; });
+  await expect(trigger).toHaveText('Choice 1');
+  await expect(trigger).toHaveAttribute('aria-expanded', 'true');
+  await native.evaluate(select => {
+    const group = document.createElement('optgroup');
+    group.disabled = true;
+    group.append(new Option('Unavailable choice', 'unavailable'));
+    select.replaceChildren(new Option('Replacement choice', 'replacement'), group);
+    select.selectedIndex = 0;
+  });
+  await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+  await expect(trigger).toHaveText('Replacement choice');
+  await trigger.press('Enter');
+  await expect(page.getByRole('option', { name: 'Unavailable choice' })).toHaveAttribute('data-disabled', '');
+  await native.evaluate(select => { select.hidden = true; });
+  await expect(trigger).toBeHidden();
+  await native.evaluate(select => { select.hidden = false; select.disabled = true; });
+  await expect(trigger).toBeDisabled();
+});
+
 test('native form reset synchronizes the rendered checkbox and slider', async ({ page }) => {
   await settings(page);
   await page.evaluate(() => {

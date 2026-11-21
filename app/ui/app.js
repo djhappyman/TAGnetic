@@ -9,7 +9,7 @@ import { captureFileOrder, restoreFileOrder } from "./js/file-order.js";
 import { interpretQueryText } from './js/query-language.js';
 import { connectRibbonActions } from './js/ribbon-actions.js';
 import { formatNumber } from './js/number-format.js';
-import { movableDirections, shiftSelectedOrder } from './js/row-order.js';
+import { indexedMovableDirections, movableDirections, shiftSelectedOrder } from './js/row-order.js';
 import { createApplyFeedback } from './js/apply-feedback.js';
 import { initStaging, renderStaging } from "./js/staging.js";
 import { connectWorkspaceController, publishWorkspaceMode, publishWorkspaceSubtab } from './lib/workspace-state';
@@ -302,6 +302,7 @@ const redoBtn = el("redo");
 const selectAll = el("select-all");
 const statusSel = el("status-sel");
 let spreadsheet = null;
+let groupMotion = null;
 // Client-only operation context. Never serialize it into the backend plan or
 // replace its composed description, which is also the journal fallback text.
 let spreadsheetBatchKind = "";
@@ -1088,6 +1089,9 @@ const UNCHANGED_GROUP_KEY = "\u0000unchanged";
 let destGrouping = false;
 let destGroups = new Map(); // key -> { dir, label, createsFolder }
 let itemIndexByPath = new Map(); // path -> index in viewItems (rendered items only)
+let groupItemIndices = new Map();
+let groupItems = new Map(); // group -> all its track items, including collapsed tracks
+let windowGroupChanges = false;
 // Per-item height in px once measured; null until then, when the per-kind
 // estimate stands in. Rows are uniform in practice, but a staged rename is two
 // lines tall, so heights are learned rather than assumed.
@@ -1185,10 +1189,23 @@ function buildViewModel(preparedFilter = null) {
   groupPaths = new Map();
   displayedGroupByPath = new Map();
   viewGroups = [];
+  groupItemIndices = new Map();
+  groupItems = new Map();
+  windowGroupChanges = false;
   viewPathIndex=new Map();navPathIndex=new Map();itemIndexByPath=new Map();
+  const pushGroup = (key, count) => {
+    const header = {kind:'group', key, count};
+    groupItems.set(key, []);
+    groupItemIndices.set(key, viewItems.length);
+    viewGroups.push(key);
+    viewItems.push(header);
+    return header;
+  };
   const pushTrack = (track, groupKey, shown) => {
     displayedGroupByPath.set(track.path, groupKey ?? '');
-    if (shown) {itemIndexByPath.set(track.path,viewItems.length);viewItems.push({ kind: "track", track, groupKey });}
+    const item = {kind:'track', track, groupKey};
+    if (groupKey !== null) groupItems.get(groupKey).push(item);
+    if (shown) {itemIndexByPath.set(track.path,viewItems.length);viewItems.push(item);}
     if (track.unreadable) return; // inert: never selectable, never navigable
     viewPathIndex.set(track.path,viewPaths.length);
     viewPaths.push(track.path);
@@ -1206,7 +1223,7 @@ function buildViewModel(preparedFilter = null) {
       const shown=!collapsedGroups.has(key),paths=[];let header=null;
       for(const path of group.paths){
         const track=trackAt(path);if(!track)continue;
-        if(!header){header={kind:'group',key,count:0};viewGroups.push(key);viewItems.push(header);}
+        if(!header)header=pushGroup(key,0);
         header.count++;pushTrack(track,key,shown);if(!track.unreadable)paths.push(path);
       }
       if(header)groupPaths.set(key,paths);
@@ -1245,8 +1262,7 @@ function buildViewModel(preparedFilter = null) {
     }
     labelDestGroups();
     for (const key of [...destOrder, ...restOrder]) {
-      viewGroups.push(key);
-      viewItems.push({ kind: "group", key, count: byKey.get(key).length });
+      pushGroup(key, byKey.get(key).length);
       const shown = !collapsedGroups.has(key);
       const paths = [];
       for (const track of byKey.get(key)) {
@@ -1273,8 +1289,7 @@ function buildViewModel(preparedFilter = null) {
     if (folderOrder) order.sort((a, b) => folderOrder.get(a) - folderOrder.get(b));
     else if (sortKey) order.sort((a, b) => numericCollator.compare(groupLabel(a), groupLabel(b)) * sortDir);
     for (const key of order) {
-      viewGroups.push(key);
-      viewItems.push({ kind: "group", key, count: byKey.get(key).length });
+      pushGroup(key, byKey.get(key).length);
       const shown = !collapsedGroups.has(key);
       const paths = [];
       for (const track of byKey.get(key)) {
@@ -1288,6 +1303,34 @@ function buildViewModel(preparedFilter = null) {
   }
   itemHeights = new Array(viewItems.length).fill(null);
   rowEstimateMeasured = groupEstimateMeasured = false;
+  recomputeItemTops();
+}
+
+function updateGroupVisibility(key, collapsing) {
+  const index = groupItemIndices.get(key) + 1;
+  const members = groupItems.get(key);
+  const end = index + (collapsing ? members.length : 0);
+  const inserted = collapsing ? [] : members;
+  viewItems = viewItems.slice(0, index).concat(inserted, viewItems.slice(end));
+  itemHeights = itemHeights.slice(0, index).concat(new Array(inserted.length).fill(null), itemHeights.slice(end));
+  windowGroupChanges ||= members.length > 80;
+  reindexGroupVisibility();
+}
+
+function reindexGroupVisibility() {
+  // Preserve the filtered scope, group order and measured heights. Reindex
+  // only the displayed projection, leaving selection of hidden files intact.
+  navPaths = [];
+  navPathIndex = new Map();
+  itemIndexByPath = new Map();
+  groupItemIndices = new Map();
+  for (let i = 0; i < viewItems.length; i++) {
+    const item = viewItems[i];
+    if (item.kind === 'group') { groupItemIndices.set(item.key, i); continue; }
+    const {path, unreadable} = item.track;
+    itemIndexByPath.set(path, i);
+    if (!unreadable) { navPathIndex.set(path, navPaths.length); navPaths.push(path); }
+  }
   recomputeItemTops();
 }
 
@@ -1310,11 +1353,13 @@ function setSpacerHeights() {
   const top = tracksBody.firstElementChild;
   const bottom = tracksBody.lastElementChild;
   if (top && top.classList.contains("spacer")) {
-    top.firstElementChild.style.height = `${Math.max(0, Math.round(itemOffsets.top(renderedFirst)))}px`;
+    const height = `${Math.max(0, Math.round(itemOffsets.top(renderedFirst)))}px`;
+    if (top.firstElementChild.style.height !== height) top.firstElementChild.style.height = height;
   }
   if (bottom && bottom.classList.contains("spacer")) {
     const below = itemOffsets.top(viewItems.length) - itemOffsets.top(Math.min(renderedLast + 1, viewItems.length));
-    bottom.firstElementChild.style.height = `${Math.max(0, Math.round(below + TABLE_END_SPACE))}px`;
+    const height = `${Math.max(0, Math.round(below + TABLE_END_SPACE))}px`;
+    if (bottom.firstElementChild.style.height !== height) bottom.firstElementChild.style.height = height;
   }
 }
 
@@ -1382,7 +1427,7 @@ function buildItemRow(i) {
 function dropRow(tr) {
   const active = tr.querySelector('[contenteditable="true"]');
   if (active) { active.contentEditable = 'false'; commitCellEdit(active); }
-  if (tr.dataset.path) renderedRows.delete(tr.dataset.path);
+  if (tr.dataset.path && renderedRows.get(tr.dataset.path) === tr) renderedRows.delete(tr.dataset.path);
   tr.remove();
 }
 
@@ -1390,7 +1435,12 @@ function dropRow(tr) {
 // every scroll event: it is bounded by the window, not by the library — and a
 // scroll that moves the window by a row or two only builds those rows, because
 // an overlapping window is trimmed and extended rather than rebuilt.
-function renderWindow({ force = false, refreshGrid = true, scrollOnly = false, preserveDuplicateRows = false } = {}) {
+function renderWindow({ force = false, refreshGrid = true, scrollOnly = false, preserveDuplicateRows = false, toggledGroups = null } = {}) {
+  const windowed = viewItems.length > MOUNTED_ROW_LIMIT || (windowGroupChanges && viewItems.length > 96);
+  if (!force && scrollOnly && !windowed) {
+    lastPaintedScrollTop = tableWrap.scrollTop;
+    return;
+  }
   // Before the table is shown for the first time it has no height yet; a nominal
   // one keeps the first render from being a single row.
   const viewportHeight = tableWrap.clientHeight || 600;
@@ -1399,33 +1449,35 @@ function renderWindow({ force = false, refreshGrid = true, scrollOnly = false, p
   // will clamp the offset when it next lays the table out, so clamp it here
   // first: cutting the window for a position that is about to be corrected
   // leaves the rows built somewhere the eye isn't.
-  const maxTop = Math.max(0, Math.ceil(headHeight + itemOffsets.top(viewItems.length) + TABLE_END_SPACE - viewportHeight));
   // Native scrolling owns its measured limit. Only clamp a rebuilt model;
   // clamping ordinary scrolls to an estimate fights the thumb near the end.
-  if (!scrollOnly && tableWrap.scrollTop > maxTop) tableWrap.scrollTop = maxTop;
+  if (!scrollOnly) {
+    const maxTop = Math.max(0, Math.ceil(headHeight + itemOffsets.top(viewItems.length) + TABLE_END_SPACE - viewportHeight));
+    if (tableWrap.scrollTop > maxTop) tableWrap.scrollTop = maxTop;
+  }
   const viewportTop = tableWrap.scrollTop;
   lastPaintedScrollTop = viewportTop;
-  const windowed = viewItems.length > MOUNTED_ROW_LIMIT;
   const visibleFirst = itemIndexAt(viewportTop);
   const visibleLast = itemIndexAt(viewportTop + viewportHeight);
-  // A scroll inside the already mounted buffer is compositor-only. Do not
-  // trim/rebuild a row at every pixel or row boundary.
-  if (!force && scrollOnly && windowed && visibleFirst >= renderedFirst && visibleLast <= renderedLast) return;
-  const first = windowed ? Math.max(0, itemIndexAt(viewportTop) - OVERSCAN_ROWS) : 0;
-  const last = windowed ? Math.min(viewItems.length - 1, itemIndexAt(viewportTop + viewportHeight) + OVERSCAN_ROWS) : viewItems.length - 1;
+  // Scrolling within the mounted buffer has no table paint work.
+  if (!force && scrollOnly && visibleFirst >= renderedFirst && visibleLast <= renderedLast) return;
+  const first = windowed ? Math.max(0, visibleFirst - OVERSCAN_ROWS) : 0;
+  const last = windowed ? Math.min(viewItems.length - 1, visibleLast + OVERSCAN_ROWS) : viewItems.length - 1;
   if (!force && first === renderedFirst && last === renderedLast) return;
   const rowCount = renderedLast - renderedFirst + 1;
   const intact = rowCount > 0 && tracksBody.children.length === rowCount + 2;
   const overlaps = intact && first <= renderedLast && last >= renderedFirst;
   const jumpingWindow = !force && intact && !overlaps;
   if (force || jumpingWindow) spreadsheet?.beforePaint();
-  if((force&&preserveDuplicateRows)||jumpingWindow){
-    const prior=new Map([...tracksBody.children].filter(row=>!row.classList.contains('spacer')).map(row=>[row.dataset.path?`track:${row.dataset.path}`:`group:${row.dataset.group}`,row]));
+  if((force&&preserveDuplicateRows)||toggledGroups||jumpingWindow){
+    const trackKey = (path, group) => toggledGroups ? `track:${(group || '').length}:${group || ''}${path}` : `track:${path}`;
+    const rowKey = row => row.dataset.path ? trackKey(row.dataset.path, row.dataset.group) : `group:${row.dataset.group}`;
+    const prior=new Map([...tracksBody.children].filter(row=>!row.classList.contains('spacer')).map(row=>[rowKey(row),row]));
     const spacers=[...tracksBody.children].filter(row=>row.classList.contains('spacer'));
     const desired=[spacers[0]||spacerRow(0)];
     renderedFirst=first;renderedLast=last;renderedRows=new Map();
     for(let i=first;i<=last;i++){
-      const item=viewItems[i],key=item.kind==='track'?`track:${item.track.path}`:`group:${item.key}`;
+      const item=viewItems[i],key=item.kind==='track'?trackKey(item.track.path, item.groupKey):`group:${item.key}`;
       const row=prior.get(key)||buildItemRow(i);
       if (item.kind === 'track' && row._columnKeys?.join('\0') !== tableColumnKeys().join('\0')) {
         const fresh = buildTrackRow(item.track, item.groupKey);
@@ -1436,16 +1488,25 @@ function renderWindow({ force = false, refreshGrid = true, scrollOnly = false, p
         for (const [field, cell] of oldCells) if (!tableColumnKeys().includes(field)) cell.remove();
         row._columnKeys = [...tableColumnKeys()];
       }
-      row.setAttribute('aria-rowindex',String(gridRowNumber(i)));
+      const rowNumber=String(gridRowNumber(i));
+      if(row.getAttribute('aria-rowindex')!==rowNumber)row.setAttribute('aria-rowindex',rowNumber);
       if(item.kind==='track')renderedRows.set(item.track.path,row);
-      else {const group=duplicateGroupLookup.get(item.key);if(group)paintDuplicateHeader(row,group,item.count);}
+      else if(toggledGroups){
+        if(toggledGroups.has(item.key)){
+          const collapsed=collapsedGroups.has(item.key);
+          row.classList.toggle('collapsed',collapsed);
+          row.setAttribute('aria-expanded',String(!collapsed));
+        }
+      } else {const group=duplicateGroupLookup.get(item.key);if(group)paintDuplicateHeader(row,group,item.count);}
       desired.push(row);
     }
     desired.push(spacers[1]||spacerRow(0));
-    const wanted=new Set(desired);let cursor=tracksBody.firstElementChild;
+    const wanted=new Set(desired);
+    if(toggledGroups)for(const row of [...tracksBody.children])if(!wanted.has(row))dropRow(row);
+    let cursor=tracksBody.firstElementChild;
     for(const row of desired){if(row===cursor)cursor=cursor.nextElementSibling;else tracksBody.insertBefore(row,cursor);}
-    for(const row of [...tracksBody.children])if(!wanted.has(row))dropRow(row);
-    if(force)patchMountedFields();
+    if(!toggledGroups)for(const row of [...tracksBody.children])if(!wanted.has(row))dropRow(row);
+    if(force&&preserveDuplicateRows)patchMountedFields();
     setSpacerHeights();
     // WebKit can clamp scrolling while the table temporarily contains fewer
     // rows. Restore the captured viewport after its spacers are consistent,
@@ -1465,18 +1526,23 @@ function renderWindow({ force = false, refreshGrid = true, scrollOnly = false, p
       dropRow(bottomSpacer.previousElementSibling);
       renderedLast -= 1;
     }
+    const enteringRows = [];
     while (renderedFirst > first) {
       renderedFirst -= 1;
-      topSpacer.after(buildItemRow(renderedFirst));
+      const row = buildItemRow(renderedFirst);
+      topSpacer.after(row);
+      enteringRows.push(row);
     }
     while (renderedLast < last) {
       renderedLast += 1;
-      bottomSpacer.before(buildItemRow(renderedLast));
+      const row = buildItemRow(renderedLast);
+      bottomSpacer.before(row);
+      enteringRows.push(row);
     }
     setSpacerHeights();
     if (tableWrap.scrollTop !== viewportTop) tableWrap.scrollTop = viewportTop;
     measureRenderedRows();
-    if (refreshGrid) spreadsheet?.refresh({scrollOnly});
+    if (refreshGrid) spreadsheet?.refresh({scrollOnly, enteringRows});
     return;
   }
   renderedFirst = first;
@@ -1598,6 +1664,7 @@ document.addEventListener("tagrex:dock-resize-end", () => {
 });
 
 function renderTracks({ preparedFilter = null, preserveDuplicateRows = false } = {}) {
+  groupMotion?.cancel();
   const anchorIndex=preserveDuplicateRows?itemIndexAt(tableWrap.scrollTop):-1;
   const anchor=anchorIndex>=0?viewItems[anchorIndex]:null;
   const anchorOffset=anchor?itemOffsets.top(anchorIndex)-tableWrap.scrollTop:0;
@@ -1635,12 +1702,15 @@ function renderTracks({ preparedFilter = null, preserveDuplicateRows = false } =
 function updateStatus(selected = selectedPaths().length, publish = true) {
   const total = tracks.length;
   updateSelectionSummary(selected);
-  el('files-total-count').textContent = total.toLocaleString();
+  const totalCount = el('files-total-count');
+  const totalText = total.toLocaleString();
+  if (totalCount.textContent !== totalText) totalCount.textContent = totalText;
   const files = filterText || filterConditions.length
     ? `${matchingTrackCount}/${tn("unit.file", total)}` : tn("unit.file", total);
   const summary = `${files} · ${tn("count.selected", selected)}`;
   if (statusSel.textContent !== summary) statusSel.textContent = summary;
-  el('files-tab').title = summary;
+  const filesTab = el('files-tab');
+  if (filesTab.title !== summary) filesTab.title = summary;
   if (publish) publishFilterState();
 }
 
@@ -1652,13 +1722,11 @@ let selectionSummaryVisible = false;
 let selectionSummaryAnimation = null;
 let selectionSummaryWidthAnimation = null;
 let selectionSummaryCountAnimation = null;
-let selectionSummaryOldWidth = 0;
 let selectionSummarySizeSignature = '';
 let selectionSummaryEpoch = 0;
 function updateSelectionSummary(count) {
   selectionSummaryCount = count;
   if (selectionSummaryFrame) return;
-  selectionSummaryOldWidth = el('selection-summary').hidden ? 0 : el('selection-summary').offsetWidth;
   selectionSummaryFrame = requestAnimationFrame(() => {
     selectionSummaryFrame = 0;
     paintSelectionSummary(selectionSummaryCount);
@@ -1714,6 +1782,11 @@ function animateSelectionSummaryWidth(oldWidth) {
   }, () => {});
 }
 function paintSelectionSummary(count) {
+  const kind = usingReviewSelection() ? 'included for Apply' : 'selected';
+  const signature = `${count}|${kind}`;
+  const summary = el('selection-summary');
+  const sizeChanged = selectionSummarySizeSignature !== signature;
+  const oldWidth = sizeChanged && count > 1 && !summary.hidden ? summary.offsetWidth : 0;
   // Keep the last multiple-selection label throughout exit. Writing 0 or 1
   // before the fade ends makes an otherwise correct hidden state flash on screen.
   if (count > 1) {
@@ -1737,16 +1810,13 @@ function paintSelectionSummary(count) {
       }
     }
   }
-  const review = usingReviewSelection();
-  const kind = review ? 'included for Apply' : 'selected';
   if (el('selection-summary-kind').textContent !== kind) el('selection-summary-kind').textContent = kind;
   if (el('selection-summary-detail').textContent) el('selection-summary-detail').textContent = '';
   setSelectionSummaryVisible(count > 1);
   el('selection-summary-clear').disabled = applying || undoing || filterPending;
-  const signature = `${count}|${kind}`;
-  if (selectionSummarySizeSignature !== signature) {
+  if (sizeChanged) {
     selectionSummarySizeSignature = signature;
-    animateSelectionSummaryWidth(selectionSummaryOldWidth);
+    animateSelectionSummaryWidth(oldWidth);
   }
 }
 
@@ -1767,13 +1837,15 @@ function remapEditsAfterRename(plan) {
 }
 
 function patchMountedFields(keys = null, {rawInput = true} = {}) {
-  const columns = tableColumnKeys();
   const affected = keys ? new Map() : null;
   if (affected) for (const {path,field} of keys) {
+    if (!renderedRows.has(path)) continue;
     let fields=affected.get(path);
     if (!fields) affected.set(path,(fields=new Set()));
     fields.add(field);
   }
+  if (affected?.size === 0) return;
+  const columns = tableColumnKeys();
   for (const [path, row] of renderedRows) {
     const fields=affected?.get(path);
     if (affected && !fields) continue;
@@ -1824,7 +1896,8 @@ function patchMountedFields(keys = null, {rawInput = true} = {}) {
         presentation.cls = projected.invalid ? 'error' : projected.dirty ? `dirty${projected.raw === '' ? ' cleared' : ''}` : '';
       }
       patchCellText(cell, presentation.text, stagedView ? presentation.old : '');
-      for (const name of ['dirty','error','unchanged','cleared','empty']) cell.classList.toggle(name, presentation.cls.split(' ').includes(name));
+      const classes = presentation.cls.split(' ');
+      for (const name of ['dirty','error','unchanged','cleared','empty']) cell.classList.toggle(name, classes.includes(name));
       if ((cell.getAttribute('title') ?? cell.getAttribute('aria-description') ?? '') !== (presentation.title || '')) cell.title = presentation.title || '';
     }
   }
@@ -2790,11 +2863,13 @@ async function apply() {
   // Only the ticked rows are applied (#81). The apply scope is the sel-column
   // tick set (`applySelection`) while diffing. The plan the backend gets — and
   // undo journals — is exactly this subset.
-  const changesByPath = new Map(previewPlan.changes.map(change => [change.path, change]));
+  const changesByPath = new Map();
+  for (const change of previewPlan.changes) {
+    if (applySelection.has(change.path)) changesByPath.set(change.path, change);
+  }
   const appliedPlan = {
     ...previewPlan,
-    changes: orderPathsForDisplay([...changesByPath.keys()])
-      .filter(path => applySelection.has(path)).map(path => changesByPath.get(path)),
+    changes: orderPathsForDisplay([...changesByPath.keys()]).map(path => changesByPath.get(path)),
   };
   if (appliedPlan.changes.length === 0) {
     toast(msg("app.tickOneRow"), true);
@@ -3416,14 +3491,18 @@ function syncRibbonSelection() {
   const total = reviewing ? diffByPath.size : viewPaths.length;
   el('ribbon-select-all').disabled = applying || undoing || filterPending || !total;
   el('ribbon-clear-selection').disabled = applying || undoing || filterPending || !count;
-  const moves = movableDirections(ribbonOrderGroups(), selection);
   const blocked = commandMode==='duplicates' || applying || undoing || filterPending || Boolean(diffByPath && !isAutomaticTransformPreview());
-  el('ribbon-move-up').disabled = blocked || !moves.up;
-  el('ribbon-move-down').disabled = blocked || !moves.down;
+  const moves = blocked || !selection.size ? null
+    : selection.size < viewPaths.length / 4
+      ? indexedMovableDirections(viewPaths, viewPathIndex, selection, groupBy ? displayedGroupByPath : null)
+      : movableDirections(ribbonOrderGroups(), selection);
+  el('ribbon-move-up').disabled = !moves?.up;
+  el('ribbon-move-down').disabled = !moves?.down;
   el('group-btn').disabled = applying || undoing;
   const blocks = new Map();
-  for (const path of selectedPaths()) for (const block of trackAt(path)?.tag_blocks || []) blocks.set(block.kind, {kind:block.kind, label:block.label});
-  document.dispatchEvent(new CustomEvent('tagrex:ribbon-state', {detail:{count:selectedPaths().length, busy:applying || undoing || commandMode==='duplicates', blocks:[...blocks.values()]}}));
+  const paths = selectedPaths();
+  for (const path of paths) for (const block of trackAt(path)?.tag_blocks || []) blocks.set(block.kind, {kind:block.kind, label:block.label});
+  document.dispatchEvent(new CustomEvent('tagrex:ribbon-state', {detail:{count:paths.length, busy:applying || undoing || commandMode==='duplicates', blocks:[...blocks.values()]}}));
 }
 function ribbonOrderGroups() {
   return groupBy ? [...groupPaths.values()] : [viewPaths];
@@ -3959,7 +4038,7 @@ function syncSelectionUI({ deferPanels = false, refreshGrid = true, refreshPanel
   updateStatus(rowSelectionSet().size);
   if (usingReviewSelection()) {
     updateDiffBar();
-    if (refreshGrid) spreadsheet?.refresh();
+    if (refreshGrid) spreadsheet?.refresh({selectionOnly:true});
     return;
   }
   if (!deferPanels) {
@@ -3970,7 +4049,7 @@ function syncSelectionUI({ deferPanels = false, refreshGrid = true, refreshPanel
     selectAll.indeterminate = checked > 0 && checked < viewPaths.length;
     updatePanelCounts(paths.length);
   }
-  if (refreshGrid) spreadsheet?.refresh();
+  if (refreshGrid) spreadsheet?.refresh({selectionOnly:true});
   if(commandMode==='duplicates'){
     // Reviewing a duplicate group changes selection, never a staged Apply scope
     // or an editor preview that the user left in another mode.
@@ -4301,7 +4380,10 @@ function scrollPathIntoView(path) {
 function setActiveRowByPath(path, focus) {
   setActiveRowPath(path);
   if (focus && path) scrollPathIntoView(path);
-  for (const [p, tr] of renderedRows) tr.tabIndex = p === activeRowPath ? 0 : -1;
+  for (const [p, tr] of renderedRows) {
+    const tabIndex = p === activeRowPath ? 0 : -1;
+    if (tr.tabIndex !== tabIndex) tr.tabIndex = tabIndex;
+  }
   if (focus && path) renderedRow(path)?.focus();
 }
 
@@ -4526,15 +4608,40 @@ document.addEventListener("keydown", (e) => {
 // question now (#189): a collapsed folder's tracks leave the rendered list
 // entirely rather than being rows with `display: none`. The selection is a set,
 // so it survives the rebuild untouched.
-const groupMotion = createGroupMotion(tableWrap, tracksBody);
+function motionViewportRows() {
+  const first = Math.max(renderedFirst, itemIndexAt(tableWrap.scrollTop) - 1);
+  const last = Math.min(renderedLast, itemIndexAt(tableWrap.scrollTop + tableWrap.clientHeight) + 1);
+  const rows = [];
+  for (let index = first; index <= last; index++) rows.push(tracksBody.children[index - renderedFirst + 1]);
+  return rows;
+}
+function motionRowLayout() {
+  const offsets = new RowHeights();
+  offsets.tree = itemOffsets.tree;
+  const items = viewItems, tracks = itemIndexByPath, groups = groupItemIndices;
+  const origin = tracksBody.getBoundingClientRect().top;
+  const top = index => index === undefined ? undefined : origin + offsets.top(index);
+  return {
+    rowTop(row) {
+      if (!row.dataset.path) return top(groups.get(row.dataset.group));
+      const index = tracks.get(row.dataset.path);
+      if (items[index]?.groupKey === row.dataset.group) return top(index);
+    },
+    groupTop(key) { return top(groups.get(key)); },
+  };
+}
+groupMotion = createGroupMotion(tableWrap, motionViewportRows, motionRowLayout);
 function toggleGroup(key) {
   const collapse = !collapsedGroups.has(key);
+  const affected = new Set([key]);
   groupMotion.run(() => {
     spreadsheet?.clearRange({refresh:false});
     if (collapse) collapsedGroups.add(key); else collapsedGroups.delete(key);
-    buildViewModel(); renderWindow({force:true}); syncGroupToggle();
-    [...tracksBody.querySelectorAll('tr.group-head')].find(row => row.dataset.group === key)?.focus({preventScroll:true});
-  }, {group:key, collapsing:collapse});
+    updateGroupVisibility(key, collapse);
+    renderWindow({force:true,toggledGroups:affected}); syncGroupToggle();
+    const index = groupItemIndices.get(key);
+    if (index >= renderedFirst && index <= renderedLast) tracksBody.children[index - renderedFirst + 1]?.focus({preventScroll:true});
+  }, {group:key, collapsing:collapse, affected});
 }
 tracksBody.addEventListener('click', event => {
   const head = event.target.closest('tr.group-head');
@@ -4565,10 +4672,29 @@ tracksBody.addEventListener('keydown', event => {
 // Expand/collapse every group at once (#32), through the same model rebuild as
 // an individual header.
 function setAllGroupsCollapsed(collapse) {
-  collapsedGroups.clear();
-  if (collapse) for (const key of viewGroups) collapsedGroups.add(key);
-  buildViewModel();
-  renderWindow({ force: true });
+  const affected = new Set(viewGroups.filter(key => collapsedGroups.has(key) !== collapse));
+  if (!affected.size) return;
+  groupMotion.run(() => {
+    const items = [], heights = [];
+    for (const key of viewGroups) {
+      const index = groupItemIndices.get(key);
+      items.push(viewItems[index]);
+      heights.push(itemHeights[index]);
+      if (collapse) continue;
+      const wasOpen = !collapsedGroups.has(key);
+      for (const [offset, item] of groupItems.get(key).entries()) {
+        items.push(item);
+        heights.push(wasOpen ? itemHeights[index + offset + 1] : null);
+      }
+    }
+    collapsedGroups.clear();
+    if (collapse) for (const key of viewGroups) collapsedGroups.add(key);
+    viewItems = items;
+    itemHeights = heights;
+    reindexGroupVisibility();
+    windowGroupChanges = true;
+    renderWindow({force:true,toggledGroups:affected});
+  }, {collapsing:collapse, affected});
 }
 // The two Expand all / Collapse all buttons collapsed into one state toggle:
 // while any group is still open it offers "collapse", and once everything is
@@ -4579,10 +4705,13 @@ function syncGroupToggle() {
   if (!btn || btn.hidden) return;
   const anyOpen = viewGroups.some((key) => !collapsedGroups.has(key));
   const label = anyOpen ? msg("toolbar.collapseGroups") : msg("toolbar.expandGroups");
-  btn.innerHTML = ico(anyOpen ? "collapse-all" : "expand-all");
-  btn.title = label;
-  btn.setAttribute("aria-label", label);
-  btn.dataset.collapse = anyOpen ? "1" : "0";
+  const collapse = anyOpen ? "1" : "0";
+  if (btn.dataset.collapse !== collapse) {
+    btn.innerHTML = ico(anyOpen ? "collapse-all" : "expand-all");
+    btn.dataset.collapse = collapse;
+  }
+  if (btn.title !== label) btn.title = label;
+  if (btn.getAttribute("aria-label") !== label) btn.setAttribute("aria-label", label);
 }
 el("toggle-groups").addEventListener("click", () => {
   setAllGroupsCollapsed(el("toggle-groups").dataset.collapse !== "0");

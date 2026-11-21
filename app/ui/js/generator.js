@@ -76,6 +76,7 @@ let automaticQueuedRun = null;
 let nativeScopeSession = null, nativeScopeKey = null, nativeGroupKey = null, nativeDismissed = null;
 const nativeTransformPaths = new Set();
 const nativeDerivedFields = new Map();
+let nativeTransformPathsHydrated = false;
 const fullPlanContexts = new Set();
 export function setNativeStageSession(session, derivedFields = null, changes = []) {
   if(session && session!==nativeScopeSession){nativeScopeSession=session;nativeScopeKey=null;nativeGroupKey=null;nativeDismissed=null;nativeTransformPaths.clear();nativeDerivedFields.clear();fullPlanContexts.clear();}
@@ -84,7 +85,20 @@ export function setNativeStageSession(session, derivedFields = null, changes = [
   // selections, including fields derived before this webview was mounted.
   if(derivedFields){nativeDerivedFields.clear();for(const entry of derivedFields)nativeDerivedFields.set(entry.path+'\0'+entry.field,entry);}
   for(const entry of changes){const key=entry.path+'\0'+entry.field;if(entry.derived)nativeDerivedFields.set(key,{path:entry.path,field:entry.field});else if(entry.derived===false)nativeDerivedFields.delete(key);}
-  if(nativeRecompute)for(const entry of nativeDerivedFields.values())nativeTransformPaths.add(entry.path);
+  if (!nativeRecompute) {
+    nativeTransformPathsHydrated = false;
+  } else if (derivedFields || !nativeTransformPathsHydrated) {
+    for (const entry of nativeDerivedFields.values()) nativeTransformPaths.add(entry.path);
+    nativeTransformPathsHydrated = true;
+  } else {
+    // Earlier paths remain eligible when presets are switched off. A scalar
+    // acknowledgement only needs to add newly derived paths that survived it.
+    for (const entry of changes) {
+      if (entry.derived && nativeDerivedFields.has(entry.path + '\0' + entry.field)) {
+        nativeTransformPaths.add(entry.path);
+      }
+    }
+  }
 }
 export function isNativeTransformedTag(path, field) {
   return nativeDerivedFields.has(path + '\0' + field);

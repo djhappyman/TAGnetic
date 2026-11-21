@@ -226,6 +226,7 @@ function createRuleChain({ ids }) {
   let rules = [];
   const inline = ids.rules === "pe-rules";
   let expandedRule = null;
+  const cards = new Map();
   // Stable per-rule id, so pointer-based reorder (#88) can key on identity
   // rather than a shifting array index.
   let ruleIdCounter = 0;
@@ -262,7 +263,7 @@ function createRuleChain({ ids }) {
   }
 
   function moveRule(from, to) {
-    if (to < 0 || to >= rules.length) return;
+    if (from < 0 || to < 0 || to >= rules.length) return;
     [rules[from], rules[to]] = [rules[to], rules[from]];
     render();
   }
@@ -278,25 +279,68 @@ function createRuleChain({ ids }) {
     return b;
   }
 
+  function styleButtons(rule, choices, onChange) {
+    const segment = document.createElement("div");
+    segment.className = "seg";
+    for (const [value, text] of choices) {
+      const button = createComponentElement("button");
+      button.type = "button";
+      button.className = "seg-btn" + (rule.style === value ? " active" : "");
+      button.textContent = text;
+      button.addEventListener("click", () => {
+        rule.style = value;
+        for (const sibling of segment.children) sibling.classList.toggle("active", sibling === button);
+        onChange?.(value);
+      });
+      segment.append(button);
+    }
+    return segment;
+  }
+
   function render() {
     const body = el(ids.rules);
     const active = document.activeElement;
     const revisionAtRender = interactionRevision;
     const readOnly = inline && el(ids.set)?.dataset.readonly === "true";
-    const focusKey = active?.closest(".rule-card")?.dataset.key;
+    const focusKey = body.contains(active) ? active.closest(".rule-card")?.dataset.key : null;
     const focusLabel = active?.getAttribute("aria-label");
-    body.innerHTML = "";
+    const language = document.documentElement.lang;
+    const ruleIds = new Set(rules.map(rule => rule.id));
+    for (const [id, entry] of cards) {
+      if (ruleIds.has(id) && entry.readOnly === readOnly && entry.language === language && entry.wordLists === smallWordLists) continue;
+      entry.card.remove();
+      cards.delete(id);
+    }
+    let cursor = body.firstElementChild;
+    function place(entry, rule, index) {
+      const {card, n, toggle, up, down, setExpanded} = entry;
+      const enabled = rule.enabled !== false;
+      card.classList.toggle("rule-disabled", !enabled);
+      card.dataset.index = index;
+      if (n.textContent !== String(index + 1)) n.textContent = index + 1;
+      if (toggle.checked !== enabled) toggle.checked = enabled;
+      const toggleLabel = t(enabled ? "chain.stepOn" : "chain.stepOff");
+      if (toggle.title !== toggleLabel) {
+        toggle.title = toggleLabel;
+        toggle.setAttribute("aria-label", toggleLabel);
+      }
+      up.disabled = readOnly || index === 0;
+      down.disabled = readOnly || index === rules.length - 1;
+      setExpanded?.(rule.id === expandedRule);
+      if (card === cursor) cursor = cursor.nextElementSibling;
+      else body.insertBefore(card, cursor);
+    }
     el(ids.empty).hidden = rules.length > 0;
     // Nothing to clear, nothing to offer (#257).
     if (ids.clear && el(ids.clear)) el(ids.clear).hidden = rules.length === 0;
 
     rules.forEach((rule, index) => {
+      const existing = cards.get(rule.id);
+      if (existing) { place(existing, rule, index); return; }
       const card = document.createElement("div");
       card.className = "rule-card";
       card.classList.toggle("pe-builtin-rule", readOnly);
       // A disabled step (#57) stays in the chain but is skipped and shown dimmed.
-      card.classList.toggle("rule-disabled", rule.enabled === false);
-      card.dataset.index = index;
       card.dataset.key = rule.id; // identity key for pointer reorder (#88)
 
       // ---- header: grip · on/off · n · kind · target ……… ↑ ↓ | ✕ (#556) ----
@@ -323,7 +367,6 @@ function createRuleChain({ ids }) {
 
       const n = document.createElement("span");
       n.className = "rule-n";
-      n.textContent = index + 1;
 
       const kind = document.createElement("span");
       kind.className = "rule-kind";
@@ -350,9 +393,6 @@ function createRuleChain({ ids }) {
       // the tick button it replaces read as one more action beside ↑ ↓ ✕.
       const toggle = createComponentElement("input", { type: "checkbox" });
       toggle.className = "rule-toggle";
-      toggle.checked = rule.enabled !== false;
-      toggle.title = rule.enabled === false ? t("chain.stepOff") : t("chain.stepOn");
-      toggle.setAttribute("aria-label", toggle.title);
       toggle.addEventListener("change", () => {
         rule.enabled = toggle.checked;
         render();
@@ -362,15 +402,19 @@ function createRuleChain({ ids }) {
       const sep = document.createElement("span");
       sep.className = "field-sep";
       sep.setAttribute("aria-hidden", "true");
-      acts.append(
-        mkRuleIcon("caret-up", t("chain.moveUp"), index === 0, () => moveRule(index, index - 1)),
-        mkRuleIcon("caret-down", t("chain.moveDown"), index === rules.length - 1, () =>
-          moveRule(index, index + 1)
-        ),
-        sep
-      );
+      const up = mkRuleIcon("caret-up", t("chain.moveUp"), false, () => {
+        const position = rules.indexOf(rule);
+        moveRule(position, position - 1);
+      });
+      const down = mkRuleIcon("caret-down", t("chain.moveDown"), false, () => {
+        const position = rules.indexOf(rule);
+        moveRule(position, position + 1);
+      });
+      acts.append(up, down, sep);
       const remove = mkRuleIcon("close", t("chain.removeRule"), false, () => {
-        rules.splice(index, 1);
+        const position = rules.indexOf(rule);
+        if (position < 0) return;
+        rules.splice(position, 1);
         render();
       });
       remove.classList.add("rm");
@@ -506,25 +550,6 @@ function createRuleChain({ ids }) {
       } else if (rule.kind === "case") {
         const b = document.createElement("div");
         b.className = "rule-body";
-        const seg = document.createElement("div");
-        seg.className = "seg";
-        for (const [value, text] of [
-          ["title", t("chain.caseTitle")],
-          ["lower", t("chain.caseLower")],
-          ["upper", t("chain.caseUpper")],
-          ["sentence", t("chain.caseSentence")],
-        ]) {
-          const btn = createComponentElement("button");
-          btn.type = "button";
-          btn.className = "seg-btn" + (rule.style === value ? " active" : "");
-          btn.textContent = text;
-          btn.addEventListener("click", () => {
-            rule.style = value;
-            seg.querySelectorAll(".seg-btn").forEach((s) => s.classList.toggle("active", s === btn));
-            small.hidden = value !== "title";
-          });
-          seg.appendChild(btn);
-        }
         const note = document.createElement("span");
         note.className = "rule-note";
         note.textContent = t("chain.caseNote");
@@ -540,28 +565,14 @@ function createRuleChain({ ids }) {
           pick.addEventListener("change", () => { rule.style = pick.value; small.hidden = pick.value !== "title"; note.hidden = pick.value !== "title"; });
           note.hidden = rule.style !== "title";
           label.append(caption, pick); b.append(label, note, small);
-        } else b.append(seg, note, small);
+        } else b.append(styleButtons(rule, [
+          ["title", t("chain.caseTitle")], ["lower", t("chain.caseLower")],
+          ["upper", t("chain.caseUpper")], ["sentence", t("chain.caseSentence")],
+        ], value => { small.hidden = value !== "title"; }), note, small);
         card.append(b);
       } else if (rule.kind === "key") {
         const b = document.createElement("div");
         b.className = "rule-body";
-        const seg = document.createElement("div");
-        seg.className = "seg";
-        for (const [value, text] of [
-          ["camelot", "Camelot"],
-          ["openkey", "Open Key"],
-          ["musical", t("chain.keyMusical")],
-        ]) {
-          const btn = createComponentElement("button");
-          btn.type = "button";
-          btn.className = "seg-btn" + (rule.style === value ? " active" : "");
-          btn.textContent = text;
-          btn.addEventListener("click", () => {
-            rule.style = value;
-            seg.querySelectorAll(".seg-btn").forEach((s) => s.classList.toggle("active", s === btn));
-          });
-          seg.appendChild(btn);
-        }
         const note = document.createElement("span");
         note.className = "rule-note";
         note.textContent = t("chain.keyNote");
@@ -572,7 +583,7 @@ function createRuleChain({ ids }) {
           for (const [value, text] of [["camelot", "Camelot — 8A"], ["openkey", "Open Key — 1m"], ["musical", t("chain.keyMusical") + " — Am"]]) { const option = document.createElement("option"); option.value = value; option.textContent = text; pick.append(option); }
           pick.value = rule.style; pick.addEventListener("change", () => { rule.style = pick.value; });
           label.append(caption, pick); b.append(label, note);
-        } else b.append(seg, note);
+        } else b.append(styleButtons(rule, [["camelot", "Camelot"], ["openkey", "Open Key"], ["musical", t("chain.keyMusical")]]), note);
         card.append(b);
       } else if (rule.kind === "untransliterate") {
         // The one step whose losses are worth stating on the card: reversing a
@@ -587,6 +598,7 @@ function createRuleChain({ ids }) {
         card.append(b);
       }
 
+      let setExpanded;
       if (inline) {
         const editor = document.createElement("div"); editor.className = "pe-inline-editor"; editor.id = `pe-edit-${rule.id}`;
         const inside = document.createElement("div"); inside.className = "pe-inline-content";
@@ -606,20 +618,16 @@ function createRuleChain({ ids }) {
         open.append(n, text, target, caret);
         head.replaceChildren(...(readOnly ? [] : [grip, toggle]), open);
         editor.append(inside); card.append(editor);
-        const setExpanded = value => {
+        let displayedExpanded;
+        setExpanded = value => {
+          if (displayedExpanded === value) return;
+          displayedExpanded = value;
           card.classList.toggle("is-expanded", value); editor.inert = !value; editor.setAttribute("aria-hidden", String(!value));
           open.setAttribute("aria-expanded", String(value));
         };
-        setExpanded(rule.id === expandedRule);
         open.addEventListener("click", () => {
           expandedRule = expandedRule === rule.id ? null : rule.id;
-          for (const sibling of body.children) {
-            const expanded = sibling.dataset.key === String(expandedRule);
-            sibling.classList.toggle("is-expanded", expanded);
-            sibling.querySelector(".pe-inline-editor").inert = !expanded;
-            sibling.querySelector(".pe-inline-editor").setAttribute("aria-hidden", String(!expanded));
-            sibling.querySelector(".pe-rule-open").setAttribute("aria-expanded", String(expanded));
-          }
+          for (const [id, entry] of cards) entry.setExpanded(id === expandedRule);
         });
         // A built-in's summary stays operable; only the actual editing controls
         // are disabled. A disabled outer fieldset would also disable disclosure.
@@ -627,11 +635,13 @@ function createRuleChain({ ids }) {
         readonly.append(...inside.childNodes); inside.append(readonly); toggle.disabled = readonly.disabled;
         if (readonly.disabled) for (const control of readonly.querySelectorAll("input, select, button, textarea")) control.disabled = true;
       }
-      body.append(card);
+      const entry = {card, n, toggle, up, down, setExpanded, readOnly, language, wordLists:smallWordLists};
+      cards.set(rule.id, entry);
+      place(entry, rule, index);
     });
     if (inline) {
       refreshPresentation();
-      if (focusKey && focusLabel) requestAnimationFrame(() => {
+      if (focusKey && focusLabel && (active !== document.activeElement || active.disabled)) requestAnimationFrame(() => {
         if (interactionRevision !== revisionAtRender) return;
         const card = Array.from(body.children).find(node => node.dataset.key === focusKey);
         const control = card && Array.from(card.querySelectorAll("[aria-label]")).find(node => node.getAttribute("aria-label") === focusLabel && !node.disabled);
@@ -648,9 +658,9 @@ function createRuleChain({ ids }) {
     sharedTarget.textContent = scopes.size === 1
       ? el(ids.rules).querySelector(".rule-scope")?.selectedOptions[0]?.textContent || [...scopes][0]
       : "";
-    for (const card of el(ids.rules).children) {
-      const rule = rules.find(rule => String(rule.id) === card.dataset.key);
-      if (!rule) continue;
+    for (const rule of rules) {
+      const card = cards.get(rule.id)?.card;
+      if (!card) continue;
       const info = describeRule(rule, t);
       card.querySelector(".pe-rule-title").textContent = info.title;
       card.querySelector(".pe-rule-help").textContent = info.help;

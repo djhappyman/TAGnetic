@@ -1,13 +1,13 @@
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import { untrack, type Snippet } from 'svelte';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
   import { connectControllerSurface, retainControllerNodes } from '$lib/controller-surfaces.js';
 
   let { id, role = 'dialog', label, labelledby, describedby, closeId, settings = false, nativeRoot,
-    nodes = [], children }: {
+    nodes = [], children, onOpenChange }: {
     id?: string; role?: 'dialog' | 'alertdialog'; label?: string; labelledby?: string; describedby?: string;
     closeId?: string; settings?: boolean; nativeRoot?: HTMLElement;
-    nodes?: Node[]; children?: Snippet;
+    nodes?: Node[]; children?: Snippet; onOpenChange?: (value: boolean) => void;
   } = $props();
   let open = $state(false);
   let previousFocus: HTMLElement | null = null;
@@ -18,6 +18,7 @@
     const bridge = connectControllerSurface(root, (value) => {
       if (value) previousFocus = document.activeElement as HTMLElement;
       open = value;
+      untrack(() => onOpenChange?.(value));
     });
     return { destroy: bridge.destroy };
   }

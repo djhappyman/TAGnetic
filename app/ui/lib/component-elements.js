@@ -2,6 +2,7 @@ import { mount, unmount } from 'svelte';
 import { Button, buttonVariants } from './components/ui/button/index.js';
 import { Input } from './components/ui/input/index.js';
 import { Textarea } from './components/ui/textarea/index.js';
+import { isTableRowMutation } from '../js/table-viewport.js';
 
 const mounted = new WeakMap();
 const textInputTypes = new Set(["text", "search", "number", "email", "url", "password", "tel", "date", "time", "datetime-local", "month", "week"]);
@@ -21,6 +22,7 @@ function observeLifetime() {
   }
   const observer = new MutationObserver(records => {
     for (const record of records) {
+      if (isTableRowMutation(record)) continue;
       for (const node of record.removedNodes) collect(node);
     }
     if (!pending.size || scheduled) return;
@@ -106,7 +108,7 @@ export function createComponentElement(tag, props = {}) {
 
 /** Upgrade freshly parsed markup before binding any per-node listeners.
  * Delegated listeners on ancestor containers remain untouched.
- * @param {Element} root
+ * @param {Element | DocumentFragment} root
  * @param {{ exclude?: string }} [options]
  */
 export function upgradeComponentMarkup(root, { exclude = '' } = {}) {

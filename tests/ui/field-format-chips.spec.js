@@ -17,6 +17,51 @@ test.beforeEach(async ({page}) => {
   await expect(page.locator('#ribbon-format-stage')).toBeEnabled();
 });
 const editor = page => page.locator('#ribbon-format-pattern');
+
+test('closing and reopening during the outro restarts the Format Fields session', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  const dialog = page.locator('#ribbon-format-dialog');
+  await page.getByRole('tab', { name: 'Build a field' }).press('ArrowRight');
+  await expect(page.getByRole('tab', { name: 'Extract fields' })).toBeFocused();
+  await page.locator('#ribbon-format-source').selectOption('album');
+  await editor(page).fill('%album%');
+  await expect(page.locator('.format-result-row').first()).toContainText('La Bush');
+
+  const clockStart = new Date('2026-01-01T00:00:00Z');
+  await page.clock.install({ time: clockStart });
+  await page.clock.pauseAt(new Date(clockStart.getTime() + 1000));
+  await page.keyboard.press('Escape');
+  await page.clock.runFor(25);
+  expect(await dialog.evaluate(node => ({
+    logicallyHidden: node.hidden,
+    physicallyHidden: node.hasAttribute('hidden'),
+    preview: node.querySelector('.format-result-row')?.textContent,
+    stageDisabled: node.querySelector('#ribbon-format-stage').disabled,
+  }))).toMatchObject({ logicallyHidden: true, physicallyHidden: false, preview: expect.stringContaining('La Bush'), stageDisabled: true });
+
+  // Click the trigger while the surface is still mounted for its outro.
+  await page.locator('#ribbon-format-values').evaluate(node => node.click());
+  await expect(page.getByRole('tab', { name: 'Build a field' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('#ribbon-format-stage')).toBeDisabled();
+  await page.clock.runFor(300);
+  await expect(dialog).toBeVisible();
+  await expect(page.locator('#ribbon-format-field')).toHaveValue('albumartist');
+  await expect(editor(page).locator('.field-pattern-chip')).toHaveText('Artist');
+  await expect(page.locator('.format-result-text').first()).toHaveText('The X Factor');
+  await expect(page.locator('#ribbon-format-stage')).toBeEnabled();
+});
+
+test('Format Fields Write uses the accepted preview while the dialog closes', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.locator('#ribbon-format-field').selectOption('comment');
+  await editor(page).fill('Format Fields write fixture');
+  await expect(page.locator('.format-result-text').first()).toHaveText('Format Fields write fixture');
+  await page.locator('#ribbon-format-write').click();
+  await expect(page.locator('#ribbon-format-dialog')).toBeHidden();
+  await expect.poll(() => page.evaluate(() => window.tagrex.tracks.map(track => track.tags.comment)))
+    .toEqual(Array(3).fill('Format Fields write fixture'));
+});
+
 async function choose(page, text, label) {
   await editor(page).pressSequentially(text);
   await expect(page.getByRole('option',{name:label,exact:true})).toBeVisible();

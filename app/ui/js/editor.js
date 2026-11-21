@@ -119,15 +119,21 @@ function refreshSharedStagedFields(changed = null) {
   if (el('panel-tagger').hidden || el('subtab-editor').hidden) return;
   const paths = selectedPaths();
   if (!isSelectionCurrent(editorSubject)) { refreshFieldEditor(); return; }
-  const fields = changed ? new Set(changed.filter(entry => editorPaths.has(entry.path)).map(entry => entry.field)) : null;
-  if (fields && !fields.size) return;
+  const fields = changed ? new Set() : null;
+  if (fields) {
+    for (const entry of changed) if (editorPaths.has(entry.path)) fields.add(entry.field);
+    if (!fields.size) return;
+  }
+  const affectedRows = new Set();
   for (const input of el('fields-body').querySelectorAll('.field-input')) {
     const field = input.dataset.key, row = input.closest('.fe-row');
     if (!field || !row || (fields && !fields.has(field)) || (document.activeElement === input && stagedFields.has(field))) continue;
-    const value = sharedFieldValue(paths, field);
-    const focused = document.activeElement === input;
-    const caret = focused ? [input.selectionStart, input.selectionEnd] : null;
-    if (input.value !== (value ?? '')) input.value = value ?? '';
+    const { value, dirty } = sharedFieldPresentation(paths, field);
+    if (input.value !== (value ?? '')) {
+      const caret = document.activeElement === input ? [input.selectionStart, input.selectionEnd] : null;
+      input.value = value ?? '';
+      if (caret && caret[0] !== null) input.setSelectionRange(caret[0], caret[1]);
+    }
     input.classList.toggle('multiple', value === null);
     const placeholder = value === null ? (EDITOR_NUMERIC_KEYS.has(field) ? '—' : tr('editor.mixedValue')) : '';
     if (input.placeholder !== placeholder) input.placeholder = placeholder;
@@ -136,15 +142,18 @@ function refreshSharedStagedFields(changed = null) {
       if (input.title !== title) input.title = title;
     }
     else input.removeAttribute('title');
-    if (caret && caret[0] !== null) input.setSelectionRange(caret[0], caret[1]);
-    input.classList.toggle('dirty', fieldHasChanges(paths, field));
+    input.classList.toggle('dirty', dirty);
     const valid = validateFieldValue(field, input.value, paths).ok;
     input.classList.toggle('error', !valid);
     if (valid) input.removeAttribute('aria-invalid'); else input.setAttribute('aria-invalid', 'true');
-    row.classList.toggle('dirty', [...row.querySelectorAll('.field-input')].some(node => node.classList.contains('dirty')));
-    row.classList.toggle('multiple', [...row.querySelectorAll('.field-input')].some(node => node.classList.contains('multiple')));
-    row.classList.toggle('error', [...row.querySelectorAll('.field-input')].some(node => node.classList.contains('error')));
+    affectedRows.add(row);
     reflectFieldClear(input);
+  }
+  for (const row of affectedRows) {
+    const inputs = [...row.querySelectorAll('.field-input')];
+    for (const state of ['dirty', 'multiple', 'error']) {
+      row.classList.toggle(state, inputs.some(node => node.classList.contains(state)));
+    }
   }
   const compilation = el('editor-compilation');
   const compilationRow = compilation?.closest('.fe-compilation');
@@ -811,6 +820,18 @@ function compilationRow(paths) {
   row.append(marker, label);
   if (keys.length) row.append(lockButton(keys, tr('editor.compilation'), refreshFieldEditor));
   return row;
+}
+
+function sharedFieldPresentation(paths, key) {
+  if (!paths.length) return { value: '', dirty: false };
+  const first = workingField(paths[0], key);
+  let mixed = false, dirty = first.dirty;
+  for (let i = 1; i < paths.length && !(mixed && dirty); i++) {
+    const field = workingField(paths[i], key);
+    mixed ||= field.value !== first.value;
+    dirty ||= field.dirty;
+  }
+  return { value: mixed ? null : first.value, dirty };
 }
 
 function sharedFieldValue(paths, key) {

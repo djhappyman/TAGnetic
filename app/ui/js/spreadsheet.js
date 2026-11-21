@@ -76,6 +76,7 @@ export function initSpreadsheet(options) {
   let scrollRefresh = false;
   let lastSummary = '';
   let lastToolbar = null;
+  let lastCellPaint = null;
   let selectionHeader = null;
   let selectionWidth = -1;
   let artworkHeader = null;
@@ -207,7 +208,7 @@ export function initSpreadsheet(options) {
     if (paint) refresh();
     if (path && giveFocus) options.focusRow(path);
   }
-  function refresh({ scrollOnly = false } = {}) {
+  function refresh({ scrollOnly = false, enteringRows = null, selectionOnly = false } = {}) {
     const paths = rows(), keys = columns();
     // The owner replaces the row array when rebuilding its view, even when its
     // path order is unchanged. Compare that order once per replacement; stable
@@ -231,7 +232,21 @@ export function initSpreadsheet(options) {
     const r = rangeBounds();
     const reviewing = options.isReviewing();
     const reasons = new Map(keys.map((key) => [key, options.readOnly(key)]));
-    for (const tr of body.querySelectorAll('tr[data-path]')) {
+    // A re-cut of the same window does not change the presentation of retained
+    // cells. On selection, column, lock or mode changes repaint the whole window.
+    const canReuse = (selectionOnly || (scrollOnly && enteringRows)) && !changed && lastCellPaint
+      && lastCellPaint.reviewing === reviewing && (active === lastCellPaint.active || same(active, lastCellPaint.active))
+      && (anchor === lastCellPaint.anchor || same(anchor, lastCellPaint.anchor))
+      && keys.every(key => lastCellPaint.reasons.get(key) === reasons.get(key));
+    lastCellPaint = { reviewing, active, anchor, reasons };
+    // Row-level navigation can update the roving Tab stop independently of
+    // the cell selection. Keep one keyboard entry point even on reused rows.
+    if (canReuse && active && !reviewing) {
+      for (const row of body.querySelectorAll('tr[data-path][tabindex="0"]:not(.unreadable)')) row.tabIndex = -1;
+    }
+    const mountedRows = canReuse ? enteringRows || [] : body.querySelectorAll('tr[data-path]');
+    for (const tr of mountedRows) {
+      if (!tr.dataset.path) continue;
       if (tr.classList.contains('unreadable')) continue;
       if (active && !reviewing && tr.tabIndex !== -1) tr.tabIndex = -1;
       attribute(tr, 'aria-rowindex', options.rowNumber(tr.dataset.path));

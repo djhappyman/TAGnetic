@@ -74,10 +74,166 @@ test('another context action replaces the column chooser and keyboard can reopen
 });
 test('group motion is bounded to the viewport, cancellable and absent with reduced motion',async({page})=>{
   await pack(page,2000);await page.emulateMedia({reducedMotion:'no-preference'});
-  await page.evaluate(()=>{window.groupAnimations=[];const original=Element.prototype.animate;Element.prototype.animate=function(frames,options){if(this.closest('#tracks')||this.classList.contains('group-motion-exit'))window.groupAnimations.push({duration:options.duration});return original.call(this,frames,options);};});
-  const group=page.locator('tr.group-head').first();await group.locator('.group-label').click();await expect(group).toHaveClass(/collapsed/);expect(await page.evaluate(()=>window.groupAnimations.length)).toBeGreaterThan(0);expect(await page.evaluate(()=>window.groupAnimations.length)).toBeLessThanOrEqual(81);expect(await page.evaluate(()=>window.groupAnimations.every(animation=>animation.duration<=140))).toBe(true);expect(await page.locator('.group-motion-exit tr').count()).toBeLessThanOrEqual(80);
-  await expect(page.locator('.group-motion-exit')).toHaveCount(0);await page.evaluate(()=>window.groupAnimations=[]);await group.locator('.group-label').click();expect(await page.evaluate(()=>window.groupAnimations.length)).toBeLessThanOrEqual(9);
+  await page.evaluate(()=>{window.groupAnimations=[];const original=Element.prototype.animate;Element.prototype.animate=function(frames,options){if(this.closest('#tracks,.group-motion-exit'))window.groupAnimations.push({frames,duration:options.duration});return original.call(this,frames,options);};});
+  const group=page.locator('tr.group-head').first();await group.locator('.group-label').click();await expect(group).toHaveClass(/collapsed/);expect(await page.evaluate(()=>window.groupAnimations.length)).toBeGreaterThan(0);expect(await page.evaluate(()=>window.groupAnimations.length)).toBeLessThanOrEqual(81);expect(await page.evaluate(()=>window.groupAnimations.every(animation=>animation.duration<=260))).toBe(true);expect(await page.locator('.group-motion-exit tr').count()).toBeLessThanOrEqual(80);
+  expect(await page.evaluate(()=>window.groupAnimations.some(({frames})=>frames.at(-1).height==='0px' && !frames.some(frame=>frame.opacity!=null)))).toBe(true);
+  await expect(page.locator('.group-motion-exit')).toHaveCount(0);await page.evaluate(()=>window.groupAnimations=[]);await group.locator('.group-label').click();expect(await page.evaluate(()=>window.groupAnimations.length)).toBeLessThanOrEqual(81);
+  expect(await page.evaluate(()=>window.groupAnimations.some(({frames})=>frames[0].height==='0px' && !frames.some(frame=>frame.opacity!=null)))).toBe(true);
   await group.locator('.group-label').click();await page.emulateMedia({reducedMotion:'reduce'});await page.evaluate(()=>window.groupAnimations=[]);await group.locator('.group-label').click();expect(await page.evaluate(()=>window.groupAnimations.length)).toBe(0);await expect(page.locator('.group-motion-exit')).toHaveCount(0);expect(await rows(page).count()).toBeLessThan(100);
+});
+
+test('collapsing a viewport-filling group slides the newly exposed group and its files in together', async ({page}) => {
+  await pack(page, 2000);
+  await page.emulateMedia({reducedMotion:'no-preference'});
+  const motion = await page.evaluate(() => {
+    const first = document.querySelector('#tracks-body .group-head');
+    first.querySelector('.group-label').click();
+    const next = first.dataset.group;
+    const following = [...document.querySelectorAll('#tracks-body tr[data-group]')].filter(row => row.dataset.group !== next);
+    return following.map(row => row.getAnimations().flatMap(animation => animation.effect.getKeyframes().map(frame => frame.transform))[0] ?? null);
+  });
+  expect(motion).toHaveLength(2);
+  expect(motion[0]).toMatch(/^translateY\([1-9][\d.]*px\)$/);
+  expect(motion[1]).toBe(motion[0]);
+});
+
+test('clamping the scroll position during a collapse preserves the running group transition', async ({page}) => {
+  await page.emulateMedia({reducedMotion:'no-preference'});
+  await page.evaluate(async () => {
+    const paths = [...Array.from({length:700}, (_, i) => `A/track-${i}.mp3`), ...Array.from({length:12}, (_, i) => `B/track-${i}.mp3`)];
+    await window.tagrex.invoke('open_drop', {paths});
+    document.getElementById('root').value = '/dropped';
+    await window.tagrex.openLibrary();
+    const port = document.getElementById('files-view');
+    port.scrollTop = port.scrollHeight;
+  });
+  const group = page.locator('tr.group-head').last();
+  await expect(group.locator('.group-label')).toHaveText('B');
+  const result = await group.evaluate(async head => {
+    const port = document.getElementById('files-view');
+    const before = port.scrollTop;
+    head.querySelector('.group-label').click();
+    const initial = document.querySelector('.group-motion-exit');
+    // Pause the actual transition so the test observes cancellation without
+    // depending on how much time the browser needed to draw two frames.
+    initial?.getAnimations({subtree:true}).forEach(animation => animation.pause());
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    return {before, after:port.scrollTop, survived:!!initial?.isConnected};
+  });
+  expect(result.after).toBeLessThan(result.before);
+  expect(result.survived).toBe(true);
+});
+
+test('the toolbar collapses and reveals all groups with the same moving edge as a single group', async ({page}) => {
+  await pack(page, 2000);
+  await page.emulateMedia({reducedMotion:'no-preference'});
+  const result = await page.evaluate(async () => {
+    const body = document.getElementById('tracks-body');
+    const toggle = document.getElementById('toggle-groups');
+    const selected = [...window.tagrex.selection];
+    toggle.click();
+    const collapsed = [...body.querySelectorAll('.group-head')].every(row => row.classList.contains('collapsed'));
+    const clip = document.querySelector('.group-motion-strip[data-motion="close"]');
+    const close = clip?.getAnimations()[0];
+    const closeTime = close?.effect.getTiming().duration;
+    await close?.finished;
+    toggle.click();
+    const revealed = document.querySelector('.group-motion-strip[data-motion="open"]');
+    const open = revealed?.getAnimations()[0];
+    return {
+      collapsed, closeTime, openTime:open?.effect.getTiming().duration,
+      selected, after:[...window.tagrex.selection], mounted:body.querySelectorAll('tr[data-path]').length,
+    };
+  });
+  expect(result.collapsed).toBe(true);
+  expect(result.closeTime).toBe(260);
+  expect(result.openTime).toBe(result.closeTime);
+  expect(result.after).toEqual(result.selected);
+  expect(result.mounted).toBeLessThan(100);
+});
+
+test('the visible group edge and following header travel together in mid-collapse and mid-reveal', async ({page}) => {
+  await pack(page, 20);
+  await page.emulateMedia({reducedMotion:'no-preference'});
+  for (const [motion, opening] of [['close', false], ['open', true]]) {
+    const frames = await page.evaluate(async motion => {
+      const heads = document.querySelectorAll('#tracks-body .group-head');
+      heads[0].querySelector('.group-label').click();
+      const strip = document.querySelector(`.group-motion-strip[data-motion="${motion}"]`);
+      if (!strip) throw new Error(`Missing ${motion} strip`);
+      const players = document.getAnimations().filter(player => player.effect.target.closest('#tracks,.group-motion-exit'));
+      players.forEach(player => player.pause());
+      const frames = [30, 90, 160, 220].map(time => {
+        players.forEach(player => { player.currentTime = time; });
+        const rect = strip.getBoundingClientRect();
+        return {height:rect.height, gap:Math.abs(rect.bottom-heads[1].getBoundingClientRect().top)};
+      });
+      players.forEach(player => player.finish());
+      await Promise.allSettled(players.map(player => player.finished));
+      return frames;
+    }, motion);
+    expect(frames.every(frame => frame.gap < 2), JSON.stringify(frames)).toBe(true);
+    expect(opening ? frames[3].height - frames[0].height : frames[0].height - frames[3].height).toBeGreaterThan(100);
+    await expect(page.locator('.group-motion-exit')).toHaveCount(0);
+    await page.waitForTimeout(175); // next click is a full transition rather than a burst reversal
+  }
+});
+
+for (const horizontal of [false, true]) test(`artwork stays aligned while the collapse strip takes over (${horizontal ? 'scrolled' : 'at origin'})`, async ({page}) => {
+  await pack(page, 20);
+  await page.emulateMedia({reducedMotion:'no-preference'});
+  const offset = await page.evaluate(async horizontal => {
+    const port = document.getElementById('files-view');
+    if (horizontal) {
+      document.querySelector('#tracks').style.width = `${port.clientWidth + 450}px`;
+      port.scrollLeft = 120;
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    }
+    const original = document.querySelector('#tracks-body tr[data-path] .track-artwork');
+    const before = original.getBoundingClientRect().left;
+    document.querySelector('#tracks-body .group-head .group-label').click();
+    const clip = document.querySelector('.group-motion-strip[data-motion="close"]');
+    const player = clip.getAnimations()[0];
+    player.pause();
+    player.currentTime = 30;
+    const after = clip.querySelector('.track-artwork').getBoundingClientRect().left;
+    return {delta:after-before, scroll:port.scrollLeft};
+  }, horizontal);
+  if (horizontal) expect(offset.scroll).toBeGreaterThan(0);
+  expect(Math.abs(offset.delta)).toBeLessThanOrEqual(.5);
+});
+
+test('the opening strip paints filenames before reaching its full height', async ({page}) => {
+  await pack(page, 20);
+  await page.emulateMedia({reducedMotion:'no-preference'});
+  const group = page.locator('#tracks-body .group-head').first();
+  await group.locator('.group-label').click();
+  await expect(page.locator('.group-motion-exit')).toHaveCount(0);
+  await group.locator('.group-label').click();
+  const clip = await page.evaluate(() => {
+    const strip = document.querySelector('.group-motion-strip[data-motion="open"]');
+    const animation = strip.getAnimations()[0];
+    animation.pause();
+    animation.currentTime = 90;
+    const file = strip.querySelector('.file').getBoundingClientRect();
+    return {x:Math.ceil(file.left)+4, y:Math.ceil(file.top)+2, width:140, height:14};
+  });
+  const screenshot = await page.screenshot({clip});
+  const ink = await page.evaluate(async encoded => {
+    const bitmap = await createImageBitmap(new Blob([Uint8Array.from(encoded)],{type:'image/png'}));
+    const canvas = document.createElement('canvas');
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const context = canvas.getContext('2d');
+    context.drawImage(bitmap,0,0);
+    const pixels = context.getImageData(0,0,bitmap.width,bitmap.height).data;
+    let varied = 0;
+    for (let index = 0; index < pixels.length; index += 4) {
+      if (Math.abs(pixels[index]-pixels[0])+Math.abs(pixels[index+1]-pixels[1])+Math.abs(pixels[index+2]-pixels[2]) > 30) varied++;
+    }
+    return varied;
+  }, [...screenshot]);
+  expect(ink).toBeGreaterThan(30);
 });
 
 test('Escape from a marquee restores the previous Shift-range anchor as well as selection',async({page})=>{

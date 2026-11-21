@@ -1413,7 +1413,7 @@ body .mode-col .staged-edits { position:relative; box-sizing:border-box; }
 @keyframes activity-glide { from { transform:translateX(-100%); } to { transform:translateX(278%); } }
 @media(prefers-reduced-motion:reduce) {
   .activity-indicator { animation:none; }
-  .staged-edits[data-activity] .activity-meter::after { content:none; }
+  .staged-edits[data-activity] .activity-meter::after { content:none; animation:none; }
   #activity-fill { transition:none; }
 }
 

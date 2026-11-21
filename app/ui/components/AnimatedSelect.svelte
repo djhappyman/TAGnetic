@@ -6,60 +6,80 @@
   let { native }: { native: HTMLSelectElement } = $props();
   type Choice = { token: string; label: string; description: string; disabled: boolean; hidden: boolean; option: HTMLOptionElement };
   let choices = $state.raw<Choice[]>([]);
-  let token = $state('');
+  let selectedIndex = $state(-1);
   let disabled = $state(false);
   let name = $state('');
   let title = $state('');
   let trigger = $state<HTMLButtonElement | null>(null);
   let open = $state(false);
-  let optionNodes: HTMLOptionElement[] = [];
   let optionGeneration = 0;
+  let nativeObserver: MutationObserver | undefined;
   let labels: HTMLLabelElement[] = [];
-  const selected = $derived(choices.find(choice => choice.token === token)?.label || '');
+  const selection = $derived(choices[selectedIndex]);
   const triggerId = untrack(() => `${native.id || nextControlId('select')}-control`);
+  const nonLabelContent = '.app-select, select, input, button, textarea';
 
-  function optionsChanged(options: HTMLOptionElement[]) {
-    return options.length !== optionNodes.length || options.some((option, index) => option !== optionNodes[index]);
-  }
   function labelText(label: HTMLLabelElement) {
     const copy = label.cloneNode(true) as HTMLLabelElement;
-    copy.querySelectorAll('.app-select, select, input, button, textarea').forEach(node => node.remove());
+    copy.querySelectorAll(nonLabelContent).forEach(node => node.remove());
     return copy.textContent?.trim() || '';
   }
-  function synchronize() {
+  function synchronizeOptions() {
+    const options = Array.from(native.options);
+    if (options.length !== choices.length || options.some((option, index) => option !== choices[index].option)) {
+      // A replaced or reordered option list invalidates the open menu's tokens.
+      open = false;
+      optionGeneration++;
+    }
+    choices = options.map((option, index) => ({
+      option,
+      token: `option-${optionGeneration}-${index}`,
+      label: option.getAttribute('label') || option.textContent || option.value,
+      description: option.dataset.description || '',
+      disabled: option.disabled || (option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled),
+      hidden: option.hidden,
+    }));
+  }
+  function synchronizeName() {
+    name = native.getAttribute('aria-label') || labels.map(labelText).join(' ').trim();
+  }
+  function synchronizePresentation() {
+    disabled = native.disabled;
+    title = native.title;
+    const wrapper = native.closest<HTMLElement>('.app-select');
+    if (wrapper) wrapper.hidden = native.hidden;
+    if (native.hidden || native.disabled) open = false;
+  }
+  function synchronizeMutations(records: MutationRecord[]) {
     // Native setters may run inside another component's binding effect. Keep
     // this imperative bridge from subscribing that effect to the state it sets.
     untrack(() => {
-      const options = Array.from(native.options);
-      if (optionsChanged(options)) {
-        // Tokens are valid only for this option order. A controller replacing the
-        // list must close the old menu before any stale item can be activated.
-        open = false;
-        optionNodes = options;
-        optionGeneration++;
+      if (records.some(record => record.type !== 'attributes' || (record.target !== native && record.attributeName !== 'selected'))) {
+        synchronizeOptions();
       }
-      const nextChoices = options.map((option, index) => ({ option, token: `option-${optionGeneration}-${index}`, label: option.textContent || option.value, description: option.dataset.description || '', disabled: option.disabled || (option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled), hidden: option.hidden }));
-      choices = nextChoices;
-      token = nextChoices[native.selectedIndex]?.token || '';
-      disabled = native.disabled;
-      name = native.getAttribute('aria-label') || labels.map(labelText).join(' ').trim();
-      title = native.title;
-      const wrapper = native.closest<HTMLElement>('.app-select');
-      if (wrapper) wrapper.hidden = native.hidden;
-      if (native.hidden || native.disabled) open = false;
+      if (records.some(record => record.target === native && record.attributeName === 'aria-label')) synchronizeName();
+      if (records.some(record => record.target === native && ['disabled', 'hidden', 'title'].includes(record.attributeName || ''))) {
+        synchronizePresentation();
+      }
+      selectedIndex = native.selectedIndex;
     });
+  }
+  function synchronizeValue() {
+    // Controllers can replace options and set a value in the same turn.
+    const records = nativeObserver?.takeRecords();
+    if (records?.length) synchronizeMutations(records);
+    else selectedIndex = native.selectedIndex;
   }
   function choose(next: string) {
     untrack(() => {
-      const options = Array.from(native.options);
-      if (optionsChanged(options)) { synchronize(); return; }
-      const choice = choices.find(choice => choice.token === next);
-      const index = choice ? options.indexOf(choice.option) : -1;
-      if (index < 0 || native.hidden || native.disabled || choice?.disabled || choice?.hidden || native.selectedIndex === index) return;
+      synchronizeValue();
+      const index = choices.findIndex(choice => choice.token === next);
+      const choice = choices[index];
+      if (!choice || native.options[index] !== choice.option || native.hidden || native.disabled || choice.disabled || choice.hidden || native.selectedIndex === index) return;
       native.selectedIndex = index;
       native.dispatchEvent(new Event('input', { bubbles: true }));
       native.dispatchEvent(new Event('change', { bubbles: true }));
-      synchronize();
+      synchronizeValue();
     });
   }
   function dismiss(event: KeyboardEvent) {
@@ -78,7 +98,7 @@
       const descriptor = Object.getOwnPropertyDescriptor(key === 'hidden' ? HTMLElement.prototype : HTMLSelectElement.prototype, key);
       if (!descriptor?.get || !descriptor.set) continue;
       saved.set(key, Object.getOwnPropertyDescriptor(native, key));
-      Object.defineProperty(native, key, { configurable: true, get: () => descriptor.get!.call(native), set: value => { descriptor.set!.call(native, value); synchronize(); } });
+      Object.defineProperty(native, key, { configurable: true, get: () => descriptor.get!.call(native), set: value => { descriptor.set!.call(native, value); synchronizeValue(); } });
     }
     const focus = native.focus;
     native.focus = options => trigger?.focus(options);
@@ -99,14 +119,39 @@
       label.htmlFor = triggerId;
       label.addEventListener('click', activateLabel);
     });
-    const observer = new MutationObserver(synchronize);
-    observer.observe(native, { attributes: true, childList: true, subtree: true, characterData: true });
-    native.addEventListener('change', synchronize);
-    const reset = () => queueMicrotask(synchronize);
-    native.form?.addEventListener('reset', reset);
-    synchronize();
+    const observer = new MutationObserver(synchronizeMutations);
+    nativeObserver = observer;
+    observer.observe(native, {
+      attributes: true,
+      attributeFilter: ['aria-label', 'title', 'disabled', 'hidden', 'label', 'selected', 'value', 'data-description'],
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+    const labelObserver = new MutationObserver(records => {
+      const captionChanged = records.some(({ target }) => {
+        const element = target instanceof Element ? target : target.parentElement;
+        return element && !element.closest(nonLabelContent);
+      });
+      if (captionChanged) synchronizeName();
+    });
+    labels.forEach(label => labelObserver.observe(label, { childList: true, subtree: true, characterData: true }));
+    native.addEventListener('change', synchronizeValue);
+    const form = native.form;
+    const reset = () => queueMicrotask(synchronizeValue);
+    form?.addEventListener('reset', reset);
+    untrack(() => {
+      synchronizeOptions();
+      synchronizeName();
+      synchronizePresentation();
+      synchronizeValue();
+    });
     return () => {
-      observer.disconnect(); native.removeEventListener('change', synchronize); native.form?.removeEventListener('reset', reset);
+      observer.disconnect();
+      labelObserver.disconnect();
+      nativeObserver = undefined;
+      native.removeEventListener('change', synchronizeValue);
+      form?.removeEventListener('reset', reset);
       native.focus = focus;
       for (const [key, descriptor] of saved) { if (descriptor) Object.defineProperty(native, key, descriptor); else Reflect.deleteProperty(native, key); }
       labelTargets.forEach(({ label, previous }) => {
@@ -121,9 +166,9 @@
 </script>
 
 <span class="app-select-proxy" {@attach attachProxy}></span>
-<Select.Root type="single" bind:open value={token} onValueChange={choose} {disabled}>
+<Select.Root type="single" bind:open value={selection?.token || ''} onValueChange={choose} {disabled}>
   <Select.Trigger bind:ref={trigger} id={triggerId} aria-label={name || undefined} {title} class="app-select-trigger" data-proxy-id={native.id} onkeydowncapture={dismiss}>
-    <span class="app-select-label">{selected}</span>
+    <span class="app-select-label">{selection?.label}</span>
   </Select.Trigger>
   <Select.Content class="app-select-menu" data-controller-popup align="start" collisionPadding={8} onkeydowncapture={dismiss}>
     {#each choices.filter(choice => !choice.hidden) as choice (choice.token)}

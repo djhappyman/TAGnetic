@@ -3,7 +3,7 @@ import { waitForScrollIdle } from './scrolling.js';
 import {test,expect} from '@playwright/test';
 import {readFile} from 'node:fs/promises';
 import {resolve,sep} from 'node:path';
-const root=resolve('.test-dist');
+const root=resolve(process.env.TAGREX_UI_DIST || '.test-dist');
 test.beforeEach(async({page})=>{
   page.errors=[];page.on('pageerror',error=>page.errors.push(error.message));
   await page.route('http://tagrex.test/**',async route=>{
@@ -298,7 +298,14 @@ test('failed activity persists and dismissal restores pending work; the next App
 test('reduced motion preserves the completion hold without spatial animations', async ({ page }) => {
   await page.emulateMedia({reducedMotion:'reduce'});
   await open(page); await stageTags(page); await holdApply(page);
-  expect(await page.locator('#staged-edits').evaluate(node => node.getAnimations({subtree:true}).length)).toBe(0);
+  const activeAnimations = await page.locator('#staged-edits').evaluate(node => node.getAnimations({subtree:true}).map(animation => ({
+    type: animation.constructor.name,
+    state: animation.playState,
+    name: animation.animationName,
+    property: animation.transitionProperty,
+    target: animation.effect?.target?.id,
+  })));
+  expect(activeAnimations).toEqual([]);
   await finish(page); await expect(page.locator('#activity-title')).toHaveText('Changes saved');
   await expect(page.locator('#staged-edits')).toBeHidden();
 });

@@ -50,7 +50,9 @@ let artworkPickerOpen = false;
 let artworkMenuRequest = 0;
 const coverCache = new Map(); // releaseId -> CoverArtDto (full cover, for embed)
 // Fetched images as data URIs, so re-rendering (layout toggle) never re-fetches.
-const imageCache = new Map(); // releaseId -> { thumb?, cover? }
+const imageCache = new Map(); // release ID -> thumbnail data URI
+const thumbnailRequests = new Map();
+const cardsById = new Map();
 const expandedIds = new Set(); // cards currently expanded — survive a re-render
 
 // Paged search: approaching the end of the scrollport appends the next batch. `searchGen` is bumped on every new
@@ -93,7 +95,7 @@ function resetSearchResults() {
   searchPage = 0; searchHasMore = false; searchFailed = false; searchRequest = null;
   releaseCandidates = [];
   releaseCache.clear(); coverCache.clear(); artworkChoices.clear(); artworkRotations.clear();
-  artworkImages.clear(); imageCache.clear(); expandedIds.clear(); artworkMenuRequest++;
+  artworkImages.clear(); imageCache.clear(); thumbnailRequests.clear(); expandedIds.clear(); artworkMenuRequest++;
   closeQueryPresets();
   renderReleaseList(); updateLoadMoreUi();
   if (onlineScroll) onlineScroll.scrollTop = 0;
@@ -147,6 +149,7 @@ async function runSearch(reset) {
     artworkRotations.clear();
     artworkImages.clear();
     imageCache.clear();
+    thumbnailRequests.clear();
     expandedIds.clear();
     searchGen++;
     prefetching = false;
@@ -251,16 +254,15 @@ function releaseList() {
 }
 
 function cardEl(id) {
-  return releaseList().querySelector(`.release-card[data-id="${cssEscape(id)}"]`);
+  return cardsById.get(String(id));
 }
 
 function coverElOf(id) {
-  return releaseList().querySelector(`[data-id="${cssEscape(id)}"] .release-cover`);
+  return cardEl(id)?.querySelector(".release-cover");
 }
 
-// The track/disc-count pill, whichever layout this release is shown in.
 function countPillOf(id) {
-  return releaseList().querySelector(`[data-id="${cssEscape(id)}"] .tk-count`);
+  return cardEl(id)?.querySelector(".tk-count");
 }
 
 // "N tracks", or "N tracks · M discs" once the release is fetched; a dash before.
@@ -360,7 +362,7 @@ function updateMediaBadge(c) {
 
 function renderReleaseList(appended = null) {
   const list = releaseList();
-  if (!appended) list.innerHTML = "";
+  if (!appended) { list.replaceChildren(); cardsById.clear(); }
   const candidates = appended || releaseCandidates;
   el("release-toolbar").hidden = releaseCandidates.length === 0;
   // The whole phrase, not just the number: "Found 1 entries" was the same
@@ -375,12 +377,14 @@ function renderReleaseList(appended = null) {
     el("discogs-empty").textContent = t("online.noReleases");
     return;
   }
-  for (const c of candidates) {
-    list.insertAdjacentHTML("beforeend", cardMarkup(c));
-  }
-  // Keep the artwork tile's dedicated native hit surface; normal actions are
-  // mounted components before any controller reads or binds their nodes.
-  upgradeComponentMarkup(list, { exclude: '.release-cover' });
+  // Only parse and upgrade the incoming cards. Earlier cards keep their
+  // nodes, expanded tracklists and focus when pagination appends more results.
+  const template = document.createElement("template");
+  template.innerHTML = candidates.map(cardMarkup).join("");
+  const batch = template.content;
+  upgradeComponentMarkup(batch, { exclude: '.release-cover' });
+  for (const card of batch.children) cardsById.set(card.dataset.id, card);
+  list.append(batch);
   // Restore images (from cache) and any expanded tracklists after the re-render.
   let entering = 0;
   const animatePage = appended && !matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -600,7 +604,9 @@ function cardMarkup(c) {
 // Put an image into a card's cover well without wiping the media badge (#98)
 // that shares it, and say whether it is round label art (#397).
 function setCoverImage(cover, src) {
-  cover.querySelector("img")?.remove();
+  const current = cover.querySelector("img");
+  if (current?.getAttribute("src") === src) return;
+  current?.remove();
   // Built through the DOM: the data URI carries a server's MIME type (#603).
   const img = document.createElement("img");
   img.alt = "";
@@ -696,7 +702,7 @@ const THUMB_AFTER_LOOKUP = new Set(["musicbrainz"]);
 
 // Show the release's cover thumbnail, fetching + caching it once. Cached data
 // URIs are reused, so a re-render never re-hits Discogs.
-async function applyImage(c) {
+async function applyImage(c, allowJoinedRetry = true) {
   const selectedCover = coverCache.get(c.id);
   if (selectedCover) {
     const cover = coverElOf(c.id);
@@ -705,30 +711,43 @@ async function applyImage(c) {
   }
   const gen = searchGen;
   const source = releaseSource;
-  const kind = "thumb";
   const url = c.thumb_url || c.cover_url;
   if (!url) return;
-  const cached = imageCache.get(c.id) || {};
-  let dataUri = cached[kind];
+  let dataUri = imageCache.get(c.id);
   if (!dataUri && THUMB_AFTER_LOOKUP.has(source)) {
     const release = releaseCache.get(c.id);
     if (!release || !release.cover_image_url) return;
   }
   if (!dataUri) {
-    const token = await providerToken(source);
-    if (gen !== searchGen) return;
-    try {
-      const img = await invoke("provider_fetch_image", { source, token, url });
-      if (gen !== searchGen) return;
-      dataUri = `data:${img.mime};base64,${img.data_base64}`;
-      cached[kind] = dataUri;
-      imageCache.set(c.id, cached);
-    } catch (e) {
-      return; // leave the striped placeholder
+    let request = thumbnailRequests.get(c.id);
+    const joined = request?.gen === gen && request?.url === url;
+    if (!joined) {
+      const promise = (async () => {
+        const token = await providerToken(source);
+        if (gen !== searchGen) return;
+        const img = await invoke("provider_fetch_image", { source, token, url });
+        if (gen !== searchGen) return;
+        const uri = `data:${img.mime};base64,${img.data_base64}`;
+        imageCache.set(c.id, uri);
+        return uri;
+      })();
+      request = { gen, url, promise };
+      thumbnailRequests.set(c.id, request);
     }
-    // A thumbnail that arrives after the card was expanded must not cover up
-    // the full-size image that came in first (#748 loads thumbnails later).
-    if (coverCache.has(c.id)) return;
+    try { dataUri = await request.promise; }
+    catch {
+      // A detail refresh that joined an earlier attempt still gets its retry
+      // after a transient failure, without issuing duplicate successful work.
+      if (thumbnailRequests.get(c.id) === request) thumbnailRequests.delete(c.id);
+      if (joined && allowJoinedRetry && gen === searchGen && !coverCache.has(c.id)) {
+        return applyImage(c, false);
+      }
+      return;
+    } finally {
+      if (thumbnailRequests.get(c.id) === request) thumbnailRequests.delete(c.id);
+    }
+    // A late thumbnail must not replace a full-size or chosen image.
+    if (!dataUri || coverCache.has(c.id)) return;
   }
   if (gen !== searchGen) return;
   const chosen = coverCache.get(c.id);
@@ -821,11 +840,6 @@ async function prefetchReleaseCounts(items, gen) {
     prefetching = false;
     updateLoadMoreUi();
   }
-}
-
-// CSS.escape isn't guaranteed in every webview; ids are numeric strings anyway.
-function cssEscape(s) {
-  return String(s).replace(/["\\]/g, "\\$&");
 }
 
 // Expand/collapse a card; on first expand, fetch the release + render its

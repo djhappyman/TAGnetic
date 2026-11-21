@@ -21,12 +21,42 @@
   let error = $state('');
   let result = $state<any>(null);
   let contextRevision = $state(0);
+  let session = $state(0);
   let request = 0;
   let root: HTMLElement;
   const pattern = $derived(kind === 'build' ? buildPattern : extractPattern);
-  const canStage = $derived(!!result && !patternPending && !result.invalid && !loading && !working && !busy && selected > 0 && result.unmatched < result.total);
+  const canStage = $derived(opened && !!result && !patternPending && !result.invalid && !loading && !working && !busy && selected > 0 && result.unmatched < result.total);
 
   function close() { if (!working) root.hidden = true; }
+  function onOpenChange(next: boolean) {
+    if (next === opened) return;
+    opened = next;
+    const epoch = ++request;
+    // Write closes the surface before submitting its accepted preview token.
+    // On failure it reopens with the current inputs so the user can retry.
+    if (working) return;
+    if (!next) {
+      // Keep the outgoing preview in place while the dialog animates out.
+      void runRibbonAction('field-format-cancel');
+      return;
+    }
+    result = null;
+    error = '';
+    loading = false;
+    patternPending = false;
+    session++;
+    kind = 'build';
+    field = 'albumartist';
+    source = 'title';
+    buildPattern = '%artist%';
+    extractPattern = '%artist% - %title%';
+    fields = [];
+    void runRibbonAction('field-format-open').then(data => {
+      if (opened && request === epoch) fields = data.fields;
+    }).catch(reason => {
+      if (opened && request === epoch) error = String(reason);
+    });
+  }
   function switchTab(event: KeyboardEvent, other: string) {
     if (working || !['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
     event.preventDefault();
@@ -36,24 +66,12 @@
   function connect(node: HTMLElement) {
     root = node.closest('.controller-dialog-root')!;
     const guard = (event: Event) => { if (working) event.preventDefault(); };
-    const changed = () => {
-      const next = !root.hidden;
-      if (next === opened) return;
-      opened = next; request++; result = null; error = '';
-      if (next) {
-        kind = 'build'; field = 'albumartist'; source = 'title';
-        buildPattern = '%artist%'; extractPattern = '%artist% - %title%'; fields = [];
-        const epoch = request;
-        void runRibbonAction('field-format-open').then(data => { if (opened && request === epoch) fields = data.fields; }).catch(reason => { if (opened) error = String(reason); });
-      } else void runRibbonAction('field-format-cancel');
-    };
     const invalidate = () => { contextRevision++; };
-    const observer = new MutationObserver(changed); observer.observe(root, {attributes:true, attributeFilter:['hidden']});
     root.addEventListener('controller:before-close', guard);
     document.addEventListener('tagrex:live-input', invalidate);
     document.addEventListener('tagrex:manual-plan-changed', invalidate);
     document.addEventListener('tagrex:ribbon-state', invalidate);
-    return () => { request++; observer.disconnect(); root.removeEventListener('controller:before-close', guard); document.removeEventListener('tagrex:live-input', invalidate); document.removeEventListener('tagrex:manual-plan-changed', invalidate); document.removeEventListener('tagrex:ribbon-state', invalidate); };
+    return () => { request++; root.removeEventListener('controller:before-close', guard); document.removeEventListener('tagrex:live-input', invalidate); document.removeEventListener('tagrex:manual-plan-changed', invalidate); document.removeEventListener('tagrex:ribbon-state', invalidate); };
   }
   $effect(() => {
     const options = {kind, field, source, pattern};
@@ -82,7 +100,7 @@
   }
 </script>
 
-<ControllerDialog id="ribbon-format-dialog" labelledby="ribbon-format-title">
+<ControllerDialog id="ribbon-format-dialog" labelledby="ribbon-format-title" {onOpenChange}>
   <div class="modal ribbon-tool-body format-fields-dialog" {@attach connect}>
     <div class="ribbon-tool-header">
       <h2 id="ribbon-format-title">Format fields</h2>
@@ -108,7 +126,7 @@
       </label>
       <div class="ribbon-field">
         <label for="ribbon-format-pattern" onpointerdown={() => document.getElementById('ribbon-format-pattern')?.focus()}>{kind === 'build' ? 'Values' : 'Pattern'}</label>
-        {#key kind}
+        {#key `${session}:${kind}`}
           <FieldPatternInput id="ribbon-format-pattern" label={kind === 'build' ? 'Values' : 'Pattern'} value={pattern} {fields} disabled={working || !opened}
             invalid={!!error} functions={kind==='build'} onpendingchange={value=>{patternPending=value;}} onchange={value => { if (kind === 'build') buildPattern = value; else extractPattern = value; }}/>
         {/key}

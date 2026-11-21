@@ -13,7 +13,7 @@ function setup(invoke) {
   const painted = [];
   const context = vm.createContext({
     releaseSource: 'musicbrainz', searchGen: 1,
-    imageCache: new Map(), coverCache: new Map(), releaseCache: new Map(),
+    imageCache: new Map(), thumbnailRequests: new Map(), coverCache: new Map(), releaseCache: new Map(),
     THUMB_AFTER_LOOKUP: new Set(['musicbrainz']), PREFETCH_CONCURRENCY: 4,
     providerToken: async () => '', invoke,
     coverElOf: () => ({}), setCoverImage: (_, uri) => painted.push(uri),
@@ -70,4 +70,22 @@ test('superseded release lookups cannot seed caches or thumbnail work', async ()
   await pending;
   assert.equal(context.releaseCache.size, 0);
   assert.deepEqual(calls, ['provider_fetch_release']);
+});
+
+test('a joined detail refresh retries a failed shared thumbnail once', async () => {
+  let rejectFirst, attempts = 0;
+  const { context, painted } = setup(() => {
+    attempts++;
+    if (attempts === 1) return new Promise((_, reject) => { rejectFirst = reject; });
+    return Promise.resolve({ mime: 'image/png', data_base64: 'retry' });
+  });
+  context.releaseCache.set(candidate.id, { cover_image_url: 'full' });
+  const first = context.applyImage(candidate);
+  const joined = context.applyImage(candidate);
+  await flush();
+  assert.equal(attempts, 1);
+  rejectFirst(new Error('Transient image request failure'));
+  await Promise.all([first, joined]);
+  assert.equal(attempts, 2);
+  assert.deepEqual(painted, ['data:image/png;base64,retry']);
 });

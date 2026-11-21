@@ -65,8 +65,10 @@ function renderSeekLabel(text) {
 }
 function updateSeekDisplay(position) {
   const fraction = plDuration > 0 ? Math.min(1, Math.max(0, position / plDuration)) : 0;
-  plSeek.value = String(Math.round(fraction * 1000));
-  plSeek.style.setProperty("--seek-progress", `${fraction * 100}%`);
+  const value = String(Math.round(fraction * 1000));
+  const progress = `${fraction * 100}%`;
+  if (plSeek.value !== value) plSeek.value = value;
+  if (plSeek.style.getPropertyValue("--seek-progress") !== progress) plSeek.style.setProperty("--seek-progress", progress);
   showSeekLabel(position);
 }
 
@@ -167,6 +169,17 @@ function showPlayerBar() {
   if (!plPollTimer) plPollTimer = setInterval(pollPlayerStatus, 300);
 }
 
+function showIdleTitle(outputUnavailable) {
+  const key = outputUnavailable ? "player.outputUnavailable" : "player.noTrack";
+  const label = t(key);
+  const hint = outputUnavailable ? t("player.outputUnavailableHint") : "";
+  if (plTitle.dataset.i18n !== key) plTitle.dataset.i18n = key;
+  if (plTitle.textContent !== label) plTitle.textContent = label;
+  // The tooltip controller transfers native titles into aria-description.
+  const shownHint = plTitle.getAttribute("title") ?? plTitle.getAttribute("aria-description") ?? "";
+  if (shownHint !== hint) plTitle.title = hint;
+}
+
 // Reset the UI to its idle, no-track state: controls disabled, placeholder
 // title, zeroed time. The bar stays visible (#31). Used on stop, end of list,
 // and when opening a library.
@@ -175,9 +188,7 @@ function playerIdle() {
   plPaused = false;
   plDuration = 0;
   plSeeking = false;
-  plTitle.dataset.i18n = "player.noTrack";
-  plTitle.textContent = t("player.noTrack");
-  plTitle.title = "";
+  showIdleTitle(false);
   // The idle clock and the disabled slider share one write path; the label is
   // "0:00 / 0:00" again only because plDuration is zero here.
   updateSeekDisplay(0);
@@ -309,10 +320,7 @@ async function pollPlayerStatus() {
   if (!st.path) {
     // Backend drained (end of list or stopped): go idle unless already idle.
     if (!playerBar.classList.contains("idle")) playerIdle();
-    const idleKey = st.output_unavailable ? "player.outputUnavailable" : "player.noTrack";
-    plTitle.dataset.i18n = idleKey;
-    plTitle.textContent = t(idleKey);
-    plTitle.title = st.output_unavailable ? t("player.outputUnavailableHint") : "";
+    showIdleTitle(st.output_unavailable);
     return;
   }
 

@@ -323,6 +323,47 @@ test('reordering keeps the focused action attached to the same rule', async ({ p
   await expect(page.locator('.is-expanded .pe-rule-open')).toBeFocused();
 });
 
+test('adding and moving inline rules retains their controls without mounting unused segments', async ({ page }) => {
+  await create(page);
+  await page.evaluate(() => {
+    const descriptor = Object.getOwnPropertyDescriptor(Element.prototype,'className');
+    window.unusedRuleSegments = 0;
+    Object.defineProperty(Element.prototype,'className',{
+      ...descriptor,
+      set(value) {
+        if (this.tagName === 'BUTTON' && String(value).split(/\s+/).includes('seg-btn')) window.unusedRuleSegments++;
+        descriptor.set.call(this,value);
+      },
+    });
+  });
+  await add(page,'case');
+  await page.locator('.pe-case-style').selectOption('lower');
+  await page.evaluate(() => { window.originalCaseRule = document.querySelector('#pe-rules .rule-card'); });
+  await add(page,'key');
+  const key = page.locator('#pe-rules .is-expanded');
+  await key.getByRole('button',{name:'Move up',exact:true}).click();
+  await expect(page.locator('#pe-rules .rule-card').first()).toHaveClass(/is-expanded/);
+  expect(await page.evaluate(() => ({
+    same:document.querySelector('#pe-rules .rule-card:last-child')===window.originalCaseRule,
+    value:document.querySelector('.pe-case-style').value,
+    unused:window.unusedRuleSegments,
+  }))).toEqual({same:true,value:'lower',unused:0});
+});
+
+test('the preset sidebar keeps matching nodes through search, selection and a neighbouring rename', async ({ page }) => {
+  await create(page,'First draft');
+  await create(page,'Second draft');
+  const second = page.getByRole('button',{name:'Second draft',exact:true});
+  const first = page.getByRole('button',{name:'First draft',exact:true});
+  await second.evaluate(row => { window.originalPresetRow = row; });
+  await first.click();
+  await first.press('F2');
+  await page.locator('#pe-name').press('Escape');
+  await page.locator('#pe-search').fill('Second');
+  await second.click();
+  expect(await second.evaluate(row => row === window.originalPresetRow)).toBe(true);
+});
+
 for (const theme of ['light','dark']) for (const [width,height] of [[1280,800],[375,667],[844,390]]) test(`aligned pinned preview and themed inline rules: ${theme} ${width}x${height}`, async ({ page }, testInfo) => {
   await page.setViewportSize({width,height}); await page.evaluate(theme=>{document.documentElement.dataset.theme=theme;},theme);
   await page.locator('#pe-editor').evaluate(async e=>{await Promise.all(e.getAnimations({subtree:true}).map(a=>a.finished.catch(()=>{})));});
