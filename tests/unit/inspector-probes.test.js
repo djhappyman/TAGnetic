@@ -97,7 +97,7 @@ function searchSetup(invoke) {
     prefetchReleaseCounts(){},renderReleaseList(){},syncClearSearch(){},getOnlineOptions:()=>({perPage:5}),onlineScroll:{setAttribute(){},scrollTop:0},scheduleTracklistWindows(){},
     releaseCache:cache(),coverCache:cache(),artworkChoices:cache(),artworkRotations:cache(),artworkImages:cache(),imageCache:cache(),expandedIds:cache(),
   });
-  vm.runInContext(`let loadingResults=false,prefetching=false,searchFailed=false,searchPage=0,searchGen=0,releaseSource='',searchPerPage=5,searchHasMore=false,releaseCandidates=[],pagingPaused=false,searchRequest=null;\n${onlineSource}`,context);
+  vm.runInContext(`let fetchingPage=false,loadingResults=false,prefetching=false,searchFailed=false,searchPage=0,searchGen=0,releaseSource='',searchPerPage=5,searchHasMore=false,releaseCandidates=[],pagingPaused=false,searchRequest=null;\n${onlineSource}`,context);
   return {nodes,context,notices};
 }
 

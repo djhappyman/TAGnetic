@@ -480,7 +480,7 @@
             <p id="discogs-empty" class="empty" data-i18n="online.empty">Search by artist, album or catalogue number.</p>
           </div>
           <div id="release-more" class="release-more" hidden>
-            <span id="release-loading" class="muted" role="status" data-i18n="inspector.searchingHeading" hidden>Searching releases…</span>
+            <span id="release-loading" class="release-loading muted" role="status" hidden><span class="release-loading-spinner" aria-hidden="true"></span><span data-i18n="online.loadingMore">Loading more releases…</span></span>
             <Button variant="ghost" size="sm" id="load-more" type="button" data-i18n="online.retry" hidden>Retry</Button>
           </div>
         </div>
@@ -696,11 +696,27 @@
     </Tabs.Content>
 
 
-    <section id="staged-edits" class="staged-edits" tabindex="-1" aria-labelledby="staged-heading" hidden>
+    <section id="staged-edits" class="staged-edits" tabindex="-1" aria-label="Staged edits and save activity" data-i18n-aria-label="apply.surface" hidden>
+      <div id="staged-draft">
       <div class="staged-head"><div><h3 id="staged-heading" data-i18n="staging.heading">Staged edits</h3><span id="staged-count" class="staged-count"></span></div><Button id="diff-discard" variant="ghost" size="icon-sm" class="icon staged-remove" data-i18n-aria-label="staging.clear" aria-label="Clear staged edits" data-i18n-title="staging.clear" title="Clear staged edits"><svg class="ico"><use href="#i-close"/></svg></Button></div>
       <div class="staged-details">
         <span id="staged-transformations" hidden></span>
         <span id="staged-tags" hidden></span>
+      </div>
+      </div>
+      <div id="staged-activity" class="staged-activity" hidden>
+        <div class="activity-head">
+          <span class="activity-indicator" aria-hidden="true">
+            <svg class="ico activity-check"><use href="#i-check"/></svg>
+            <svg class="ico activity-alert"><use href="#i-info"/></svg>
+          </span>
+          <h3 id="activity-title" role="status" aria-live="polite">Checking files…</h3>
+          <span id="activity-percent" aria-hidden="true"></span>
+          <Button id="activity-stop" variant="ghost" size="sm" type="button" data-i18n="action.stop">Stop</Button>
+          <Button id="activity-dismiss" variant="ghost" size="icon-sm" type="button" aria-label="Dismiss activity" data-i18n-aria-label="apply.dismiss" hidden><svg class="ico"><use href="#i-close"/></svg></Button>
+        </div>
+        <div id="activity-meter" class="activity-meter" role="progressbar" aria-label="Applying changes" aria-valuemin="0" aria-valuemax="100"><span id="activity-fill"></span></div>
+        <p id="activity-detail" class="activity-detail"></p>
       </div>
     </section>
   </aside>
@@ -725,12 +741,9 @@
       <span class="ab-summary sr-only"><span id="ab-state">files ready</span><span class="ab-plan" id="ab-plan"></span></span>
       <Button variant="outline" size="sm" id="preview" class="btn" hidden={mode !== 'renamer'} disabled data-i18n="renamer.previewRename">Preview</Button>
       <Button variant="outline" size="sm" id="diff-preview" class="btn" hidden={mode === 'renamer'} disabled data-i18n="staging.preview">Preview</Button>
-      <span class="ab-progress" id="ab-progress"><span class="ab-bar"><span class="ab-bar-fill" id="ab-bar-fill"></span></span><span class="ab-file" id="ab-file"></span></span>
-      <Button variant="outline" size="sm" id="diff-cancel-apply" class="btn" data-i18n="action.cancel">Cancel</Button>
       <Button variant="default" size="sm" id="diff-apply" class="btn primary" disabled><span id="ab-apply-label">Apply changes</span><span id="ab-count" class="sr-only">0</span></Button>
     </div>
 
-    <span id="busy-pill" class="busy-pill" hidden role="status"><span class="ab-bar"><span class="ab-bar-fill" id="busy-fill"></span></span><span id="busy-text"></span><Button variant="ghost" size="icon-sm" id="busy-stop" class="icon busy-stop" type="button" hidden data-i18n-title="action.stop" title="Stop" data-i18n-aria-label="action.stop" aria-label="Stop"><svg class="ico"><use href="#i-stop"/></svg></Button></span>
     <div class="footer-feedback">
       <span class="ab-locked" id="ab-locked" hidden></span>
       <span id="status-transform-scope" class="muted" hidden aria-live="polite"></span>

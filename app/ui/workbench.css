@@ -452,9 +452,7 @@ body button[data-slot="button"].seg-btn.active { background: var(--accent); colo
   box-shadow: 0 10px 26px rgba(0, 0, 0, 0.3);
 }
 .compact-actions #diff-actionbar .toggle-old,
-.compact-actions #diff-actionbar .ab-sep,
-.compact-actions #diff-actionbar .ab-progress,
-.compact-actions #diff-actionbar #diff-cancel-apply { display: none; }
+.compact-actions #diff-actionbar .ab-sep { display: none; }
 .compact-actions #diff-actionbar .ab-count {
   min-width: 0;
   overflow: hidden;
@@ -695,9 +693,7 @@ body button[data-slot="button"].settings-nav-item { min-height: 34px; border-rad
   /* The table's own floating bar has the same reduced contents and fit. */
   .workarea .diff-actionbar { padding: 6px 8px 6px 14px; gap: 8px; }
   .workarea .diff-actionbar .toggle-old,
-  .workarea .diff-actionbar .ab-sep,
-  .workarea .diff-actionbar .ab-progress,
-  .workarea .diff-actionbar #diff-cancel-apply { display: none; }
+  .workarea .diff-actionbar .ab-sep { display: none; }
   .mode-col > .mode-panel { flex: 1; }
   .mode-col > .mode-panel > .panel-block { flex: none; }
 }

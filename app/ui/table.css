@@ -106,9 +106,6 @@ body #columns-menu .col-menu-row.is-hidden { color:color-mix(in srgb,var(--text)
 body #columns-menu .col-menu-row.is-hidden:hover { color:var(--text); }
 body #columns-menu .col-menu-actions { flex:none; position:static; display:flex; align-items:center; justify-content:space-between; gap:8px; margin:5px 0 0; padding:8px 2px 2px; border-top:1px solid var(--border); background:transparent; }
 body #columns-menu .column-action { min-height:28px; padding:4px 14px; border-radius:999px; }
-/* Cancel stays reachable while mutation surfaces are temporarily inert. */
-.compact-actions #diff-actionbar.applying #diff-cancel-apply,
-.workarea .diff-actionbar.applying #diff-cancel-apply { display:inline-flex; }
 
 body #tracks tr.group-head { cursor:default; }
 body #tracks tr.group-head .group-caret > .ico { transform:rotate(0deg); }

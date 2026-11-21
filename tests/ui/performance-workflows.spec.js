@@ -211,8 +211,8 @@ test('Apply shows a truthful preparation message until write progress is availab
   await expect(page.locator('#diff-apply')).toBeEnabled();
   await page.evaluate(() => { window.perfPauseApply = true; });
   await page.locator('#diff-apply').click();
-  await expect(page.locator('#ab-file')).toHaveText('Checking files…');
-  await expect(page.locator('#ab-bar-fill')).toHaveCSS('width', '0px');
+  await expect(page.locator('#activity-title')).toHaveText('Checking files…');
+  await expect(page.locator('#activity-meter')).not.toHaveAttribute('aria-valuenow');
   await expect(page.locator('#diff-actionbar')).toBeVisible();await expect(page.locator('#diff-apply')).toBeDisabled();
 });
 

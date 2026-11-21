@@ -1,102 +1,129 @@
 // Progress and Cancel for a running Apply (#437).
 //
 // The backend emits `tagrex://apply-progress` while it writes and stops at the
-// next file after `cancel_apply`. This only paints that in the diff bar; the
-// bar shows nothing for the first moment, so a quick apply does not flash it.
+// next file after `cancel_apply`. The staged surface carries checking, writing
+// and the confirmed result; row feedback still receives every completed step.
 import { el } from "./dom.js";
 import { invoke } from "./invoke.js";
 import { t } from "./i18n.js";
+import { beginStagedActivity, paintStagedActivity, stopStagedActivity, finishStagedActivity, restoreDraft } from './staged-activity.js';
 
 const EVENT = "tagrex://apply-progress";
-const SHOW_AFTER_MS = 250;
 
 let unlisten = null;
-let showTimer = null;
 
 function baseName(path) {
   return String(path || "").split(/[\\/]/).pop();
 }
 
-function paintMeter(id, done, total, label) {
-  const fill = el(id), meter = fill.parentElement;
-  const percent = total > 0 ? Math.max(0, Math.min(100, Math.round(done / total * 100))) : 0;
-  fill.style.width = `${percent}%`;
-  meter.setAttribute('role', 'progressbar');
-  meter.setAttribute('aria-label', label);
-  meter.setAttribute('aria-valuemin', '0');
-  meter.setAttribute('aria-valuemax', '100');
-  if (total > 0) meter.setAttribute('aria-valuenow', String(percent));
-  else meter.removeAttribute('aria-valuenow');
-  return percent;
-}
-
-function paint(progress) {
-  const total = progress.total || 0;
-  paintMeter("ab-bar-fill", progress.done, total, el("diff-apply").getAttribute("aria-label") || t("apply.checking"));
-  if (!el("diff-cancel-apply").disabled) el("ab-file").textContent = baseName(progress.path);
-}
-
-export async function beginApplyProgress(onProgress = () => {}) {
-  const bar = el("diff-actionbar");
-  el("diff-apply").setAttribute("aria-busy", "true");
-  paintMeter("ab-bar-fill", 0, 0, t("apply.checking"));
-  el("ab-file").textContent = t("apply.checking");
-  el("diff-cancel-apply").disabled = false;
-  showTimer = setTimeout(() => bar.classList.add("applying"), SHOW_AFTER_MS);
-  const events = window.__TAURI__ && window.__TAURI__.event;
-  if (events) unlisten = await events.listen(EVENT, (e) => { paint(e.payload); onProgress(e.payload); });
-  else {
-    const listener = event => { paint(event.detail); onProgress(event.detail); };
-    document.addEventListener(EVENT, listener);
-    unlisten = () => document.removeEventListener(EVENT, listener);
-  }
-}
-
-// The same events while an undo runs (#448), painted in the status bar since there
-// may be no diff bar to put them in. No Cancel: a rollback stopped half-way would
-// leave the batch partly undone.
-let undoUnlisten = null;
-let undoTimer = null;
-
-export async function beginUndoProgress(labelKey = "undo.running") {
-  // A rollback can't be stopped, so the pill shows no Stop (#558).
-  el("busy-stop").hidden = true;
-  paintMeter("busy-fill", 0, 0, t(labelKey));
-  el("busy-text").textContent = t(labelKey);
-  undoTimer = setTimeout(() => (el("busy-pill").hidden = false), SHOW_AFTER_MS);
-  const events = window.__TAURI__ && window.__TAURI__.event;
-  if (events) {
-    undoUnlisten = await events.listen(EVENT, (e) => {
-      const { done, total } = e.payload;
-      const percent = paintMeter("busy-fill", done, total, t(labelKey));
-      el("busy-text").textContent = `${t(labelKey)} ${percent}%`;
+let frame = null, latest = null, fileCount = 0, percent = 0, acceptingProgress = false;
+let historyOperation = null;
+let required = new Map(), completed = new Map(), completedFiles = 0;
+function flushProgress() {
+  frame = null;
+  if (!latest) return;
+  const progress = latest; latest = null;
+  if (historyOperation) {
+    if (progress.total > 0) percent = Math.max(percent, Math.min(99, Math.round(progress.done / progress.total * 100)));
+    paintStagedActivity({
+      phase: progress.total > 0 ? 'writing' : 'checking',
+      percent: progress.total > 0 ? percent : null,
+      detail: baseName(progress.path),
     });
+    return;
   }
+  const checking = !progress.completed && progress.done < fileCount;
+  const steps = Math.max(1, progress.total - fileCount);
+  if (!checking) percent = Math.max(percent, Math.min(99, Math.round((progress.done - fileCount) / steps * 100)));
+  const name = baseName(progress.path);
+  paintStagedActivity({ phase: checking ? 'checking' : 'writing', percent: checking ? null : percent,
+    detail: checking ? name : t('apply.filesProgress', { done: completedFiles, total: fileCount, file: name }) });
+}
+function queueProgress(progress) {
+  latest = progress;
+  if (frame === null) frame = requestAnimationFrame(flushProgress);
+}
+function receive(progress, onProgress) {
+  if (!acceptingProgress) return;
+  const bit = progress.completed === 'tags' ? 1 : progress.completed === 'transfer' ? 2 : 0;
+  if (bit && required.has(progress.path)) {
+    const old = completed.get(progress.path) || 0, next = old | bit;
+    completed.set(progress.path, next);
+    const mask = required.get(progress.path);
+    if ((old & mask) !== mask && (next & mask) === mask) completedFiles++;
+  }
+  queueProgress(progress);
+  onProgress(progress); // Row feedback retains every confirmed step.
+}
+export async function beginApplyProgress(onProgress = () => {}, changes = []) {
+  acceptingProgress = true;
+  fileCount = changes.length; percent = 0; completedFiles = 0;
+  required = new Map(changes.map(change => [change.path,
+    (change.tag_changes?.length || change.cover_change || change.block_changes?.length ? 1 : 0) | (change.rename_to ? 2 : 0)]));
+  completed = new Map();
+  el('diff-apply').setAttribute('aria-busy', 'true');
+  beginStagedActivity('apply', { stop: cancelApply });
+  unlisten = await listenProgress(progress => receive(progress, onProgress));
+}
+async function listenProgress(callback) {
+  const events = window.__TAURI__?.event;
+  if (events) return events.listen(EVENT, event => callback(event.payload));
+  const listener = event => callback(event.detail);
+  document.addEventListener(EVENT, listener);
+  return () => document.removeEventListener(EVENT, listener);
+}
+export function finishingWriteProgress() {
+  acceptingProgress = false;
+  if (frame !== null) cancelAnimationFrame(frame);
+  frame = null; latest = null;
+  el('activity-stop').disabled = true;
+  paintStagedActivity({ phase: 'finishing', percent: 99, detail: t('apply.refreshing') });
 }
 
-export function endUndoProgress() {
-  clearTimeout(undoTimer);
-  undoTimer = null;
-  if (undoUnlisten) undoUnlisten();
-  undoUnlisten = null;
-  el("busy-pill").hidden = true;
+// History operations share the card and event stream. The backend does not
+// offer cancellation here, so the card omits Stop.
+export async function beginHistoryProgress(operation) {
+  historyOperation = operation;
+  acceptingProgress = true;
+  percent = 0;
+  beginStagedActivity(operation);
+  unlisten = await listenProgress(progress => {
+    if (acceptingProgress) queueProgress(progress);
+  });
 }
 
-export function endApplyProgress() {
-  clearTimeout(showTimer);
-  showTimer = null;
+export function endHistoryProgress(outcome, detail) {
+  if (!historyOperation) return;
+  historyOperation = null;
+  stopListening();
+  // A history conflict hands control to the decision dialog. Cancel returns
+  // directly to the draft, while a retry starts a fresh activity.
+  if (outcome) finishStagedActivity(outcome, detail);
+  else void restoreDraft();
+}
+
+function stopListening() {
+  acceptingProgress = false;
   if (unlisten) unlisten();
   unlisten = null;
+  if (frame !== null) cancelAnimationFrame(frame);
+  frame = null;
+  latest = null;
+}
+
+export function endApplyProgress(outcome = "error", detail = "") {
+  stopListening();
+  required.clear(); completed.clear();
+  finishStagedActivity(outcome, detail);
   el("diff-apply").removeAttribute("aria-busy");
-  el("diff-actionbar").classList.remove("applying", "cancelling");
 }
 
 // The backend stops at the next file and rolls back; until it answers, the
 // button is spent and the bar says so.
-el("diff-cancel-apply").addEventListener("click", () => {
-  el("diff-cancel-apply").disabled = true;
-  // Cancelling reads as stopping does (#558): the bar goes muted.
-  el("diff-actionbar").classList.add("cancelling");
-  el("ab-file").textContent = t("apply.cancelling");
-  invoke("cancel_apply", {});
-});
+function cancelApply() {
+  stopStagedActivity();
+  invoke('cancel_apply', {}).catch(error => {
+    // A failed cancellation request does not mean the executor has stopped.
+    el('activity-detail').textContent = String(error);
+  });
+}

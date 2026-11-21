@@ -63,6 +63,7 @@ let searchPage = 0; // last page fetched (0 = none yet)
 let searchHasMore = false; // provider likely has another page
 let searchGen = 0; // generation token
 let searchFailed = false;
+let fetchingPage = false;
 let loadingResults = false; // a page fetch is in flight
 let prefetching = false; // the background per-release detail sweep is running
 let pagingPaused = false;
@@ -88,7 +89,7 @@ function syncClearSearch() {
 }
 function resetSearchResults() {
   searchGen++;
-  loadingResults = false; prefetching = false; pagingPaused = true;
+  fetchingPage = false; loadingResults = false; prefetching = false; pagingPaused = true;
   searchPage = 0; searchHasMore = false; searchFailed = false; searchRequest = null;
   releaseCandidates = [];
   releaseCache.clear(); coverCache.clear(); artworkChoices.clear(); artworkRotations.clear();
@@ -110,6 +111,7 @@ function stopLoading() {
   if (!searchBusy()) return;
   searchGen++;
   pagingPaused = true;
+  fetchingPage = false;
   loadingResults = false;
   prefetching = false;
   updateLoadMoreUi();
@@ -155,6 +157,7 @@ async function runSearch(reset) {
   const gen = searchGen;
   const page = searchPage + 1;
   loadingResults = true;
+  fetchingPage = true;
   searchFailed = false;
   updateLoadMoreUi();
   try {
@@ -170,6 +173,7 @@ async function runSearch(reset) {
       query: { ...searchRequest, page, per_page: searchPerPage },
     });
     if (gen !== searchGen) return; // a newer search / Stop superseded this
+    fetchingPage = false;
     searchPage = page;
     // A full page back suggests there's more to fetch.
     searchHasMore = hits.length >= searchPerPage;
@@ -187,6 +191,7 @@ async function runSearch(reset) {
     toast(String(e), true);
   } finally {
     if (gen === searchGen) {
+      fetchingPage = false;
       loadingResults = false;
       updateLoadMoreUi();
     }
@@ -213,9 +218,14 @@ function updateLoadMoreUi() {
   btn.setAttribute("aria-label", btn.title);
   const wrap = el("release-more");
   if (!wrap) return;
-  wrap.hidden = releaseCandidates.length === 0 || (!loadingResults && !searchFailed);
-  el("release-loading").hidden = !loadingResults;
-  el("load-more").hidden = loadingResults || !searchFailed || !searchHasMore;
+  wrap.hidden = releaseCandidates.length === 0 || pagingPaused || (!fetchingPage && !searchHasMore && !searchFailed);
+  el('release-loading').hidden = !fetchingPage;
+  const more = el('load-more');
+  more.hidden = fetchingPage || !searchHasMore;
+  more.disabled = busy;
+  const key = searchFailed ? 'online.retry' : 'online.loadMore';
+  more.dataset.i18n = key;
+  more.textContent = t(key);
   onlineScroll?.setAttribute('aria-busy', String(loadingResults));
   scheduleTracklistWindows();
 }
@@ -372,9 +382,17 @@ function renderReleaseList(appended = null) {
   // mounted components before any controller reads or binds their nodes.
   upgradeComponentMarkup(list, { exclude: '.release-cover' });
   // Restore images (from cache) and any expanded tracklists after the re-render.
+  let entering = 0;
+  const animatePage = appended && !matchMedia("(prefers-reduced-motion: reduce)").matches;
   for (const c of candidates) {
     applyImage(c);
     const card = cardEl(c.id);
+    // Animate only the new page, capped independently of result/library size.
+    // Existing cards, tracklists and the scroll anchor stay in place.
+    if (animatePage && card && entering < 12) {
+      card.animate([{ opacity: 0, transform: 'translateY(8px)' }, { opacity: 1, transform: 'translateY(0)' }],
+        { duration: 280, delay: Math.min(entering++ * 18, 90), easing: 'cubic-bezier(.16,1,.3,1)', fill: 'backwards' });
+    }
     if (card && expandedIds.has(c.id) && releaseCache.has(c.id)) {
       card.setAttribute("aria-expanded", "true");
       card.querySelector(".release-caret").innerHTML = ico("caret-down");

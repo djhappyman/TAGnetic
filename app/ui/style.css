@@ -1393,53 +1393,6 @@ body.diffing #tracks tbody tr.staged td.sel {
   padding-right: var(--space-5);
 }
 
-/* While an apply runs (#437) the bar swaps its gate buttons for a progress bar,
-   the file being written and a Cancel. The count stays: it is what is being
-   applied. */
-.diff-actionbar .ab-progress,
-.diff-actionbar #diff-cancel-apply {
-  display: none;
-}
-.diff-actionbar.applying .ab-progress {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-3);
-  min-width: 0;
-}
-.diff-actionbar.applying #diff-cancel-apply {
-  display: inline-flex;
-}
-.diff-actionbar.applying .toggle-old,
-.diff-actionbar.applying .ab-sep,
-.diff-actionbar.applying #diff-discard,
-.diff-actionbar.applying #diff-apply {
-  display: none;
-}
-.diff-actionbar .ab-bar {
-  flex: 0 0 auto;
-  width: 140px;
-  height: 4px;
-  border-radius: 999px;
-  background: var(--border);
-  overflow: hidden;
-}
-.diff-actionbar .ab-bar-fill {
-  display: block;
-  height: 100%;
-  width: 0;
-  background: var(--accent-ink);
-  transition: width var(--motion-feedback) var(--motion-ease);
-}
-.diff-actionbar .ab-file {
-  min-width: 0;
-  max-width: 220px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--text-xs);
-  color: var(--muted);
-}
-
 /* ---- duplicate finder (#40) ---- */
 .dup-bar {
   display: flex;
@@ -3623,8 +3576,13 @@ td.unreadable-note {
 }
 
 /* Paging feedback scrolls with the results; no separate footer surface. */
-.release-more { display:flex; align-items:center; justify-content:center; gap:8px; padding:8px 0; border:0; background:transparent; font-size:var(--type-help-size); }
+.release-more { box-sizing:border-box; min-height:48px; display:flex; align-items:center; justify-content:center; gap:8px; padding:8px 0; border:0; background:transparent; font-size:var(--type-help-size); }
 .release-more[hidden] { display:none; }
+.release-loading { display:inline-flex; align-items:center; gap:var(--sp-2); animation:release-loading-enter 220ms ease-out; }
+.release-loading[hidden] { display:none; }
+.release-loading-spinner { width:12px; height:12px; border:2px solid var(--border); border-top-color:var(--accent-ink); border-radius:var(--r-circle); animation:activity-spin 900ms linear infinite; }
+@keyframes release-loading-enter { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
+@media(prefers-reduced-motion:reduce) { .release-loading, .release-loading-spinner { animation:none; } }
 
 /* One height for every segmented control regardless of its per-context padding
    (List/Grid, export format, ID3 version were rendering 22 / 25 / 21px). The
@@ -6374,92 +6332,6 @@ body.drag-active #drop-overlay {
   display: none;
 }
 
-/* ---- a run in progress (#448, one pattern since #558) ----------------------
-   Wherever a run is shown: [ bar ] [ what, n of N ] [ stop ]. A staged plan's
-   apply runs in the diff bar; every other run (BPM detection, undo) in this
-   busy pill, never both. While stopping the count freezes, the bar goes muted
-   and Stop is spent; a run that can't be stopped (undo) has no Stop. */
-.busy-pill {
-  min-width: 0;
-  max-width: 100%;
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-3);
-  font-size: var(--text-xs);
-}
-.busy-pill[hidden] {
-  display: none;
-}
-.busy-pill .ab-bar {
-  flex: 0 1 96px;
-  min-width: 16px;
-  max-width: 24%;
-  width: 96px;
-  height: 4px;
-  border-radius: 999px;
-  background: var(--border);
-  overflow: hidden;
-}
-.busy-pill .ab-bar-fill {
-  display: block;
-  height: 100%;
-  width: 0;
-  background: var(--accent-ink);
-  transition: width var(--motion-feedback) var(--motion-ease);
-}
-#busy-text {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: var(--text);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-/* Stop: the field-tools tier, a filled square, --del on hover because it ends
-   something. */
-.busy-stop.icon {
-  flex: none;
-  width: var(--ctl-hit);
-  min-width: var(--ctl-hit);
-  height: var(--ctl-hit);
-  min-height: var(--ctl-hit);
-  padding: 0;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: none;
-  box-shadow: none;
-  color: var(--muted);
-}
-.busy-stop.icon > svg {
-  width: 12px;
-  height: 12px;
-}
-.busy-stop.icon:hover:not(:disabled) {
-  background: var(--error-tint);
-  color: var(--del);
-}
-.busy-stop[hidden] {
-  display: none;
-}
-.busy-pill.stopping .ab-bar-fill,
-.diff-actionbar.cancelling .ab-bar-fill {
-  background: var(--muted);
-}
-.busy-pill.stopping #busy-text,
-.diff-actionbar.cancelling .ab-file {
-  color: var(--muted);
-}
-.busy-pill.stopping .busy-stop.icon:disabled {
-  background: none;
-  color: var(--border);
-  cursor: default;
-}
-.diff-actionbar .ab-file {
-  font-variant-numeric: tabular-nums;
-  color: var(--muted);
-}
-
 /* ---- input group: .field (#547) --------------------------------------------
    One component for every field that carries its own actions, grown out of the
    mask builder's field (#546). Inside one border, left to right: the value
@@ -6995,5 +6867,4 @@ button.release-cover:hover { border-color: var(--accent); }
 button.release-cover[aria-busy="true"] { opacity: 0.55; cursor: progress; }
 
 @media (prefers-reduced-motion: reduce) {
-  .diff-actionbar .ab-bar-fill, .busy-pill .ab-bar-fill { transition: none; }
 }
