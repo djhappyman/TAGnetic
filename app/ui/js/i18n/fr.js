@@ -1019,6 +1019,7 @@ export const fr = {
   "group.release": "Id de la parution",
   "group.drop": "Par dépôt",
   "group.none": "Aucun",
+  "table.sortWithinGroups": "Tri au sein de chaque groupe. Choisissez « Aucun » dans le menu Regrouper par pour trier toute la liste.",
   "group.buttonLabel": "Regrouper par : {key}",
   "field.artist": "Artiste",
   "field.title": "Titre",

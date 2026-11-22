@@ -1019,6 +1019,7 @@ export const ru = {
   "group.release": "ID релиза",
   "group.drop": "По перетаскиванию",
   "group.none": "Нет",
+  "table.sortWithinGroups": "Сортировка внутри каждой группы. Выберите «Нет» в меню группировки, чтобы отсортировать весь список.",
   "group.buttonLabel": "Группировка: {key}",
   "field.artist": "Исполнитель",
   "field.title": "Название",

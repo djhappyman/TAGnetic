@@ -305,3 +305,68 @@ test('detail prefetch shares the pending thumbnail request and retains its image
   await settle(page);
   expect(await page.evaluate(() => window.thumbnailMounts)).toBe(1);
 });
+
+test('closing and reopening keeps the Online results, checked tracks and scroll without paging', async ({page}) => {
+  await page.evaluate(() => {
+    window.detailHarness = ({releaseId}) => Promise.resolve({
+      id:releaseId, artist:'Fixture', title:'Fixture', labels:[], images:[],
+      tracks:Array.from({length:24}, (_, i) => ({position:String(i+1), title:`Track ${i+1}`, artist:'Fixture'})),
+    });
+  });
+  await search(page);
+  const card = page.locator('.release-card').first();
+  const head = card.locator('.release-head');
+  await head.click();
+  await expect(head).toHaveAttribute('aria-expanded', 'true');
+  const panelId = await head.getAttribute('aria-controls');
+  await expect(card.locator('.release-tracklist')).toHaveAttribute('id', panelId);
+  await expect(card.locator('.tk-selall-box')).toBeChecked();
+  await card.getByRole('checkbox', {name:'Select all tracks', exact:true}).click();
+  await expect(card.locator('.tk-selall-box')).not.toBeChecked();
+  await card.evaluate(node => { window.savedCard = node; });
+  const toggle = page.locator('#panel-toggle');
+  await toggle.click();
+  await expect(page.locator('.dock-right')).toHaveAttribute('inert', '');
+  await bottom(page);
+  await settle(page);
+  const scrollTop = await page.locator('.online-scroll').evaluate(node => node.scrollTop);
+  expect(scrollTop).toBeGreaterThan(0);
+  expect(await page.evaluate(() => window.pageCalls.length)).toBe(1);
+
+  await toggle.click();
+  await settle(page);
+  await expect(head).toHaveAttribute('aria-expanded', 'true');
+  await expect(card.locator('.tk-selall-box')).not.toBeChecked();
+  expect(await card.evaluate(node => node === window.savedCard)).toBe(true);
+  expect(await page.locator('.online-scroll').evaluate(node => node.scrollTop)).toBe(scrollTop);
+  expect(await page.evaluate(() => window.pageCalls.length)).toBe(1);
+  await bottom(page);
+  await expect(page.locator('.release-card')).toHaveCount(10);
+});
+
+test('a slow background release lookup is shared with expansion and does not block a page request', async ({page}) => {
+  await page.evaluate(() => {
+    window.detailCalls = [];
+    window.detailHarness = ({releaseId}) => {
+      window.detailCalls.push(releaseId);
+      const release = {id:releaseId, artist:'Fixture', title:'Fixture', labels:[], images:[],
+        tracks:[{position:'1', title:'Shared detail', artist:'Fixture'}]};
+      return releaseId === '300001' ? new Promise(resolve => { window.finishDetail = () => resolve(release); })
+        : Promise.resolve(release);
+    };
+  });
+  await page.locator('#discogs-query').fill('Original search');
+  await page.locator('#discogs-query').press('Enter');
+  await expect.poll(() => page.evaluate(() => window.detailCalls)).toEqual(['300001']);
+  const first = page.locator('.release-card').first();
+  await first.locator('.release-head').click();
+  await expect(first.locator('.skeleton-line')).toHaveCount(3);
+  const more = page.locator('#load-more');
+  await expect(more).toBeEnabled();
+  await more.evaluate(button => button.click());
+  await expect(page.locator('.release-card')).toHaveCount(10);
+  expect(await page.evaluate(() => window.detailCalls)).toEqual(['300001']);
+  await page.evaluate(() => window.finishDetail());
+  await expect(first.locator('.tk-t')).toHaveText('Shared detail');
+  await expect(page.locator('#discogs-search')).not.toHaveClass(/busy/);
+});

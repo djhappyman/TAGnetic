@@ -52,7 +52,8 @@ body #tracks tr.selected:hover td.artwork-col { background:var(--row-sel-hover);
 .track-artwork[data-cover-state='unknown'] { color:var(--muted); opacity:.18; }
 .track-artwork[data-cover-state='missing']::after { content:''; position:absolute; inset:6px 0 auto; height:1px; background:currentColor; transform:rotate(-45deg); }
 body #tracks button.artwork-sort { position:relative; display:inline-flex; vertical-align:middle; width:23px; height:23px; min-height:0; padding:4px; border:0; border-radius:2px; background:transparent; color:var(--muted); box-shadow:none; }
-body #tracks .artwork-col .sort-ind { display:none; }
+body #tracks .artwork-col .sort-ind { position:absolute; inset:0 0 auto auto; width:8px; line-height:1; }
+body #tracks .artwork-col .sort-ind > .ico { width:8px; height:8px; }
 body #tracks button.artwork-sort[aria-pressed='true'] { color:var(--accent-ink); }
 body #tracks button.artwork-sort:focus-visible { outline:1px solid var(--accent); outline-offset:-1px; }
 

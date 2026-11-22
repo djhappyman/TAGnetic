@@ -619,7 +619,7 @@ body .mode-col .release-list {
 /* Floating result entries: typography carries the hierarchy, the only
    separator is a short faint line, and no state adds a box. */
 body .mode-col .release-card,
-body .mode-col .release-card[aria-expanded='true'] {
+body .mode-col .release-card[data-expanded='true'] {
   position: relative;
   border: 0;
   border-radius: 0;
@@ -731,10 +731,10 @@ body .mode-col .release-label .rb-catno, body .mode-col .release-tracklist .tk-c
   font-weight: var(--fw-regular);
 }
 body .mode-col .release-tracklist .tk-readout { display: inline-flex; gap: var(--sp-3); align-items: center; }
-body .mode-col .release-card.tracklist-loaded[aria-expanded='true'] .release-artist {
+body .mode-col .release-card.tracklist-loaded[data-expanded='true'] .release-artist {
   padding-right: 0;
 }
-body .mode-col .release-card.tracklist-loaded[aria-expanded='true'] .release-title {
+body .mode-col .release-card.tracklist-loaded[data-expanded='true'] .release-title {
   padding-right: 0;
 }
 body .mode-col button[data-slot='button'].release-import {

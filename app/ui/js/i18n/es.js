@@ -1017,6 +1017,7 @@ export const es = {
   "group.release": "Id del lanzamiento",
   "group.drop": "Por arrastre",
   "group.none": "Ninguna",
+  "table.sortWithinGroups": "Ordenado dentro de cada grupo. Elige «Ninguna» en el menú Agrupar por para ordenar toda la lista.",
   "group.buttonLabel": "Agrupar por: {key}",
   "field.artist": "Artista",
   "field.title": "Título",

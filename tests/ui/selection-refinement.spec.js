@@ -81,3 +81,100 @@ test('column sorting keeps folder positions and sorts numeric filenames only ins
   expect(await headers.evaluateAll(nodes=>nodes.map(node=>node.dataset.group))).toEqual(original);
   await expect(rows(page)).toHaveCount(3); // collapse state survived filtering and sorting
 });
+
+for (const count of [371, 1248]) {
+  test(`sorting ${count} expanded files animates only visible rows and preserves the group anchors`, async ({page}) => {
+    await page.emulateMedia({reducedMotion:'no-preference'});
+    await page.evaluate(async size => {
+      const groupCount = size === 371 ? 23 : 2;
+      const paths = Array.from({length:size}, (_, index) => `Folder ${index % groupCount}/take${index}.mp3`);
+      await window.tagrex.invoke('open_drop', {paths});
+      document.getElementById('root').value = '/dropped';
+      await window.tagrex.openLibrary();
+    }, count);
+    const fileHeader = page.locator('#tracks th[data-sort="file"]');
+    const probe = await fileHeader.evaluate(header => {
+      const table = document.querySelector('#files-view');
+      const body = document.querySelector('#tracks-body');
+      const before = new Map([...body.querySelectorAll('tr[data-path]')].map(row => [row.dataset.path,row]));
+      const groups = [...body.querySelectorAll('tr.group-head')].map(row => row.dataset.group);
+      const first = body.querySelector('tr[data-path]');
+      first.querySelector('td.file').click();
+      const selection = [...window.tagrex.selection];
+      const animate = Element.prototype.animate;
+      const moving = [];
+      let previous = new Map();
+      Element.prototype.animate = function (frames, timing) {
+        if (this.matches('#tracks-body tr[data-path]')) {
+          const rect = this.getBoundingClientRect();
+          const top = table.querySelector('thead').getBoundingClientRect().bottom;
+          const bottom = table.getBoundingClientRect().bottom;
+          const old = previous.get(this.dataset.path);
+          moving.push({
+            path:this.dataset.path, visible:rect.bottom > top && rect.top < bottom,
+            actual:Number.parseFloat(frames[0].transform.slice('translateY('.length)),
+            expected:old === undefined ? bottom - rect.top : old - rect.top,
+            fade:frames.some(frame => frame.opacity !== undefined), duration:timing.duration,
+          });
+        }
+        return animate.call(this, frames, timing);
+      };
+      try {
+        header.click();
+        table.dispatchEvent(new WheelEvent('wheel', {deltaY:10}));
+        moving.length = 0;
+        const upper = table.querySelector('thead').getBoundingClientRect().bottom;
+        const lower = table.getBoundingClientRect().bottom;
+        previous = new Map([...body.querySelectorAll('tr[data-path]')].flatMap(row => {
+          const rect = row.getBoundingClientRect();
+          return rect.bottom > upper && rect.top < lower ? [[row.dataset.path, rect.top]] : [];
+        }));
+        header.click();
+        const rows = [...body.querySelectorAll('tr[data-path]')];
+        const rowBottom = rows.at(-1).getBoundingClientRect().bottom;
+        const running = rows.flatMap(row => row.getAnimations());
+        table.dispatchEvent(new WheelEvent('wheel', {deltaY:10}));
+        return {
+          moving, mounted: rows.length,
+          visible:rows.flatMap(row => {
+            const rect = row.getBoundingClientRect();
+            const old = previous.get(row.dataset.path);
+            return rect.bottom > upper && rect.top < lower && (old === undefined || Math.abs(old - rect.top) > 1) ? [row.dataset.path] : [];
+          }),
+          fillsViewport: rowBottom >= table.getBoundingClientRect().bottom,
+          columnState: header.getAttribute('aria-sort'),
+          reused: rows.some(row => before.get(row.dataset.path) === row),
+          scoped: selection.length === 1 && window.tagrex.selection.has(selection[0]),
+          firstGroup: body.querySelector('tr.group-head').dataset.group,
+          previousFirstGroup: groups[0],
+          cancelled: running.length > 0 && running.every(animation => animation.playState === 'idle'),
+        };
+      } finally { Element.prototype.animate = animate; }
+    });
+    expect(probe.fillsViewport).toBe(true);
+    if (count === 371) expect(probe.mounted).toBe(count);
+    else expect(probe.mounted).toBeLessThan(96);
+    expect(probe.columnState).toBe('descending');
+    expect(probe.moving.length).toBeGreaterThan(5);
+    expect(probe.moving.map(move => move.path)).toEqual(probe.visible);
+    expect(probe.moving.every(move => move.visible && !move.fade && move.duration === 230)).toBe(true);
+    expect(probe.moving.some(move => Math.abs(move.actual) > 160)).toBe(true);
+    for (const move of probe.moving) expect(move.actual).toBeCloseTo(move.expected, 0);
+    if (count === 371) expect(probe.reused).toBe(true);
+    expect(probe.scoped).toBe(true);
+    expect(probe.firstGroup).toBe(probe.previousFirstGroup);
+    expect(probe.cancelled).toBe(true);
+
+    await page.locator('#group-btn').click();
+    await page.locator('#group-menu .group-opt[data-group=""]').click();
+    await expect(page.locator('#tracks-body tr.group-head')).toHaveCount(0);
+    await expect(fileHeader).toHaveAttribute('aria-sort','descending');
+    const order = await page.evaluate(() => window.tagrex.tracks.map(track => Number(/take(\d+)\.mp3$/.exec(track.path)[1])));
+    expect(order).toEqual(Array.from({length:count},(_, i) => count-1-i));
+
+    await page.emulateMedia({reducedMotion:'reduce'});
+    await fileHeader.evaluate(header => header.click());
+    expect(await rows(page).evaluateAll(nodes => nodes.flatMap(node => node.getAnimations()).length)).toBe(0);
+    await expect(fileHeader).toHaveAttribute('aria-sort','ascending');
+  });
+}

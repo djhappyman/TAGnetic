@@ -7,18 +7,15 @@ import { setImmediate as flush } from 'node:timers/promises';
 
 const text = readFileSync(process.env.TAGREX_ONLINE_SOURCE || new URL('../../app/ui/js/online.js', import.meta.url), 'utf8');
 const ast = ts.createSourceFile('online.js', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
-const functions = ['applyImage', 'prefetchReleaseCounts'];
+const functions = ['applyImage', 'releaseDetail'];
 const bodies = ast.statements.filter(n => ts.isFunctionDeclaration(n) && functions.includes(n.name?.text)).map(n => n.getText(ast)).join('\n');
 function setup(invoke) {
   const painted = [];
   const context = vm.createContext({
     releaseSource: 'musicbrainz', searchGen: 1,
-    imageCache: new Map(), thumbnailRequests: new Map(), coverCache: new Map(), releaseCache: new Map(),
-    THUMB_AFTER_LOOKUP: new Set(['musicbrainz']), PREFETCH_CONCURRENCY: 4,
-    providerToken: async () => '', invoke,
+    imageCache: new Map(), thumbnailRequests: new Map(), coverCache: new Map(), releaseCache: new Map(), releaseRequests: new Map(),
+    THUMB_AFTER_LOOKUP: new Set(['musicbrainz']), providerToken: async () => '', invoke,
     coverElOf: () => ({}), setCoverImage: (_, uri) => painted.push(uri),
-    updateLoadMoreUi() {}, updateMediaBadge() {}, countPillOf: () => null,
-    prefetching: false, rateLimitPauseMs: () => null,
   });
   vm.runInContext(bodies, context);
   return { context, painted };
@@ -63,13 +60,31 @@ test('superseded release lookups cannot seed caches or thumbnail work', async ()
   let resolve;
   const calls = [];
   const { context } = setup((name) => { calls.push(name); return new Promise(r => { resolve = r; }); });
-  const pending = context.prefetchReleaseCounts([candidate], 1);
+  const pending = context.releaseDetail(candidate.id, 'musicbrainz', '', 1);
   await flush();
-  context.searchGen++; context.releaseCache.clear(); context.releaseSource = 'discogs';
+  context.searchGen++; context.releaseRequests.clear(); context.releaseCache.clear(); context.releaseSource = 'discogs';
   resolve({ cover_image_url: 'old-front' });
   await pending;
   assert.equal(context.releaseCache.size, 0);
   assert.deepEqual(calls, ['provider_fetch_release']);
+});
+
+test('foreground release detail joins a background lookup and a stale lookup cannot clear a new one', async () => {
+  const completions = [];
+  const { context } = setup(() => new Promise(resolve => completions.push(resolve)));
+  const first = context.releaseDetail(candidate.id, 'musicbrainz', '', 1);
+  assert.equal(context.releaseDetail(candidate.id, 'musicbrainz', '', 1), first);
+  assert.equal(completions.length, 1);
+  context.searchGen++;
+  context.releaseRequests.clear();
+  const second = context.releaseDetail(candidate.id, 'discogs', '', 2);
+  completions[0]({ title: 'old' });
+  await first;
+  assert.equal(context.releaseRequests.get(candidate.id), second);
+  assert.equal(context.releaseCache.has(candidate.id), false);
+  completions[1]({ title: 'current' });
+  assert.equal((await second).title, 'current');
+  assert.equal(context.releaseRequests.size, 0);
 });
 
 test('a joined detail refresh retries a failed shared thumbnail once', async () => {

@@ -305,6 +305,11 @@ const selectAll = el("select-all");
 const statusSel = el("status-sel");
 let spreadsheet = null;
 let groupMotion = null;
+const sortAnimations = new Set();
+const sortReducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+
+let sortScrollTop = 0;
+let sortScrollLeft = 0;
 // Client-only operation context. Never serialize it into the backend plan or
 // replace its composed description, which is also the journal fallback text.
 let spreadsheetBatchKind = "";
@@ -533,13 +538,21 @@ function updateSortIndicators() {
   document.querySelectorAll("th.sortable").forEach((th) => {
     const ind = th.querySelector(".sort-ind");
     const sorted = th.dataset.sort === sortKey;
-    ind.innerHTML = sorted ? ico(sortDir > 0 ? "tri-up" : "tri-down") : "";
+    const direction = sorted ? (manualOrder ? 'other' : sortDir > 0 ? 'ascending' : 'descending') : null;
+    if (th.getAttribute('aria-sort') !== direction) {
+      if (direction) th.setAttribute('aria-sort', direction);
+      else th.removeAttribute('aria-sort');
+    }
+    ind.classList.toggle('descending', sorted && sortDir < 0);
     // A hand-made order (a drag, a match) leaves the sort in force for
     // everything it didn't touch (#198). The indicator fades rather than
     // vanishing, so the column still says what orders the list while admitting
     // that some rows are where they were put.
     ind.classList.toggle("manual", sorted && manualOrder);
-    ind.title = sorted && manualOrder ? msg("app.reorderedByHand") : "";
+    const scope = sorted && groupBy && !duplicateResultsActive() ? msg('table.sortWithinGroups') : '';
+    ind.title = sorted && manualOrder ? msg("app.reorderedByHand") : scope;
+    if (scope) th.setAttribute('aria-description', scope);
+    else th.removeAttribute('aria-description');
   });
 }
 
@@ -1449,7 +1462,7 @@ function dropRow(tr, scrollOnly) {
 // every scroll event: it is bounded by the window, not by the library — and a
 // scroll that moves the window by a row or two only builds those rows, because
 // an overlapping window is trimmed and extended rather than rebuilt.
-function renderWindow({ force = false, refreshGrid = true, scrollOnly = false, preserveDuplicateRows = false, toggledGroups = null } = {}) {
+function renderWindow({ force = false, refreshGrid = true, scrollOnly = false, preserveDuplicateRows = false, reorderRows = false, toggledGroups = null } = {}) {
   const windowed = viewItems.length > MOUNTED_ROW_LIMIT || (windowGroupChanges && viewItems.length > 96);
   if (!force && scrollOnly && !windowed) {
     lastPaintedScrollTop = tableWrap.scrollTop;
@@ -1483,8 +1496,8 @@ function renderWindow({ force = false, refreshGrid = true, scrollOnly = false, p
   const overlaps = intact && first <= renderedLast && last >= renderedFirst;
   const jumpingWindow = !force && intact && !overlaps;
   if (force || jumpingWindow) spreadsheet?.beforePaint();
-  if((force&&preserveDuplicateRows)||toggledGroups||jumpingWindow){
-    const trackKey = (path, group) => toggledGroups ? `track:${(group || '').length}:${group || ''}${path}` : `track:${path}`;
+  if ((force && (preserveDuplicateRows || reorderRows)) || toggledGroups || jumpingWindow) {
+    const trackKey = (path, group) => (toggledGroups || reorderRows) ? `track:${(group || '').length}:${group || ''}${path}` : `track:${path}`;
     const rowKey = row => row.dataset.path ? trackKey(row.dataset.path, row.dataset.group) : `group:${row.dataset.group}`;
     const prior=new Map([...tracksBody.children].filter(row=>!row.classList.contains('spacer')).map(row=>[rowKey(row),row]));
     const spacers=[...tracksBody.children].filter(row=>row.classList.contains('spacer'));
@@ -1677,8 +1690,9 @@ document.addEventListener("tagrex:dock-resize-end", () => {
   if (tableResizeNeedsMeasure) scheduleTableResize();
 });
 
-function renderTracks({ preparedFilter = null, preserveDuplicateRows = false } = {}) {
+function renderTracks({ preparedFilter = null, preserveDuplicateRows = false, reorderRows = false } = {}) {
   groupMotion?.cancel();
+  cancelSortMotion();
   const anchorIndex=preserveDuplicateRows?itemIndexAt(tableWrap.scrollTop):-1;
   const anchor=anchorIndex>=0?viewItems[anchorIndex]:null;
   const anchorOffset=anchor?itemOffsets.top(anchorIndex)-tableWrap.scrollTop:0;
@@ -1691,7 +1705,7 @@ function renderTracks({ preparedFilter = null, preserveDuplicateRows = false } =
   headHeight = el("tracks").tHead?.offsetHeight || headHeight;
   buildViewModel(preparedFilter);
   if(anchor){const index=anchor.kind==='track'?itemIndexByPath.get(anchor.track.path):viewItems.findIndex(item=>item.kind==='group'&&item.key===anchor.key);if(index!=null&&index>=0)tableWrap.scrollTop=itemOffsets.top(index)-anchorOffset;}
-  renderWindow({ force: true, refreshGrid: false, preserveDuplicateRows });
+  renderWindow({ force: true, refreshGrid: false, preserveDuplicateRows, reorderRows });
 
   // The group toggle only makes sense while grouped (#32).
   el("toggle-groups").hidden = !groupBy && !duplicateResultsActive();
@@ -4487,22 +4501,83 @@ tracksBody.addEventListener("keydown", (e) => {
 });
 
 
-// Sort by clicking a column header (toggles direction). Reorders `tracks`
-// itself so position-based mapping follows the visible order.
-function sortBy(key) {
-  if (sortKey === key) applySort(key, -sortDir);
-  else applySort(key, 1);
+function stopWatchingSortMotion() {
+  tableWrap.removeEventListener('scroll', cancelSortOnScroll);
+  tableWrap.removeEventListener('wheel', cancelSortMotion);
+  tableWrap.removeEventListener('pointerdown', cancelSortMotion, true);
+  window.removeEventListener('resize', cancelSortMotion);
+  sortReducedMotion.removeEventListener('change', cancelSortMotion);
+}
+function cancelSortMotion() {
+  if (!sortAnimations.size) return;
+  for (const animation of sortAnimations) animation.cancel();
+  sortAnimations.clear();
+  stopWatchingSortMotion();
+}
+function cancelSortOnScroll() {
+  if (tableWrap.scrollTop !== sortScrollTop || tableWrap.scrollLeft !== sortScrollLeft) cancelSortMotion();
 }
 
-// Sort by `key` in an explicit direction (1 asc, -1 desc) — the toggle-free core
-// shared by header clicks and preset restore (#44).
-document.addEventListener('tagrex:sort-artwork', () => applySort('artwork', sortKey === 'artwork' ? -sortDir : 1));
+function visibleSortRows() {
+  const bounds = tableWrap.getBoundingClientRect();
+  const top = Math.max(bounds.top + tableWrap.clientTop, tableWrap.querySelector('thead').getBoundingClientRect().bottom);
+  const bottom = bounds.top + tableWrap.clientTop + tableWrap.clientHeight;
+  const rows = new Map();
+  for (const row of motionViewportRows()) {
+    if (!row?.dataset.path) continue;
+    const rect = row.getBoundingClientRect();
+    if (rect.bottom > top && rect.top < bottom) {
+      rows.set(row.dataset.path, {row, top: rect.top, height: rect.height});
+    }
+  }
+  return {rows, top, bottom};
+}
 
-function applySort(key, dir) {
+// Commit the final file order immediately. Only the visible rows play back
+// their displacement, with newly visible rows starting at the viewport edge.
+function sortBy(key) {
+  cancelSortMotion();
+  const before = !sortReducedMotion.matches && typeof Element.prototype.animate === 'function' ? visibleSortRows() : null;
+  const previousLayout = before?.rows.size ? motionRowLayout() : null;
+  applySort(key, sortKey === key ? -sortDir : 1, {reorderRows:true});
+  if (!previousLayout) return;
+  sortScrollTop = tableWrap.scrollTop;
+  sortScrollLeft = tableWrap.scrollLeft;
+  const after = visibleSortRows();
+  let moving = 0;
+  for (const [path, {row, top, height}] of after.rows) {
+    const prior = before.rows.get(path);
+    const previousTop = prior?.top ?? previousLayout.rowTop(row);
+    if (previousTop === undefined) continue;
+    const start = prior ? previousTop : Math.min(after.bottom, Math.max(after.top - height, previousTop));
+    const offset = start - top;
+    if (Math.abs(offset) <= 1) continue;
+    const animation = row.animate(
+      [{transform:`translateY(${offset}px)`}, {transform:'translateY(0)'}],
+      {duration:230, delay:Math.min(moving++ * 4, 48), easing:'cubic-bezier(.3,0,.25,1)', fill:'backwards'},
+    );
+    sortAnimations.add(animation);
+    const finished = () => {
+      if (sortAnimations.delete(animation) && !sortAnimations.size) stopWatchingSortMotion();
+    };
+    animation.finished.then(finished, finished);
+  }
+  if (!sortAnimations.size) return;
+  tableWrap.addEventListener('scroll', cancelSortOnScroll, {passive:true});
+  tableWrap.addEventListener('wheel', cancelSortMotion, {passive:true});
+  tableWrap.addEventListener('pointerdown', cancelSortMotion, {capture:true, passive:true});
+  window.addEventListener('resize', cancelSortMotion, {passive:true});
+  sortReducedMotion.addEventListener('change', cancelSortMotion);
+}
+
+document.addEventListener('tagrex:sort-artwork', () => sortBy('artwork'));
+
+// The toggle-free core is shared with preset restore.
+function applySort(key, dir, {reorderRows = false} = {}) {
   setSortKey(key);
   setSortDir(dir);
   sortTracks();
-  renderTracks();
+  renderTracks({reorderRows});
 }
 
 // Put `tracks` in the active sort's order. Separate from applySort because a
@@ -4632,7 +4707,14 @@ el("group-menu").addEventListener("click", (e) => {
   const opt = e.target.closest(".group-opt");
   if (!opt) return;
   el("group-menu").hidden = true;
-  setGroupBy(opt.dataset.group);
+  el('group-btn').setAttribute('aria-expanded', 'false');
+  const previous = groupBy;
+  setGroupBy(opt.dataset.group, {rerender:false});
+  // A folder sort orders the model by folder before the column. Leaving that
+  // mode must reapply the active column globally, including unmounted rows.
+  const folderSortChanged = (previous === 'folder' || previous === 'drop') !== (groupBy === 'folder' || groupBy === 'drop');
+  if (folderSortChanged && !manualOrder) sortTracks();
+  renderTracks();
   el("group-btn").focus();
 });
 document.addEventListener("click", (e) => {
@@ -4664,13 +4746,14 @@ function motionRowLayout() {
     rowTop(row) {
       if (!row.dataset.path) return top(groups.get(row.dataset.group));
       const index = tracks.get(row.dataset.path);
-      if (items[index]?.groupKey === row.dataset.group) return top(index);
+      if (items[index]?.groupKey === (row.dataset.group ?? null)) return top(index);
     },
     groupTop(key) { return top(groups.get(key)); },
   };
 }
 groupMotion = createGroupMotion(tableWrap, motionViewportRows, motionRowLayout);
 function toggleGroup(key) {
+  cancelSortMotion();
   const collapse = !collapsedGroups.has(key);
   const affected = new Set([key]);
   groupMotion.run(() => {
@@ -4753,6 +4836,7 @@ function syncGroupToggle() {
   if (btn.getAttribute("aria-label") !== label) btn.setAttribute("aria-label", label);
 }
 el("toggle-groups").addEventListener("click", () => {
+  cancelSortMotion();
   setAllGroupsCollapsed(el("toggle-groups").dataset.collapse !== "0");
   syncGroupToggle();
 });

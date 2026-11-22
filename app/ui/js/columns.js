@@ -564,10 +564,12 @@ function renderTableHead() {
     event.stopPropagation();
     document.dispatchEvent(new CustomEvent('tagrex:sort-artwork'));
   });
-  artwork.append(artworkSort);
   const artworkIndicator = document.createElement('span');
   artworkIndicator.className = 'sort-ind';
-  artwork.append(artworkIndicator);
+  artworkIndicator.setAttribute('aria-hidden', 'true');
+  artworkIndicator.innerHTML = ico('tri-up');
+  artworkSort.append(artworkIndicator);
+  artwork.append(artworkSort);
   row.append(artwork);
   for (const [index, key] of tableColumnKeys().entries()) {
     const th = document.createElement("th");
@@ -610,7 +612,7 @@ function renderTableHead() {
     th.innerHTML =
       `<span class="th-label">${escapeHtml(columnLabel(key))}` +
       (lockedColumn ? `<span class="th-lock">${ico("lock")}</span>` : "") +
-      `<span class="sort-ind"></span></span>` +
+      `<span class="sort-ind" aria-hidden="true">${ico("tri-up")}</span></span>` +
       `<span class="col-resize" data-key="${escapeHtml(key)}"></span>`;
     // Drag the header itself to reorder (#89) — the direct version of the
     // Columns popover's grips, over the same order model. File is structural and

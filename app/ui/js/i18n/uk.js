@@ -1020,6 +1020,7 @@ export const uk = {
   "group.release": "ID релізу",
   "group.drop": "За перетягуванням",
   "group.none": "Немає",
+  "table.sortWithinGroups": "Сортування в межах кожної групи. Виберіть «Немає» в меню групування, щоб відсортувати весь список.",
   "group.buttonLabel": "Групування: {key}",
   "field.artist": "Виконавець",
   "field.title": "Назва",

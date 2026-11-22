@@ -1019,6 +1019,7 @@ export const it = {
   "group.release": "Id release",
   "group.drop": "Per trascinamento",
   "group.none": "Nessuno",
+  "table.sortWithinGroups": "Ordinamento all’interno di ogni gruppo. Scegli «Nessuno» nel menu Raggruppa per ordinare l’intero elenco.",
   "group.buttonLabel": "Raggruppa per: {key}",
   "field.artist": "Artista",
   "field.title": "Titolo",

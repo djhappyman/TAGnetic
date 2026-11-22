@@ -43,6 +43,7 @@ let releaseCandidates = []; // last search results (CandidateDto[])
 // changes the Source dropdown afterward.
 let releaseSource = "discogs";
 const releaseCache = new Map(); // releaseId -> fetched ReleaseDto (with tracks)
+const releaseRequests = new Map();
 const artworkImages = new Map(); // releaseId -> URL -> fetched image promise
 const artworkRotations = new Map(); // releaseId -> committed image orientations
 const artworkChoices = new Map(); // releaseId -> chosen image index
@@ -65,16 +66,15 @@ let searchPage = 0; // last page fetched (0 = none yet)
 let searchHasMore = false; // provider likely has another page
 let searchGen = 0; // generation token
 let searchFailed = false;
-let fetchingPage = false;
 let loadingResults = false; // a page fetch is in flight
-let prefetching = false; // the background per-release detail sweep is running
+let detailSweep = null;
 let pagingPaused = false;
 let searchRequest = null; // paging retains the query that produced the cards
 
 // Whether a search is doing background work the user might want to interrupt
 // (#108) — a page fetch or the per-release prefetch sweep.
 function searchBusy() {
-  return loadingResults || prefetching;
+  return loadingResults || Boolean(detailSweep?.running || detailSweep?.queue.length);
 }
 
 async function discogsSearch() {
@@ -82,7 +82,7 @@ async function discogsSearch() {
 }
 
 async function loadMoreResults() {
-  if (searchBusy() || !searchHasMore || pagingPaused) return;
+  if (loadingResults || !searchHasMore || pagingPaused) return;
   return runSearch(false);
 }
 
@@ -91,7 +91,8 @@ function syncClearSearch() {
 }
 function resetSearchResults() {
   searchGen++;
-  fetchingPage = false; loadingResults = false; prefetching = false; pagingPaused = true;
+  loadingResults = false; pagingPaused = true;
+  clearReleasePrefetch();
   searchPage = 0; searchHasMore = false; searchFailed = false; searchRequest = null;
   releaseCandidates = [];
   releaseCache.clear(); coverCache.clear(); artworkChoices.clear(); artworkRotations.clear();
@@ -113,9 +114,8 @@ function stopLoading() {
   if (!searchBusy()) return;
   searchGen++;
   pagingPaused = true;
-  fetchingPage = false;
   loadingResults = false;
-  prefetching = false;
+  clearReleasePrefetch();
   updateLoadMoreUi();
   toast(t("toast.online.stopped"));
 }
@@ -152,7 +152,7 @@ async function runSearch(reset) {
     thumbnailRequests.clear();
     expandedIds.clear();
     searchGen++;
-    prefetching = false;
+    clearReleasePrefetch();
     pagingPaused = false;
     renderReleaseList();
     if (onlineScroll) onlineScroll.scrollTop = 0;
@@ -160,7 +160,6 @@ async function runSearch(reset) {
   const gen = searchGen;
   const page = searchPage + 1;
   loadingResults = true;
-  fetchingPage = true;
   searchFailed = false;
   updateLoadMoreUi();
   try {
@@ -176,7 +175,6 @@ async function runSearch(reset) {
       query: { ...searchRequest, page, per_page: searchPerPage },
     });
     if (gen !== searchGen) return; // a newer search / Stop superseded this
-    fetchingPage = false;
     searchPage = page;
     // A full page back suggests there's more to fetch.
     searchHasMore = hits.length >= searchPerPage;
@@ -187,14 +185,14 @@ async function runSearch(reset) {
     if (!added.length) searchHasMore = false;
     releaseCandidates.push(...added);
     renderReleaseList(reset ? null : added);
-    await prefetchReleaseCounts(added, gen); // keep one page/count sweep in flight
+    queueReleaseCounts(added, token);
+    requestOnlinePaging();
   } catch (e) {
     if (gen !== searchGen) return;
     searchFailed = true;
     toast(String(e), true);
   } finally {
     if (gen === searchGen) {
-      fetchingPage = false;
       loadingResults = false;
       updateLoadMoreUi();
     }
@@ -221,11 +219,11 @@ function updateLoadMoreUi() {
   btn.setAttribute("aria-label", btn.title);
   const wrap = el("release-more");
   if (!wrap) return;
-  wrap.hidden = releaseCandidates.length === 0 || pagingPaused || (!fetchingPage && !searchHasMore && !searchFailed);
-  el('release-loading').hidden = !fetchingPage;
+  wrap.hidden = releaseCandidates.length === 0 || pagingPaused || (!loadingResults && !searchHasMore && !searchFailed);
+  el('release-loading').hidden = !loadingResults;
   const more = el('load-more');
-  more.hidden = fetchingPage || !searchHasMore;
-  more.disabled = busy;
+  more.hidden = loadingResults || !searchHasMore;
+  more.disabled = loadingResults;
   const key = searchFailed ? 'online.retry' : 'online.loadMore';
   more.dataset.i18n = key;
   more.textContent = t(key);
@@ -387,7 +385,7 @@ function renderReleaseList(appended = null) {
   list.append(batch);
   // Restore images (from cache) and any expanded tracklists after the re-render.
   let entering = 0;
-  const animatePage = appended && !matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const animatePage = appended && onlineViewportHeight() && !matchMedia("(prefers-reduced-motion: reduce)").matches;
   for (const c of candidates) {
     applyImage(c);
     const card = cardEl(c.id);
@@ -398,8 +396,7 @@ function renderReleaseList(appended = null) {
         { duration: 280, delay: Math.min(entering++ * 18, 90), easing: 'cubic-bezier(.16,1,.3,1)', fill: 'backwards' });
     }
     if (card && expandedIds.has(c.id) && releaseCache.has(c.id)) {
-      card.setAttribute("aria-expanded", "true");
-      card.querySelector(".release-caret").innerHTML = ico("caret-down");
+      setReleaseExpanded(card, true);
       renderTracklist(card, releaseCache.get(c.id));
       card.querySelector(".release-tracklist").dataset.loaded = "1";
     }
@@ -582,11 +579,12 @@ function cardMarkup(c) {
   const meta = releaseMeta(c);
   const metaLine = meta ? `<span class="release-meta" title="${escapeHtml(fullMeta)}">${escapeHtml(meta)}</span>` : "";
   const label = releaseLabel(c);
+  const tracklistId = `release-tracklist-${escapeHtml(encodeURIComponent(c.id))}`;
   return `
-    <article class="release-card" data-id="${escapeHtml(c.id)}" aria-expanded="false">
+    <article class="release-card" data-id="${escapeHtml(c.id)}" data-expanded="false">
       <div class="release-header-row">
         <button class="release-cover" type="button" data-act="artwork" title="${escapeHtml(t("artwork.title"))}" aria-label="${escapeHtml(t("artwork.forRelease", { title: c.title }))}">${mediaBadgeMarkup(c)}</button>
-        <button class="release-head" type="button">
+        <button class="release-head" type="button" aria-expanded="false" aria-controls="${tracklistId}">
           <span class="release-info">
             <span class="release-title" title="${escapeHtml(c.title)}">${escapeHtml(c.title)}</span>
             ${artist}
@@ -597,7 +595,7 @@ function cardMarkup(c) {
         <div class="release-label" data-markup="${escapeHtml(label)}">${label}</div>
         <button class="release-import btn-sm" type="button" data-act="import" title="${escapeHtml(t("online.importTitle"))}" aria-label="${escapeHtml(t("online.importTitle"))}"><svg class="ico"><use href="#i-import"/></svg><span>${t("online.importAction")}</span></button>
       </div>
-      <div class="release-tracklist"></div>
+      <div class="release-tracklist" id="${tracklistId}"></div>
     </article>`;
 }
 
@@ -610,46 +608,19 @@ function setCoverImage(cover, src) {
   // Built through the DOM: the data URI carries a server's MIME type (#603).
   const img = document.createElement("img");
   img.alt = "";
+  cover.classList.remove("round-art");
+  cover.style.removeProperty("--art-inset");
+  // Analyse the displayed image once. Replaced images carry their own listener
+  // and can be collected with the card, including their encoded data URI.
+  img.addEventListener("load", () => {
+    if (!cover.isConnected || img.parentElement !== cover) return;
+    const inset = roundArtInset(img);
+    if (inset == null) return;
+    cover.classList.add("round-art");
+    cover.style.setProperty("--art-inset", `${(inset * 100).toFixed(2)}%`);
+  }, { once: true });
   img.src = src;
   cover.prepend(img);
-  markRoundArt(cover, src);
-}
-
-// Round label art (#397): a record label drawn as a circle on a white square —
-// a whole label's catalogue is often sleeved that way. In the framed square
-// well the white corners read as a box the circle was forced into, so the well
-// drops its frame and clips the image to the circle (style.css): the white is
-// cut away rather than blended, which WKWebView won't do inside the card's
-// button, and a clip works the same in both themes.
-//
-// Told apart from an ordinary cover by sampling a small copy of the image: all
-// four corners near-white, and the middle of all four edges NOT — the circle
-// reaches (almost) to the edges, a square cover on a white background doesn't.
-// How far in it starts is measured too, so the clip lands on the circle's own
-// edge and leaves no white rim. The image is a data URI fetched by the backend,
-// so reading its pixels is never cross-origin.
-const roundArtCache = new Map(); // src -> inset fraction, or null when not round
-
-function markRoundArt(cover, src) {
-  const apply = (inset) => {
-    cover.classList.toggle("round-art", inset != null);
-    if (inset != null) cover.style.setProperty("--art-inset", `${(inset * 100).toFixed(2)}%`);
-    else cover.style.removeProperty("--art-inset");
-  };
-  if (roundArtCache.has(src)) {
-    apply(roundArtCache.get(src));
-    return;
-  }
-  apply(null);
-  const img = new Image();
-  img.onload = () => {
-    const inset = roundArtInset(img);
-    roundArtCache.set(src, inset);
-    // The well may hold a newer image by now (the full cover replacing the
-    // thumbnail); only the one that was measured gets the verdict.
-    if (cover.querySelector("img")?.getAttribute("src") === src) apply(inset);
-  };
-  img.src = src;
 }
 
 // How far in from the image's edge its circle starts, as a fraction of the
@@ -755,24 +726,13 @@ async function applyImage(c, allowJoinedRetry = true) {
   if (cover) setCoverImage(cover, chosen ? `data:${chosen.mime};base64,${chosen.data_base64}` : dataUri);
 }
 
-// Fetch each release once, in the background, to fill the track/disc count on
-// every card up front. A small pool fetches several at a time (the commands are
-// async/off-main-thread) so counts appear quickly without bursting past Discogs'
-// 60/min limit. Cached, so expanding a card and toggling layout are then instant.
-const PREFETCH_CONCURRENCY = 4;
-
-// A rate limit (HTTP 429) pauses every worker of the sweep for as long as the
-// provider asks, then the release it hit is tried again. The backend only reports
-// the limit, it does not wait; the sweep used to skip to the next release at once,
-// so the rest of the page went out straight into the limit and kept it in force.
-// At least a second, so a stated wait of 0 is not a burst, and at most two
-// minutes, so a page left open does not sit dark for an hour.
+// Keep only one background detail command in flight. The native provider
+// queue serialises these calls with page searches for the same provider.
 const PREFETCH_MIN_PAUSE_MS = 1000;
 const PREFETCH_MAX_PAUSE_MS = 120_000;
 // A server that is down answers everything this way too (MusicBrainz and Soundeo
 // report a 503 as a rate limit). This many limits with nothing fetched between
-// them ends the sweep, three rounds of all the workers, and the cards keep their
-// dash; expanding a card still fetches it.
+// them ends the sweep, and the cards keep their dash until opened.
 const PREFETCH_MAX_LIMITS_IN_A_ROW = 12;
 
 // The wait a rate-limit error asks for, in ms, or null for any other error.
@@ -784,71 +744,88 @@ function rateLimitPauseMs(e) {
   return Math.min(Math.max(ms, PREFETCH_MIN_PAUSE_MS), PREFETCH_MAX_PAUSE_MS);
 }
 
-async function prefetchReleaseCounts(items, gen) {
-  const source = releaseSource;
-  const token = await providerToken(source);
-  if (gen !== undefined && gen !== searchGen) return;
-  const queue = (items || releaseCandidates).filter((c) => !releaseCache.has(c.id));
-  if (queue.length === 0) return;
-  // The sweep is interruptible background work — show Stop while it runs (#108).
-  prefetching = true;
-  updateLoadMoreUi();
-  // When the sweep may send its next request: later than now while a rate limit holds.
-  let resumeAt = 0;
-  let limitsInARow = 0;
-  async function worker() {
-    while (queue.length) {
-      // A newer search, or Stop (#96), bumps the generation → bail.
-      if (gen !== undefined && gen !== searchGen) return;
-      // Wait out a rate limit, then look at the generation again.
-      const wait = resumeAt - Date.now();
-      if (wait > 0) {
-        await new Promise((resolve) => setTimeout(resolve, wait));
-        continue;
-      }
-      const c = queue.shift();
-      if (!c || releaseCache.has(c.id)) continue;
-      try {
-        const release = await invoke("provider_fetch_release", { source, token, releaseId: c.id });
-        if (gen !== undefined && gen !== searchGen) return;
-        releaseCache.set(c.id, release);
-        const pill = countPillOf(c.id);
-        if (pill) pill.textContent = countLabel(c.id);
-        updateMediaBadge(c); // fill the badge's ×N now that disc count is known
-        applyImage(c); // a thumbnail that waited for this lookup (#748)
-        limitsInARow = 0;
-      } catch (e) {
-        // A rate limit pauses the sweep and retries this release after it.
-        const pause = rateLimitPauseMs(e);
-        if (pause !== null) {
-          limitsInARow += 1;
-          if (limitsInARow >= PREFETCH_MAX_LIMITS_IN_A_ROW) {
-            queue.length = 0;
-            return;
-          }
-          queue.unshift(c);
-          resumeAt = Math.max(resumeAt, Date.now() + pause);
-        }
-        /* anything else: skip this one; the card just keeps its dash */
+function clearReleasePrefetch() {
+  clearTimeout(detailSweep?.timer);
+  detailSweep = null;
+  releaseRequests.clear();
+}
+
+function releaseDetail(id, source, token, gen) {
+  const cached = releaseCache.get(id);
+  if (cached) return Promise.resolve(cached);
+  const pending = releaseRequests.get(id);
+  if (pending) return pending;
+  const request = invoke("provider_fetch_release", { source, token, releaseId: id })
+    .then(release => {
+      if (gen === searchGen) releaseCache.set(id, release);
+      return release;
+    })
+    .finally(() => {
+      if (releaseRequests.get(id) === request) releaseRequests.delete(id);
+    });
+  releaseRequests.set(id, request);
+  return request;
+}
+
+function queueReleaseCounts(items, token) {
+  if (!items.length) return;
+  detailSweep ??= { queue: [], running: false, timer: null, resumeAt: 0, limits: 0, token };
+  detailSweep.token = token;
+  detailSweep.queue.push(...items);
+}
+
+async function pumpReleaseCounts() {
+  const sweep = detailSweep;
+  if (!sweep || sweep.running || sweep.timer || !sweep.queue.length || loadingResults || !onlineViewportHeight()) return;
+  const wait = sweep.resumeAt - Date.now();
+  if (wait > 0) {
+    sweep.timer = setTimeout(() => {
+      sweep.timer = null;
+      void pumpReleaseCounts();
+    }, wait);
+    return;
+  }
+  const candidate = sweep.queue.shift();
+  const gen = searchGen;
+  sweep.running = true;
+  try {
+    await releaseDetail(candidate.id, releaseSource, sweep.token, gen);
+    if (detailSweep !== sweep) return;
+    const pill = countPillOf(candidate.id);
+    if (pill) pill.textContent = countLabel(candidate.id);
+    updateMediaBadge(candidate);
+    applyImage(candidate); // a thumbnail that waited for this lookup (#748)
+    sweep.limits = 0;
+  } catch (error) {
+    const pause = rateLimitPauseMs(error);
+    if (detailSweep === sweep && pause !== null) {
+      if (++sweep.limits >= PREFETCH_MAX_LIMITS_IN_A_ROW) sweep.queue.length = 0;
+      else {
+        sweep.queue.unshift(candidate);
+        sweep.resumeAt = Date.now() + pause;
       }
     }
+  } finally {
+    if (detailSweep === sweep) {
+      sweep.running = false;
+      if (!sweep.queue.length) updateLoadMoreUi();
+      else void pumpReleaseCounts();
+    }
   }
-  await Promise.all(Array.from({ length: PREFETCH_CONCURRENCY }, worker));
-  // Only the sweep for the current generation owns the flag (Stop / a newer
-  // search may have moved on already).
-  if (gen === undefined || gen === searchGen) {
-    prefetching = false;
-    updateLoadMoreUi();
-  }
+}
+
+function setReleaseExpanded(card, expanded) {
+  card.dataset.expanded = String(expanded);
+  card.querySelector('.release-head').setAttribute('aria-expanded', String(expanded));
+  card.querySelector('.release-caret').innerHTML = ico(expanded ? "caret-down" : "chevron-right");
 }
 
 // Expand/collapse a card; on first expand, fetch the release + render its
 // tracklist and pull the full cover for embedding.
 async function toggleCard(card) {
   const id = card.dataset.id;
-  const expanded = card.getAttribute("aria-expanded") === "true";
-  card.setAttribute("aria-expanded", expanded ? "false" : "true");
-  card.querySelector(".release-caret").innerHTML = ico(expanded ? "chevron-right" : "caret-down");
+  const expanded = card.dataset.expanded === "true";
+  setReleaseExpanded(card, !expanded);
   if (expanded) {
     expandedIds.delete(id);
     return;
@@ -874,19 +851,16 @@ async function toggleCard(card) {
   try {
     const token = await providerToken(source);
     if (!current()) return;
-    let release = releaseCache.get(id);
-    if (!release) {
-      release = await invoke("provider_fetch_release", { source, token, releaseId: id });
-      if (!current()) return;
-      releaseCache.set(id, release);
-    }
+    const release = await releaseDetail(id, source, token, gen);
+    if (!current() || card.dataset.expanded !== "true" || body.dataset.loaded === "1") return;
     updateMediaBadge(releaseCandidates.find(c => c.id === id) || { id, format: release.format });
     renderTracklist(card, release);
     body.dataset.loaded = "1";
     const tkPill = countPillOf(id); if (tkPill) tkPill.textContent = countLabel(id);
     loadFullCover(id, release.cover_image_url, card);
   } catch (e) {
-    if (!current()) return;
+    if (!current() || card.dataset.expanded !== "true") return;
+    setReleaseExpanded(card, false);
     body.innerHTML = "";
     body.dataset.loaded = "";
     expandedIds.delete(id);
@@ -976,14 +950,14 @@ function measureRows(tbody, state) {
 function renderWindow(card, force = false, remeasured = false) {
   const state = tracklistState.get(card);
   const tbody = card.querySelector(".release-tracklist tbody");
-  if (!state || !tbody || card.getAttribute("aria-expanded") !== "true") return;
+  if (!state || !tbody || card.dataset.expanded !== "true") return;
   const n = state.rows.length;
   let start = 0;
   let end = Math.min(n, WINDOW_CHUNK * 2);
   const scroller = card.closest(".online-scroll");
   // A hidden panel has no size to go by, and a selection change can redraw the
   // list while another tab is open: the rows stay where the panel will show them.
-  const hidden = !scroller || scroller.clientHeight === 0;
+  const hidden = !scroller || !onlineViewportHeight();
   if (hidden && state.end > 0) {
     start = state.start;
     end = state.end;
@@ -1089,33 +1063,60 @@ function shiftWindow(tbody, state, start, end) {
   state.end = end;
 }
 
-// Every open tracklist follows the panel as it scrolls, once a frame.
+// Geometry can change when the drawer reopens. Keep its current cards, and
+// only page in response to visible scrolling or the arrival of a visible page.
+const onlineScroll = document.querySelector(".online-scroll");
 let windowFrame = 0;
+let pagingRequested = false;
+function onlineViewportHeight() {
+  if (!onlineScroll || onlineScroll.closest('[inert]')) return 0;
+  return onlineScroll.clientHeight;
+}
+function requestOnlinePaging() {
+  if (!onlineViewportHeight()) return;
+  pagingRequested = true;
+  scheduleTracklistWindows();
+}
 function scheduleTracklistWindows() {
   if (windowFrame) return;
   windowFrame = requestAnimationFrame(() => {
     windowFrame = 0;
-    const onlineHeight = onlineScroll?.clientHeight;
+    const shouldPage = pagingRequested;
+    pagingRequested = false;
+    const onlineHeight = onlineViewportHeight();
     if (onlineHeight) {
       for (const id of expandedIds) {
         const card = cardEl(id);
-        if (card) renderWindow(card);
+        if (!card) continue;
+        renderWindow(card);
+        if (tracklistState.get(card)?.widthDirty) fixTrackColumnWidth(card);
       }
+      if (shouldPage) updateResultViewport(onlineHeight);
+      void pumpReleaseCounts();
     }
     updateScrollFades();
-    if (onlineHeight) updateResultViewport(onlineHeight);
   });
 }
-const onlineScroll = document.querySelector(".online-scroll");
 function updateResultViewport(height) {
   const remaining = onlineScroll.scrollHeight - onlineScroll.scrollTop - height;
   if (remaining < 96 && releaseCandidates.length && !searchFailed && !pagingPaused) void loadMoreResults();
 }
-onlineScroll?.addEventListener("scroll", scheduleTracklistWindows, { passive: true });
+onlineScroll?.addEventListener("scroll", requestOnlinePaging, { passive: true });
+// The desktop drawer stays laid out while inert, so resize alone cannot tell
+// us that it reopened. Compact layout and tab changes resize the scrollport.
+const onlineDock = onlineScroll?.closest('.dock-right');
+if (onlineDock) {
+  const drawerVisibility = new MutationObserver(() => {
+    pagingRequested = false;
+    scheduleTracklistWindows();
+  });
+  drawerVisibility.observe(onlineDock, { attributes: true, attributeFilter: ['inert'] });
+}
 // The panel's size changes with the window, and from nothing when its tab opens.
 const inspectorScrollports = [...document.querySelectorAll('.mode-col .online-scroll, .mode-col .editor-scroll, .mode-col .from-name-scroll, .mode-col > .mode-panel:not(#panel-tagger)')];
 function updateScrollFades() {
   for (const port of inspectorScrollports) {
+    if (port === onlineScroll && !onlineViewportHeight()) continue;
     port.classList.toggle('can-scroll-up',port.clientHeight > 0 && port.scrollTop > 1);
     port.classList.toggle('can-scroll-down', port.clientHeight > 0 && port.scrollHeight - port.scrollTop - port.clientHeight > 1);
     const focus = document.activeElement;
@@ -1140,6 +1141,7 @@ for (const port of inspectorScrollports) inspectorContent.observe(port, { childL
 // A table that stops matching its layout has changed row height with no scroll
 // to notice it by: a font size set in Settings, a zoom. It is laid out again.
 const tracklistResize = new ResizeObserver((entries) => {
+  if (!onlineViewportHeight()) return;
   for (const entry of entries) {
     const card = entry.target.closest(".release-card");
     if (!card || !entry.contentRect.height || tracklistDrift(card) <= 2) continue;
@@ -1154,9 +1156,15 @@ const tracklistResize = new ResizeObserver((entries) => {
 let measureCanvas = null;
 function fixTrackColumnWidth(card) {
   const state = tracklistState.get(card);
+  if (!state || !card.isConnected) return;
+  if (!onlineViewportHeight() || card.dataset.expanded !== "true") {
+    state.widthDirty = true;
+    return;
+  }
   const table = card.querySelector(".release-tracklist table");
   const sample = card.querySelector(".release-tracklist .tk-t");
-  if (!state || !table || !sample) return;
+  if (!table || !sample) return;
+  state.widthDirty = false;
   // A face first used by these rows is still loading, and a canvas would measure
   // its fallback. Measured again once it is in.
   if (document.fonts.status === "loading") document.fonts.ready.then(() => fixTrackColumnWidth(card));
@@ -1222,6 +1230,7 @@ function renderTracklist(card, release) {
     checked: new Uint8Array(release.tracks.length).fill(1),
     offsets: null, // where each drawn row starts, once a row of each kind is measured
     heights: null,
+    widthDirty: true,
     start: -1,
     end: -1,
   });
@@ -1315,12 +1324,9 @@ async function pickReleaseArtwork(card) {
   trigger.setAttribute("aria-busy", "true");
   try {
     const token = await providerToken(source);
-    let release = releaseCache.get(id);
-    if (!release) {
-      release = await invoke("provider_fetch_release", { source, token, releaseId: id });
-      if (gen !== searchGen) return;
-      releaseCache.set(id, release);
-    }
+    if (gen !== searchGen) return;
+    const release = await releaseDetail(id, source, token, gen);
+    if (gen !== searchGen) return;
     const images = release.images?.length ? release.images :
       (release.cover_image_url ? [{ url: release.cover_image_url }] : []);
     if (!images.length) { toast(t("toast.online.noImages"), true); return; }
@@ -1622,9 +1628,9 @@ async function openReleaseArtworkMenu(event) {
     let release = releaseCache.get(id);
     if (!release) {
       const token = await providerToken(source);
-      release = await invoke('provider_fetch_release', { source, token, releaseId:id });
       if (gen !== searchGen || !card.isConnected) return;
-      releaseCache.set(id, release);
+      release = await releaseDetail(id, source, token, gen);
+      if (gen !== searchGen || !card.isConnected) return;
       updateMediaBadge(releaseCandidates.find(candidate => candidate.id === id) || { id, format:release.format });
     }
     if (request !== artworkMenuRequest || gen !== searchGen || !card.isConnected) return;
@@ -1706,7 +1712,7 @@ document.addEventListener("click", (e) => {
 // A family can change width without changing row height. Re-measure only the
 // expanded release cards after the interface face changes/finishes loading.
 document.addEventListener("tagrex:interfacefont", () => {
-  for (const card of releaseList().querySelectorAll('.release-card[aria-expanded="true"]')) fixTrackColumnWidth(card);
+  for (const card of releaseList().querySelectorAll('.release-card[data-expanded="true"]')) fixTrackColumnWidth(card);
 });
 
 // A language switch: the cards and their open tracklists are built at run time, so

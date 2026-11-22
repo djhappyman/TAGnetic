@@ -1139,6 +1139,7 @@ export const en = {
   "group.release": "Release id",
   "group.drop": "By drop",
   "group.none": "None",
+  "table.sortWithinGroups": "Sorted within each group. Choose None in the Group by menu to sort the entire list.",
   "group.buttonLabel": "Group by: {key}",
   "field.artist": "Artist",
   "field.title": "Title",
