@@ -83,6 +83,7 @@ test('trusted recovery displays the server scope and submits its exact proof', a
     window.mcpFixture.emit('service_changed', {});
   });
   await page.locator('#agent-activity').click();
+  await page.getByRole('button', { name: 'Check interrupted work' }).click();
   await expect(page.getByRole('region', { name: 'Interrupted agent work' })).toBeVisible();
   await expect(page.getByText('/music/example.flac', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Keep completed changes', exact: true }).click();
@@ -96,6 +97,7 @@ test('a stale recovery proof refreshes the scope before a person retries', async
     window.mcpFixture.emit('service_changed', {});
   });
   await page.locator('#agent-activity').click();
+  await page.getByRole('button', { name: 'Check interrupted work' }).click();
   const restore = page.getByRole('button', { name: 'Keep completed changes', exact: true });
   await restore.click();
   await expect(page.locator('#mcp-error')).toContainText('recovery evidence changed');
@@ -123,8 +125,8 @@ test('pairing generates an install command; pairing alone never claims installat
   await expect(page.locator('.agent-connections')).toContainText('opencode mcp list');
   await page.locator('#settings-close').click();
   await page.locator('#agent-activity').click();
-  await page.getByRole('button', { name: 'Revoke', exact: true }).first().click();
-  await expect(page.getByRole('button', { name: 'Revoke', exact: true }).first()).toBeDisabled();
+  await expect(page.getByRole('dialog', { name: 'Agents' })).toContainText('No agent connected');
+  await expect(page.getByRole('button', { name: 'Revoke', exact: true })).toHaveCount(0);
 });
 
 test('unavailable recovery evidence stays in activity, away from connection setup', async ({ page }) => {
@@ -133,6 +135,7 @@ test('unavailable recovery evidence stays in activity, away from connection setu
     window.mcpFixture.emit('service_changed', {});
   });
   await page.locator('#agent-activity').click();
+  await page.getByRole('button', { name: 'Check interrupted work' }).click();
   await expect(page.getByText('Open the original folder to inspect this interrupted operation.', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Keep completed changes', exact: true })).toHaveCount(0);
   await page.keyboard.press('Escape');
@@ -546,4 +549,154 @@ test('fresh Files and Reset use the TagScanner column defaults while a saved lay
   await page.locator('#tracks th[data-sort="file"]').click({button:'right'});
   await page.locator('#columns-menu').getByRole('button',{name:'Reset',exact:true}).click();
   await expect.poll(headers).toEqual(defaults);
+});
+
+test('the header shows live names, model and native save progress after an agent disconnects', async ({ page }) => {
+  await page.setViewportSize({ width: 480, height: 720 });
+  const trigger = page.locator('#agent-activity');
+  const popup = page.getByRole('dialog', { name: 'Agents' });
+  await expect(trigger).toHaveAttribute('data-agent-state', 'disconnected');
+  await trigger.click();
+  await expect(popup.getByRole('button', { name: 'Connect an agent' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(trigger).toBeFocused();
+
+  await page.evaluate(() => {
+    const fixture = window.mcpFixture;
+    fixture.state.activity.connections = [
+      { principal: 'codex', name: 'Codex CLI' },
+      { principal: 'opencode', name: 'opencode', model: 'Claude Sonnet' },
+    ];
+    fixture.emit('agent_activity_changed', {});
+  });
+  await expect(trigger).toHaveAttribute('data-agent-state', 'connected');
+  await trigger.click();
+  await expect(popup.getByText('Codex', { exact: true })).toBeVisible();
+  await expect(popup.getByText('OpenCode', { exact: true })).toBeVisible();
+  await expect(popup.getByText('Claude Sonnet', { exact: true })).toBeVisible();
+  await expect(popup).toHaveClass(/controller-popover-content/);
+  const bounds = await popup.boundingBox();
+  expect(bounds.x).toBeGreaterThanOrEqual(0);
+  expect(bounds.x + bounds.width).toBeLessThanOrEqual(480);
+  await expect(popup).not.toContainText('Work history');
+
+  await page.evaluate(() => {
+    const fixture = window.mcpFixture;
+    fixture.state.activity.work = [{ principal: 'opencode', kind: 'staging' }];
+    fixture.emit('agent_activity_changed', {});
+  });
+  await expect(trigger).toHaveAttribute('data-agent-state', 'working');
+  await expect(popup).toContainText('Staging changes');
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await expect.poll(() => trigger.locator('.agent-status-dot').evaluate(node => getComputedStyle(node).animationName)).toBe('none');
+
+  await page.evaluate(() => {
+    const fixture = window.mcpFixture;
+    fixture.state.activity.work = [];
+    fixture.state.activity.staged = { id: 'stage_one', files: 38 };
+    fixture.emit('agent_activity_changed', {});
+  });
+  await expect(popup).toContainText('38 files staged');
+
+  await page.evaluate(() => {
+    const fixture = window.mcpFixture;
+    fixture.state.activity.connections = [];
+    fixture.state.activity.writes = [{ id: 'save_one', principal: 'opencode', status: 'writing', processed: 14, total: 38 }];
+    fixture.emit('operation_changed', {});
+  });
+  await expect(popup).toContainText('No agent connected');
+  await expect(popup).toContainText('Saving 14 of 38 files');
+  await expect(popup.getByRole('progressbar', { name: 'Save progress' })).toHaveAttribute('value', '14');
+
+  await page.evaluate(() => {
+    const fixture = window.mcpFixture;
+    fixture.state.activity.writes = [];
+    fixture.emit('operation_changed', { operation: 'save_one', status: 'succeeded', completed: true, processed: 38 });
+  });
+  await expect(trigger).toHaveAttribute('data-agent-state', 'finished');
+  await expect(popup).toContainText('38 files saved');
+  await expect(trigger).toHaveAttribute('data-agent-state', 'disconnected');
+});
+
+test('the centered connect action opens setup and the popup re-enables an existing pairing', async ({ page }) => {
+  const trigger = page.locator('#agent-activity');
+  const popup = page.getByRole('dialog', { name: 'Agents' });
+  await trigger.click();
+  const connect = popup.getByRole('button', { name: 'Connect an agent' });
+  await expect(connect).toBeVisible();
+  const bounds = await popup.boundingBox();
+  const action = await connect.boundingBox();
+  expect(Math.abs(action.x + action.width / 2 - (bounds.x + bounds.width / 2))).toBeLessThan(2);
+  await connect.click();
+  await expect(page.getByRole('tab', { name: 'MCP connection', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await page.locator('#settings-close').click();
+  await page.evaluate(() => {
+    const f = window.mcpFixture;
+    f.state.enabled = false;
+    f.state.clients = [{ id: 'agent', label: 'Codex', revoked: false }];
+    f.emit('service_changed', {});
+  });
+  await trigger.click();
+  const reconnect = popup.getByRole('button', { name: 'Reconnect agents' });
+  await expect(reconnect).toBeVisible();
+  const reconnectBounds = await reconnect.boundingBox();
+  const popupBounds = await popup.boundingBox();
+  expect(Math.abs(reconnectBounds.x + reconnectBounds.width / 2 - (popupBounds.x + popupBounds.width / 2))).toBeLessThan(2);
+  await reconnect.click();
+  await expect.poll(() => page.evaluate(() => window.mcpFixture.state.enabled)).toBe(true);
+  await expect(reconnect).toHaveCount(0);
+  await expect(page.getByRole('tab', { name: 'MCP connection', exact: true })).toHaveCount(0);
+});
+
+test('agent row controls hover, pause, stop, reconnect, and restore from Settings independently', async ({ page }) => {
+  const trigger = page.locator('#agent-activity');
+  const popup = page.getByRole('dialog', { name: 'Agents' });
+  await page.evaluate(() => {
+    const f = window.mcpFixture;
+    f.state.activity.connections = [
+      { id: 'codex-session', principal: 'shared-pairing', name: 'Codex' },
+      { id: 'opencode-session', principal: 'shared-pairing', name: 'OpenCode', model: 'Claude Sonnet' },
+    ];
+    f.state.activity.writes = [{ id: 'save-one', session: 'codex-session', status: 'writing', processed: 2, total: 7 }];
+    f.emit('agent_activity_changed', {});
+  });
+  await expect(trigger).toHaveAttribute('data-agent-state', 'working');
+  await trigger.click();
+  await expect(popup.locator('.agent-status-header').getByRole('button', { name: 'Connect an agent' })).toBeVisible();
+  const codex = popup.locator('.agent-status-row').filter({ has: page.getByText('Codex', { exact: true }) });
+  const opencode = popup.locator('.agent-status-row').filter({ has: page.getByText('OpenCode', { exact: true }) });
+  await expect(codex).toContainText('Saving 2 of 7 files');
+  await expect(opencode).not.toContainText('Saving');
+  const controls = codex.locator('.agent-row-controls');
+  await expect(controls).toHaveCSS('opacity', '0');
+  await codex.hover();
+  await expect(controls).toHaveCSS('opacity', '1');
+  await expect(opencode.locator('.agent-row-controls')).toHaveCSS('opacity', '0');
+  await codex.getByRole('button', { name: 'Stop job for Codex' }).click();
+  await expect.poll(() => page.evaluate(() => window.mcpFixture.state.lastStoppedOperation)).toBe('save-one');
+  await opencode.hover();
+  await opencode.getByRole('button', { name: 'Pause edits for OpenCode' }).click();
+  await expect(opencode).toContainText('Edits paused');
+  await expect(codex.getByRole('button', { name: 'Pause edits for Codex' })).toHaveCount(1);
+  await opencode.getByRole('button', { name: 'Resume edits for OpenCode' }).click();
+  await opencode.getByRole('button', { name: 'Disconnect OpenCode' }).click();
+  await expect(opencode).toContainText('Disconnected');
+  await opencode.getByRole('button', { name: 'Reconnect OpenCode' }).click();
+  await expect(opencode).not.toContainText('Disconnected');
+  await opencode.getByRole('button', { name: 'Hide OpenCode from Agents' }).click();
+  await expect(opencode).toHaveCount(0);
+  expect(await page.evaluate(() => window.mcpFixture.state.activity.connections.length)).toBe(2);
+  await popup.locator('.agent-status-header').getByRole('button', { name: 'Connect an agent' }).click();
+  const settings = page.locator('.agent-connections');
+  await expect(settings).toContainText('OpenCode · Claude Sonnet');
+  await settings.getByRole('button', { name: 'Show in Agents' }).click();
+  await page.locator('#settings-close').click();
+  await trigger.click();
+  await expect(popup).toContainText('OpenCode');
+  expect(await page.evaluate(() => window.mcpFixture.state.agentControls)).toEqual([
+    { sessionId: 'opencode-session', action: 'pause' },
+    { sessionId: 'opencode-session', action: 'resume' },
+    { sessionId: 'opencode-session', action: 'disconnect' },
+    { sessionId: 'opencode-session', action: 'reconnect' },
+  ]);
 });

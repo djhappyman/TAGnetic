@@ -5,10 +5,12 @@
 //! IPC. Opening independent IPC calls lets Stop/status bypass a long-running
 //! request on the same MCP connection.
 
+mod activity;
 mod bridge;
 mod host;
 mod ipc;
 
+pub use activity::SessionControl;
 pub use bridge::{handle_cli, run_stdio, StdioOptions};
 pub use host::{start_host, HostHandle};
 pub use ipc::{Discovery, TransportError, MAX_FRAME_BYTES};

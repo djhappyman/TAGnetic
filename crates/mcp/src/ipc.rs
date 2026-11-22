@@ -50,10 +50,27 @@ pub(crate) enum Request {
         credential: String,
     },
     ListTools,
+    Presence {
+        session: String,
+        name: String,
+        model: Option<String>,
+        connected: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        controllable: bool,
+    },
     Call {
         tool: String,
         arguments: Value,
     },
+    SessionCall {
+        session: String,
+        tool: String,
+        arguments: Value,
+    },
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Serialize, Deserialize)]

@@ -2925,6 +2925,8 @@ fn main() {
         .manage(Player::new())
         .invoke_handler(tauri::generate_handler![
             mcp_control::mcp_status,
+            mcp_control::mcp_agent_status,
+            mcp_control::mcp_control_agent,
             mcp_control::mcp_set_enabled,
             mcp_control::mcp_pair_client,
             mcp_control::mcp_revoke_client,

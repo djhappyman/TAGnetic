@@ -531,6 +531,13 @@ impl Service {
             json!({"enabled":state.security.enabled,"clients":state.security.clients.iter().map(|c| json!({"id":c.id,"label":c.label,"grant":c.grant,"revoked":c.revoked})).collect::<Vec<_>>() }),
         )
     }
+    pub fn has_agent_pairing(&self) -> ServiceResult<bool> {
+        Ok(lock(&self.0.state)?
+            .security
+            .clients
+            .iter()
+            .any(|client| !client.revoked && !expired(&client.grant)))
+    }
     pub fn revoke_client(&self, id: &str) -> ServiceResult<()> {
         let mut state = lock(&self.0.state)?;
         let client = state
@@ -634,6 +641,31 @@ impl Service {
             .map(|op| lock(&op.record).map(|r| r.clone()))
             .collect::<ServiceResult<Vec<_>>>()?;
         Ok(json!({"operations":records}))
+    }
+    pub fn agent_work_status(&self) -> ServiceResult<Value> {
+        let (operations, recovery_required) = {
+            let state = lock(&self.0.state)?;
+            (
+                state.operations.values().cloned().collect::<Vec<_>>(),
+                state.recovery_required,
+            )
+        };
+        let mut active = Vec::new();
+        for operation in operations {
+            let record = lock(&operation.record)?;
+            if matches!(
+                record.status.as_str(),
+                "queued" | "preflight" | "writing" | "rolling_back"
+            ) {
+                active.push(json!({"id":record.id,"principal":record.owner,"status":record.status,"processed":record.processed,"total":record.total}));
+            }
+        }
+        active.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+        Ok(json!({"writes":active,"recovery_required":recovery_required}))
+    }
+
+    pub fn notify_agent_activity(&self) {
+        self.emit("agent_activity_changed", json!({}));
     }
     /// Trusted desktop-only adoption: MCP clients receive sanitized diffs instead.
     pub fn draft_plan(&self, principal_id: &str, draft_id: &str) -> ServiceResult<PlanDto> {

@@ -5365,16 +5365,8 @@ if (TAURI) {
     // During source iteration the old native binary remains usable. Only a
     // backend advertising this contract receives shared-stage commands.
     if (agentsAvailable && status.shared_staging === true) connectSharedStage(status.live_fields);
-    const activity = el('agent-activity');
-    activity.hidden = !agentsEnabled;
-    const active = [...(status.operations?.operations || []), ...(status.analysis?.jobs || [])].filter(operation => ['queued','running','preflight','writing','rolling_back'].includes(operation.status)).length;
-    activity.setAttribute('aria-label', active ? `External agents · ${active} active operations` : 'External agent connections and work');
-    activity.classList.toggle('has-active-work', active > 0);
     if (agentsEnabled && !wasEnabled) mirrorManualPlan(previewPlan);
   }
-  el('agent-activity').addEventListener('click', () => {
-    document.dispatchEvent(new CustomEvent('tagrex:show-agent-activity'));
-  });
   document.addEventListener('tagrex:show-shared-stage', () => {
     el('settings').hidden = true;
     setFileView(true);
