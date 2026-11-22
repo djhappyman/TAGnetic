@@ -169,7 +169,8 @@ body .files-col .file-view-tabs::-webkit-scrollbar { display:none; }
 
 /* Overlay the table without moving its edges, player or Apply footer. */
 body .table-selection-summary { position:absolute; z-index:15; contain:layout; box-sizing:border-box; inset-inline-start:50%; bottom:16px; transform:translateX(-50%); display:flex; align-items:center; gap:var(--sp-2); width:max-content; max-width:calc(100% - 32px); min-height:36px; padding:var(--sp-1) var(--sp-2) var(--sp-1) var(--sp-3); border:1px solid var(--workbench-seam); border-radius:var(--r-pill); background:var(--panel); color:var(--text); box-shadow:0 4px 16px rgb(0 0 0 / .2); font-size:var(--text-xs); line-height:1.4; }
-body .table-selection-summary[hidden] { display:none; }
+/* Keep the absolute overlay laid out when a drag crosses the visibility threshold. */
+body .table-selection-summary[hidden] { display:flex !important; visibility:hidden; pointer-events:none; }
 body .selection-summary-text { flex:1; min-width:0; text-align:center; }
 body .selection-summary-primary { color:var(--accent-ink); font-weight:var(--fw-medium); white-space:nowrap; font-variant-numeric:tabular-nums; }
 body #files-selected-count { display:inline-block; }

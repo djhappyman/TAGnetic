@@ -51,6 +51,7 @@ const KNOWN_CUSTOM_LABELS = {
   REPLAYGAIN_ALBUM_PEAK: "ReplayGain peak (album)",
   WWWAUDIOFILE: "Audio file URL",
   ORIGARTIST: "Original Artist",
+  TPE4: "Remixed by",
   ORIGALBUM: "Original Album",
   ORIGYEAR: "Original Year",
   ENCODEDBY: "Encoded by",
@@ -75,6 +76,13 @@ const VIRTUAL_COLUMNS = [
   // a file showing values you didn't expect explains itself: "ID3v2.4 + ID3v1"
   // is a file with a second, stale answer in it.
   ["tagtypes", "Tag types"],
+  ["path", "Filepath"],
+  ["size", "Size"],
+  ["bitrate", "Bitrate"],
+  ["channels", "Channels"],
+  ["sample_rate", "Sample rate"],
+  ["format", "Kind"],
+  ["modified", "Modified"],
 ];
 
 // The display name for a field or virtual column (#50).

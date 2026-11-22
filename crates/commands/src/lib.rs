@@ -98,6 +98,16 @@ pub struct TrackDto {
     /// costs nothing extra. `None` when the file couldn't be read.
     #[serde(default)]
     pub duration_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bitrate_kbps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_rate_hz: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channels: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified: Option<String>,
     /// Which tag blocks the file carries, in the order it carries them (#47).
     /// From the same probe again. Empty for an unreadable file, and for a file
     /// that genuinely has no tags at all — which is itself worth seeing.
@@ -159,6 +169,11 @@ impl TrackDto {
             unreadable: true,
             read_error: Some(read_error),
             duration_secs: None,
+            size_bytes: None,
+            bitrate_kbps: None,
+            sample_rate_hz: None,
+            channels: None,
+            modified: None,
             tag_blocks: Vec::new(),
             compilation_field: None,
             has_cover: true,
@@ -2618,22 +2633,6 @@ impl App {
         self.read_snapshot(path).map(|read| read.file.clone())
     }
 
-    /// Build a table row from one probe: tags, playing time (#172) and tag
-    /// blocks (#47). Length and Tags columns must reuse that read, so they
-    /// remain free rather than probing the file again.
-    fn track_dto(&self, path: &Path) -> TrackDto {
-        match self.read_snapshot(path) {
-            Ok(read) => TrackDto {
-                duration_secs: Some(read.props.duration_secs),
-                tag_blocks: read.blocks.iter().map(TagBlockDto::from).collect(),
-                compilation_field: read.compilation_field().map(|field| field.to_storage_key()),
-                has_cover: read.has_cover,
-                ..TrackDto::from(read.file.clone())
-            },
-            Err(error) => TrackDto::unreadable(path, ErrorDto::from(AppError::TagIo(error))),
-        }
-    }
-
     /// Gather only the file properties a mask needs, reusing cached audio
     /// properties while reading filesystem size/date freshly when requested.
     fn file_context<'a>(
@@ -2960,9 +2959,7 @@ impl App {
         let mut records = Vec::new();
         for path in self.source_paths() {
             preview_context::check()?;
-            let track = self.track_dto(&path);
-            let row = self.query_row(&track, policy_revision)?;
-            records.push((track, row));
+            records.push(self.track_and_query_row(&path, policy_revision)?);
         }
         preview_context::check()?;
         if policy_revision == u64::MAX
@@ -2985,30 +2982,48 @@ impl App {
         Ok(tracks)
     }
 
-    fn query_row(
+    /// Use the same tag probe and filesystem metadata for the table and the
+    /// native query index, including when only the written rows are refreshed.
+    fn track_and_query_row(
         &self,
-        track: &TrackDto,
+        path: &Path,
         policy_revision: u64,
-    ) -> Result<query::QueryRow, AppError> {
-        let mut row = query::QueryRow::try_from_track(track)?;
-        let read = self.read_snapshot(Path::new(&track.path)).ok();
-        let props = read.as_ref().map(|read| read.props);
-        let metadata = std::fs::metadata(&track.path).ok();
+    ) -> Result<(TrackDto, query::QueryRow), AppError> {
+        let (mut track, file_context) = match self.read_snapshot(path) {
+            Ok(read) => (
+                TrackDto {
+                    duration_secs: Some(read.props.duration_secs),
+                    bitrate_kbps: read.props.bitrate_kbps,
+                    sample_rate_hz: read.props.sample_rate_hz,
+                    channels: read.props.channels,
+                    tag_blocks: read.blocks.iter().map(TagBlockDto::from).collect(),
+                    compilation_field: read.compilation_field().map(|field| field.to_storage_key()),
+                    has_cover: read.has_cover,
+                    ..TrackDto::from(read.file.clone())
+                },
+                Some((read.file.format, read.props)),
+            ),
+            Err(error) => (
+                TrackDto::unreadable(path, ErrorDto::from(AppError::TagIo(error))),
+                None,
+            ),
+        };
+        let metadata = std::fs::metadata(path).ok();
+        let modified = metadata.as_ref().and_then(|m| m.modified().ok());
+        track.size_bytes = metadata.as_ref().map(|m| m.len());
+        track.modified = modified.and_then(tagrex_core::mask::format_file_date);
+        let mut row = query::QueryRow::try_from_track(&track)?;
         row.set_source_metadata(metadata.as_ref(), policy_revision);
         row.set_technical(
-            metadata.as_ref().map(|m| m.len()),
-            props.as_ref().and_then(|p| p.bitrate_kbps),
-            props.as_ref().and_then(|p| p.sample_rate_hz),
-            props.as_ref().and_then(|p| p.channels),
+            track.size_bytes,
+            track.bitrate_kbps,
+            track.sample_rate_hz,
+            track.channels,
         );
-        if let Some(read) = read {
-            row.set_file_context(
-                read.file.format,
-                read.props,
-                metadata.and_then(|m| m.modified().ok()),
-            );
+        if let Some((format, props)) = file_context {
+            row.set_file_context(format, props, modified);
         }
-        Ok(row)
+        Ok((track, row))
     }
 
     fn validate_query_policy(&self) -> u64 {
@@ -3194,9 +3209,9 @@ impl App {
         let mut tracks = Vec::with_capacity(paths.len());
         for path in paths {
             preview_context::check()?;
-            let track = self.track_dto(path);
+            let (track, row) = self.track_and_query_row(path, policy_revision)?;
             preview_context::check()?;
-            rows.push(self.query_row(&track, policy_revision)?);
+            rows.push(row);
             tracks.push(track);
         }
         preview_context::check()?;
@@ -8879,6 +8894,11 @@ impl From<tagrex_core::model::TrackFile> for TrackDto {
             // #47); a conversion from tags alone knows neither the playing time
             // nor which blocks the file carries.
             duration_secs: None,
+            size_bytes: None,
+            bitrate_kbps: None,
+            sample_rate_hz: None,
+            channels: None,
+            modified: None,
             tag_blocks: Vec::new(),
             compilation_field: None,
             has_cover: true,
@@ -12446,8 +12466,22 @@ mod tests {
             assert!(unreadable.tag_blocks.is_empty());
             assert_eq!(unreadable.compilation_field, None);
             assert!(unreadable.has_cover);
-            assert!(!rows[1].unreadable);
-            assert_eq!(rows[1].read_error, None);
+            let readable = &rows[1];
+            assert!(!readable.unreadable);
+            assert_eq!(readable.read_error, None);
+            let metadata = std::fs::metadata(&good).unwrap();
+            assert_eq!(readable.size_bytes, Some(metadata.len()));
+            assert_eq!(
+                readable.modified,
+                metadata
+                    .modified()
+                    .ok()
+                    .and_then(tagrex_core::mask::format_file_date),
+            );
+            let props = TagEngine::read_with_props(&good).unwrap().props;
+            assert_eq!(readable.bitrate_kbps, props.bitrate_kbps);
+            assert_eq!(readable.sample_rate_hz, props.sample_rate_hz);
+            assert_eq!(readable.channels, props.channels);
             assert!(serde_json::to_value(&rows[1])
                 .unwrap()
                 .get("read_error")

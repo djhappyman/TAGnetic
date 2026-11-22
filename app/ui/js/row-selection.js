@@ -9,10 +9,9 @@ export function initRowSelection(options) {
   let gesture = null;
   let swallowClick = false;
   let swallowDoubleClick = false;
-  let autoFrame = 0;
   let paintFrame = 0;
   function schedulePaint() {
-    if (!paintFrame) paintFrame = requestAnimationFrame(() => { paintFrame = 0; paint(); });
+    if (!paintFrame) paintFrame = requestAnimationFrame(update);
   }
   const rectangle = document.createElement('div');
   rectangle.className = 'row-selection-rectangle';
@@ -33,24 +32,22 @@ export function initRowSelection(options) {
   }
   const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
-  function paint() {
-    if (!gesture?.active) return;
-    const box = viewport();
+  function paint(box, scrollTop) {
     const x = clamp(gesture.x, box.left, box.right);
     const y = clamp(gesture.y, box.top, box.bottom);
     const firstX = gesture.startX - wrap.scrollLeft + box.origin.left;
-    const firstY = gesture.startY - wrap.scrollTop + box.origin.top;
+    const firstY = gesture.startY - scrollTop + box.origin.top;
     const left = clamp(Math.min(firstX, x), box.left, box.right);
     const top = clamp(Math.min(firstY, y), box.top, box.bottom);
     const right = clamp(Math.max(firstX, x), box.left, box.right);
     const bottom = clamp(Math.max(firstY, y), box.top, box.bottom);
+    const endY = y - box.origin.top + scrollTop;
+    const paths = options.pathsInRange(Math.min(gesture.startY, endY), Math.max(gesture.startY, endY), box.origin.top, scrollTop);
+    const selection = currentSelection();
+    const range = new Set(paths);
     Object.assign(rectangle.style, {
       left: `${left}px`, top: `${top}px`, width: `${right - left}px`, height: `${bottom - top}px`,
     });
-    const endY = y - box.origin.top + wrap.scrollTop;
-    const paths = options.pathsInRange(Math.min(gesture.startY, endY), Math.max(gesture.startY, endY));
-    const selection = currentSelection();
-    const range = new Set(paths);
     gesture.paths = paths;
     gesture.downward = endY >= gesture.startY;
     // Reconcile membership rather than clearing/re-adding the entire captured
@@ -66,20 +63,23 @@ export function initRowSelection(options) {
     if (changed) options.onChange();
   }
 
-  function autoScroll() {
-    autoFrame = 0;
+  function update() {
+    paintFrame = 0;
     if (!gesture?.active) return;
+    // Edge scrolling and selection share the same frame and viewport bounds.
     const box = viewport();
     const edge = 28;
     const speed = gesture.y < box.top + edge ? -Math.min(16, (box.top + edge - gesture.y) / 2)
       : gesture.y > box.bottom - edge ? Math.min(16, (gesture.y - box.bottom + edge) / 2) : 0;
-    if (!speed) return;
     const before = wrap.scrollTop;
-    wrap.scrollTop += speed;
-    if (wrap.scrollTop === before) return;
-    options.onScroll?.();
-    paint();
-    autoFrame = requestAnimationFrame(autoScroll);
+    if (speed) wrap.scrollTop += speed;
+    let scrollTop = wrap.scrollTop;
+    if (scrollTop !== before) {
+      options.onScroll?.();
+      scrollTop = wrap.scrollTop;
+      schedulePaint();
+    }
+    paint(box, scrollTop);
   }
 
   function moved(event) {
@@ -97,18 +97,17 @@ export function initRowSelection(options) {
     }
     event.preventDefault();
     schedulePaint();
-    if (!autoFrame) autoFrame = requestAnimationFrame(autoScroll);
   }
 
   function finish(cancelled = false) {
     const ended = gesture;
     if (!ended) return;
-    cancelAnimationFrame(paintFrame);
+    if (paintFrame) {
+      cancelAnimationFrame(paintFrame);
+      if (ended.active && !cancelled) paint(viewport(), wrap.scrollTop);
+    }
     paintFrame = 0;
-    if (ended.active && !cancelled) paint();
     gesture = null;
-    cancelAnimationFrame(autoFrame);
-    autoFrame = 0;
     rectangle.hidden = true;
     document.body.classList.remove('selecting-rows');
     document.removeEventListener('mousemove', moved);

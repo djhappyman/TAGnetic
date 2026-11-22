@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createLiveStageTransport } from '../../app/ui/js/live-stage-transport.js';
+import { createSharedStageSync } from '../../app/ui/js/shared-stage.js';
 
 const snapshot = () => ({revision:1,human_revision:0,plan:{changes:[{path:'a',tag_changes:[{field:'title',old:'Saved',new:'Agent'}],cover_change:{old:[],new:[{data_base64:'keep-by-reference'}]}}]},human_plan:null});
 test('scalar delta retains plan, unaffected fields and artwork without snapshot transfer',async()=>{
@@ -167,4 +168,42 @@ test('bulk incremental adoption aggregates derived ownership across every chunk'
   await transport.read();
   const result=await transport.publish(Array.from({length:513},(_,i)=>({path:String(i),field:'title',value:'Derived'})),1);
   assert.equal(result.derivedChanges.length,513);assert.ok(result.derivedChanges.every(entry=>entry.derived));
+});
+
+test('reconciling a skipped native revision includes earlier transformed fields', async () => {
+  const adopted = [];
+  let revision = 1;
+  let resumeFirst;
+  let requestStarted;
+  const firstStarted = new Promise(resolve => { requestStarted = resolve; });
+  const transport = createLiveStageTransport(async (command, args) => {
+    if (command === 'mcp_shared_stage_delta') {
+      return {session:'s',revision,resync:true,snapshot:{revision,plan:null}};
+    }
+    if (revision === 1) {
+      await new Promise(resolve => { resumeFirst = resolve; requestStarted(); });
+    }
+    const changes = args.intents.map(({path, field, value}) => ({
+      path, field, derived:true, tag:{old:'Saved',new:value},
+    }));
+    return {accepted:true,delta:{session:'s',revision:++revision,changes}};
+  });
+  const library = [];
+  const sync = createSharedStageSync({
+    read:transport.read, intents:transport.publish,
+    context:() => ({library, inputRevision:0, busy:false}),
+    adopt:value => { adopted.push(value); },
+  });
+  await sync.start();
+  const first = sync.intents([{path:'a',field:'albumartist',value:'Tidied album artist'}]);
+  await firstStarted;
+  const second = sync.intents([{path:'b',field:'artist',value:'Tidied artist'}]);
+  resumeFirst();
+  await Promise.all([first,second]);
+  assert.deepEqual(adopted.map(value => value.revision), [1,3]);
+  assert.equal(adopted.at(-1).nativeDelta, false);
+  assert.deepEqual(adopted.at(-1).derived_fields, [
+    {path:'a',field:'albumartist'}, {path:'b',field:'artist'},
+  ]);
+  assert.equal(adopted.at(-1).plan.changes.length, 2);
 });

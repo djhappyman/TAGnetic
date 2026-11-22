@@ -8,7 +8,18 @@ export default defineConfig({
   base: './',
   // Controllers retain DOM references; component saves reload to rebind them.
   // CSS still updates live through Vite without restarting the native shell.
-  plugins: [tailwindcss(), svelte({ compilerOptions: { hmr: false }, configFile: fileURLToPath(new URL('./svelte.config.js', import.meta.url)) })],
+  plugins: [
+    tailwindcss(),
+    svelte({
+      compilerOptions: { hmr: false },
+      configFile: fileURLToPath(new URL('./svelte.config.js', import.meta.url)),
+      // Cold dev requests can reach a virtual stylesheet before Svelte caches it.
+      // Include component styles in their modules until the dev loader handles that order.
+      dynamicCompileOptions({ environment }) {
+        if (environment.mode === 'dev') return { css: 'injected' };
+      },
+    }),
+  ],
   resolve: { alias: { $lib: fileURLToPath(new URL('./app/ui/lib', import.meta.url)) } },
   build: {
     outDir: '../dist',

@@ -343,6 +343,49 @@ test('native preset composition retains earlier raw fields and the final toggle-
   expect(await page.evaluate(()=>window.mcpFixture.state.mediaWrites)).toBe(0);
 });
 
+test('queued native edits reconcile deferred rows in Files and hidden fields in Staged', async ({ page }) => {
+  await nativeTransforms(page);
+  await page.evaluate(() => {
+    const [first, second] = window.tagrex.tracks;
+    const invoke = window.__TAURI__.core.invoke;
+    let hold = true;
+    window.__TAURI__.core.invoke = (command, args) => {
+      if (command === 'mcp_publish_shared_intents' && args.recompute && hold) {
+        hold = false;
+        return new Promise((resolve, reject) => {
+          window.finishFirstTransform = () => invoke(command, args).then(resolve, reject);
+        });
+      }
+      return invoke(command, args);
+    };
+    const queue = (path, changes) => {
+      const entries = changes.map(([field, value]) => ({path,field,value}));
+      const options = {recompute:true,paths:[path],groups:[]};
+      document.dispatchEvent(new CustomEvent('tagrex:native-recompute', {detail:{entries, options}}));
+    };
+    queue(first.path, [['catalognumber','Fixture catalogue number'], ['artist','The X Factor!']]);
+    window.runSecondTransform = () => queue(second.path, [['title','Second title']]);
+  });
+  await expect.poll(() => page.evaluate(() => typeof window.finishFirstTransform)).toBe('function');
+  await page.evaluate(() => {
+    window.runSecondTransform();
+    window.finishFirstTransform();
+  });
+  await expect.poll(() => page.evaluate(() => window.tagrex.previewPlan?.changes.length)).toBe(2);
+  expect(await page.evaluate(() => window.tagrex.previewPlan.changes.flatMap(c => c.tag_changes))).toEqual(expect.arrayContaining([expect.objectContaining({field:'artist', new:'The X Factor!'})]));
+  await expect(page.locator('#tracks th[data-sort="catalognumber"]')).toHaveCount(0);
+  const rows = page.locator('#tracks-body tr[data-path]');
+  await expect(rows.nth(0).locator('td[data-field="artist"]')).toHaveText('The X Factor!');
+  await expect(rows.nth(1).locator('td[data-field="title"]')).toHaveText('Second title');
+  await page.locator('#staged-tab').click();
+  await expect(rows).toHaveCount(2);
+  await expect(page.locator('#tracks th[data-sort="catalognumber"]')).toHaveCount(1);
+  await expect(rows.nth(0).locator('td[data-field="artist"].dirty')).toContainText('The X Factor!');
+  await expect(rows.nth(0).locator('td[data-field="catalognumber"].dirty')).toHaveText('Fixture catalogue number');
+  await expect(rows.nth(1).locator('td[data-field="catalognumber"]')).toHaveText('');
+  expect(await page.evaluate(() => window.mcpFixture.state.mediaWrites)).toBe(0);
+});
+
 test('settled native recompute releases Apply after a selection change', async ({ page }) => {
   const preset = await nativeTransforms(page);
   await staged(page, 'Ready to apply');
@@ -468,4 +511,39 @@ test('first scalar staging leaves unrelated Files rows entirely untouched',async
   await page.waitForTimeout(150);
   const mutations=await page.evaluate(()=>{window.unrelatedObserver.disconnect();return window.unrelatedRowMutations;});
   expect(mutations).toEqual([]);
+});
+
+test('fresh Files and Reset use the TagScanner column defaults while a saved layout stays custom', async ({ page }) => {
+  const headers = () => page.locator('#tracks thead th[data-sort]').evaluateAll(nodes => nodes.map(node => node.dataset.sort));
+  const defaults = [
+    'artwork','file','artist','title','album','track','albumartist','year','genre','composer','disc',
+    'custom:TPE4','bpm','key','path','length','size','bitrate','channels','sample_rate','format','tagtypes','modified',
+  ];
+  expect(await headers()).toEqual(defaults);
+  const technical = await page.evaluate(() => {
+    const [first] = window.tagrex.tracks;
+    Object.assign(first, {size_bytes:1048576, bitrate_kbps:320, channels:2, sample_rate_hz:44100, modified:'2026-11-22'});
+    window.tagrex.renderTracks();
+    const rows = [...document.querySelectorAll('#tracks-body tr[data-path]')];
+    const cell = (row, key) => row.cells[document.querySelector(`#tracks th[data-sort="${key}"]`).cellIndex];
+    return ['path','size','bitrate','channels','sample_rate','format','modified'].map(key => {
+      const node = cell(rows[0], key);
+      return {key, value:node.textContent, editable:node.matches('.editable')};
+    }).concat({key:'missing size', value:cell(rows[1], 'size').textContent, editable:false});
+  });
+  expect(technical.map(cell => cell.value)).toEqual([
+    '/music/01 - the x factor - desert rain.mp3','1.00 MiB','320','2','44100','Mp3','2026-11-22','',
+  ]);
+  expect(technical.every(cell => !cell.editable)).toBe(true);
+
+  await page.evaluate(() => localStorage.setItem('tagrex.columns', JSON.stringify(['file'])));
+  await page.reload();
+  await expect.poll(headers).toEqual(['artwork','file']);
+
+  await page.evaluate(() => localStorage.setItem('tagrex.columns', JSON.stringify(['file','year','title'])));
+  await page.reload();
+  await expect.poll(headers).toEqual(['artwork','file','year','title']);
+  await page.locator('#tracks th[data-sort="file"]').click({button:'right'});
+  await page.locator('#columns-menu').getByRole('button',{name:'Reset',exact:true}).click();
+  await expect.poll(headers).toEqual(defaults);
 });

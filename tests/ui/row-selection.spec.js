@@ -150,20 +150,69 @@ test('double-click tag editing still works and its text drag does not become a r
   await page.keyboard.press('Escape');
 });
 
-test('drag bursts coalesce visual feedback and defer expensive ribbon updates until release',async({page})=>{
-  await many(page,Array.from({length:371},(_,i)=>`/music/all/track-${String(i).padStart(4,'0')}.mp3`));
-  const result=await page.evaluate(async()=>{
-    const cells=[...document.querySelectorAll('#tracks-body td.file')],a=cells[0].getBoundingClientRect(),b=cells[12].getBoundingClientRect();
-    let updates=0;const listener=()=>updates++;document.addEventListener('tagrex:ribbon-state',listener);
-    cells[0].dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true,button:0,detail:1,clientX:a.x+80,clientY:a.y+a.height/2}));
-    updates=0;
-    for(let i=0;i<80;i++)document.dispatchEvent(new MouseEvent('mousemove',{bubbles:true,cancelable:true,buttons:1,clientX:b.x+90,clientY:a.y+a.height/2+(b.y-a.y)*(i+1)/80}));
-    await new Promise(requestAnimationFrame);
-    const during=updates;
-    document.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,button:0}));
-    document.removeEventListener('tagrex:ribbon-state',listener);
-    return {during,selected:window.tagrex.selection.size};
+for (const view of ['Files', 'Staged']) {
+  test(`${view} paints a drag burst once per frame and defers command updates until release`, async ({ page }) => {
+    await many(page, Array.from({ length: 371 }, (_, i) => `/music/all/track-${String(i).padStart(4, '0')}.mp3`));
+    if (view === 'Staged') {
+      await rows(page).first().locator('td[data-field="artist"]').click();
+      await page.evaluate(() => {
+        const data = new DataTransfer();
+        data.setData('text/plain', Array.from({ length: 45 }, (_, i) => `Staged artist ${i}`).join('\n'));
+        document.activeElement.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data }));
+      });
+      await expect.poll(() => page.evaluate(() => window.tagrex.previewPlan?.changes.length)).toBe(45);
+      await page.locator('#staged-tab').click();
+    }
+    const result = await page.evaluate(async () => {
+      const wrap = document.getElementById('files-view');
+      wrap.scrollTop = 0;
+      const frame = () => new Promise(requestAnimationFrame);
+      await frame();
+      await frame();
+      const cells = [...document.querySelectorAll('#tracks-body td.file')];
+      const start = cells[3].getBoundingClientRect();
+      const end = cells[10].getBoundingClientRect();
+      const head = wrap.querySelector('thead');
+      const summary = document.getElementById('selection-summary');
+      const count = document.getElementById('files-selected-count');
+      const getBounds = head.getBoundingClientRect.bind(head);
+      const getWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth').get;
+      let ribbon = 0, headerReads = 0, summaryReads = 0, animations = 0;
+      head.getBoundingClientRect = () => { headerReads++; return getBounds(); };
+      for (const node of [summary, count]) {
+        const animate = node.animate.bind(node);
+        node.animate = (...args) => { animations++; return animate(...args); };
+      }
+      Object.defineProperty(summary, 'offsetWidth', {
+        configurable: true,
+        get() { summaryReads++; return getWidth.call(this); },
+      });
+      const counted = () => ribbon++;
+      document.addEventListener('tagrex:ribbon-state', counted);
+      cells[3].dispatchEvent(new MouseEvent('mousedown', {
+        bubbles: true, cancelable: true, button: 0, detail: 1, clientX: start.x + 80, clientY: start.y + start.height / 2,
+      }));
+      ribbon = headerReads = summaryReads = animations = 0;
+      for (let n = 0; n < 4; n++) {
+        for (let i = 0; i < 20; i++) {
+          document.dispatchEvent(new MouseEvent('mousemove', {
+            bubbles: true, cancelable: true, buttons: 1, clientX: end.x + 90,
+            clientY: start.y + start.height / 2 + (end.y - start.y) * (n * 20 + i + 1) / 80,
+          }));
+        }
+        await frame();
+      }
+      await frame();
+      const during = { ribbon, headerReads, summaryReads, animations, count: count.textContent, selected: document.querySelectorAll('#tracks-body tr.selected').length };
+      document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0 }));
+      document.removeEventListener('tagrex:ribbon-state', counted);
+      delete head.getBoundingClientRect;
+      delete summary.offsetWidth;
+      delete summary.animate;
+      delete count.animate;
+      return { ...during, committed: document.querySelectorAll('#tracks-body tr.selected').length };
+    });
+    expect(result).toMatchObject({ ribbon: 0, summaryReads: 0, animations: 0, count: '8', selected: 8, committed: 8 });
+    expect(result.headerReads).toBeLessThanOrEqual(5);
   });
-  expect(result.during).toBe(0);
-  expect(result.selected).toBe(13);
-});
+}

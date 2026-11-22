@@ -152,7 +152,19 @@ export const TABLE_DATA_COLUMN_OFFSET = 2;
 export const ARTWORK_COLUMN_WIDTH = 24;
 // The columns a fresh library starts with (#173). A chosen set is persisted and
 // wins over this, so changing it never rearranges anyone's table.
-export const DEFAULT_COLUMNS = ["file", "artist", "title", "album", "year", "length"];
+// TagScanner 6.1.21 File view order; Artwork is Tagnetic's fixed indicator.
+export const STANDARD_COLUMN_ORDER = [
+  "file", "artist", "title", "album", "track", "albumartist", "year", "genre",
+  "composer", "disc", "comment", "custom:ORIGARTIST", "custom:TPE4", "custom:CONDUCTOR",
+  "custom:LYRICIST", "bpm", "key", "custom:GROUPING", "custom:SUBTITLE", "isrc",
+  "publisher", "custom:COPYRIGHT", "url", "custom:ENCODEDBY", "path", "length",
+  "size", "bitrate", "channels", "sample_rate", "format", "tagtypes", "modified",
+];
+const hiddenByDefault = new Set([
+  "comment", "custom:ORIGARTIST", "custom:CONDUCTOR", "custom:LYRICIST", "custom:GROUPING",
+  "custom:SUBTITLE", "isrc", "publisher", "custom:COPYRIGHT", "url", "custom:ENCODEDBY",
+]);
+export const DEFAULT_COLUMNS = STANDARD_COLUMN_ORDER.filter(key => !hiddenByDefault.has(key));
 export let visibleColumns = DEFAULT_COLUMNS.slice();
 export function setVisibleColumns(value) {
   visibleColumns = value;
