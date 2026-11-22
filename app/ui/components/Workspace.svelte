@@ -5,6 +5,7 @@
   import { FolderOpen, FolderPlus, Undo2, Redo2, ListChecks, ListX, ArrowDown, ArrowUp, Group, ChevronDown, PanelRightOpen, PanelRightClose } from '@lucide/svelte';
   import RibbonTools from './RibbonTools.svelte';
   import BrandWordmark from './BrandWordmark.svelte';
+  import AgentActivity from './AgentActivity.svelte';
   import { subscribeWorkspaceState, setWorkspaceMode, setWorkspaceSubtab, type WorkspaceMode, type WorkspaceSubtab } from '$lib/workspace-state';
   import DockWorkspace from './DockWorkspace.svelte';
   import CompactPlayer from './CompactPlayer.svelte';
@@ -210,7 +211,7 @@
       <Button variant="ghost" size="icon-sm" id="update-skip" class="update-skip icon" type="button" data-i18n-title="update.skip" title="Don't tell me about this version" data-i18n-aria-label="update.skip" aria-label="Don't tell me about this version"><svg class="ico"><use href="#i-close"/></svg></Button>
     </span>
 
-    <Button variant="ghost" size="icon-sm" id="agent-activity" class="icon" hidden title="External agent connections and work" aria-label="External agent connections and work"><svg class="ico"><use href="#i-agent"/></svg></Button>
+    <AgentActivity />
     <Button variant="ghost" size="icon-sm" id="settings-open" class="icon gear" data-i18n-title="topbar.settings" title="Settings" data-i18n-aria-label="topbar.settings" aria-label="Settings"><svg class="ico"><use href="#i-settings"/></svg></Button>
     <Button variant="ghost" size="icon-sm" id="panel-toggle" class="icon" aria-expanded={!sidebarClosed} aria-controls="mode-col" disabled={applying} onclick={toggleSidebar} data-i18n-title={sidebarClosed ? 'topbar.expandPanelTitle' : 'topbar.collapsePanelTitle'} title={t(sidebarClosed ? 'topbar.expandPanelTitle' : 'topbar.collapsePanelTitle')} data-i18n-aria-label={sidebarClosed ? 'topbar.expandPanel' : 'topbar.collapsePanel'} aria-label={t(sidebarClosed ? 'topbar.expandPanel' : 'topbar.collapsePanel')}>{#if sidebarClosed}<PanelRightOpen class="ico" size={17}/>{:else}<PanelRightClose class="ico" size={17}/>{/if}</Button>
     </div>

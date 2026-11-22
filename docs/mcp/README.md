@@ -21,9 +21,21 @@ second library or journal.
 4. Keep the desktop open. The connector reports unavailable when no desktop
    owns that profile; it does not silently launch another session.
 
-Pair Codex and OpenCode separately. Pairings remain valid until revoked through
-the **Agent activity** button in the app header; work history, draft review and
-interrupted-operation recovery also live there, separate from connection setup.
+Pair Codex and OpenCode separately. The header's **Agents** popover shows live
+client names, current work and brief stage or save results. When supplied by the
+client, the model appears beside its name. A client can report it in MCP request
+metadata under `io.tagnetic/model` or set `TAGNETIC_MCP_MODEL` in its connector
+environment.
+
+Use the row controls to pause or resume edits, stop an active save, or
+disconnect and reconnect that session. Paused sessions can still read the
+library. Hiding a row keeps its session active. Use **Show in Agents** in
+Agent Connections settings to restore it.
+
+Use **Connect an agent** in the empty popover or the plus beside **Agents** to
+open setup. If the listener is disabled and a pairing is still valid, choose
+**Reconnect agents** in the popover. Draft review, Undo and
+interrupted-operation recovery are available through the desktop.
 
 Example Codex configuration (substitute the absolute installed paths):
 

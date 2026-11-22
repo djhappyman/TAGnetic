@@ -18,7 +18,7 @@ import { placeholderToken } from "./placeholders.js";
 import { groupByPref, saveGroupBy } from "./prefs.js";
 import { enablePointerReorder } from "./reorder.js";
 import {
-  DEFAULT_COLUMNS,
+  DEFAULT_COLUMNS, STANDARD_COLUMN_ORDER,
   ARTWORK_COLUMN_WIDTH,
   TABLE_DATA_COLUMN_OFFSET,
   collapsedGroups,
@@ -46,15 +46,14 @@ const COLUMN_WIDTHS_STORAGE_KEY = "tagrex.colWidths";
 const COLUMN_MIN_WIDTH = 20;
 
 // ---- configurable columns (#43) ----
-// "file" plus every modeled tag field, the pool the user picks columns from.
 function allColumnKeys() {
-  return [
-    "file",
+  return [...new Set([
+    ...STANDARD_COLUMN_ORDER,
     ...EXTENDED_FIELDS.map(([key]) => key),
     ...Object.keys(KNOWN_CUSTOM_LABELS).map(key => 'custom:' + key),
     ...VIRTUAL_COLUMNS.map(([key]) => key),
     ...customColumns.map((c) => customColumnKey(c.id)),
-  ];
+  ])];
 }
 
 let stagedColumns = null;
@@ -158,8 +157,8 @@ function setGroupBy(value, { persist = true, rerender = true } = {}) {
 // Sensible starting width for a column the user hasn't resized yet. The file
 // name is the widest; short numeric/code fields start narrow.
 function defaultColumnWidth(key) {
-  if (key === "file") return 240;
-  if (["year", "track", "tracktotal", "disc", "bpm", "key", "length"].includes(key)) return 70;
+  if (key === "file" || key === "path") return 240;
+  if (["year", "track", "tracktotal", "disc", "bpm", "key", "length", "size", "bitrate", "channels", "sample_rate", "format"].includes(key)) return 70;
   if (["artist", "title", "album", "albumartist", "composer"].includes(key)) return 160;
   return 130;
 }
@@ -689,7 +688,7 @@ function loadColumns() {
   const known = new Set(allColumnKeys());
   const cols = saved.filter((k) => known.has(k) && k !== "file");
   cols.unshift("file");
-  if (cols.length > 1) setVisibleColumns(cols);
+  if (cols.length > 1 || saved.includes("file")) setVisibleColumns(cols);
 }
 
 // Apply a new column set: persist, rebuild the header, repaint rows.

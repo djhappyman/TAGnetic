@@ -973,7 +973,7 @@ fn render_file_value(value: FileValue, file: &FileContext<'_>) -> String {
             .unwrap_or_default(),
         FileValue::FileSize => file.size_bytes.map(format_size).unwrap_or_default(),
         FileValue::FileSizeBytes => optional_number(file.size_bytes),
-        FileValue::FileDate => file.modified.and_then(format_date).unwrap_or_default(),
+        FileValue::FileDate => file.modified.and_then(format_file_date).unwrap_or_default(),
     }
 }
 
@@ -1008,10 +1008,9 @@ fn format_size(bytes: u64) -> String {
     format!("{value:.1} {}", UNITS[unit])
 }
 
-/// `YYYY-MM-DD` in UTC. A local-time rendering would make the same file produce
-/// different names on two machines, which is precisely what a rename mask must
-/// not do; UTC keeps it reproducible.
-fn format_date(time: SystemTime) -> Option<String> {
+/// Format a file modification time as a `YYYY-MM-DD` UTC date, keeping rename
+/// masks reproducible across time zones.
+pub fn format_file_date(time: SystemTime) -> Option<String> {
     let seconds = time.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs();
     let (year, month, day) = civil_from_days((seconds / 86_400) as i64);
     Some(format!("{year:04}-{month:02}-{day:02}"))

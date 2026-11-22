@@ -5,6 +5,7 @@ const state = {
   enabled: true, revision: 0, manual: null, view: {}, recovered: false,
   liveFields: false, shared: false, stage: null, humanRevision: 0, mediaWrites: 0,
   recovery: { recovery_required: false, operations: [] }, calls: [], clients: [],
+  activity: { connections: [], work: [], writes: [], staged: null },
 };
 const rawInputs = new Map(), transformBases = new Map(), derivedFields = new Map();
 const copy = value => value === undefined ? undefined : structuredClone(value);
@@ -24,6 +25,22 @@ window.__TAURI__ = {
   } },
   core: { invoke: async (command, args = {}) => {
     state.calls.push(command);
+    if (command === 'mcp_agent_status') return {
+      enabled: state.enabled,
+      can_reconnect: state.clients.some(client => !client.revoked),
+      recovery_required: state.recovery.recovery_required,
+      ...copy(state.activity),
+      connections: state.activity.connections.map(connection => ({ id: connection.principal, state: 'active', controllable: true, ...copy(connection) })),
+    };
+    if (command === 'mcp_control_agent') {
+      const connection = state.activity.connections.find(connection => (connection.id || connection.principal) === args.sessionId);
+      if (!connection) throw new Error('The agent session changed');
+      connection.state = { pause: 'paused', resume: 'active', disconnect: 'disconnected', reconnect: 'active' }[args.action];
+      (state.agentControls ||= []).push(copy(args));
+      emit('agent_activity_changed', {});
+      return;
+    }
+    if (command === 'mcp_cancel_operation') { state.lastStoppedOperation = args.operationId; return; }
     if (command === 'mcp_status') return {
       live_fields: state.liveFields ? {version:1,delta:true,intents:true,recompute:!!state.liveRecompute,derived_scope:!!state.liveRecompute,session_check:!!state.liveRecompute,session:'fixture'} : undefined,
       available: true, listening: state.enabled, shared_staging: state.shared, clients: { clients: copy(state.clients) },
@@ -97,7 +114,7 @@ window.__TAURI__ = {
       return result;
     }
     if (command === 'mcp_set_view_preferences') { state.view = copy(args.preferences); return; }
-    if (command === 'mcp_set_enabled') { state.enabled = args.enabled; emit('service_changed', {}); return; }
+    if (command === 'mcp_set_enabled') { state.enabled = args.enabled; if (!state.enabled) state.activity.connections = []; emit('service_changed', {}); return; }
     if (command === 'save_settings' && state.failNextSettingsSave) {
       state.failNextSettingsSave = false;
       const fresh = await mock('load_settings', {});

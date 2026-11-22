@@ -219,7 +219,7 @@ test('Tab can leave the grid at either edge and filtering resets the rectangle',
   await cell(page, 'artist').click();
   await page.keyboard.press('Shift+Tab');
   expect(await page.evaluate(() => !!document.activeElement.closest('#tracks-body'))).toBe(false);
-  await cell(page, 'year', 2).click();
+  await cell(page, 'key', 2).click();
   await page.keyboard.press('Tab');
   expect(await page.evaluate(() => !!document.activeElement.closest('#tracks-body'))).toBe(false);
   await cell(page, 'artist').click();
@@ -290,8 +290,8 @@ test('manual review applies only highlighted files without row checkboxes', asyn
 
 for (const [name, value, field, expected] of [
   ['ragged rows', 'A\tB\nC', 'artist', 'rectangular'],
-  ['invalid numeric value', 'New artist\tNew title\tNew album\tbad-year', 'artist', 'Nothing was staged'],
-  ['read-only column', '2025\t10:00', 'year', 'read-only'],
+  ['invalid numeric value', 'New artist\tNew title\tNew album\t1\tNew album artist\tbad-year', 'artist', 'Nothing was staged'],
+  ['read-only column', '8A\t/music/other.mp3', 'key', 'read-only'],
   ['beyond visible rows', 'A\nB\nC\nD', 'artist', 'beyond'],
   ['unclosed quoted field', '"A\tB', 'artist', 'unclosed'],
   ['cell count limit', Array(10001).fill('x').join('\t'), 'artist', '10,000'],

@@ -373,10 +373,20 @@ function componentOwnsEscape(event) {
 // playing time (#172) — or null when the column is an ordinary tag. One place,
 // so the row renderer, the diff renderer, sorting and filtering cannot drift on
 // what a derived cell says.
+const technicalColumnProperties = {
+  path:'path', size:'size_bytes', bitrate:'bitrate_kbps', channels:'channels',
+  sample_rate:'sample_rate_hz', format:'format', modified:'modified',
+};
 function virtualCellText(track, key, pending) {
   if (key === "position") return vinylPositionOf(track, new Map(['media','disc','track'].map(field => [field, workingField(track.path, field).value])));
   if (key === "length") return track.duration_secs == null ? "" : fmtTime(track.duration_secs);
   if (key === "tagtypes") return tagBlockSummary(track);
+  if (Object.hasOwn(technicalColumnProperties, key)) {
+    const value = track[technicalColumnProperties[key]];
+    if (value == null) return "";
+    if (key === "size") return `${(value / (1024 * 1024)).toFixed(2)} MiB`;
+    return String(value);
+  }
   return null;
 }
 
@@ -411,6 +421,9 @@ function sortValue(track, key) {
   if (key === "tagtypes") {
     const blocks = track.tag_blocks || [];
     return String(9 - Math.min(blocks.length, 9)) + tagBlockSummary(track).toLowerCase();
+  }
+  if (Object.hasOwn(technicalColumnProperties, key)) {
+    return String(track[technicalColumnProperties[key]] ?? "").toLowerCase();
   }
   // A mask column sorts on what it renders, which is what the eye compares.
   if (customColumnOf(key)) return customColumnValue(key, track.path).toLowerCase();
@@ -937,9 +950,8 @@ function fillDiffRow(tr, track) {
       tr.appendChild(td);
       continue;
     }
-    // A changed visible field shows the new value (dirty/error); an unchanged one
-    // shows the current value. Fields changed outside visibleColumns still apply
-    // — they just don't get a cell here (the action-bar count covers them).
+    // Staged supplies every changed field, including fields hidden in Files.
+    // A row without that field still gets a cell so the columns stay aligned.
     const cell = diffCell(change, field, track);
     const td = document.createElement("td");
     td.className = cell.cls;
@@ -1752,8 +1764,15 @@ let selectionSummaryWidthAnimation = null;
 let selectionSummaryCountAnimation = null;
 let selectionSummarySizeSignature = '';
 let selectionSummaryEpoch = 0;
-function updateSelectionSummary(count) {
+let selectionMarqueeActive = false;
+function updateSelectionSummary(count, immediate = false) {
   selectionSummaryCount = count;
+  if (immediate) {
+    cancelAnimationFrame(selectionSummaryFrame);
+    selectionSummaryFrame = 0;
+    paintSelectionSummary(count);
+    return;
+  }
   if (selectionSummaryFrame) return;
   selectionSummaryFrame = requestAnimationFrame(() => {
     selectionSummaryFrame = 0;
@@ -1763,7 +1782,7 @@ function updateSelectionSummary(count) {
 function setSelectionSummaryVisible(show) {
   if (show === selectionSummaryVisible) return;
   const summary = el('selection-summary');
-  const reversing = !!selectionSummaryAnimation;
+  const reversing = !selectionMarqueeActive && !!selectionSummaryAnimation;
   const from = reversing ? {transform:getComputedStyle(summary).transform, opacity:getComputedStyle(summary).opacity} : null;
   selectionSummaryVisible = show;
   summary.inert = !show;
@@ -1772,7 +1791,7 @@ function setSelectionSummaryVisible(show) {
   const epoch = ++selectionSummaryEpoch;
   selectionSummaryAnimation?.cancel();
   selectionSummaryAnimation = null;
-  if (matchMedia('(prefers-reduced-motion: reduce)').matches || !summary.animate) {
+  if (selectionMarqueeActive || matchMedia('(prefers-reduced-motion: reduce)').matches || !summary.animate) {
     summary.hidden = !show;
     return;
   }
@@ -1814,7 +1833,7 @@ function paintSelectionSummary(count) {
   const signature = `${count}|${kind}`;
   const summary = el('selection-summary');
   const sizeChanged = selectionSummarySizeSignature !== signature;
-  const oldWidth = sizeChanged && count > 1 && !summary.hidden ? summary.offsetWidth : 0;
+  const oldWidth = !selectionMarqueeActive && sizeChanged && count > 1 && !summary.hidden ? summary.offsetWidth : 0;
   // Keep the last multiple-selection label throughout exit. Writing 0 or 1
   // before the fade ends makes an otherwise correct hidden state flash on screen.
   if (count > 1) {
@@ -1826,7 +1845,7 @@ function paintSelectionSummary(count) {
       selectionSummaryCountAnimation = null;
       number.textContent = label;
       number.dataset.count = String(count);
-      if (selectionSummaryVisible && !matchMedia('(prefers-reduced-motion: reduce)').matches && number.animate) {
+      if (!selectionMarqueeActive && selectionSummaryVisible && !matchMedia('(prefers-reduced-motion: reduce)').matches && number.animate) {
         const animation = number.animate([
           { opacity: .35, transform: `translateY(${increasing ? 4 : -4}px)` },
           { opacity: 1, transform: 'translateY(0)' },
@@ -4298,13 +4317,13 @@ el("files-view").addEventListener("click", (e) => {
 
 // Calibrate model offsets from a real rendered row, then binary-search the
 // virtual model. The drag can therefore span rows that have left the DOM.
-function marqueePaths(top, bottom) {
+function marqueePaths(top, bottom, viewportTop, scrollTop) {
   const reference = renderedRows.entries().next().value;
   if (!reference) return [];
   const [path, row] = reference;
   const index = itemIndexByPath.get(path);
   if (index === undefined) return [];
-  const origin = row.getBoundingClientRect().top - tableWrap.getBoundingClientRect().top + tableWrap.scrollTop - itemOffsets.top(index);
+  const origin = row.getBoundingClientRect().top - viewportTop + scrollTop - itemOffsets.top(index);
   const from = Math.max(0, top - origin);
   const to = bottom - origin;
   if (to < 0) return [];
@@ -4321,7 +4340,10 @@ function marqueePaths(top, bottom) {
 initRowSelection({
   wrap: tableWrap, getSelection: rowSelectionSet,
   enabled: () => !applying && !undoing && !duplicateResultsActive(),
-  pathsInRange: (top,bottom) => marqueePaths(top,bottom).filter(path => !usingReviewSelection() || diffByPath.has(path)),
+  pathsInRange: (top, bottom, viewportTop, scrollTop) => {
+    const paths = marqueePaths(top, bottom, viewportTop, scrollTop);
+    return usingReviewSelection() ? paths.filter(path => diffByPath.has(path)) : paths;
+  },
   onPress: (event) => {
     const before = {selAnchor,selBase,reviewAnchor,reviewBase,activeRowPath};
     const row = event.target.closest('tr[data-path]');
@@ -4330,15 +4352,23 @@ initRowSelection({
     return before;
   },
   onScroll: () => renderWindow({scrollOnly:true}),
-  onStart: () => spreadsheet?.clearRange(),
+  onStart: () => {
+    selectionMarqueeActive = true;
+    selectionSummaryAnimation?.finish();
+    selectionSummaryWidthAnimation?.cancel();
+    selectionSummaryWidthAnimation = null;
+    selectionSummaryCountAnimation?.cancel();
+    selectionSummaryCountAnimation = null;
+    spreadsheet?.clearRange();
+  },
   onChange: () => {
-    // Drag feedback must not inspect tag blocks or rebuild toolbar state.
-    // The press invalidates stale editor controls; release publishes the scope.
+    // The press invalidates stale editor controls. Publish the command scope
+    // on release and update only the table and its selection count during drag.
     paintRowSelection();
-    updateStatus(rowSelectionSet().size, false);
-    if (usingReviewSelection()) updateDiffBar();
+    updateSelectionSummary(rowSelectionSet().size, true);
   },
   onCommit: ({ cancelled, beforePress, paths, startPath, focusPath }) => {
+    selectionMarqueeActive = false;
     if (cancelled && beforePress) {
       ({selAnchor,selBase,reviewAnchor,reviewBase} = beforePress);
       setActiveRowByPath(beforePress.activeRowPath, false);
@@ -5335,16 +5365,8 @@ if (TAURI) {
     // During source iteration the old native binary remains usable. Only a
     // backend advertising this contract receives shared-stage commands.
     if (agentsAvailable && status.shared_staging === true) connectSharedStage(status.live_fields);
-    const activity = el('agent-activity');
-    activity.hidden = !agentsEnabled;
-    const active = [...(status.operations?.operations || []), ...(status.analysis?.jobs || [])].filter(operation => ['queued','running','preflight','writing','rolling_back'].includes(operation.status)).length;
-    activity.setAttribute('aria-label', active ? `External agents · ${active} active operations` : 'External agent connections and work');
-    activity.classList.toggle('has-active-work', active > 0);
     if (agentsEnabled && !wasEnabled) mirrorManualPlan(previewPlan);
   }
-  el('agent-activity').addEventListener('click', () => {
-    document.dispatchEvent(new CustomEvent('tagrex:show-agent-activity'));
-  });
   document.addEventListener('tagrex:show-shared-stage', () => {
     el('settings').hidden = true;
     setFileView(true);

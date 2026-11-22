@@ -74,6 +74,7 @@ export function createSharedStageSync({ read, publish, clear, context, adopt, in
   let snapshot = null, remainder = null, pending = null, running = null, refresh = false, clearRequested = false;
   let generation = 0, discardGeneration = 0, started = false, lastFailure = null, publishing = false;
   let adoptedRevision = -1, adoptedGeneration = -1, adoptedSession = null;
+  let missedAdoption = false;
   const touches = new Map();
   const capture = () => ({ ...context(), generation, discardGeneration });
   const current = before => {
@@ -84,10 +85,20 @@ export function createSharedStageSync({ read, publish, clear, context, adopt, in
   const accept = (value, before) => {
     if (snapshot && value.revision < snapshot.revision && (!value.session || value.session === snapshot.session)) return;
     snapshot = value; remainder = stageRemainder(value);
-    if (!pending && !clearRequested && current(before)
-      && (adoptedRevision !== value.revision || adoptedGeneration !== generation || adoptedSession !== value.session)) {
-      if (adopt(value) !== false) { adoptedRevision = value.revision; adoptedGeneration = generation; adoptedSession = value.session; }
+    const stageChanged = adoptedRevision !== value.revision || adoptedSession !== value.session;
+    if (!pending && !clearRequested && current(before) && (stageChanged || adoptedGeneration !== generation)) {
+      // The transport can consume a revision while a newer input is queued.
+      // The next delta then only describes changes since that skipped revision.
+      const presentation = missedAdoption && value.nativeDelta
+        ? { ...value, nativeDelta:false, derived_fields:value.readDerivedFields() }
+        : value;
+      if (adopt(presentation) !== false) {
+        adoptedRevision = value.revision; adoptedGeneration = generation; adoptedSession = value.session;
+        missedAdoption = false;
+        return;
+      }
     }
+    missedAdoption ||= stageChanged;
   };
   const hasPlan = value => value && Object.hasOwn(value,'plan');
   const conflict = failure => /stage_conflict|staging.*changed|stage.*changed|stage revision.*different session/i.test(String(failure));

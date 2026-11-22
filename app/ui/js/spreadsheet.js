@@ -205,7 +205,7 @@ export function initSpreadsheet(options) {
   function clear(giveFocus = true, paint = true) {
     const path = active?.path;
     active = anchor = null;
-    if (paint) refresh();
+    if (paint) refresh({selectionOnly:true});
     if (path && giveFocus) options.focusRow(path);
   }
   function refresh({ scrollOnly = false, enteringRows = null, selectionOnly = false } = {}) {

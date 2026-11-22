@@ -111,7 +111,7 @@ export function createLiveStageTransport(invoke, capabilities = {}) {
     snapshot = {...snapshot, columnsChanged, revision:delta.revision, human_revision:delta.human_revision, plan:plan.changes.length ? plan : null,
       changeAt: path => { const at = positions.get(path); return at === undefined ? undefined : plan.changes[at]; },
       changedKeys:[...(delta.changes || []), ...(delta.removed || [])].map(({path,field})=>({path,field})),
-      derivedChanges, nativeDelta:true};
+      derivedChanges, readDerivedFields: () => [...derivedFields.values()], nativeDelta:true};
     return snapshot;
   }
   return {

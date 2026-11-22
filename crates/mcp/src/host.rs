@@ -1,4 +1,7 @@
-use crate::ipc::{self, Discovery, Reply, Request, TransportError, AUTH_TIMEOUT};
+use crate::{
+    activity::{Activity, SessionControl, HEARTBEAT},
+    ipc::{self, Discovery, Reply, Request, TransportError, AUTH_TIMEOUT},
+};
 use serde_json::json;
 use std::{
     io::Write,
@@ -22,12 +25,25 @@ pub struct HostHandle {
     task: Option<JoinHandle<()>>,
     discovery: Discovery,
     profile: PathBuf,
+    activity: Arc<Activity>,
     _lease: Arc<std::fs::File>,
 }
 
 impl HostHandle {
     pub fn discovery(&self) -> &Discovery {
         &self.discovery
+    }
+
+    pub fn activity(&self) -> serde_json::Value {
+        self.activity.snapshot()
+    }
+
+    pub fn control_session(&self, id: &str, action: SessionControl) -> bool {
+        uuid::Uuid::parse_str(id).is_ok_and(|id| self.activity.control(id, action))
+    }
+
+    pub fn annotate_writes(&self, writes: &mut [serde_json::Value]) {
+        self.activity.annotate_writes(writes);
     }
 
     pub async fn shutdown(mut self) {
@@ -126,20 +142,31 @@ pub async fn start_host(
     let (shutdown, mut stopped) = oneshot::channel();
     let endpoint = discovery.clone();
     let serving_lease = lease.clone();
+    let activity = Arc::new(Activity::default());
+    let tracker = activity.clone();
     let task = tokio::spawn(async move {
         let admission = Arc::new(Semaphore::new(MAX_CONNECTIONS));
         let workers = Arc::new(Semaphore::new(MAX_WORKERS));
+        let mut expiry = tokio::time::interval(HEARTBEAT);
         #[cfg(windows)]
         let mut listener = listener;
         loop {
             #[cfg(unix)]
             let accepted = tokio::select! {
                 _ = &mut stopped => break,
+                _ = expiry.tick() => {
+                    if tracker.expire() { service.notify_agent_activity(); }
+                    continue;
+                }
                 connection = listener.accept() => connection.map(|(stream, _)| stream),
             };
             #[cfg(windows)]
             let accepted = tokio::select! {
                 _ = &mut stopped => break,
+                _ = expiry.tick() => {
+                    if tracker.expire() { service.notify_agent_activity(); }
+                    continue;
+                }
                 result = listener.connect() => match result {
                     Err(error) => Err(error),
                     Ok(()) => match create_windows_pipe(&endpoint.address, false) {
@@ -159,11 +186,12 @@ pub async fn start_host(
             let workers = workers.clone();
             let lease = serving_lease.clone();
             let instance = endpoint.instance.clone();
+            let tracker = tracker.clone();
             tokio::spawn(async move {
                 let _permit = permit;
                 let _lease = lease;
                 // Failures never log request bodies, credentials or tag data.
-                let _ = serve_connection(stream, service, &instance, workers).await;
+                let _ = serve_connection(stream, service, &instance, workers, tracker).await;
             });
         }
     });
@@ -172,6 +200,7 @@ pub async fn start_host(
         task: Some(task),
         discovery,
         profile: profile.to_path_buf(),
+        activity,
         _lease: lease,
     })
 }
@@ -181,6 +210,7 @@ async fn serve_connection<S: AsyncRead + AsyncWrite + Unpin + Send>(
     service: Arc<Service>,
     instance: &str,
     workers: Arc<Semaphore>,
+    activity: Arc<Activity>,
 ) -> Result<(), TransportError> {
     let hello: Request = tokio::time::timeout(AUTH_TIMEOUT, ipc::read_frame(&mut stream))
         .await
@@ -213,7 +243,7 @@ async fn serve_connection<S: AsyncRead + AsyncWrite + Unpin + Send>(
     };
     ipc::write_frame(
         &mut stream,
-        &Reply::ok(json!({"protocol":crate::IPC_VERSION})),
+        &Reply::ok(json!({"protocol":crate::IPC_VERSION,"session_controls":true})),
     )
     .await?;
     let request: Request = tokio::time::timeout(AUTH_TIMEOUT, ipc::read_frame(&mut stream))
@@ -230,7 +260,56 @@ async fn serve_connection<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 Err(_) => Reply::err("internal", "Tool catalogue could not be encoded."),
             }
         }
-        Request::Call { tool, arguments } => {
+        Request::Presence {
+            session,
+            name,
+            model,
+            connected,
+            controllable,
+        } => {
+            let changed = uuid::Uuid::parse_str(&session).ok().and_then(|id| {
+                activity.heartbeat(
+                    principal.id(),
+                    id,
+                    &name,
+                    model.as_deref(),
+                    connected,
+                    controllable,
+                )
+            });
+            match changed {
+                Some(changed) => {
+                    if changed {
+                        service.notify_agent_activity();
+                    }
+                    Reply::ok(json!({}))
+                }
+                None => Reply::err(
+                    "presence_unavailable",
+                    "Agent presence could not be recorded.",
+                ),
+            }
+        }
+        call @ (Request::Call { .. } | Request::SessionCall { .. }) => {
+            let (session, tool, arguments) = match call {
+                Request::Call { tool, arguments } => (None, tool, arguments),
+                Request::SessionCall {
+                    session,
+                    tool,
+                    arguments,
+                } => (
+                    Some(uuid::Uuid::parse_str(&session).map_err(|_| TransportError::Protocol)?),
+                    tool,
+                    arguments,
+                ),
+                _ => unreachable!(),
+            };
+            if let Some((code, message)) =
+                session.and_then(|id| activity.denied(id, principal.id(), &tool))
+            {
+                ipc::write_frame(&mut stream, &Reply::err(code, message)).await?;
+                return Ok(());
+            }
             // A saturated work budget cannot consume all Stop/status lanes.
             // Refuse new heavy work instead of queuing another blocking thread.
             let _worker = if matches!(
@@ -247,9 +326,13 @@ async fn serve_connection<S: AsyncRead + AsyncWrite + Unpin + Send>(
                     }
                 }
             };
+            let mut active = activity.start(&service, principal.id(), session, &tool);
             let result =
                 tokio::task::spawn_blocking(move || service.call(&principal, &tool, arguments))
                     .await;
+            if let (Some(active), Ok(Ok(value))) = (&mut active, &result) {
+                active.completed(value);
+            }
             match result {
                 Ok(Ok(value)) => Reply::ok(value),
                 Ok(Err(error)) => Reply::err(&error.code, &error.message),
@@ -374,6 +457,7 @@ mod tests {
             service,
             "test-instance",
             Arc::new(Semaphore::new(1)),
+            Arc::new(Activity::default()),
         ));
         let reply = handshake(&mut client, "wrong-secret".into()).await;
         assert_eq!(reply.error.unwrap().code, "unauthorized");
@@ -394,6 +478,7 @@ mod tests {
                 service.clone(),
                 "test-instance",
                 Arc::new(Semaphore::new(0)),
+                Arc::new(Activity::default()),
             ));
             assert!(handshake(&mut client, credential.clone())
                 .await
@@ -429,6 +514,7 @@ mod tests {
             service,
             "test-instance",
             Arc::new(Semaphore::new(1)),
+            Arc::new(Activity::default()),
         ));
         assert_eq!(
             handshake(&mut client, credential).await.error.unwrap().code,

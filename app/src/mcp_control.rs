@@ -520,6 +520,57 @@ pub async fn mcp_status(
 }
 
 #[tauri::command]
+pub async fn mcp_agent_status(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> Result<Value, ErrorDto> {
+    trusted_window(&window)?;
+    let Some(control) = app.try_state::<AgentControl>() else {
+        return Ok(
+            json!({"enabled":false,"can_reconnect":false,"connections":[],"work":[],"writes":[]}),
+        );
+    };
+    let host = control.host.lock().await;
+    let mut status = host
+        .as_ref()
+        .map(tagrex_mcp::HostHandle::activity)
+        .unwrap_or_else(|| json!({"connections":[],"work":[]}));
+    status["enabled"] = json!(host.is_some());
+    status["can_reconnect"] = json!(control.service.has_agent_pairing().map_err(shell_error)?);
+    let mut work = control.service.agent_work_status().map_err(shell_error)?;
+    if let Some(host) = host.as_ref() {
+        if let Some(writes) = work["writes"].as_array_mut() {
+            host.annotate_writes(writes);
+        }
+    }
+    status["writes"] = work["writes"].clone();
+    status["recovery_required"] = work["recovery_required"].clone();
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn mcp_control_agent(
+    window: tauri::WebviewWindow,
+    control: State<'_, AgentControl>,
+    session_id: String,
+    action: tagrex_mcp::SessionControl,
+) -> Result<(), ErrorDto> {
+    trusted_window(&window)?;
+    let host = control.host.lock().await;
+    if !host
+        .as_ref()
+        .is_some_and(|host| host.control_session(&session_id, action))
+    {
+        return Err(shell_error(
+            "The agent session changed. Check the Agents popup and retry.",
+        ));
+    }
+    drop(host);
+    control.service.notify_agent_activity();
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn mcp_set_enabled(
     window: tauri::WebviewWindow,
     control: State<'_, AgentControl>,
