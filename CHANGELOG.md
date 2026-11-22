@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Drag selection stays responsive in large libraries.
 - Repeated transformations use current staged data and show the resulting
   values in both Files and Staged.
+- Updated the URL parser to address RustSec advisory RUSTSEC-2026-0592.
 
 ## [1.4.12] - 2026-11-22
 
