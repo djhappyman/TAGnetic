@@ -260,6 +260,7 @@ const rootInput = el("root");
 const tableWrap = el("files-view");
 const tracksBody = el("tracks-body");
 const tracksEmpty = el("tracks-empty");
+let scrolledCellEdit = null;
 let stagedView = false;
 let stagedMembershipPending = false;
 let activeApplyReview = null;
@@ -271,6 +272,7 @@ function editablePreview() {
 function setFileView(staged) {
   if (applying || undoing) return;
   if (stagedView === staged) return;
+  scrolledCellEdit = null;
   const active = tracksBody.querySelector('[contenteditable="true"]');
   if (active) active.blur();
   fileViewScroll[stagedView ? 'staged' : 'files'] = { top:tableWrap.scrollTop, left:tableWrap.scrollLeft };
@@ -1424,11 +1426,23 @@ function buildItemRow(i) {
   return tr;
 }
 
-function dropRow(tr) {
+function dropRow(tr, scrollOnly) {
   const active = tr.querySelector('[contenteditable="true"]');
-  if (active) { active.contentEditable = 'false'; commitCellEdit(active); }
+  const preserveCancel = scrollOnly && active && active === document.activeElement;
+  if (preserveCancel) {
+    // Recycling ends the DOM edit. Escape still belongs to that cell while
+    // the user is scrolling, so the rest of the staged plan stays intact.
+    const {path, field, editOriginal} = active.dataset;
+    scrolledCellEdit = {path, field, value: editOriginal ?? active.dataset.original};
+  }
+  if (active) {
+    endCellSuggest();
+    active.contentEditable = 'false';
+    commitCellEdit(active);
+  }
   if (tr.dataset.path && renderedRows.get(tr.dataset.path) === tr) renderedRows.delete(tr.dataset.path);
   tr.remove();
+  if (preserveCancel) el('tracks').focus({preventScroll: true});
 }
 
 // Build the rows the viewport covers (plus the overscan). Cheap enough to run on
@@ -1505,7 +1519,7 @@ function renderWindow({ force = false, refreshGrid = true, scrollOnly = false, p
     if(toggledGroups)for(const row of [...tracksBody.children])if(!wanted.has(row))dropRow(row);
     let cursor=tracksBody.firstElementChild;
     for(const row of desired){if(row===cursor)cursor=cursor.nextElementSibling;else tracksBody.insertBefore(row,cursor);}
-    if(!toggledGroups)for(const row of [...tracksBody.children])if(!wanted.has(row))dropRow(row);
+    if(!toggledGroups)for(const row of [...tracksBody.children])if(!wanted.has(row))dropRow(row, scrollOnly);
     if(force&&preserveDuplicateRows)patchMountedFields();
     setSpacerHeights();
     // WebKit can clamp scrolling while the table temporarily contains fewer
@@ -1519,11 +1533,11 @@ function renderWindow({ force = false, refreshGrid = true, scrollOnly = false, p
     const topSpacer = tracksBody.firstElementChild;
     const bottomSpacer = tracksBody.lastElementChild;
     while (renderedFirst < first) {
-      dropRow(topSpacer.nextElementSibling);
+      dropRow(topSpacer.nextElementSibling, scrollOnly);
       renderedFirst += 1;
     }
     while (renderedLast > last) {
-      dropRow(bottomSpacer.previousElementSibling);
+      dropRow(bottomSpacer.previousElementSibling, scrollOnly);
       renderedLast -= 1;
     }
     const enteringRows = [];
@@ -1821,6 +1835,7 @@ function paintSelectionSummary(count) {
 }
 
 function resetEdits({ preserveEditor = false } = {}) {
+  scrolledCellEdit = null;
   clearLiveInputs();
   resetFieldEditor({ preserveSubject: preserveEditor });
 }
@@ -1952,6 +1967,10 @@ function cancelCellEdit(td) {
   const value = td.dataset.editOriginal ?? original;
   td.textContent = value;
   td.classList.remove('dirty','error');
+  recordRestoredCellValue(path, field, value);
+}
+
+function recordRestoredCellValue(path, field, value) {
   recordLiveField([path],field,value,validateFieldValue(field,value,[path]).ok);
 }
 
@@ -2878,6 +2897,7 @@ async function apply() {
   const appliedPaths = new Set(appliedPlan.changes.map((c) => c.path));
   // A second Apply (the shortcut, a double click) would queue behind the first.
   if (applying || undoing) return;
+  scrolledCellEdit = null;
   applying = true;
   el('diff-preview').disabled = true;
   applyBtn.disabled = true;
@@ -3839,6 +3859,14 @@ const ESC_POPUPS = [
   "preset-menu",
   "query-preset-menu",
 ];
+// Focusing or interacting with another control leaves the scrolled-out edit
+// staged. Scrollbar interactions alone keep its cell-level Escape available.
+document.addEventListener('focusin', event => {
+  if (scrolledCellEdit && event.target !== el('tracks') && !event.target.closest('.table-scrollbar')) scrolledCellEdit = null;
+}, true);
+document.addEventListener('pointerdown', event => {
+  if (scrolledCellEdit && !event.target.closest?.('.table-scrollbar')) scrolledCellEdit = null;
+}, true);
 window.addEventListener(
   "keydown",
   (e) => {
@@ -3847,7 +3875,7 @@ window.addEventListener(
     // A report or error waiting to be dismissed closes first (#562), so the
     // plan it describes isn't thrown away under it.
     const sticky = !el("toast").hidden && !el("toast-close").hidden;
-    if (!diffByPath && !detecting && !sticky) return;
+    if (!diffByPath && !detecting && !sticky && !scrolledCellEdit) return;
     const active = document.activeElement;
     const typing =
       active && (active.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName));
@@ -3856,6 +3884,17 @@ window.addEventListener(
       [...document.querySelectorAll(".sg-menu, .modal-backdrop")].some((surface) => !surface.hidden) ||
       !el("settings").hidden;
     if (typing || popupOpen || searchBusy()) return;
+    if (scrolledCellEdit) {
+      const {path, field, value} = scrolledCellEdit;
+      scrolledCellEdit = null;
+      e.preventDefault();
+      e.stopPropagation();
+      if (trackAt(path)) {
+        prepareTagCellEdit();
+        recordRestoredCellValue(path, field, value);
+      }
+      return;
+    }
     if (sticky) {
       e.preventDefault();
       dismissStickyToast();
