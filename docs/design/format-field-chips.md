@@ -82,4 +82,4 @@ Preview labels are muted field-colour chips, with plain result values beside
 them. The last result remains while a new preview runs silently; actions remain
 disabled until the new result is accepted. Loading prose is absent. The content
 corner beneath the inactive Build/Extract tab is rounded in either mode.
-Hosted caret/clipboard/geometry contracts now run in WebKit as well as Chromium.
+Hosted WebKit fixtures cover caret, clipboard and geometry contracts.

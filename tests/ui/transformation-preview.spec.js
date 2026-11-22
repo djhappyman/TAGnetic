@@ -1,4 +1,5 @@
 import { openTagSource } from './navigation.js';
+import { waitForScrollIdle } from './scrolling.js';
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -394,12 +395,21 @@ test('internal fades and overlay scrollbar track overflow without moving content
 test('the combined editor scrolls under fixed tabs with fades on both edges',async({page})=>{
   await openTagSource(page,'editor');
   const port=page.locator('#subtab-editor .editor-scroll');
-  await port.evaluate(n=>n.scrollTop=0);
+  await port.evaluate(async node => {
+    node.scrollTop = 0;
+    // Both reveal animations translate the port while its scroll offset stays
+    // fixed. Measure the scroll displacement once those animations finish.
+    await new Promise(requestAnimationFrame);
+    const panels = [node.closest('.mode-panel'), node.closest('.subtab-panel')];
+    await Promise.allSettled(panels.flatMap(panel => panel.getAnimations().map(animation => animation.finished)));
+  });
+  await waitForScrollIdle(port);
   const tabs=await page.locator('.subtabs').boundingBox(),table=await page.locator('#transform-block').boundingBox();
   expect(table.y-tabs.y-tabs.height).toBeLessThanOrEqual(8);
   const before=await page.locator('#editor-field-title').boundingBox();
   await port.evaluate(n=>n.scrollTop=60);
   await expect(port).toHaveClass(/can-scroll-up/);
+  await waitForScrollIdle(port);
   expect(await page.locator('.subtabs').boundingBox()).toEqual(tabs);
   expect(table.y-(await page.locator('#transform-block').boundingBox()).y).toBeCloseTo(60,0);
   expect(before.y-(await page.locator('#editor-field-title').boundingBox()).y).toBeCloseTo(60,0);

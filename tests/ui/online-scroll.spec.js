@@ -59,6 +59,48 @@ test('scroll appends once, keeps the existing cards and query, and stops after t
   await expect(page.locator('.online-scroll')).not.toHaveClass(/can-scroll-down/);
 });
 
+test('Editor scrolling leaves hidden Online tracklists idle until the Online tab reopens', async ({page}) => {
+  await page.evaluate(() => {
+    window.detailHarness = ({releaseId}) => Promise.resolve({
+      id: releaseId, artist: 'Fixture', title: 'Fixture', year: 2004,
+      genres: [], styles: [], labels: [], images: [],
+      tracks: Array.from({length: 160}, (_, i) => ({
+        position: String(i + 1), artist: 'Fixture', title: `Track ${i + 1}`, duration_secs: 60,
+      })),
+    });
+  });
+  await search(page);
+  const firstCard = page.locator('.release-card').first();
+  await firstCard.locator('.release-head').click();
+  await expect(firstCard.locator('.tk-t').first()).toHaveText('Track 1');
+  await firstCard.evaluate(card => {
+    const query = card.querySelector;
+    window.tracklistChecks = 0;
+    card.querySelector = function (selector) {
+      if (selector === '.release-tracklist tbody') window.tracklistChecks++;
+      return query.call(this, selector);
+    };
+  });
+  await openTagSource(page, 'editor');
+  const editor = page.locator('.editor-scroll');
+  await editor.evaluate(port => {
+    const filler = document.createElement('div');
+    filler.style.cssText = 'height:1200px;flex:none';
+    port.append(filler);
+  });
+  await expect(editor).toHaveClass(/can-scroll-down/);
+  await settle(page);
+  await editor.evaluate(port => { window.tracklistChecks = 0; port.scrollTop = 100; });
+  await expect(editor).toHaveClass(/can-scroll-up/);
+  await settle(page);
+  expect(await page.evaluate(() => window.tracklistChecks)).toBe(0);
+
+  await openTagSource(page, 'online');
+  await page.locator('.online-scroll').evaluate(port => { port.scrollTop = 2600; });
+  await expect.poll(() => page.evaluate(() => window.tracklistChecks)).toBeGreaterThan(0);
+  await expect(firstCard.locator('.tk-t').first()).not.toHaveText('Track 1');
+});
+
 test('slow paging does not duplicate requests, and Stop rejects late results without restarting',async({page})=>{
   await search(page);await page.evaluate(()=>window.pagingMode='hold');await bottom(page);
   await expect.poll(()=>page.evaluate(()=>window.pendingPages.length)).toBe(1);

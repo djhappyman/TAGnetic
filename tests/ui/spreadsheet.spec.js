@@ -402,6 +402,56 @@ for (const invalidKind of ['date', 'cover']) {
   });
 }
 
+for (const returnToEdit of [false, true]) {
+  test(`Escape cancels only the inline draft after a scrollbar drag (${returnToEdit ? 'return to row' : 'offscreen'})`, async ({ page }) => {
+    await page.evaluate(async () => {
+      await window.tagrex.invoke('open_drop', { paths: Array.from({ length: 1200 }, (_, index) => `track-${String(index).padStart(4, '0')}.mp3`) });
+      document.getElementById('root').value = '/dropped';
+      await window.tagrex.openLibrary();
+    });
+    const draft = cell(page, 'title');
+    const other = cell(page, 'title', 1);
+    const draftPath = await draft.getAttribute('data-path');
+    const otherPath = await other.getAttribute('data-path');
+    const original = await draft.textContent();
+
+    await other.click();
+    await page.keyboard.press('F2');
+    await other.fill('Keep this staged title');
+    await page.keyboard.press('Enter');
+    await expect(page.locator('#diff-apply')).toBeEnabled();
+    await draft.click();
+    await page.keyboard.press('F2');
+    await draft.fill('Cancel only this title');
+
+    const rail = page.getByRole('scrollbar', { name: 'Scroll tracks' });
+    await rail.hover();
+    const bounds = await rail.boundingBox();
+    const thumb = await rail.locator('.table-scrollbar-thumb').boundingBox();
+    const x = thumb.x + thumb.width / 2;
+    await page.mouse.move(x, thumb.y + thumb.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(x, bounds.y + bounds.height * .85, { steps: 6 });
+    await page.mouse.up();
+
+    const originalCell = page.locator(`td[data-path="${draftPath}"][data-field="title"]`);
+    await expect(originalCell).toHaveCount(0);
+    const wrap = page.locator('#files-view');
+    const returnToTop = () => wrap.evaluate(node => { node.scrollTop = 0; });
+    if (returnToEdit) {
+      await returnToTop();
+      await expect(originalCell).toHaveText('Cancel only this title');
+    }
+    await page.keyboard.press('Escape');
+    if (!returnToEdit) await returnToTop();
+
+    await expect(originalCell).toHaveText(original);
+    await expect(page.locator(`td[data-path="${otherPath}"][data-field="title"]`)).toHaveText('Keep this staged title');
+    await expect(page.locator('#diff-apply')).toBeEnabled();
+    expect(await calls(page, 'apply_plan')).toBe(0);
+  });
+}
+
 test('wheel scrolling can unmount the focused row while keyboard navigation remains in the grid', async ({ page }) => {
   await page.evaluate(async () => {
     await window.tagrex.invoke('open_drop', { paths: Array.from({ length: 1200 }, (_, i) => `track-${String(i).padStart(3, '0')}.mp3`) });

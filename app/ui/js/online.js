@@ -1095,18 +1095,20 @@ function scheduleTracklistWindows() {
   if (windowFrame) return;
   windowFrame = requestAnimationFrame(() => {
     windowFrame = 0;
-    for (const id of expandedIds) {
-      const card = cardEl(id);
-      if (card) renderWindow(card);
+    const onlineHeight = onlineScroll?.clientHeight;
+    if (onlineHeight) {
+      for (const id of expandedIds) {
+        const card = cardEl(id);
+        if (card) renderWindow(card);
+      }
     }
     updateScrollFades();
-    updateResultViewport();
+    if (onlineHeight) updateResultViewport(onlineHeight);
   });
 }
 const onlineScroll = document.querySelector(".online-scroll");
-function updateResultViewport() {
-  if (!onlineScroll?.clientHeight) return;
-  const remaining = onlineScroll.scrollHeight - onlineScroll.scrollTop - onlineScroll.clientHeight;
+function updateResultViewport(height) {
+  const remaining = onlineScroll.scrollHeight - onlineScroll.scrollTop - height;
   if (remaining < 96 && releaseCandidates.length && !searchFailed && !pagingPaused) void loadMoreResults();
 }
 onlineScroll?.addEventListener("scroll", scheduleTracklistWindows, { passive: true });

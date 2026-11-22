@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.12] - 2026-11-22
+
+### Changed
+
+- Apply, Undo, Redo and source imports now report progress in a shared activity
+  card in the workbench.
+- File groups expand and collapse at the row boundary, with artwork aligned
+  throughout the animation. Large-library selection and Online paging respond
+  faster.
+
+### Fixed
+
+- Escape cancels the current inline draft after scrolling its row out of view
+  while preserving other staged edits.
+- Scrolling the Editor skips tracklist work in the hidden Online tab.
+
 ## [1.4.11] - 2026-11-20
 
 ### Added
