@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.13] - 2026-11-22
+
+### Added
+
+- A floating Agents button shows connected clients, available model names and
+  live job progress. Pause, resume, stop and reconnect from each agent row.
+- Connect from the Agents popover. Hide agent rows while their sessions keep
+  running and restore them from MCP connection settings.
+
+### Changed
+
+- Sorting animates visible file rows. Online browsing pauses background work
+  while the sidebar is closed and retains previously loaded results.
+- The file table follows TagScanner's default column order and visibility.
+  Staged review includes changed fields even when their main-table columns
+  are hidden.
+
+### Fixed
+
+- Drag selection stays responsive in large libraries.
+- Repeated transformations use current staged data and show the resulting
+  values in both Files and Staged.
+
 ## [1.4.12] - 2026-11-22
 
 ### Changed
