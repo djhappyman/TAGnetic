@@ -1,5 +1,9 @@
 # Agent entry point
 
+TAGnetic ships only as a native Tauri desktop app for Linux, macOS and Windows.
+Verify user-facing behavior in the platform webview. Use frontend fixtures for
+focused regression checks.
+
 Before planning a change, delegating work, proposing a commit, opening or merging
 a PR, or retiring a branch, read [docs/WORKFLOW.md](docs/WORKFLOW.md).
 Orchestrators must include its scope, completion gate and publication target in each

@@ -92,7 +92,7 @@ control needs `aria-label` + `title`.
 
 ### 3. Cross-platform consistency & portability
 
-TagRex is Tauri, so the webview is **WKWebView on macOS, WebView2/Chromium on
+TagRex is Tauri, so the webview is **WKWebView on macOS, WebView2 on
 Windows, WebKitGTK on Linux** — three engines, three default font stacks. Unicode
 symbol glyphs diverge badly across them (`⚙` is a colour emoji on macOS, flat
 elsewhere; `⇥`/`▦`/`☰` can render as **tofu** on minimal Linux font sets), with

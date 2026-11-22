@@ -127,27 +127,10 @@ from memory + git + this repo.
   gone in slice 3; this removes Duplicates + the Files tab too).
 - Transferable CSS is **A7 + A8**.
 
-## How to work here (project conventions — do not deviate)
+## Verification workflow
 
-- **Per-issue loop, autonomous:** file a GitHub issue → implement → verify on real
-  behaviour (browser pane + on-disk checks, not just green tests) → `cargo fmt` /
-  `clippy -D warnings` / `test` all green (for any Rust) → **signed** commit with
-  `Closes #N` → add a `CHANGELOG.md` entry under `[Unreleased]` → push `main` →
-  confirm the issue auto-closed. Slices 3+4 are expected to be **frontend-only**
-  (`app/ui/*`), no Rust.
-- **Git identity:** repo-local `ThaVip3r`, SSH-signed (Verified). **NEVER add the
-  `Co-Authored-By: Claude` trailer.** Never name competitor tagger/DJ products.
-- **Build & run:** `~/.cargo/bin/cargo tauri build --debug --bundles app`, then
-  `pkill -f "target/debug/tagrex"; open target/debug/bundle/macos/TagRex.app`.
-  The frontend is bundled into the `.app`, so rebuild after `app/ui/*` edits.
-- **Verify the frontend** in the in-app Browser pane against
-  `python3 -m http.server <port>` from `app/ui/` — **use a FRESH port every time**
-  (the server sends no `Cache-Control`, so a reload serves stale CSS/JS). Drive
-  via `javascript_tool`: top-level `function`s in `app.js` are global, and the
-  mock at the bottom of `app.js` fakes every Tauri command. WKWebView ≠ Chromium
-  (e.g. HTML5 DnD, and `resize`/`ResizeObserver` firing) — treat pane quirks as
-  harness limits and confirm logic with manual calls.
-- Test only on disposable copies in the scratchpad, never `~/Music`.
+Follow [AGENTS.md](../../AGENTS.md) and the [fork workflow](../WORKFLOW.md) for
+native verification and publication. Use disposable media for write checks.
 
 ## Reference
 

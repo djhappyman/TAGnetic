@@ -155,8 +155,8 @@ Implementation checks must establish:
   round-trip without changing query operators.
 - Per-source draft restoration, duplicate/incomplete-field handling, rapid source
   changes, stale replies, retries, pagination and thumbnail races behave correctly.
-- Chip acceptance/deletion/caret, copy/paste, local undo and IME work in WebKit and
-  Chromium. Check both themes, narrow windows, labels and focus/error precedence.
+- Verify chip acceptance, deletion, caret, copy/paste, local undo and IME in the
+  native app. Check both themes, narrow windows, labels and focus/error precedence.
 - Existing release fetch, track matching, preview/stage/Apply and Undo remain
   intact. Any media write verification uses disposable fixtures and the safe-audio
   skill; source-search testing itself is read-only.
