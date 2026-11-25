@@ -50,6 +50,7 @@ Open the editor from the command ribbon or the file table’s right-click menu.
   files with an empty opening block used for gapless timing.
 - Waveform drags keep tracking the pointer outside the waveform. Zooming and
   selecting tracks keep the editing area stable.
+- Updated the cookie and filesystem dependencies to versions with published fixes.
 
 ## [1.4.13] - 2026-11-22
 
