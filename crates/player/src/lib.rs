@@ -160,6 +160,7 @@ impl Player {
                 audition,
                 sample_rate,
                 seek_index: None,
+                treatment: Default::default(),
             },
         )
     }
@@ -179,6 +180,7 @@ impl Player {
             audition: request.audition,
             sample_rate: request.sample_rate,
             seek_index: request.seek_index,
+            treatment: request.treatment,
         }))
     }
 
@@ -224,6 +226,7 @@ pub struct StudioPlayback {
     pub audition: Option<StudioAudition>,
     pub sample_rate: u32,
     pub seek_index: Option<std::sync::Arc<tagrex_audio_workbench::SeekIndex>>,
+    pub treatment: tagrex_audio_workbench::PreparedTreatment,
 }
 
 impl Default for Player {

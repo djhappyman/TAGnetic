@@ -9,6 +9,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+ebur128 = "0.1.10"
 encoding_rs = "0.8.35"
 flacenc = { version = "=0.5.1", default-features = false }
 rusty_mp3 = "=1.2.2"

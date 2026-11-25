@@ -7,9 +7,9 @@ use std::sync::{
     Arc, Mutex,
 };
 use tagrex_commands::audio_studio::{
-    CueEncoding, DiscogsProposal, DraftSegment, ExportResult, ImportedCue, OpenedRecording,
-    Progress, ProviderAnchor, RecordingProgress, RestoreResult, Review, ReviewRequest, Studio,
-    StudioError,
+    AudioTreatment, CueEncoding, DiscogsProposal, DraftSegment, ExportResult, ImportedCue,
+    OpenedRecording, Progress, ProviderAnchor, RecordingProgress, RestoreResult, Review,
+    ReviewRequest, Studio, StudioError, TreatmentAnalysis,
 };
 use tagrex_commands::ErrorDto;
 use tauri::{Manager, State};
@@ -29,6 +29,8 @@ struct Opening {
 static OPEN: blocking::Queue = blocking::Queue::new();
 static PEAKS: blocking::Queue = blocking::Queue::new();
 static LATEST_PEAKS: blocking::Latest = blocking::Latest::new();
+static TREATMENT: blocking::Queue = blocking::Queue::new();
+static LATEST_TREATMENT: blocking::Latest = blocking::Latest::new();
 static REVIEW: blocking::Queue = blocking::Queue::new();
 static EXPORT: blocking::Queue = blocking::Queue::new();
 static CUE: blocking::Queue = blocking::Queue::new();
@@ -117,15 +119,43 @@ pub(super) async fn audio_split_peaks(
     start_frame: u64,
     end_frame: u64,
     bins: usize,
+    stereo: Option<bool>,
+    energy: Option<bool>,
 ) -> Result<tauri::ipc::Response, ErrorDto> {
     let studio = studio.inner().clone();
     PEAKS
         .run_latest(&LATEST_PEAKS, move |cancel| {
             let peaks = studio
-                .peaks(&id, start_frame, end_frame, bins, || cancel.cancelled())
+                .peaks(
+                    &id,
+                    tagrex_commands::audio_studio::FrameRange {
+                        start: start_frame,
+                        end: end_frame,
+                    },
+                    bins,
+                    stereo.unwrap_or_default(),
+                    energy.unwrap_or_default(),
+                    || cancel.cancelled(),
+                )
                 .map_err(shell_error)?;
             let bytes: Vec<u8> = peaks.into_iter().flat_map(f32::to_le_bytes).collect();
             Ok(tauri::ipc::Response::new(bytes))
+        })
+        .await
+}
+
+#[tauri::command]
+pub(super) async fn audio_split_treatment(
+    studio: State<'_, StudioState>,
+    id: String,
+    treatment: AudioTreatment,
+) -> Result<TreatmentAnalysis, ErrorDto> {
+    let studio = studio.inner().clone();
+    TREATMENT
+        .run_latest(&LATEST_TREATMENT, move |cancel| {
+            studio
+                .prepare_treatment(&id, treatment, || cancel.cancelled())
+                .map_err(shell_error)
         })
         .await
 }
@@ -365,6 +395,7 @@ fn frame_time(frame: u64, rate: u32) -> Duration {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Keep the transport arguments flat for Tauri IPC.
 pub(super) async fn audio_split_transport(
     studio: State<'_, StudioState>,
     player: State<'_, Player>,
@@ -373,52 +404,62 @@ pub(super) async fn audio_split_transport(
     frame: Option<u64>,
     end_frame: Option<u64>,
     sequence: Option<u64>,
+    treatment: Option<AudioTreatment>,
 ) -> Result<(), ErrorDto> {
+    let treatment = match action {
+        TransportAction::Play | TransportAction::Audition => treatment.unwrap_or_default(),
+        TransportAction::Seek | TransportAction::Pause => AudioTreatment::default(),
+    };
     studio
-        .with_playback_source(&id, |file, rate, total, seek_index| {
-            let frame = frame.unwrap_or_default();
-            if frame >= total && !matches!(action, TransportAction::Pause) {
-                return Err(StudioError::new(
-                    "Choose a preview position inside the recording.",
-                ));
-            }
-            let start = frame_time(frame, rate);
-            let end = frame_time(total, rate);
-            let owner = id.clone();
-            let sequence = sequence.unwrap_or_default();
-            let play = |audition| {
-                player.studio_play_request(
-                    owner.clone(),
-                    sequence,
-                    StudioPlayback {
-                        file,
-                        start,
-                        end,
-                        audition,
-                        sample_rate: rate,
-                        seek_index,
-                    },
-                )
-            };
-            match action {
-                TransportAction::Seek => player.studio_seek_sequenced(owner, sequence, start),
-                TransportAction::Play => play(None),
-                TransportAction::Pause => player.studio_pause_sequenced(owner, sequence),
-                TransportAction::Audition => {
-                    let cut_end = end_frame
-                        .filter(|end| *end > frame && *end <= total)
-                        .ok_or_else(|| {
-                            StudioError::new("Choose an audition range inside the recording.")
-                        })?;
-                    let audition = StudioAudition {
-                        start,
-                        end: frame_time(cut_end, rate),
-                    };
-                    play(Some(audition))
+        .with_playback_source(
+            &id,
+            treatment,
+            |file, rate, total, seek_index, treatment| {
+                let frame = frame.unwrap_or_default();
+                if frame >= total && !matches!(action, TransportAction::Pause) {
+                    return Err(StudioError::new(
+                        "Choose a preview position inside the recording.",
+                    ));
                 }
-            }
-            .map_err(StudioError::new)
-        })
+                let start = frame_time(frame, rate);
+                let end = frame_time(total, rate);
+                let owner = id.clone();
+                let sequence = sequence.unwrap_or_default();
+                let play = |audition| {
+                    player.studio_play_request(
+                        owner.clone(),
+                        sequence,
+                        StudioPlayback {
+                            file,
+                            start,
+                            end,
+                            audition,
+                            sample_rate: rate,
+                            seek_index,
+                            treatment,
+                        },
+                    )
+                };
+                match action {
+                    TransportAction::Seek => player.studio_seek_sequenced(owner, sequence, start),
+                    TransportAction::Play => play(None),
+                    TransportAction::Pause => player.studio_pause_sequenced(owner, sequence),
+                    TransportAction::Audition => {
+                        let cut_end = end_frame
+                            .filter(|end| *end > frame && *end <= total)
+                            .ok_or_else(|| {
+                                StudioError::new("Choose an audition range inside the recording.")
+                            })?;
+                        let audition = StudioAudition {
+                            start,
+                            end: frame_time(cut_end, rate),
+                        };
+                        play(Some(audition))
+                    }
+                }
+                .map_err(StudioError::new)
+            },
+        )
         .map_err(shell_error)
 }
 
@@ -431,27 +472,34 @@ pub(super) fn audio_split_audition_output(
     sequence: u64,
 ) -> Result<(), ErrorDto> {
     studio
-        .with_review_playback(&id, index, |owner, file, rate, range, seek_index| {
-            let start = frame_time(range.start, rate);
-            let end = frame_time(
-                range.end.min(range.start.saturating_add(u64::from(rate) * 4)),
-                rate,
-            );
-            player
-                .studio_play_request(
-                    owner.to_owned(),
-                    sequence,
-                    StudioPlayback {
-                        file,
-                        start,
-                        end,
-                        audition: None,
-                        sample_rate: rate,
-                        seek_index,
-                    },
-                )
-                .map_err(StudioError::new)
-        })
+        .with_review_playback(
+            &id,
+            index,
+            |owner, file, rate, range, seek_index, treatment| {
+                let start = frame_time(range.start, rate);
+                let end = frame_time(
+                    range
+                        .end
+                        .min(range.start.saturating_add(u64::from(rate) * 4)),
+                    rate,
+                );
+                player
+                    .studio_play_request(
+                        owner.to_owned(),
+                        sequence,
+                        StudioPlayback {
+                            file,
+                            start,
+                            end,
+                            audition: None,
+                            sample_rate: rate,
+                            seek_index,
+                            treatment,
+                        },
+                    )
+                    .map_err(StudioError::new)
+            },
+        )
         .map_err(shell_error)
 }
 

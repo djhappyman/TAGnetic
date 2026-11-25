@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 use stream::{DecodeRequest, Voice, Worker};
-use tagrex_audio_workbench::SeekIndex;
+use tagrex_audio_workbench::{PreparedTreatment, SeekIndex};
 
 #[derive(Clone, Copy, Debug)]
 pub struct StudioAudition {
@@ -44,6 +44,7 @@ pub(super) enum Command {
         audition: Option<StudioAudition>,
         sample_rate: u32,
         seek_index: Option<Arc<SeekIndex>>,
+        treatment: PreparedTreatment,
     },
     Seek {
         owner: String,
@@ -205,6 +206,7 @@ impl Actor {
                 audition,
                 sample_rate,
                 seek_index,
+                treatment,
                 ..
             } => {
                 self.lease = None;
@@ -224,6 +226,7 @@ impl Actor {
                             sample_rate,
                             end,
                             audition,
+                            treatment,
                         };
                         match Lease::open(worker, router, volume, file, geometry, start, seek_index)
                         {
@@ -359,6 +362,7 @@ struct Geometry {
     sample_rate: u32,
     end: Duration,
     audition: Option<StudioAudition>,
+    treatment: PreparedTreatment,
 }
 
 impl Lease {
@@ -423,6 +427,7 @@ impl Geometry {
             end,
             loop_start,
             seek_index,
+            treatment: self.treatment,
         })
     }
 }

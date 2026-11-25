@@ -4,13 +4,15 @@
   import { timeLabel, type FrameRange, type PeakTile, type Track } from '../js/audio-split';
 
   let {
-    start, end, total, sampleRate, tile = null, overview, playhead, tracks, selected,
+    start, end, total, sampleRate, tile = null, overview, stereoOverview, overviewRms, stereoOverviewRms, stereo = false, playhead, tracks, selected,
     readonly = false, playing = false, coverage = 1, onmove, onseek, oncancel, onselect, onmarker, onviewport, onwheelzoom, ongesture, onkey,
     onplaymarker, onadd, oneditmarker, onremovemarker, ontrim, onrestoremarker, visualPlayhead,
-    loopRegion = null, loopEnabled = false, onloop, onmovetoplayhead, canmove,
+    loopRegion = null, loopEnabled = false, onloop, onmovetoplayhead, canmove, ontrack, trackTitle,
   }: {
     start: number; end: number; total: number; sampleRate: number;
-    tile?: PeakTile | null; overview: Float32Array; playhead: number; visualPlayhead?: number;
+    tile?: PeakTile | null; overview: Float32Array; stereoOverview?: Float32Array; stereo?: boolean;
+    overviewRms?: Float32Array; stereoOverviewRms?: Float32Array;
+    playhead: number; visualPlayhead?: number; ontrack?: (track: Track) => void; trackTitle?: (track: Track) => string | undefined;
     tracks: Track[]; selected: string; readonly?: boolean; playing?: boolean; coverage?: number;
     onmove?: (frame: number) => void; onseek?: (frame: number) => void;
     oncancel?: (frame: number) => void; onselect?: (id: string) => void; onmarker?: (id: string, frame: number) => void;
@@ -58,22 +60,26 @@
     return { width, height, scale: Math.min(3, window.devicePixelRatio || 1), color: getComputedStyle(canvas).color };
   }
 
-  function draw(canvas: HTMLCanvasElement, size: CanvasSize, grid: boolean, first: number, last: number, levels: PeakTile[]) {
+  function draw(canvas: HTMLCanvasElement, size: CanvasSize, grid: boolean, first: number, last: number, levels: PeakTile[], lanes = 1) {
     const context = canvas.getContext('2d');
-    if (!context) return;
+    if (!context || !size.width || !size.height) return;
     const { width, height, scale, color } = size;
-    if (!width || !height) return;
     const pixelsWide = Math.round(width * scale);
     const pixelsHigh = Math.round(height * scale);
     if (canvas.width !== pixelsWide) canvas.width = pixelsWide;
     if (canvas.height !== pixelsHigh) canvas.height = pixelsHigh;
     context.clearRect(0, 0, pixelsWide, pixelsHigh);
     context.strokeStyle = color;
+    context.fillStyle = color;
     context.lineWidth = scale;
-    context.globalAlpha = 0.21;
+    context.globalAlpha = 0.16;
     context.beginPath();
-    context.moveTo(0, pixelsHigh / 2);
-    context.lineTo(pixelsWide, pixelsHigh / 2);
+    const laneHeight = pixelsHigh / lanes;
+    for (let channel = 0; channel < lanes; channel++) {
+      const centre = (channel + 0.5) * laneHeight;
+      context.moveTo(0, centre);
+      context.lineTo(pixelsWide, centre);
+    }
     if (grid) {
       for (let quarter = 1; quarter < 4; quarter++) {
         context.moveTo(pixelsWide * quarter / 4, 0);
@@ -82,44 +88,90 @@
     }
     context.stroke();
     const toX = (frame: number) => (frame - first) * pixelsWide / Math.max(1, last - first);
-    const toY = (sample: number) => pixelsHigh * (0.5 - Math.min(1, Math.max(-1, sample)) * 0.44);
     const fine = levels[1];
     for (const level of levels) {
-      const count = level.values.length / 2;
+      if (lanes === 2 && !level.stereo) continue;
+      const stride = level.stereo ? 4 : 2;
+      const count = level.values.length / stride;
       if (!count || level.end <= level.start) continue;
       const step = (level.end - level.start) / count;
       const from = Math.max(0, Math.floor((first - level.start) / step));
       const until = Math.min(count, Math.ceil((last - level.start) / step));
-      const pixelsPerBin = toX(first + step);
-      context.globalAlpha = pixelsPerBin > 7 ? 0.28 : 0.88;
-      context.fillStyle = color;
-      context.beginPath();
-      for (let i = from; i < until; i++) {
-        const frame = level.start + i * step;
-        if (fine && level !== fine && frame >= fine.start && frame + step <= fine.end) continue;
-        const top = toY(level.values[i * 2 + 1]);
-        const bottom = toY(level.values[i * 2]);
-        if (pixelsPerBin > 7) {
-          const left = Math.max(0, toX(frame));
-          const right = Math.min(pixelsWide, toX(frame + step));
-          context.fillRect(left, top, Math.max(0, right - left), Math.max(1, bottom - top));
-        } else {
-          const x = toX(frame + step / 2);
-          context.moveTo(x, top);
-          context.lineTo(x, Math.max(top + 1, bottom));
-        }
+      const wideBins = toX(first + step) > 7;
+      for (let channel = 0; channel < lanes; channel++) {
+        const centre = (channel + 0.5) * laneHeight;
+        const toY = (sample: number) => centre - laneHeight * Math.min(1, Math.max(-1, sample)) * 0.44;
+        const amplitude = (index: number, high: boolean) => {
+          const offset = index * stride + Number(high);
+          if (!level.stereo || lanes === 2) return level.values[offset + channel * 2];
+          const left = level.values[offset];
+          const right = level.values[offset + 2];
+          return high ? Math.max(left, right) : Math.min(left, right);
+        };
+        const rms = level.rms;
+        const rmsStride = level.stereo ? 2 : 1;
+        const hasRms = rms && rms.length === count * rmsStride;
+        const energyEdge = (index: number, high: boolean) => {
+          if (!rms) return 0;
+          const offset = index * rmsStride;
+          // The combined view pools energy while the split view keeps each lane exact.
+          const value = level.stereo && lanes === 1
+            ? Math.sqrt((rms[offset] ** 2 + rms[offset + 1] ** 2) * 0.5)
+            : rms[offset + channel];
+          const inner = (high ? 0.72 : -0.72) * value;
+          return Math.min(amplitude(index, true), Math.max(amplitude(index, false), inner));
+        };
+        const path = (begin: number, until: number, edge: (index: number, high: boolean) => number) => {
+          const envelope = new Path2D();
+          const top = (i: number) => toY(edge(i, true));
+          const bottom = (i: number) => Math.max(top(i) + scale, toY(edge(i, false)));
+          if (wideBins) {
+            for (let i = begin; i < until; i++) {
+              const frame = level.start + i * step;
+              envelope.rect(toX(frame), top(i), toX(first + step), bottom(i) - top(i));
+            }
+            return envelope;
+          }
+          envelope.moveTo(toX(level.start + begin * step), top(begin));
+          for (let i = begin; i < until; i++) {
+            envelope.lineTo(toX(level.start + (i + 0.5) * step), top(i));
+          }
+          envelope.lineTo(toX(level.start + until * step), top(until - 1));
+          envelope.lineTo(toX(level.start + until * step), bottom(until - 1));
+          for (let i = until - 1; i >= begin; i--) {
+            envelope.lineTo(toX(level.start + (i + 0.5) * step), bottom(i));
+          }
+          envelope.lineTo(toX(level.start + begin * step), bottom(begin));
+          envelope.closePath();
+          return envelope;
+        };
+        const plot = (begin: number, until: number) => {
+          if (begin >= until) return;
+          context.globalAlpha = wideBins ? 0.17 : 0.27;
+          context.fill(path(begin, until, amplitude));
+          if (hasRms) {
+            context.globalAlpha = wideBins ? 0.29 : 0.43;
+            context.fill(path(begin, until, energyEdge));
+          }
+        };
+        if (fine && level !== fine) {
+          plot(from, Math.min(until, Math.ceil((fine.start - level.start) / step)));
+          plot(Math.max(from, Math.floor((fine.end - level.start) / step)), until);
+        } else plot(from, until);
       }
-      context.stroke();
     }
   }
 
-  const coarse = $derived({ start: 0, end: total * coverage, values: overview });
+  const coarse = $derived({ start: 0, end: total * coverage, values: overview, rms: overviewRms });
+  const channelCoarse = $derived(stereo && stereoOverview?.length
+    ? { ...coarse, values: stereoOverview, rms: stereoOverviewRms, stereo: true }
+    : coarse);
 
   $effect(() => {
     if (mini && miniSize) draw(mini, miniSize, false, 0, total, [coarse]);
   });
   $effect(() => {
-    if (detail && detailSize) draw(detail, detailSize, true, start, end, tile ? [coarse, tile] : [coarse]);
+    if (detail && detailSize) draw(detail, detailSize, true, start, end, tile ? [channelCoarse, tile] : [channelCoarse], stereo ? 2 : 1);
   });
 
   function observe(node: HTMLDivElement) {
@@ -160,6 +212,12 @@
   const announceFrame = $derived(playing ? Math.min(total, Math.round(Math.floor(playhead * 10 / sampleRate) * sampleRate / 10)) : playhead);
   const visible = $derived(tracks.map((track, index) => ({ track, index }))
     .filter(({ track }) => track.startFrame >= start && track.startFrame <= end));
+  const trackHeaders = $derived(tracks.map((track, index) => ({
+    track, index,
+    start: drag?.marker === track.id ? drag.frame : track.startFrame,
+    end: drag?.marker && drag.marker === tracks[index + 1]?.id ? drag.frame : (tracks[index + 1]?.startFrame ?? total),
+  })).filter(region => region.start < end && region.end > start));
+  const selectedHeader = $derived(trackHeaders.find(region => region.track.id === selected));
   const firstTrack = $derived(tracks[0]);
   const opening = $derived(drag && drag.marker === firstTrack?.id ? drag.frame : firstTrack?.startFrame ?? 0);
   const shownPlayhead = $derived(visualPlayhead ?? playhead);
@@ -509,23 +567,37 @@
 </script>
 
 <div class="audio-split-wave" {@attach observe}>
-  <div class="overview">
-    <canvas bind:this={mini} aria-hidden="true"></canvas>
-    <div class="window" style:left={`${start / Math.max(1,total) * 100}%`} style:width={`${span / Math.max(1,total) * 100}%`}></div>
-    {#if !readonly}<div class="overview-pan" role="slider" tabindex="0" aria-label="Waveform overview"
-      title="Drag to move the visible range" aria-valuemin={0} aria-valuemax={Math.max(0,total - span)} aria-valuenow={start}
-      aria-valuetext={`View centred at ${timeLabel(center, sampleRate)}`}
-      onpointerdown={startOverview}
-      onkeydown={overviewKeys}></div>{/if}
-  </div>
+  {#if !readonly && trackHeaders.length}
+    <div class="track-headers" aria-label="Timeline tracks" role="group">
+      {#each trackHeaders as region (region.track.id)}
+        {@const title = trackTitle?.(region.track) || ''}
+        <button type="button" class="track-header" aria-pressed={region.track.id === selected}
+          aria-label={title ? `Go to track ${region.index + 1}, ${title}` : `Go to track ${region.index + 1}`}
+          title={title || `Track ${region.index + 1}`}
+          style:left={`${Math.max(0, percent(region.start))}%`}
+          style:right={`${Math.max(0, 100 - percent(region.end))}%`}
+          onclick={() => ontrack?.(region.track)}>
+          <span>{String(region.index + 1).padStart(2, '0')}</span>{#if title}<span>{title}</span>{/if}
+        </button>
+      {/each}
+    </div>
+  {/if}
   <ContextMenu.Root bind:open={menuOpen}>
     <ContextMenu.Trigger disabled={readonly}>
       {#snippet child({ props })}
         <!-- The waveform owns pointer gestures, including touch scrubbing. -->
-        <div {...props} class={['detail', { panning: panDrag?.middle }]} {@attach wheelControl}
+        <div {...props} class={['detail', { panning: panDrag?.middle, 'stereo-detail': stereo }]} {@attach wheelControl}
           onpointerdown={undefined} onpointerdowncapture={startMiddlePan} oncontextmenucapture={prepareMenu}
           onauxclick={event => { if (event.button === 1) event.preventDefault(); }}>
+          {#if selectedHeader}
+            <div class="selected-region" style:left={`${Math.max(0, percent(selectedHeader.start))}%`}
+              style:right={`${Math.max(0, 100 - percent(selectedHeader.end))}%`} aria-hidden="true"></div>
+          {/if}
           <canvas bind:this={detail} aria-hidden="true"></canvas>
+          {#if stereo}
+            <div class="channel-label left">Left</div>
+            <div class="channel-label right">Right</div>
+          {/if}
           {#if !readonly}<div class="scrubber" role="slider" tabindex="0" aria-label="Waveform playhead"
             aria-valuemin={0} aria-valuemax={total} aria-valuenow={announceFrame} aria-valuetext={timeLabel(announceFrame, sampleRate)}
             onkeydown={sliderKeys} onpointerdown={event => begin(event)}></div>{/if}
@@ -535,7 +607,9 @@
           {/if}
           {#if shownLoop && shownLoop.start < shownLoop.end && shownLoop.start < end && shownLoop.end > start}
             <div class="loop-region" data-active={loopEnabled || !!drag?.loop}
-              style:left={`${Math.max(0, percent(shownLoop.start))}%`} style:right={`${Math.max(0, 100 - percent(shownLoop.end))}%`} aria-hidden="true"></div>
+              style:left={`${Math.max(0, percent(shownLoop.start))}%`} style:right={`${Math.max(0, 100 - percent(shownLoop.end))}%`} aria-hidden="true">
+              {#if percent(shownLoop.end) - percent(shownLoop.start) > 8}<span>Loop</span>{/if}
+            </div>
           {/if}
           {#each visible as { track, index } (track.id)}
             {@const position = drag?.marker === track.id ? drag.frame : track.startFrame}
@@ -547,7 +621,6 @@
               onkeydown={event => markerKeys(event, track)}
               onpointerdown={event => begin(event, track)}>
               <span class="marker-line" aria-hidden="true"></span>
-              <span class="marker-number" aria-hidden="true">{index + 1}</span>
             </button>
             <span class="marker-time" data-dragging={drag?.marker === track.id}
               style:left={`clamp(45px, ${percent(position)}%, calc(100% - 45px))`} aria-hidden="true">{timeLabel(position, sampleRate)}</span>
@@ -604,12 +677,33 @@
       <span>{timeLabel(start + span * division / 4, sampleRate, span < sampleRate * 12 ? 1 : 0)}</span>
     {/each}
   </div>
+  <div class="overview">
+    <canvas bind:this={mini} aria-hidden="true"></canvas>
+    <div class="window" style:left={`${start / Math.max(1,total) * 100}%`} style:width={`${span / Math.max(1,total) * 100}%`}></div>
+    {#if !readonly}<div class="overview-pan" role="slider" tabindex="0" aria-label="Waveform overview"
+      title="Drag to move the visible range" aria-valuemin={0} aria-valuemax={Math.max(0,total - span)} aria-valuenow={start}
+      aria-valuetext={`View centred at ${timeLabel(center, sampleRate)}`}
+      onpointerdown={startOverview}
+      onkeydown={overviewKeys}></div>{/if}
+  </div>
 </div>
 
 <style>
-  .audio-split-wave { position:relative; display:grid; gap:var(--sp-1); border-radius:var(--r-inset); padding:var(--sp-2); background:var(--bg); }
+  .audio-split-wave { position:relative; display:grid; gap:var(--sp-1); }
+  .track-headers { position:relative; height:28px; overflow:hidden; background:var(--panel); border-radius:var(--r-media) var(--r-media) 0 0; margin-bottom:calc(-1 * var(--sp-1)); }
+  .track-header { position:absolute; inset-block:0; display:flex; align-items:center; gap:var(--sp-1); overflow:hidden; padding:0; border:0; border-radius:0; font-size:var(--text-xs); color:var(--muted); background:transparent; white-space:nowrap; }
+  .track-header span:first-child { margin-inline-start:var(--sp-2); font-family:var(--font-literal); }
+  .track-header span:last-child { overflow:hidden; text-overflow:ellipsis; }
+  .track-header[aria-pressed=true] { color:var(--text); background:var(--sel-tint); }
+  .track-header:hover { color:var(--text); background:var(--row-hover); }
+  .track-header:focus-visible { color:var(--text); outline:2px solid var(--accent); outline-offset:-2px; }
+  .track-headers + :global([data-slot="context-menu-trigger"]) { border-start-start-radius:0; border-start-end-radius:0; }
+  .selected-region { position:absolute; inset-block:0; background:color-mix(in srgb,var(--accent) 6%,transparent); pointer-events:none; }
+  .channel-label { position:absolute; inset-inline-start:var(--sp-2); color:var(--text); font-size:var(--text-xs); pointer-events:none; }
+  .channel-label.left { inset-block-start:var(--sp-1); }
+  .channel-label.right { inset-block-start:calc(50% + var(--sp-1)); }
   .overview, .detail { position:relative; overflow:hidden; border-radius:var(--r-media); }
-  .overview { height:24px; background:var(--panel); }
+  .overview { height:20px; margin-top:var(--sp-1); background:var(--panel); }
   .overview-pan, .scrubber { position:absolute; inset:0; width:100%; background:transparent; border:0; border-radius:inherit; touch-action:none; }
   .scrubber { cursor:crosshair; }
   .panning :is(.scrubber, .marker) { cursor:grabbing; }
@@ -617,13 +711,15 @@
   .overview-pan:active { cursor:grabbing; }
   .overview-pan:focus-visible, .scrubber:focus-visible { outline:2px solid var(--accent); outline-offset:-3px; }
   .window { position:absolute; inset-block:1px; background:color-mix(in srgb,var(--accent) 15%,transparent); border:1px solid var(--accent); border-radius:4px; pointer-events:none; }
-  .detail { height:clamp(90px, 20dvh, 168px); background:var(--panel); }
+  .detail { height:clamp(112px, 24dvh, 208px); background:var(--panel); }
+  .detail.stereo-detail { height:clamp(152px, 31dvh, 256px); }
   canvas { width:100%; height:100%; display:block; color:var(--muted); }
-  .detail canvas { opacity:.64; }
+  .detail canvas { position:relative; }
   .overview canvas { opacity:.76; }
   .hint { position:absolute; inset:0; display:grid; place-items:center; pointer-events:none; color:var(--muted); }
   .loop-region { position:absolute; inset-block:0; pointer-events:none; background:color-mix(in srgb,var(--accent) 9%,transparent); }
-  .loop-region[data-active=true] { background:color-mix(in srgb,var(--accent) 17%,transparent); }
+  .loop-region[data-active=true] { background:color-mix(in srgb,var(--accent) 12%,transparent); border-inline:1px solid color-mix(in srgb,var(--accent) 65%,transparent); }
+  .loop-region span { margin-inline-start:var(--sp-1); color:var(--text); font-size:var(--text-xs); }
   .loop-handle { position:absolute; bottom:1px; z-index:2; width:18px; height:24px; translate:-50% 0; cursor:ew-resize; touch-action:none; }
   .loop-handle[data-edge=start] { translate:-30% 0; }
   .loop-handle[data-edge=end] { translate:-70% 0; }
@@ -633,10 +729,8 @@
   .detail .marker { position:absolute; top:0; height:100%; width:24px; transform:translateX(-50%); background:transparent; border:0; padding:0; cursor:pointer; touch-action:none; }
   .marker[data-dragging=true] { cursor:ew-resize; }
   .marker-line { position:absolute; top:3px; bottom:0; left:50%; width:1px; background:var(--muted); }
-  .marker-line::before { content:''; position:absolute; top:0; left:-4px; width:9px; height:9px; rotate:45deg; background:inherit; border-radius:2px; }
+  .marker-line::before { content:''; position:absolute; top:-3px; left:-3px; width:7px; height:7px; background:inherit; clip-path:polygon(0 0,100% 0,100% 50%,50% 100%,0 50%); }
   .marker.selected .marker-line { background:var(--accent); width:2px; }
-  .marker-number { position:absolute; top:var(--sp-1); left:calc(50% + 7px); color:var(--muted); font:var(--text-xs)/1.2 var(--font-literal); pointer-events:none; }
-  .marker.selected .marker-number { color:var(--accent-ink); }
   .marker:is(:hover, :focus-visible, [data-dragging=true]) .marker-line { background:color-mix(in srgb, var(--accent) 55%, var(--text)); width:2px; }
   .marker-time { position:absolute; bottom:var(--sp-2); z-index:1; translate:-50% 0; border-radius:var(--r-compact); padding:var(--sp-1) var(--sp-2); color:var(--text); background:var(--bg); font:var(--text-xs)/1.4 var(--font-literal); pointer-events:none; visibility:hidden; }
   .marker:is(:hover, :focus-visible) + .marker-time, .marker-time[data-dragging=true] { visibility:visible; }

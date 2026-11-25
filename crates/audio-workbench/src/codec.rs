@@ -11,11 +11,15 @@ mod decode;
 mod encode;
 mod peaks;
 mod seek;
+mod treatment;
 
 use decode::Recording;
 use peaks::PeakBins;
-pub use peaks::{Peak, WaveformIndex};
+pub use peaks::{Peak, WaveformIndex, WaveformPeaks};
 pub use seek::SeekIndex;
+pub use treatment::{
+    prepare_treatment, AudioTreatment, HumFilter, MonoMode, PreparedTreatment, TreatmentProcessor,
+};
 
 const MAX_SEGMENTS: usize = 1_000;
 
@@ -67,6 +71,11 @@ pub struct AnalysisProgress {
     pub scanned_frames: u64,
     /// Peaks cover the decoded prefix, from frame zero to scanned_frames.
     pub peaks: Vec<Peak>,
+    pub rms: Vec<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stereo_peaks: Option<Vec<[Peak; 2]>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stereo_rms: Option<Vec<[f32; 2]>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -74,6 +83,11 @@ pub struct AnalysisProgress {
 pub struct Analysis {
     pub source: SourceInfo,
     pub peaks: Vec<Peak>,
+    pub rms: Vec<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stereo_peaks: Option<Vec<[Peak; 2]>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stereo_rms: Option<Vec<[f32; 2]>>,
     #[serde(skip)]
     pub waveform: WaveformIndex,
     #[serde(skip)]
@@ -235,6 +249,9 @@ fn analyze(
             source: probed,
             scanned_frames: 0,
             peaks: Vec::new(),
+            rms: Vec::new(),
+            stereo_peaks: None,
+            stereo_rms: None,
         });
     }
     while let Some(packet) = recording.next(&mut cancelled)? {
@@ -246,11 +263,14 @@ fn analyze(
                     start: 0,
                     end: scanned_frames,
                 };
-                let peaks = waveform.peaks(range, bins)?;
+                let peaks = waveform.channel_peaks(range, bins)?;
                 report(AnalysisProgress {
                     source: probed,
                     scanned_frames,
-                    peaks,
+                    peaks: peaks.combined,
+                    rms: peaks.rms,
+                    stereo_peaks: peaks.stereo,
+                    stereo_rms: peaks.stereo_rms,
                 });
                 last_reported = Instant::now();
             }
@@ -262,7 +282,7 @@ fn analyze(
             "The recording contains no audio frames".into(),
         ));
     }
-    let peaks = waveform.peaks(
+    let peaks = waveform.channel_peaks(
         FrameRange {
             start: 0,
             end: source.frames,
@@ -285,7 +305,10 @@ fn analyze(
         .map(Arc::new);
     Ok(Analysis {
         source,
-        peaks,
+        peaks: peaks.combined,
+        rms: peaks.rms,
+        stereo_peaks: peaks.stereo,
+        stereo_rms: peaks.stereo_rms,
         waveform,
         seek_index,
     })
@@ -317,8 +340,19 @@ pub fn waveform_file_indexed(
     range: FrameRange,
     bins: usize,
     index: Option<&SeekIndex>,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<Vec<Peak>, MediaError> {
+    Ok(waveform_channels_file_indexed(source, range, bins, index, cancelled)?.combined)
+}
+
+/// Compute a tile with independent channel peaks for stereo sources.
+pub fn waveform_channels_file_indexed(
+    source: File,
+    range: FrameRange,
+    bins: usize,
+    index: Option<&SeekIndex>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<WaveformPeaks, MediaError> {
     let mut peaks = PeakBins::new(range, bins)?;
     check_cancelled(&mut cancelled)?;
     let mut recording = Recording::open_at(source, range.start, index, &mut cancelled)?;
@@ -337,7 +371,7 @@ pub fn waveform_file_indexed(
             peaks.push(first, &packet[skip..skip + take], channels);
         }
     }
-    Ok(peaks.finish())
+    Ok(peaks.finish(channels))
 }
 
 /// Check the requested codec can retain the source's rate and channel layout.
@@ -382,6 +416,27 @@ pub fn render_file_with_outputs(
     source: File,
     segments: &[RenderSegment],
     format: OutputFormat,
+    cancelled: impl FnMut() -> bool,
+    progress: impl FnMut(RenderProgress),
+    open: impl FnMut(&Path) -> std::io::Result<File>,
+) -> Result<(), MediaError> {
+    render_treated_file(
+        source,
+        segments,
+        format,
+        PreparedTreatment::default(),
+        cancelled,
+        progress,
+        open,
+    )
+}
+
+/// Render prepared audio through the same streaming processor used by preview.
+pub fn render_treated_file(
+    source: File,
+    segments: &[RenderSegment],
+    format: OutputFormat,
+    treatment: PreparedTreatment,
     mut cancelled: impl FnMut() -> bool,
     mut progress: impl FnMut(RenderProgress),
     mut open: impl FnMut(&Path) -> std::io::Result<File>,
@@ -410,9 +465,11 @@ pub fn render_file_with_outputs(
 
     check_cancelled(&mut cancelled)?;
     let mut recording = Recording::open(source)?;
-    let info = recording.info();
+    let mut processor = treatment.processor(recording.info())?;
+    let info = processor.output_info();
     check_output(&info, format)?;
     let channels = info.channels as usize;
+    let mut processed = Vec::new();
     let mut next = 0;
     let mut completed_frames = 0;
     let mut reported_frames = 0;
@@ -423,6 +480,12 @@ pub fn render_file_with_outputs(
         let packet = recording
             .next(&mut cancelled)?
             .ok_or(MediaError::Range("An output extends past the recording"))?;
+        let packet = if treatment.settings().is_active() {
+            processor.process(packet, &mut processed);
+            &processed
+        } else {
+            packet
+        };
         let end = start + (packet.len() / channels) as u64;
         while let Some(segment) = segments
             .get(next)

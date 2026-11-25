@@ -13,9 +13,12 @@ export type Source = {
   originalFormat?: Format | null;
   sourceStamp?: string;
   overview?: number[];
+  stereoOverview?: number[];
+  overviewRms?: number[];
+  stereoOverviewRms?: number[];
   tags?: Tags;
 };
-export type Loading = { frames: number; sampleRate: number; scannedFrames: number; overview: number[] };
+export type Loading = { frames: number; sampleRate: number; scannedFrames: number; overview: number[]; stereoOverview?: number[]; overviewRms?: number[] };
 export type Track = {
   id: string;
   startFrame: number;
@@ -45,7 +48,21 @@ export type Review = {
 export type ExportResult = { paths: string[]; replaced?: string[]; backups?: string[]; warnings?: string[] };
 export type ReplacementUndo = { paths: string[]; removed: string[]; warnings?: string[] };
 export type Progress = { completed: number; total: number; phase: string; framesDone?: number; framesTotal?: number };
-export type PeakTile = { start: number; end: number; values: Float32Array };
+export type PeakTile = { start: number; end: number; values: Float32Array; rms?: Float32Array; stereo?: boolean };
+export type AudioTreatment = { normalize: boolean; mono: 'off' | 'mix' | 'left' | 'right'; rumble: boolean; hum: 'off' | 'hz50' | 'hz60' };
+export type TreatmentAnalysis = { gainDb: number; loudnessLufs: number | null; outputChannels: number };
+export const noTreatment: AudioTreatment = { normalize: false, mono: 'off', rumble: false, hum: 'off' };
+export const hasTreatment = ({ normalize, mono, rumble, hum }: AudioTreatment) =>
+  normalize || mono !== 'off' || rumble || hum !== 'off';
+export function readTreatment(value?: AudioTreatment): AudioTreatment {
+  if (!value) return noTreatment;
+  return {
+    normalize: value.normalize === true,
+    mono: value.mono === 'left' || value.mono === 'right' || value.mono === 'mix' ? value.mono : 'off',
+    rumble: value.rumble === true,
+    hum: value.hum === 'hz50' || value.hum === 'hz60' ? value.hum : 'off',
+  };
+}
 export type Status = { frame: number; playing: boolean; loading?: boolean; sequence?: number };
 export type Cue = {
   sourceName: string;
@@ -59,8 +76,8 @@ export type Proposal = {
   warnings: string[];
   spans?: Array<{ startIndex: number; endIndex: number; expectedEndFrame?: number | null; availableEndFrame?: number | null }>;
 };
-type DraftView = { playhead: number; start: number; end: number; selected: string; follow: boolean };
-export type Draft = { tracks: Track[]; tags: Tags; importedTags?: Tags; artworkPath: string; view?: DraftView };
+type DraftView = { playhead: number; start: number; end: number; selected: string; follow: boolean; stereo?: boolean };
+export type Draft = { tracks: Track[]; tags: Tags; importedTags?: Tags; artworkPath: string; treatment?: AudioTreatment; view?: DraftView };
 type StoredDraft = Draft & { frames: number; sampleRate: number; stamp?: string; version: 1 };
 type Native = {
   core?: { invoke: (command: string, args: Record<string, unknown>) => Promise<unknown> };

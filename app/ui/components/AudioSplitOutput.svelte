@@ -11,12 +11,12 @@
   import { defaultSplitFilePattern, directory, leaf, type Format, type Progress, type Review, type SaveMode, type SplitMethod } from '../js/audio-split';
 
   let {
-    split, canCopy, copying, blocked, sampleRate, sourcePaths, saveMode = $bindable(), destination = $bindable(),
+    split, canCopy, copying, treated, blocked, sampleRate, sourcePaths, saveMode = $bindable(), destination = $bindable(),
     backupDirectory = $bindable(), createFolder = $bindable(), folderPattern = $bindable(),
     format = $bindable(), splitMethod = $bindable(), bitrate = $bindable(), namePattern = $bindable(),
     review, progress, previewing, finished, backups, restored, exportWarnings, outputAudition, onbrowse, onchange, onaudition,
   }: {
-    split: boolean; canCopy: boolean; copying: boolean; blocked: boolean; sampleRate: number; sourcePaths: string[];
+    split: boolean; canCopy: boolean; copying: boolean; treated: boolean; blocked: boolean; sampleRate: number; sourcePaths: string[];
     saveMode: SaveMode; destination: string; backupDirectory: string; createFolder: boolean; folderPattern: string;
     format: Format; bitrate: number; namePattern: string; splitMethod: SplitMethod;
     review: Review | null; progress: Progress | null; previewing: boolean; finished: string[]; backups: string[];
@@ -35,7 +35,8 @@
   const sourceFolder = $derived(sourceFolders.length === 1 ? sourceFolders[0] : 'Each original’s folder');
   const warnings = $derived((review?.warnings || []).filter(warning =>
     warning !== 'MP3 players that ignore gapless timing tags may play a little extra audio at a cut.'
-      && warning !== 'MP3 recordings will be encoded again.'));
+      && warning !== 'MP3 recordings will be encoded again.'
+      && warning !== 'The selected audio treatments will be applied when encoding.'));
 
   onMount(() => {
     let mounted = true;
@@ -157,7 +158,8 @@
                     <Popover.Content class="split-method-info" align="start" collisionPadding={12}>
                       <p><strong>Fast split</strong> copies the audio as it is. It’s quick and keeps the same quality. Cuts may move slightly to the nearest spot the file can be cut. Some older MP3 players may play a little extra audio at a cut.</p>
                       <p><strong>Exact cuts</strong> split right where you put the markers. This takes longer because the app makes new audio files. Creating a new MP3 can reduce quality.</p>
-                      {#if !canCopy}<p>Changing the file type requires making new audio files, so exact cuts are used.</p>{/if}
+                      {#if treated}<p>Audio treatments require encoding new files, so exact cuts are used.</p>
+                      {:else if !canCopy}<p>Changing the file type requires making new audio files, so exact cuts are used.</p>{/if}
                     </Popover.Content>
                   </Popover.Root>
                 </div>
@@ -183,7 +185,7 @@
               <p class="format-mode">FLAC keeps the full audio quality.</p>
             {/if}
           </div>
-        {:else if split}<span class="format-mode">{copying ? 'Fast split' : 'Exact cuts'}</span>{/if}
+        {:else if split}<span class="format-mode">{treated ? 'Exact cuts · Audio treated' : copying ? 'Fast split' : 'Exact cuts'}</span>{/if}
       </div>
     </fieldset>
 

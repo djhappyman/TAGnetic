@@ -23,6 +23,18 @@ test.beforeEach(async ({ page }) => {
     await window.tagrex.openLibrary();
     const calls = [];
     const peaks = Array.from({ length: 512 }, (_, index) => (index % 2 ? 1 : -1) * (0.3 + 0.5 * Math.sin(index / 11) ** 2));
+    function stereoWaveform(first = 0, last = 480000, bins = 256) {
+      const peaks = [];
+      const rms = [];
+      for (let bin = 0; bin < bins; bin++) {
+        const frame = first + (bin + 0.5) * (last - first) / bins;
+        // The left channel keeps identical peaks but has two distinct energy levels.
+        peaks.push(-0.8, 0.8, 0, 0);
+        rms.push(frame < 240000 ? 0.21 : 0.64, 0);
+      }
+      return { peaks, rms };
+    }
+    const stereo = stereoWaveform();
     let finishExport;
     let reviewIndex = 0;
     let reviewed = null;
@@ -37,14 +49,23 @@ test.beforeEach(async ({ page }) => {
             case 'read_cover_image': return { mime: 'image/png', data_base64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jX1sAAAAASUVORK5CYII=' };
             case 'audio_split_open':
               if (window.studioFixture.slowOpen) await new Promise(resolve => { window.studioFixture.finishOpen = resolve; });
-              return { id: 'recording', path: args.path, frames: 480000, sampleRate: window.studioFixture.sampleRate || 48000, originalFormat: window.studioFixture.originalFormat, sourceStamp: 'unchanged-master', tags: { album: 'Saved album', ...window.studioFixture.sourceTags }, overview: peaks };
+              return { id: 'recording', path: args.path, frames: 480000, sampleRate: window.studioFixture.sampleRate || 48000, originalFormat: window.studioFixture.originalFormat, sourceStamp: 'unchanged-master', tags: { album: 'Saved album', ...window.studioFixture.sourceTags }, overview: peaks, ...(window.studioFixture.stereo ? {
+                stereoOverview: stereo.peaks, stereoOverviewRms: stereo.rms,
+                overviewRms: stereo.rms.filter((_, index) => index % 2 === 0).map(value => value * Math.SQRT1_2),
+              } : {}) };
             case 'audio_split_loading':
               return { frames: 480000, sampleRate: 48000, scannedFrames: 48000, overview: peaks };
             case 'audio_split_cancel_open':
               window.studioFixture.finishOpen?.();
               return;
             case 'audio_split_reveal': return;
-            case 'audio_split_peaks': return Float32Array.from(peaks).buffer;
+            case 'audio_split_peaks': {
+              if (!args.stereo) return Float32Array.from(peaks).buffer;
+              const tile = stereoWaveform(args.startFrame, args.endFrame, Math.min(args.bins, args.endFrame - args.startFrame));
+              return Float32Array.from(args.energy ? [...tile.peaks, ...tile.rms] : tile.peaks).buffer;
+            }
+            case 'audio_split_treatment':
+              return { gainDb: args.treatment.normalize ? 4.2 : 0, loudnessLufs: -22.2, outputChannels: args.treatment.mono === 'off' ? 2 : 1 };
             case 'audio_split_status':
               if (args.audition) return { playing: true, loading: false, sequence: args.sequence };
               return window.studioFixture.statusProbe?.(args) ?? { frame: 48001, playing: true };
@@ -916,7 +937,7 @@ test('Track 1 can be trimmed and selecting a row visibly moves the playhead to i
   const waveform = studio.getByRole('slider', { name: 'Waveform playhead' });
   const first = studio.getByRole('button', { name: 'Start of Track 1 at 0:00.000' });
   await expect(first).toHaveCSS('left', '0px');
-  await expect(first.locator('.marker-number')).toHaveText('1');
+  await expect(studio.locator('.track-header span:first-child')).toHaveText('01');
   await expect(studio.getByRole('button', { name: 'Import splits' })).toHaveCSS('border-top-width', '0px');
   await editFromMenu(page, first, 'Edit start time');
   const time = studio.getByRole('textbox', { name: 'Track start time' });
@@ -929,7 +950,7 @@ test('Track 1 can be trimmed and selecting a row visibly moves the playhead to i
   const nextFrame = Number(await waveform.getAttribute('aria-valuenow'));
   await waveform.press('m');
   await expect(rows(studio)).toHaveCount(2);
-  await expect(studio.locator('.marker-number')).toHaveText(['1', '2']);
+  await expect(studio.locator('.track-header span:first-child')).toHaveText(['01', '02']);
   const samples = await rows(studio).first().evaluate(async row => {
     const playhead = row.closest('[data-audio-studio]').querySelector('.playhead');
     const x = () => new DOMMatrixReadOnly(getComputedStyle(playhead).transform).m41;
@@ -1002,7 +1023,7 @@ test('row actions renumber splits and undo an adjacent merge in one step', async
   await expect(trackRows.nth(4)).toHaveAttribute('data-track-id', original[5]);
   await expect(trackRows.nth(4).locator('.track-number')).toHaveText('05');
   await expect(trackRows.nth(4)).toBeFocused();
-  await expect(studio.locator('.marker-number')).toHaveText(['1', '2', '3', '4', '5', '6']);
+  await expect(studio.locator('.track-header span:first-child')).toHaveText(['01', '02', '03', '04', '05', '06']);
   await trackRows.nth(4).press('Control+z');
   await expect(trackRows).toHaveCount(7);
   await trackRows.first().press('Delete');
@@ -1215,4 +1236,67 @@ test('audio draft shortcuts and closing preserve pending library changes', async
   await page.getByRole('alertdialog', { name: 'Save split draft?' }).getByRole('button', { name: 'Discard changes' }).click();
   await expect(page.locator('#editor-field-title')).toHaveValue('Pending library tag');
   expect(await page.evaluate(() => window.tagrex.querySession)).toEqual(before);
+});
+
+test('stereo waveform uses independent channel data and keeps one shared cut and playhead', async ({ page }) => {
+  await page.evaluate(() => { window.studioFixture.stereo = true; });
+  await page.getByRole('button', { name: 'Split recording', exact: true }).click();
+  const studio = page.getByRole('dialog', { name: 'Split recording' });
+  const playhead = studio.getByRole('slider', { name: 'Waveform playhead' });
+  await playhead.press('ArrowRight');
+  await playhead.press('m');
+  const toggle = studio.getByRole('button', { name: 'Show left and right channels' });
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+  await expect(studio.getByText('Left', { exact: true })).toBeVisible();
+  await expect(studio.getByText('Right', { exact: true })).toBeVisible();
+  await expect(studio.locator('.track-header span:first-child')).toHaveText(['01', '02']);
+  await expect(studio.locator('.playhead')).toHaveCount(1);
+  await expect(studio.locator('.marker')).toHaveCount(2);
+  const strongestRows = (fraction = 0.37) => studio.locator('.detail canvas').evaluate((canvas, fraction) => {
+    const alpha = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+    const centreX = Math.round(canvas.width * fraction);
+    return [0, 1].map(channel => {
+      let audible = 0;
+      for (let y = Math.round(channel * canvas.height / 2); y < (channel + 1) * canvas.height / 2; y++) {
+        if (alpha[(y * canvas.width + centreX) * 4 + 3] > 120) audible++;
+      }
+      return audible;
+    });
+  }, fraction);
+  await expect.poll(async () => (await strongestRows())[0]).toBeGreaterThan(10);
+  expect((await strongestRows())[1]).toBeLessThanOrEqual(3);
+  // With matching extrema, the real energy layer gets wider only where
+  // the sustained signal is stronger.
+  expect((await strongestRows(0.7))[0]).toBeGreaterThan((await strongestRows(0.3))[0] * 2);
+  await waveformOption(page, studio, 'Zoom in');
+  await expect.poll(async () => (await calls(page, 'peaks')).at(-1)?.args).toMatchObject({ stereo: true, energy: true });
+  await expect.poll(async () => (await strongestRows())[0]).toBeGreaterThan(10);
+  expect((await strongestRows())[1]).toBeLessThanOrEqual(3);
+});
+
+test('treatment plays the processed or original audio on request and always reviews the chosen settings', async ({ page }) => {
+  await page.evaluate(() => { window.studioFixture.stereo = true; window.studioFixture.originalFormat = 'mp3'; });
+  await page.getByRole('button', { name: 'Split recording', exact: true }).click();
+  const studio = page.getByRole('dialog', { name: 'Split recording' });
+  await studio.getByRole('button', { name: 'Audio tools' }).click();
+  await page.getByRole('checkbox', { name: /Normalise/ }).check();
+  await page.getByRole('combobox', { name: 'Convert to mono' }).click();
+  await page.getByRole('option', { name: 'Right only' }).click();
+  await page.getByRole('combobox', { name: 'Reduce mains hum' }).click();
+  await page.getByRole('option', { name: '50 Hz' }).click();
+  await expect(page.getByText('Whole-recording gain +4.2 dB')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await studio.getByRole('button', { name: 'Play audio' }).click();
+  const recipe = { normalize: true, mono: 'right', rumble: false, hum: 'hz50' };
+  await expect.poll(async () => (await calls(page, 'transport')).at(-1)?.args.treatment).toEqual(recipe);
+  await studio.getByRole('button', { name: 'Audio tools' }).click();
+  await page.getByRole('button', { name: 'Hear original' }).click();
+  await expect.poll(async () => (await calls(page, 'transport')).at(-1)?.args.treatment).toBeUndefined();
+  await page.keyboard.press('Escape');
+  await reviewAndSave(studio);
+  await expect.poll(async () => (await calls(page, 'preview')).at(-1)?.args.request).toMatchObject({
+    splitMethod: 'exact', treatment: recipe, format: 'mp3',
+  });
+  await expect(studio.getByText('Exact cuts · Audio treated')).toBeVisible();
 });

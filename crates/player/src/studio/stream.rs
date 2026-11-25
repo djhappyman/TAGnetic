@@ -12,7 +12,7 @@ use std::{
     },
     time::Duration,
 };
-use tagrex_audio_workbench::{PreviewDecoder, SeekIndex};
+use tagrex_audio_workbench::{PreparedTreatment, PreviewDecoder, SeekIndex, TreatmentProcessor};
 
 const CHUNK_FRAMES: usize = 256;
 const BUFFERED_CHUNKS: usize = 12;
@@ -91,6 +91,7 @@ pub(super) struct DecodeRequest {
     pub(super) end: u64,
     pub(super) loop_start: Option<u64>,
     pub(super) seek_index: Option<Arc<SeekIndex>>,
+    pub(super) treatment: PreparedTreatment,
 }
 
 pub(super) struct Voice {
@@ -319,19 +320,32 @@ impl Job {
         origin_nanos: u64,
         cache: bool,
     ) -> Result<Option<Arc<Vec<f32>>>, String> {
+        let treatment = self.decode.treatment;
+        let decode_start = treatment.preview_start(start, self.decode.source_rate);
         let decoder = PreviewDecoder::open_indexed(
             self.decode.file.try_clone().map_err(|e| e.to_string())?,
-            start,
+            decode_start,
             self.decode.seek_index.as_deref(),
             || self.shared.cancelled(),
         )
         .map_err(|e| e.to_string())?;
-        let mut remaining = (self.decode.end - start) * u64::from(decoder.source_info().channels);
+        let processor = treatment
+            .processor(decoder.source_info())
+            .map_err(|e| e.to_string())?;
+        let channels = u64::from(processor.output_info().channels);
+        let mut remaining = (self.decode.end - start) * channels;
         if decoder.source_info().sample_rate != self.decode.source_rate {
             return Err("The recording sample rate changed".into());
         }
         let mut failure = None;
-        let native = Native::new(decoder, &self.shared, &mut remaining, &mut failure)?;
+        let native = Native::new(
+            decoder,
+            processor,
+            (start - decode_start) * channels,
+            &self.shared,
+            &mut remaining,
+            &mut failure,
+        )?;
         let mut fixed = Fixed::new(native, self.channels, self.rate);
         let mut cache = cache.then(Vec::new);
         let channels = usize::from(self.channels.get());
@@ -397,6 +411,8 @@ impl Job {
 
 struct Native<'a> {
     decoder: PreviewDecoder,
+    processor: TreatmentProcessor,
+    discard_samples: u64,
     shared: &'a Shared,
     remaining: &'a mut u64,
     failure: &'a mut Option<String>,
@@ -409,15 +425,19 @@ struct Native<'a> {
 impl<'a> Native<'a> {
     fn new(
         decoder: PreviewDecoder,
+        processor: TreatmentProcessor,
+        discard_samples: u64,
         shared: &'a Shared,
         remaining: &'a mut u64,
         failure: &'a mut Option<String>,
     ) -> Result<Self, String> {
-        let info = decoder.source_info();
+        let info = processor.output_info();
         let channels = ChannelCount::new(info.channels).ok_or("No audio channels")?;
         let rate = SampleRate::new(info.sample_rate).ok_or("Invalid audio sample rate")?;
         Ok(Self {
             decoder,
+            processor,
+            discard_samples,
             shared,
             remaining,
             failure,
@@ -436,12 +456,13 @@ impl Iterator for Native<'_> {
         if *self.remaining == 0 || self.failure.is_some() {
             return None;
         }
-        if self.index == self.packet.len() {
+        while self.index == self.packet.len() {
             match self.decoder.next_block(|| self.shared.cancelled()) {
                 Ok(Some(block)) => {
-                    self.packet.clear();
-                    self.packet.extend_from_slice(block);
-                    self.index = 0;
+                    self.processor.process(block, &mut self.packet);
+                    let skip = self.discard_samples.min(self.packet.len() as u64);
+                    self.index = skip as usize;
+                    self.discard_samples -= skip;
                 }
                 Ok(None) => return None,
                 Err(failure) => {

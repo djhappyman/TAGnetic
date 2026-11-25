@@ -17,8 +17,10 @@ use tagrex_audio_workbench::markers::{
 };
 pub use tagrex_audio_workbench::markers::{CueEncoding, ProviderAnchor};
 use tagrex_audio_workbench::{
-    self as audio, Analysis, CopyCodec, FrameCopyIndex, FrameRange, OutputFormat, RenderSegment,
+    self as audio, Analysis, CopyCodec, FrameCopyIndex, OutputFormat, PreparedTreatment,
+    RenderSegment,
 };
+pub use tagrex_audio_workbench::{AudioTreatment, FrameRange};
 use tagrex_core::mask::{portable_file_name, Mask};
 use tagrex_core::model::{
     is_writable_value_at, normalize_staged_tag_value, AudioFormat, CoverArt, CoverKind,
@@ -88,6 +90,7 @@ struct Source {
     analysis: Option<Analysis>,
     format: AudioFormat,
     frame_index: OnceLock<Arc<FrameCopyIndex>>,
+    treatments: Mutex<Vec<PreparedTreatment>>,
     tags: TagMap,
     tag_policy: u64,
     replaceable: bool,
@@ -126,6 +129,7 @@ impl Source {
             analysis: (bins > 1).then_some(analysis),
             format: tagged.format,
             frame_index: OnceLock::new(),
+            treatments: Mutex::new(Vec::new()),
             tags: tagged.tags,
             tag_policy: tagrex_core::model::read_policy_revision(),
             replaceable,
@@ -160,6 +164,38 @@ impl Source {
         )?;
         self.open_current()?;
         Ok(self.frame_index.get_or_init(|| Arc::new(index)).clone())
+    }
+
+    fn cached_treatment(&self, settings: AudioTreatment) -> Result<Option<PreparedTreatment>> {
+        if !settings.is_active() {
+            return Ok(Some(PreparedTreatment::default()));
+        }
+        Ok(lock(&self.treatments)?
+            .iter()
+            .find(|prepared| prepared.settings() == settings)
+            .copied())
+    }
+
+    fn prepare_treatment(
+        &self,
+        settings: AudioTreatment,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedTreatment> {
+        let file = self.open_current()?;
+        if let Some(prepared) = self.cached_treatment(settings)? {
+            return Ok(prepared);
+        }
+        let prepared =
+            audio::prepare_treatment(file, settings, cancelled).map_err(StudioError::new)?;
+        self.open_current()?;
+        // Settings are a finite set. Only store one measurement per recipe so
+        // concurrent or superseded review work cannot evict the preview's recipe.
+        let mut treatments = lock(&self.treatments)?;
+        if let Some(existing) = treatments.iter().find(|item| item.settings() == settings) {
+            return Ok(*existing);
+        }
+        treatments.push(prepared);
+        Ok(prepared)
     }
 
     fn stamp_key(&self) -> String {
@@ -205,6 +241,11 @@ pub struct OpenedRecording {
     original_format: Option<&'static str>,
     source_stamp: String,
     overview: Vec<f32>,
+    overview_rms: Vec<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stereo_overview: Option<Vec<f32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stereo_overview_rms: Option<Vec<f32>>,
     tags: Values,
 }
 
@@ -215,6 +256,19 @@ pub struct RecordingProgress {
     sample_rate: u32,
     scanned_frames: u64,
     overview: Vec<f32>,
+    overview_rms: Vec<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stereo_overview: Option<Vec<f32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stereo_overview_rms: Option<Vec<f32>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TreatmentAnalysis {
+    gain_db: f64,
+    loudness_lufs: Option<f64>,
+    output_channels: u16,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -250,6 +304,8 @@ pub struct ReviewRequest {
     format: String,
     bitrate: Option<u16>,
     split_method: Option<SplitMethod>,
+    #[serde(default)]
+    treatment: AudioTreatment,
     name_pattern: Option<String>,
     artwork_path: Option<String>,
     #[serde(default)]
@@ -349,6 +405,7 @@ struct ExportState {
 
 struct PlannedFile {
     source: Arc<Source>,
+    treatment: PreparedTreatment,
     range: FrameRange,
     requested: FrameRange,
     name: String,
@@ -527,6 +584,10 @@ fn flat_peaks(peaks: impl IntoIterator<Item = audio::Peak>) -> Vec<f32> {
         .collect()
 }
 
+fn flat_stereo(peaks: impl IntoIterator<Item = [audio::Peak; 2]>) -> Vec<f32> {
+    flat_peaks(peaks.into_iter().flatten())
+}
+
 impl Studio {
     pub fn apply_settings(&self, settings: &crate::SettingsDto) {
         self.policy.configure(
@@ -593,6 +654,11 @@ impl Studio {
                         sample_rate: part.source.source.sample_rate,
                         scanned_frames: part.scanned_frames,
                         overview: flat_peaks(part.peaks),
+                        overview_rms: part.rms,
+                        stereo_overview: part.stereo_peaks.map(flat_stereo),
+                        stereo_overview_rms: part
+                            .stereo_rms
+                            .map(|values| values.into_iter().flatten().collect()),
                     });
                 }),
             )?),
@@ -624,6 +690,21 @@ impl Studio {
                     .iter()
                     .flat_map(|item| item.peaks.iter().copied()),
             ),
+            overview_rms: source
+                .analysis
+                .as_ref()
+                .map(|analysis| analysis.rms.clone())
+                .unwrap_or_default(),
+            stereo_overview_rms: source
+                .analysis
+                .as_ref()
+                .and_then(|analysis| analysis.stereo_rms.as_ref())
+                .map(|values| values.iter().flatten().copied().collect()),
+            stereo_overview: source
+                .analysis
+                .as_ref()
+                .and_then(|analysis| analysis.stereo_peaks.as_deref())
+                .map(|peaks| flat_stereo(peaks.iter().copied())),
             tags: public_tags(&source.tags),
         };
         state.sources.insert(id, source);
@@ -654,10 +735,46 @@ impl Studio {
         release_transport()
     }
 
+    pub fn prepare_treatment(
+        &self,
+        id: &str,
+        settings: AudioTreatment,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<TreatmentAnalysis> {
+        let source = self.source(id)?;
+        let mut last_session_check = Instant::now();
+        let prepared = source.prepare_treatment(settings, || {
+            if cancelled() {
+                return true;
+            }
+            if last_session_check.elapsed() >= Duration::from_millis(100) {
+                last_session_check = Instant::now();
+                return self.source(id).is_err();
+            }
+            false
+        })?;
+        self.source(id)?;
+        Ok(TreatmentAnalysis {
+            gain_db: prepared.gain_db(),
+            loudness_lufs: prepared.loudness_lufs(),
+            output_channels: settings
+                .output_info(source.info)
+                .map_err(StudioError::new)?
+                .channels,
+        })
+    }
+
     pub fn with_playback_source<T>(
         &self,
         id: &str,
-        command: impl FnOnce(File, u32, u64, Option<Arc<audio::SeekIndex>>) -> Result<T>,
+        settings: AudioTreatment,
+        command: impl FnOnce(
+            File,
+            u32,
+            u64,
+            Option<Arc<audio::SeekIndex>>,
+            PreparedTreatment,
+        ) -> Result<T>,
     ) -> Result<T> {
         let state = lock(&self.state)?;
         let source = state
@@ -672,6 +789,9 @@ impl Studio {
                 .analysis
                 .as_ref()
                 .and_then(|analysis| analysis.seek_index.clone()),
+            source.cached_treatment(settings)?.ok_or_else(|| {
+                StudioError::new("Wait for audio treatment analysis before playing")
+            })?,
         )
     }
 
@@ -679,7 +799,14 @@ impl Studio {
         &self,
         id: &str,
         output_index: usize,
-        command: impl FnOnce(&str, File, u32, FrameRange, Option<Arc<audio::SeekIndex>>) -> Result<T>,
+        command: impl FnOnce(
+            &str,
+            File,
+            u32,
+            FrameRange,
+            Option<Arc<audio::SeekIndex>>,
+            PreparedTreatment,
+        ) -> Result<T>,
     ) -> Result<T> {
         let state = lock(&self.state)?;
         let plan = state
@@ -700,20 +827,22 @@ impl Studio {
                 .analysis
                 .as_ref()
                 .and_then(|analysis| analysis.seek_index.clone()),
+            output.treatment,
         )
     }
 
     pub fn peaks(
         &self,
         id: &str,
-        start: u64,
-        end: u64,
+        range: FrameRange,
         bins: usize,
+        stereo: bool,
+        energy: bool,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Vec<f32>> {
         let source = self.source(id)?;
         let file = source.open_current()?;
-        let range = FrameRange { start, end };
+        let FrameRange { start, end } = range;
         if bins == 0 || bins > 4096 || start >= end || end > source.info.frames {
             return Err(StudioError::new("Invalid waveform viewport"));
         }
@@ -723,9 +852,9 @@ impl Studio {
             .ok_or_else(|| StudioError::new("The waveform is unavailable"))?;
         let waveform = &analysis.waveform;
         let peaks = if (end - start) / bins as u64 >= waveform.frames_per_bucket() {
-            waveform.peaks(range, bins)
+            waveform.channel_peaks(range, bins)
         } else {
-            audio::waveform_file_indexed(
+            audio::waveform_channels_file_indexed(
                 file,
                 range,
                 bins,
@@ -733,7 +862,22 @@ impl Studio {
                 cancelled,
             )
         };
-        peaks.map(flat_peaks).map_err(StudioError::new)
+        let peaks = peaks.map_err(StudioError::new)?;
+        let mut values = if stereo {
+            peaks.stereo.map(flat_stereo).ok_or_else(|| {
+                StudioError::new("Separate left and right waveforms require stereo audio")
+            })?
+        } else {
+            flat_peaks(peaks.combined)
+        };
+        if energy {
+            if stereo {
+                values.extend(peaks.stereo_rms.into_iter().flatten().flatten());
+            } else {
+                values.extend(peaks.rms);
+            }
+        }
+        Ok(values)
     }
 
     pub fn cue_geometry(&self, id: &str) -> Result<(u32, u64)> {
@@ -833,13 +977,9 @@ impl Studio {
             if !destination.is_absolute() {
                 return Err(StudioError::new("Choose or enter a full folder path"));
             }
-            Some(
-                destination
-                    .canonicalize()
-                    .map_err(|error| {
-                        StudioError::new(format!("Could not open the save folder: {error}"))
-                    })?,
-            )
+            Some(destination.canonicalize().map_err(|error| {
+                StudioError::new(format!("Could not open the save folder: {error}"))
+            })?)
         } else {
             None
         };
@@ -872,6 +1012,14 @@ impl Studio {
         {
             return Err(StudioError::new("Include at least one output track"));
         }
+        if request.treatment.is_active() && request.split_method == Some(SplitMethod::Copy) {
+            return Err(StudioError::new(
+                "Audio treatment requires re-encoding. Choose exact cuts.",
+            ));
+        }
+        let copy_codec = (!request.treatment.is_active())
+            .then_some(copy_codec)
+            .flatten();
         let frame_index = match (copy_codec, &split_source, request.split_method) {
             (Some(codec), Some(source), None | Some(SplitMethod::Copy)) => {
                 Some(source.frame_index(codec)?)
@@ -883,6 +1031,9 @@ impl Studio {
         let mut destinations = Vec::<PlannedDestination>::new();
         let mut destination_ids = BTreeMap::<(PathBuf, Option<String>), usize>::new();
         let mut warnings = Vec::new();
+        if request.treatment.is_active() {
+            warnings.push("The selected audio treatments will be applied when encoding.".into());
+        }
         if copying && copy_codec == Some(CopyCodec::Mp3) {
             warnings.push("MP3 players that ignore gapless timing tags may play a little extra audio at a cut.".to_owned());
         }
@@ -914,8 +1065,12 @@ impl Studio {
                 .parent()
                 .ok_or_else(|| StudioError::new("The recording has no source folder"))?;
             let root = custom.as_deref().unwrap_or(parent);
+            let output_info = request
+                .treatment
+                .output_info(source.info)
+                .map_err(StudioError::new)?;
             if !copying {
-                audio::check_output(&source.info, format).map_err(StudioError::new)?;
+                audio::check_output(&output_info, format).map_err(StudioError::new)?;
             }
             if source.tag_policy != tag_policy {
                 return Err(StudioError::new(
@@ -1010,9 +1165,12 @@ impl Studio {
                 && !named
                 && mask.is_none()
                 && source.path.file_name().is_some_and(|original| {
-                    original.to_string_lossy().eq_ignore_ascii_case(
-                        &portable_file_name(&format!("{stem}.{extension}"), true),
-                    )
+                    original
+                        .to_string_lossy()
+                        .eq_ignore_ascii_case(&portable_file_name(
+                            &format!("{stem}.{extension}"),
+                            true,
+                        ))
                 })
             {
                 stem.push_str(" - Split");
@@ -1044,14 +1202,14 @@ impl Studio {
             {
                 warnings.push("Some tracks have no title.".into());
             }
-            if !copying && format == OutputFormat::Flac && source.info.bits_per_sample.is_none()
+            if !copying && format == OutputFormat::Flac && output_info.bits_per_sample.is_none()
                 && !warnings.iter().any(|warning| warning == "Decoded audio without integer bit depth will be stored as 24-bit FLAC.")
             {
                 warnings.push("Decoded audio without integer bit depth will be stored as 24-bit FLAC.".into());
             }
             if !copying && format == OutputFormat::Flac {
-                let depth = audio::flac_output_bits(&source.info);
-                if let Some(bits) = source.info.bits_per_sample.filter(|bits| *bits != depth) {
+                let depth = audio::flac_output_bits(&output_info);
+                if let Some(bits) = output_info.bits_per_sample.filter(|bits| *bits != depth) {
                     let warning = format!("{bits}-bit audio will be stored in {depth}-bit FLAC with the original sample precision.");
                     if !warnings.contains(&warning) {
                         warnings.push(warning);
@@ -1072,7 +1230,7 @@ impl Studio {
             let audio = match (copying, format) {
                 (true, _) => 32_768,
                 (false, OutputFormat::Flac) => {
-                    frames * u64::from(source.info.channels) * 4 + frames / 64 + 16_384
+                    frames * u64::from(output_info.channels) * 4 + frames / 64 + 16_384
                 }
                 (false, OutputFormat::Mp3 { .. }) => {
                     (frames / u64::from(source.info.sample_rate) + 1) * 40_000 + 16_384
@@ -1084,6 +1242,11 @@ impl Studio {
                 .saturating_add(audio + (tags.values().map(String::len).sum::<usize>() as u64) * 4);
             files.push(PlannedFile {
                 source: source.clone(),
+                treatment: if request.treatment.is_active() {
+                    source.prepare_treatment(request.treatment, || false)?
+                } else {
+                    PreparedTreatment::default()
+                },
                 range,
                 requested,
                 name,
@@ -1602,10 +1765,11 @@ fn execute(
             };
             match &plan.frame_index {
                 Some(index) => index.write(held, &ranges, cancelled, progress, open),
-                None => audio::render_file_with_outputs(
+                None => audio::render_treated_file(
                     held,
                     &ranges,
                     plan.format,
+                    files[0].treatment,
                     cancelled,
                     progress,
                     open,
@@ -1674,15 +1838,20 @@ fn execute(
                         .map_err(StudioError::new)?
                         .source
                 };
-                if info.sample_rate != source.info.sample_rate
-                    || info.channels != source.info.channels
+                let expected = file
+                    .treatment
+                    .settings()
+                    .output_info(source.info)
+                    .map_err(StudioError::new)?;
+                if info.sample_rate != expected.sample_rate
+                    || info.channels != expected.channels
                     || (plan.frame_index.is_none() && info.frames != expected_frames)
                     || (plan.format == OutputFormat::Flac
                         && info.bits_per_sample
                             != if plan.frame_index.is_some() {
                                 source.info.bits_per_sample
                             } else {
-                                Some(audio::flac_output_bits(&source.info))
+                                Some(audio::flac_output_bits(&expected))
                             })
                 {
                     return Err(StudioError::new(format!(

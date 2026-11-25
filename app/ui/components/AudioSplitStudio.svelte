@@ -10,11 +10,12 @@
   import { savedSettings, tracks as libraryTracks } from '../js/state.js';
   import AudioSplitWaveform from './AudioSplitWaveform.svelte';
   import AudioSplitOutput from './AudioSplitOutput.svelte';
+  import AudioSplitTreatment from './AudioSplitTreatment.svelte';
   import AudioSplitImport from './AudioSplitImport.svelte';
   import {
-    audioCommand, choosePath, closeAudioSplitSession, defaultSplitFilePattern, frameAtTime, hasDraft, leaf, peakValues, readDraft,
+    audioCommand, choosePath, closeAudioSplitSession, defaultSplitFilePattern, frameAtTime, hasDraft, hasTreatment, leaf, noTreatment, peakValues, readDraft, readTreatment,
     recordingCover, recoverAudioSplitSession, rememberAudioSplitSession, saveDraft, stem, timeLabel,
-    type Cue, type Draft, type ExportResult, type Format, type FrameRange, type Launch, type Loading, type PeakTile, type Progress, type ReplacementUndo, type Review, type SaveMode, type Source, type SplitMethod, type Status, type Tags, type Track,
+    type AudioTreatment, type TreatmentAnalysis, type Cue, type Draft, type ExportResult, type Format, type FrameRange, type Launch, type Loading, type PeakTile, type Progress, type ReplacementUndo, type Review, type SaveMode, type Source, type SplitMethod, type Status, type Tags, type Track,
   } from '../js/audio-split';
 
   let { launch, onclose }: { launch: Launch; onclose: () => void } = $props();
@@ -56,6 +57,12 @@
   let draftAnnouncement = $state('');
   let showHelp = $state(false);
   let waveformMenuOpen = $state(false);
+  let treatment = $state.raw<AudioTreatment>(noTreatment);
+  let treatmentAnalysis = $state.raw<TreatmentAnalysis | null>(null);
+  let treatmentBusy = $state(false);
+  let treatmentError = $state('');
+  let hearOriginal = $state(false);
+  let treatmentVersion = 0;
   let selected = $state('');
   let rangeAnchor = '';
   let rangeIds = $state.raw<string[]>([]);
@@ -68,6 +75,11 @@
   let start = $state(0);
   let end = $state(1);
   let overview = $state.raw(new Float32Array());
+  let stereoOverview = $state.raw(new Float32Array());
+  let overviewRms = $state.raw(new Float32Array());
+  let stereoOverviewRms = $state.raw(new Float32Array());
+  let stereoView = $state(false);
+  const hasStereo = $derived(stereoOverview.length > 0);
   let tile = $state.raw<PeakTile | null>(null);
   let saveMode = $state<SaveMode>('beside');
   let destination = $state('');
@@ -136,9 +148,11 @@
   const duration = $derived(timeLabel(total, sampleRate, 1));
   const readout = $derived(playing && !buffering ? timeLabel(Math.floor(playhead * 10 / sampleRate) * sampleRate / 10, sampleRate, 1) : timeLabel(playhead, sampleRate));
   const canEdit = $derived(!!source && !working && !loading && phase === 'edit');
-  const canCopy = $derived(split && source?.originalFormat === format);
+  const treated = $derived(hasTreatment(treatment));
+  const treatmentReady = $derived(!treated || (!!treatmentAnalysis && !treatmentBusy));
+  const canCopy = $derived(split && !treated && source?.originalFormat === format);
   const copying = $derived(canCopy && splitMethod === 'copy');
-  const canEnterReview = $derived(split ? !!source && included > 0 : launch.paths.length > 0 && launch.paths.length <= maxFiles);
+  const canEnterReview = $derived(split ? !!source && included > 0 && treatmentReady : launch.paths.length > 0 && launch.paths.length <= maxFiles);
   const reviewReady = $derived(canEnterReview && (saveMode !== 'folder' || !!destination.trim()) &&
     (!createFolder || !!folderPattern.trim()));
   const reviewingOutput = $derived(previewing || checkingOutput);
@@ -147,7 +161,7 @@
   const newId = () => `segment-${++serial}`;
   const initial = (): Track => ({ id: newId(), startFrame: 0, include: true, tags: {} });
 
-  const draft = (): Draft => ({ tracks, tags, importedTags, artworkPath });
+  const draft = (): Draft => ({ tracks, tags, importedTags, artworkPath, treatment });
 
   function capture() {
     previous = [...previous.slice(-49), draft()];
@@ -163,6 +177,8 @@
     tags = nextDraft.tags;
     importedTags = nextDraft.importedTags || {};
     artworkPath = nextDraft.artworkPath;
+    const settings = readTreatment(nextDraft.treatment);
+    replaceTreatment(hasStereo ? settings : { ...settings, mono: 'off' });
     if (!tracks.some(track => track.id === selected)) selected = tracks[0]?.id || '';
     invalidate();
   }
@@ -261,6 +277,12 @@
       tags = {};
       importedTags = {};
       artworkPath = '';
+      treatment = noTreatment;
+      treatmentAnalysis = null;
+      treatmentBusy = false;
+      treatmentError = '';
+      hearOriginal = false;
+      treatmentVersion++;
       hasSaved = hasDraft(opened);
       playhead = 0;
       playing = false;
@@ -269,6 +291,10 @@
       start = 0;
       end = opened.frames;
       overview = peakValues(opened.overview || []);
+      stereoOverview = peakValues(opened.stereoOverview || []);
+      overviewRms = peakValues(opened.overviewRms || []);
+      stereoOverviewRms = peakValues(opened.stereoOverviewRms || []);
+      stereoView = false;
       tile = null;
       if (!overview.length) requestPeaks(0);
       dirty = false;
@@ -309,18 +335,30 @@
     if (!opened) return;
     if (start === 0 && end === opened.frames && overview.length) return;
     const size = end - start;
+    const stereo = hasStereo;
     if (tile && tile.start <= start && tile.end >= end &&
-      tile.values.length * size >= 800 * (tile.end - tile.start)) return;
+      tile.values.length * size >= (stereo ? 1600 : 800) * (tile.end - tile.start)) return;
     const extra = Math.round(size * 0.30);
     const first = Math.max(0, start - extra);
     const last = Math.min(opened.frames, end + extra);
     peaksTimer = setTimeout(async () => {
       try {
-        const data = await audioCommand<ArrayBuffer | number[]>('peaks', { id: opened.id, startFrame: first, endFrame: last, bins: 1024 });
+        const energy = !!opened.overviewRms?.length;
+        const bins = 1024;
+        const data = await audioCommand<ArrayBuffer | number[]>('peaks', {
+          id: opened.id, startFrame: first, endFrame: last, bins,
+          ...(stereo ? { stereo } : {}), ...(energy ? { energy } : {}),
+        });
         if (!active || revision !== viewportVersion || source?.id !== opened.id) return;
-        const values = peakValues(data);
-        if (first === 0 && last === opened.frames && !overview.length) overview = values;
-        else tile = { start: first, end: last, values };
+        const samples = peakValues(data);
+        const bandValues = Math.min(bins, last - first) * (stereo ? 2 : 1);
+        const hasEnergy = energy && samples.length === bandValues * 3;
+        const values = hasEnergy ? samples.subarray(0, bandValues * 2) : samples;
+        const rms = hasEnergy ? samples.subarray(bandValues * 2) : undefined;
+        if (first === 0 && last === opened.frames && !overview.length) {
+          overview = values;
+          if (rms) overviewRms = rms;
+        } else tile = { start: first, end: last, values, rms, stereo };
       } catch (reason) {
         if (active && revision === viewportVersion) fail(String(reason));
       }
@@ -542,7 +580,8 @@
     buffering = playing;
     if (playing) animation = requestAnimationFrame(paintPlayback);
     try {
-      await audioCommand('transport', { id, action, frame, endFrame, sequence });
+      const listening = action !== 'pause' && treated && treatmentReady && !hearOriginal;
+      await audioCommand('transport', { id, action, frame, endFrame, sequence, ...(listening ? { treatment } : {}) });
       if (active && source?.id === id && playing && sequence === transportVersion) scheduleStatus(id, sequence, 20);
     } catch (reason) {
       if (active && sequence === transportVersion) {
@@ -551,6 +590,50 @@
         buffering = false;
       }
     }
+  }
+
+  function restartListening() {
+    if (!playing) return;
+    if (loopEnabled && loopRegion) void transport('audition', loopRegion.start, loopRegion.end);
+    else void transport('play');
+  }
+
+  function toggleOriginal() {
+    hearOriginal = !hearOriginal;
+    restartListening();
+  }
+
+  function changeTreatment(settings: AudioTreatment) {
+    capture();
+    replaceTreatment(settings);
+  }
+
+  function replaceTreatment(settings: AudioTreatment) {
+    const opened = source;
+    if (!opened || (settings.normalize === treatment.normalize && settings.mono === treatment.mono
+      && settings.rumble === treatment.rumble && settings.hum === treatment.hum)) return;
+    const revision = ++treatmentVersion;
+    const wasBusy = treatmentBusy;
+    treatment = settings;
+    treatmentAnalysis = null;
+    treatmentError = '';
+    treatmentBusy = hasTreatment(settings);
+    if (!treatmentBusy) {
+      hearOriginal = false;
+      if (wasBusy) void audioCommand('treatment', { id: opened.id, treatment: settings }).catch(() => {});
+      restartListening();
+      return;
+    }
+    void audioCommand<TreatmentAnalysis>('treatment', { id: opened.id, treatment: settings }).then(result => {
+      if (!active || revision !== treatmentVersion || source?.id !== opened.id) return;
+      treatmentAnalysis = result;
+      treatmentBusy = false;
+      if (!hearOriginal) restartListening();
+    }).catch(reason => {
+      if (!active || revision !== treatmentVersion || source?.id !== opened.id) return;
+      treatmentBusy = false;
+      treatmentError = String(reason).replace(/^Error: /, '');
+    });
   }
 
   function audition() {
@@ -921,7 +1004,7 @@
   function save() {
     if (!source) return;
     try {
-      saveDraft(source, { ...draft(), view: { playhead, start, end, selected, follow } });
+      saveDraft(source, { ...draft(), view: { playhead, start, end, selected, follow, stereo: stereoView } });
       dirty = false;
       hasSaved = true;
       draftAnnouncement = 'Draft saved';
@@ -941,6 +1024,7 @@
         const saved = stored.view;
         if (tracks.some(track => track.id === saved.selected)) selection(saved.selected);
         follow = saved.follow === true;
+        stereoView = hasStereo && saved.stereo === true;
         if ([saved.start, saved.end, saved.playhead].every(Number.isSafeInteger)
           && saved.start >= 0 && saved.end > saved.start && saved.end <= total) {
           viewport(saved.start, saved.end - saved.start);
@@ -1135,7 +1219,8 @@
         destination: saveMode === 'folder' ? destination.trim() : '',
         backupDirectory: saveMode === 'replace' ? backupDirectory || undefined : undefined,
         folderPattern: createFolder ? folderPattern.trim() : undefined,
-        format, splitMethod: canCopy ? splitMethod : undefined,
+        format, splitMethod: treated ? 'exact' : canCopy ? splitMethod : undefined,
+        ...(treated ? { treatment } : {}),
         bitrate: format === 'mp3' && !copying ? bitrate : undefined,
         namePattern: split && pattern === defaultSplitFilePattern ? undefined : pattern || undefined,
       } });
@@ -1378,7 +1463,7 @@
               {@const interim = peakValues(loadingInfo.overview)}
               {@const extent = Math.max(loadingInfo.frames, loadingInfo.scannedFrames)}
               <AudioSplitWaveform start={0} end={extent} total={extent} sampleRate={loadingInfo.sampleRate}
-                overview={interim} coverage={loadingInfo.scannedFrames / extent}
+                overview={interim} overviewRms={peakValues(loadingInfo.overviewRms || [])} coverage={loadingInfo.scannedFrames / extent}
                 playhead={0} tracks={[]} selected="" readonly/>
             {/if}
           </div>
@@ -1403,6 +1488,16 @@
                 <span class="time">{readout}</span>
                 <Button variant="ghost" size="sm" onclick={addCut} disabled={!canEdit}><Scissors size={15}/> Add cut</Button>
                 <div class="waveform-options">
+                  {#if hasStereo}
+                    <Button class="stereo-toggle" variant="ghost" size="sm" aria-label="Show left and right channels"
+                      aria-pressed={stereoView}
+                      title={stereoView ? 'Switch to combined waveform' : 'Show left and right channels'}
+                      onclick={() => stereoView = !stereoView}>
+                      {stereoView ? 'Left + Right' : 'Combined'}
+                    </Button>
+                  {/if}
+                  <AudioSplitTreatment settings={treatment} stereo={hasStereo} original={hearOriginal} busy={treatmentBusy}
+                    analysis={treatmentAnalysis} error={treatmentError} onchange={changeTreatment} oncompare={toggleOriginal}/>
                   <DropdownMenu.Root bind:open={waveformMenuOpen}>
                     <DropdownMenu.Trigger>
                       {#snippet child({ props })}
@@ -1435,14 +1530,14 @@
                 </label>
               {/if}
               <AudioSplitWaveform {start} {end} {total} {sampleRate} tile={start === 0 && end === total ? null : tile}
-                {overview} {playhead} {visualPlayhead} {playing} {tracks} {selected} {loopRegion} {loopEnabled} onloop={setLoop}
-                onmove={movePreview} onseek={seek}
+                {overview} {stereoOverview} {overviewRms} {stereoOverviewRms} stereo={stereoView} {playhead} {visualPlayhead} {playing} {tracks} {selected}
+                {loopRegion} {loopEnabled} onloop={setLoop} ontrack={selectTrack} trackTitle={track => trackTag(track, 'title')} onmove={movePreview} onseek={seek}
                 oncancel={cancelPreview} onselect={selection} onmarker={moveCut} onviewport={viewport} onwheelzoom={wheelZoom}
                 ongesture={waveformGesture} onkey={timelineKeys} onplaymarker={playFromCut} onadd={addCutAt}
                 oneditmarker={id => beginEdit(id, 'start')} onremovemarker={removeCutAt} ontrim={trimStart}
                 onrestoremarker={id => updateTrack(id, { include: true })}
                 onmovetoplayhead={moveToPlayhead} canmove={id => canMoveToPlayhead(tracks.findIndex(track => track.id === id))}/>
-              <p class="waveform-hint" aria-live="polite">{buffering ? 'Buffering preview…' : ''}</p>
+              <p class="waveform-hint" aria-live="polite">{buffering ? 'Buffering preview…' : treatmentBusy ? 'Measuring recording…' : hearOriginal ? 'Listening to the original' : ''}</p>
               {#if showHelp}
                 <p class="help">Scroll to zoom, middle-drag to pan, and Shift-drag to mark a loop. L toggles the loop. Space plays or pauses, Shift+Space loops around the selected cut, and M adds a cut. In the track list, Shift-click or Shift+Up/Down selects a range, F2 edits tags, and Delete removes a split.</p>
               {/if}
@@ -1611,7 +1706,7 @@
             </ul>
           {/if}
         {:else}
-          <AudioSplitOutput {split} {canCopy} {copying} blocked={working} {sampleRate} bind:saveMode bind:destination bind:backupDirectory
+          <AudioSplitOutput {split} {canCopy} {copying} {treated} blocked={working} {sampleRate} bind:saveMode bind:destination bind:backupDirectory
             sourcePaths={source ? [source.path] : launch.paths} bind:createFolder bind:folderPattern bind:format bind:splitMethod bind:bitrate bind:namePattern
             review={review ?? (reviewReady && reviewingOutput ? lastReview : null)} {progress} {finished} {backups} {restored} {exportWarnings}
             previewing={reviewingOutput} {outputAudition} onbrowse={browseOutput} onchange={changeOutput} onaudition={auditionOutput}/>
@@ -1703,7 +1798,10 @@
   .toolbar { display:flex; gap:var(--sp-1); align-items:center; flex-wrap:wrap; }
   .transport .time { font-family:var(--font-literal); font-variant-numeric:tabular-nums; min-width:8ch; }
   .transport :global(button.loop-toggle[aria-pressed="true"]) { color:var(--accent-ink); background:var(--sel-tint); }
-  .waveform-options { margin-inline-start:auto; }
+  .waveform-options { margin-inline-start:auto; display:flex; align-items:center; gap:var(--sp-1); }
+  .transport :global(button.stereo-toggle[aria-pressed="true"]), .transport :global(button.audio-tools-trigger[data-treated="true"]) {
+    color:var(--accent-ink); background:var(--sel-tint);
+  }
   .editor { display:grid; gap:var(--sp-2); grid-template-columns:minmax(0,1.12fr) minmax(0,1fr); margin-block-start:calc(-1 * var(--sp-2)); }
   .track-panel, .tag-panel { min-width:0; display:grid; align-content:start; gap:var(--sp-2); padding:var(--sp-2); background:var(--panel); border-radius:var(--r-inset); }
   .editor h3 { font-size:var(--text-sm); font-weight:600; margin:0; }

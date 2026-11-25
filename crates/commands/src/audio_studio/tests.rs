@@ -50,6 +50,7 @@ fn request(root: &Path, source: &Path, name: &str, format: &str) -> ReviewReques
         format: format.into(),
         bitrate: Some(128),
         split_method: None,
+        treatment: AudioTreatment::default(),
         name_pattern: None,
         artwork_path: None,
         save_mode: SaveMode::Folder,
@@ -149,14 +150,19 @@ fn split_saves_in_place_unless_a_folder_pattern_is_requested() {
     draft.segments = vec![segment(0, "Opening"), segment(CUT as u64, "Second track")];
 
     let flat = studio.preview(draft).unwrap();
-    assert_eq!(Path::new(&flat.outputs[0].path), music.join("01 - Opening.flac"));
-    studio.with_review_playback(&flat.id, 1, |owner, _, rate, range, _| {
-        assert_eq!(owner, source.id);
-        assert_eq!(rate, 44_100);
-        assert_eq!(range.start, CUT as u64);
-        assert_eq!(range.end, FRAMES as u64);
-        Ok(())
-    }).unwrap();
+    assert_eq!(
+        Path::new(&flat.outputs[0].path),
+        music.join("01 - Opening.flac")
+    );
+    studio
+        .with_review_playback(&flat.id, 1, |owner, _, rate, range, _, _| {
+            assert_eq!(owner, source.id);
+            assert_eq!(rate, 44_100);
+            assert_eq!(range.start, CUT as u64);
+            assert_eq!(range.end, FRAMES as u64);
+            Ok(())
+        })
+        .unwrap();
     assert!(!Path::new(&flat.outputs[0].path).exists());
     studio.export(&flat.id).unwrap();
     assert!(Path::new(&flat.outputs[0].path).is_file());
@@ -169,7 +175,10 @@ fn split_saves_in_place_unless_a_folder_pattern_is_requested() {
     draft.name_pattern = Some("%track:2% - %title%".to_owned());
     let grouped = studio.preview(draft).unwrap();
     let folder = music.join("Tape pack - Splits");
-    assert_eq!(Path::new(&grouped.outputs[1].path), folder.join("02 - Second track.flac"));
+    assert_eq!(
+        Path::new(&grouped.outputs[1].path),
+        folder.join("02 - Second track.flac")
+    );
     assert!(!folder.exists());
     studio.export(&grouped.id).unwrap();
     assert!(Path::new(&grouped.outputs[1].path).is_file());
@@ -567,4 +576,131 @@ fn studio_requires_a_real_range_when_cuts_snap_to_the_same_frame() {
         .expect("two snapped cuts must not collapse");
     assert!(error.to_string().contains("choose exact cuts"));
     assert!(!root.path().join("overlapping").exists());
+}
+
+#[test]
+fn stereo_peaks_and_right_channel_export_use_the_original_channel_order() {
+    let root = fixtures();
+    let wav = root.path().join("master.wav");
+    let original = recording(&wav);
+    let source_hash = fs::read(&wav).unwrap();
+    let studio = Studio::default();
+    let opened = studio.open(&wav, || false).unwrap();
+    assert_eq!(
+        opened.overview.len() * 2,
+        opened.stereo_overview.as_ref().unwrap().len()
+    );
+    let range = FrameRange { start: 0, end: 3 };
+    let tile = studio
+        .peaks(&opened.id, range, 3, true, true, || false)
+        .unwrap();
+    let (extrema, rms) = tile.split_at(12);
+    for ((frame, peaks), energy) in original
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(extrema.as_chunks::<4>().0)
+        .zip(rms.as_chunks::<2>().0)
+    {
+        let left = f32::from(i16::from_le_bytes([frame[0], frame[1]])) / 32_768.0;
+        let right = f32::from(i16::from_le_bytes([frame[2], frame[3]])) / 32_768.0;
+        assert_eq!(peaks, &[left, left, right, right]);
+        assert_eq!(energy, &[left.abs(), right.abs()]);
+    }
+
+    let mut draft = request(root.path(), &wav, "Processed", "flac");
+    draft.session_id = Some(opened.id.clone());
+    draft.segments = vec![segment(0, "Opening"), segment(CUT as u64, "Second track")];
+    draft.treatment.mono = audio::MonoMode::Right;
+    let treatment = studio
+        .prepare_treatment(&opened.id, draft.treatment, || false)
+        .unwrap();
+    assert_eq!(treatment.output_channels, 1);
+    let review = studio.preview(draft).unwrap();
+    assert_eq!(review.split_method, SplitMethod::Exact);
+    studio
+        .with_review_playback(&review.id, 1, |_, _, _, _, _, prepared| {
+            assert_eq!(prepared.settings().mono, audio::MonoMode::Right);
+            Ok(())
+        })
+        .unwrap();
+    let exported = studio.export(&review.id).unwrap();
+    let mut expected = original.as_chunks::<4>().0.iter().map(|frame| &frame[2..4]);
+    for (path, frames) in exported.paths.iter().zip([CUT, FRAMES - CUT]) {
+        let path = Path::new(path);
+        let info = audio::inspect(path, 1, || false).unwrap().source;
+        assert_eq!(info.channels, 1);
+        assert_eq!(info.frames, frames as u64);
+        if let Some(actual) = ffmpeg_pcm(path) {
+            assert_eq!(
+                actual,
+                expected
+                    .by_ref()
+                    .take(frames)
+                    .flatten()
+                    .copied()
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+    assert_eq!(fs::read(&wav).unwrap(), source_hash);
+}
+
+#[test]
+fn treated_mp3_splits_reencode_as_mono_and_leave_the_source_untouched() {
+    let root = fixtures();
+    let wav = root.path().join("master.wav");
+    recording(&wav);
+    let studio = Studio::default();
+    let converted = studio
+        .preview(request(root.path(), &wav, "Original MP3", "mp3"))
+        .unwrap();
+    let original = studio.export(&converted.id).unwrap();
+    let mp3 = Path::new(&original.paths[0]);
+    let witness = fs::read(mp3).unwrap();
+
+    let opened = studio.open(mp3, || false).unwrap();
+    let draft = |split_method| {
+        let mut draft = request(root.path(), mp3, "Treated MP3", "mp3");
+        draft.session_id = Some(opened.id.clone());
+        draft.segments = vec![segment(0, "Opening"), segment(CUT as u64, "Second track")];
+        draft.treatment = AudioTreatment {
+            normalize: true,
+            mono: audio::MonoMode::Right,
+            rumble: true,
+            hum: audio::HumFilter::Hz50,
+        };
+        draft.split_method = split_method;
+        draft
+    };
+    let refused = studio
+        .preview(draft(Some(SplitMethod::Copy)))
+        .err()
+        .unwrap();
+    assert!(refused.to_string().contains("requires re-encoding"));
+
+    let draft = draft(None);
+    let prepared = studio
+        .prepare_treatment(&opened.id, draft.treatment, || false)
+        .unwrap();
+    assert_eq!(prepared.output_channels, 1);
+    assert!(prepared.loudness_lufs.is_some());
+    let review = studio.preview(draft).unwrap();
+    assert_eq!(review.split_method, SplitMethod::Exact);
+    let exported = studio.export(&review.id).unwrap();
+    for (path, frames) in exported
+        .paths
+        .iter()
+        .zip([CUT as u64, opened.frames - CUT as u64])
+    {
+        if let Some(decoded) = ffmpeg_pcm(Path::new(path)) {
+            assert_eq!(decoded.len(), frames as usize * 2);
+        }
+        let info = audio::inspect(Path::new(path), 1, || false).unwrap().source;
+        assert_eq!(
+            (info.channels, info.sample_rate, info.frames),
+            (1, 44_100, frames)
+        );
+    }
+    assert_eq!(fs::read(mp3).unwrap(), witness);
 }

@@ -12,29 +12,118 @@ pub struct Peak {
     pub max: f32,
 }
 
-impl Peak {
+const PCM_SCALE: f32 = 1.0 / 2_147_483_648.0;
+
+#[derive(Clone, Copy, Debug)]
+struct PeakGroup {
+    min: [i32; 2],
+    max: [i32; 2],
+    // Keep accumulated energy and sample count so merging buckets weights
+    // short or partial buckets correctly. Values are squared PCM units.
+    energy: [f32; 2],
+    samples_per_lane: u64,
+}
+
+impl PeakGroup {
     const EMPTY: Self = Self {
-        min: 1.0,
-        max: -1.0,
+        min: [i32::MAX; 2],
+        max: [i32::MIN; 2],
+        energy: [0.0; 2],
+        samples_per_lane: 0,
     };
 
-    fn merge(&mut self, other: Self) {
-        self.min = self.min.min(other.min);
-        self.max = self.max.max(other.max);
+    fn push(&mut self, samples: &[i32], channels: usize) {
+        let mut chunk = Self::EMPTY;
+        if channels == 2 {
+            let frames = samples.as_chunks::<2>().0;
+            let (mut left_energy, mut right_energy) = (0.0, 0.0);
+            for &[left, right] in frames {
+                chunk.min[0] = chunk.min[0].min(left);
+                chunk.max[0] = chunk.max[0].max(left);
+                chunk.min[1] = chunk.min[1].min(right);
+                chunk.max[1] = chunk.max[1].max(right);
+                let (left, right) = (left as f32, right as f32);
+                left_energy += left * left;
+                right_energy += right * right;
+            }
+            chunk.energy = [left_energy, right_energy];
+            chunk.samples_per_lane = frames.len() as u64;
+        } else {
+            let mut energy = 0.0;
+            for &sample in samples {
+                chunk.min[0] = chunk.min[0].min(sample);
+                chunk.max[0] = chunk.max[0].max(sample);
+                let sample = sample as f32;
+                energy += sample * sample;
+            }
+            chunk.energy[0] = energy;
+            chunk.samples_per_lane = samples.len() as u64;
+        }
+        self.merge(chunk);
     }
 
-    fn push(&mut self, samples: &[i32]) {
-        let mut min = i32::MAX;
-        let mut max = i32::MIN;
-        for &sample in samples {
-            min = min.min(sample);
-            max = max.max(sample);
+    fn merge(&mut self, other: Self) {
+        for channel in 0..2 {
+            self.min[channel] = self.min[channel].min(other.min[channel]);
+            self.max[channel] = self.max[channel].max(other.max[channel]);
+            self.energy[channel] += other.energy[channel];
         }
-        const SCALE: f32 = 1.0 / 2_147_483_648.0;
-        self.merge(Self {
-            min: min as f32 * SCALE,
-            max: max as f32 * SCALE,
-        });
+        self.samples_per_lane += other.samples_per_lane;
+    }
+
+    fn combined(self) -> Peak {
+        Peak {
+            min: self.min[0].min(self.min[1]) as f32 * PCM_SCALE,
+            max: self.max[0].max(self.max[1]) as f32 * PCM_SCALE,
+        }
+    }
+
+    fn stereo(self) -> [Peak; 2] {
+        std::array::from_fn(|channel| Peak {
+            min: self.min[channel] as f32 * PCM_SCALE,
+            max: self.max[channel] as f32 * PCM_SCALE,
+        })
+    }
+
+    fn rms(self, sum: f32, channels: u64) -> f32 {
+        let count = (self.samples_per_lane * channels).max(1) as f32;
+        (sum / count).sqrt() * PCM_SCALE
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct WaveformPeaks {
+    pub combined: Vec<Peak>,
+    pub rms: Vec<f32>,
+    /// Independent left/right extrema and RMS for each bin, in source order.
+    pub stereo: Option<Vec<[Peak; 2]>>,
+    pub stereo_rms: Option<Vec<[f32; 2]>>,
+}
+
+impl WaveformPeaks {
+    fn from_groups(groups: impl Iterator<Item = PeakGroup>, stereo: bool) -> Self {
+        let (count, _) = groups.size_hint();
+        let mut combined = Vec::with_capacity(count);
+        let mut rms = Vec::with_capacity(count);
+        let mut channels = stereo.then(|| Vec::with_capacity(count));
+        let mut stereo_rms = stereo.then(|| Vec::with_capacity(count));
+        for group in groups {
+            combined.push(group.combined());
+            rms.push(group.rms(
+                group.energy[0] + group.energy[1],
+                if stereo { 2 } else { 1 },
+            ));
+            if let (Some(channels), Some(stereo_rms)) = (&mut channels, &mut stereo_rms) {
+                channels.push(group.stereo());
+                stereo_rms.push(group.energy.map(|energy| group.rms(energy, 1)));
+            }
+        }
+        Self {
+            combined,
+            rms,
+            stereo: channels,
+            stereo_rms,
+        }
     }
 }
 
@@ -42,7 +131,8 @@ impl Peak {
 /// the cache, retaining all extrema without allocating a PCM-sized buffer.
 #[derive(Clone, Debug)]
 pub struct WaveformIndex {
-    buckets: Vec<Peak>,
+    buckets: Vec<PeakGroup>,
+    stereo: bool,
     frames_per_bucket: u64,
     frames: u64,
 }
@@ -51,6 +141,7 @@ impl Default for WaveformIndex {
     fn default() -> Self {
         Self {
             buckets: Vec::new(),
+            stereo: false,
             frames_per_bucket: INITIAL_CACHE_FRAMES_PER_BIN,
             frames: 0,
         }
@@ -59,6 +150,7 @@ impl Default for WaveformIndex {
 
 impl WaveformIndex {
     pub(super) fn push(&mut self, mut samples: &[i32], channels: usize) {
+        self.stereo = channels == 2;
         while !samples.is_empty() {
             if self.frames == self.frames_per_bucket * MAX_CACHE_BINS as u64 {
                 for index in 0..MAX_CACHE_BINS / 2 {
@@ -72,12 +164,12 @@ impl WaveformIndex {
 
             let offset = self.frames % self.frames_per_bucket;
             if offset == 0 {
-                self.buckets.push(Peak::EMPTY);
+                self.buckets.push(PeakGroup::EMPTY);
             }
             let count = (self.frames_per_bucket - offset).min((samples.len() / channels) as u64);
             let (bucket_samples, remaining) = samples.split_at(count as usize * channels);
             let bucket = (self.frames / self.frames_per_bucket) as usize;
-            self.buckets[bucket].push(bucket_samples);
+            self.buckets[bucket].push(bucket_samples, channels);
             self.frames += count;
             samples = remaining;
         }
@@ -91,29 +183,36 @@ impl WaveformIndex {
     /// Summarize cached buckets overlapping the range. Boundary buckets may
     /// include neighboring frames. Use [super::waveform] for exact boundaries.
     pub fn peaks(&self, range: FrameRange, bins: usize) -> Result<Vec<Peak>, MediaError> {
+        Ok(self.channel_peaks(range, bins)?.combined)
+    }
+
+    pub fn channel_peaks(
+        &self,
+        range: FrameRange,
+        bins: usize,
+    ) -> Result<WaveformPeaks, MediaError> {
         let count = bins_in_range(range, bins)?;
         if range.end > self.frames {
             return Err(MediaError::Range(
                 "The waveform range extends past the recording",
             ));
         }
-        let mut peaks = Vec::with_capacity(count);
-        for index in 0..count {
+        let groups = (0..count).map(|index| {
             let first = bin_boundary(range, index, count) / self.frames_per_bucket;
             let last = (bin_boundary(range, index + 1, count) - 1) / self.frames_per_bucket;
-            let mut peak = Peak::EMPTY;
+            let mut peak = PeakGroup::EMPTY;
             for &bucket in &self.buckets[first as usize..=last as usize] {
                 peak.merge(bucket);
             }
-            peaks.push(peak);
-        }
-        Ok(peaks)
+            peak
+        });
+        Ok(WaveformPeaks::from_groups(groups, self.stereo))
     }
 }
 
 pub(super) struct PeakBins {
     range: FrameRange,
-    peaks: Vec<Peak>,
+    peaks: Vec<PeakGroup>,
     index: usize,
 }
 
@@ -122,7 +221,7 @@ impl PeakBins {
         let count = bins_in_range(range, bins)?;
         Ok(Self {
             range,
-            peaks: vec![Peak::EMPTY; count],
+            peaks: vec![PeakGroup::EMPTY; count],
             index: 0,
         })
     }
@@ -132,7 +231,7 @@ impl PeakBins {
             let boundary = bin_boundary(self.range, self.index + 1, self.peaks.len());
             let count = (boundary - first).min((samples.len() / channels) as u64);
             let (bin_samples, remaining) = samples.split_at(count as usize * channels);
-            self.peaks[self.index].push(bin_samples);
+            self.peaks[self.index].push(bin_samples, channels);
             samples = remaining;
             first += count;
             if first == boundary {
@@ -141,8 +240,8 @@ impl PeakBins {
         }
     }
 
-    pub(super) fn finish(self) -> Vec<Peak> {
-        self.peaks
+    pub(super) fn finish(self, channels: usize) -> WaveformPeaks {
+        WaveformPeaks::from_groups(self.peaks.into_iter(), channels == 2)
     }
 }
 
@@ -166,4 +265,41 @@ fn bins_in_range(range: FrameRange, bins: usize) -> Result<usize, MediaError> {
 
 fn bin_boundary(range: FrameRange, index: usize, count: usize) -> u64 {
     range.start + (range.end - range.start) * index as u64 / count as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn equal_peaks_can_have_different_energy_in_each_channel() {
+        let peak = 1 << 30;
+        let mut samples = Vec::new();
+        for i in 0..512 {
+            let left = match i {
+                0 => peak,
+                1 => -peak,
+                2..256 => 0,
+                _ if i % 2 == 0 => peak,
+                _ => -peak,
+            };
+            samples.extend([left, 0]);
+        }
+        let range = FrameRange { start: 0, end: 512 };
+        let mut overview = WaveformIndex::default();
+        overview.push(&samples[..100], 2);
+        overview.push(&samples[100..], 2);
+        let overview = overview.channel_peaks(range, 2).unwrap();
+        let mut tile = PeakBins::new(range, 2).unwrap();
+        tile.push(0, &samples, 2);
+        let tile = tile.finish(2);
+
+        assert_eq!(overview.combined, tile.combined);
+        assert_eq!(overview.combined[0], overview.combined[1]);
+        assert_eq!(overview.rms, tile.rms);
+        assert_eq!(overview.stereo_rms, tile.stereo_rms);
+        let stereo = overview.stereo_rms.unwrap();
+        assert_eq!(stereo[0], [0.5 / 128.0_f32.sqrt(), 0.0]);
+        assert_eq!(stereo[1], [0.5, 0.0]);
+    }
 }
