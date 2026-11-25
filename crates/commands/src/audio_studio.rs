@@ -1960,9 +1960,13 @@ fn execute(
     match result {
         Err(error) => {
             let retained: Vec<_> = stages
-                .iter()
-                .filter(|stage| stage.discard().is_err())
-                .filter_map(|stage| stage.staging_path().ok())
+                .iter_mut()
+                .filter_map(|stage| {
+                    stage
+                        .discard()
+                        .err()
+                        .and_then(|_| stage.recovery_path().ok())
+                })
                 .collect();
             if retained.is_empty() && published_paths.is_empty() {
                 Err(error)

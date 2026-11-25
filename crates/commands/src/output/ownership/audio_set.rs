@@ -9,7 +9,7 @@ use std::sync::{atomic::Ordering, Arc};
 
 pub struct AudioSet {
     private: Private,
-    directory: Directory,
+    directory: Option<Directory>,
     destination: PathBuf,
     name: Option<String>,
     owned: BTreeMap<String, OwnedFile>,
@@ -27,7 +27,7 @@ pub struct AudioPublishedFolder {
 }
 
 impl AudioPublishedFolder {
-    pub fn remove_if_empty(&self) -> io::Result<()> {
+    pub fn remove_if_empty(self) -> io::Result<()> {
         let name = OsStr::new(&self.name);
         let identity = same_file::Handle::from_file(self.directory.directory_file()?)?;
         let current = self.parent.open_child_dir(name)?;
@@ -53,8 +53,10 @@ impl AudioPublishedFolder {
             if !same_handles(&identity, &actual)? {
                 return Err(io::Error::other("The output folder changed"));
             }
-            drop(directory);
             drop(actual);
+            drop(directory);
+            drop(identity);
+            drop(self.directory);
             private.dir.unlink_private(&captured, true)
         })();
         if let Err(error) = remove {
@@ -79,6 +81,15 @@ struct OwnedFile {
 }
 
 impl OwnedFile {
+    fn open_checked(&self, directory: &Directory, name: &OsStr) -> io::Result<File> {
+        let current = directory.open_regular(name, false)?;
+        let actual = same_file::Handle::from_file(current.try_clone()?)?;
+        if !self.matches(&actual)? {
+            return Err(io::Error::other("A staged audio file changed"));
+        }
+        Ok(current)
+    }
+
     fn matches(&self, actual: &same_file::Handle) -> io::Result<bool> {
         if let Some(handle) = &self.handle {
             return same_handles(handle, actual);
@@ -207,7 +218,7 @@ impl AudioSet {
             })?;
         Ok(Self {
             private,
-            directory,
+            directory: Some(directory),
             destination,
             name: name.map(str::to_owned),
             owned: BTreeMap::new(),
@@ -215,12 +226,24 @@ impl AudioSet {
     }
 
     pub fn staging_path(&self) -> io::Result<PathBuf> {
-        self.directory.actual_path()
+        self.staging_directory()?.actual_path()
+    }
+
+    fn staging_directory(&self) -> io::Result<&Directory> {
+        self.directory
+            .as_ref()
+            .ok_or_else(|| io::Error::other("The staging folder was retired"))
+    }
+
+    pub fn recovery_path(&self) -> io::Result<PathBuf> {
+        self.private.path()
     }
 
     pub fn create_file(&mut self, name: &str) -> io::Result<File> {
         Self::validate_name(name)?;
-        let file = self.directory.open_regular(OsStr::new(name), true)?;
+        let file = self
+            .staging_directory()?
+            .open_regular(OsStr::new(name), true)?;
         let handle = same_file::Handle::from_file(file.try_clone()?)?;
         self.owned.insert(
             name.into(),
@@ -237,12 +260,7 @@ impl AudioSet {
             .owned
             .get(name)
             .ok_or_else(|| io::Error::other("Output was not created by this export"))?;
-        let current = self.directory.open_regular(OsStr::new(name), false)?;
-        let actual = same_file::Handle::from_file(current.try_clone()?)?;
-        if !owned.matches(&actual)? {
-            return Err(io::Error::other("A staged audio file changed"));
-        }
-        Ok(current)
+        owned.open_checked(self.staging_directory()?, OsStr::new(name))
     }
 
     pub fn witness(file: &File) -> io::Result<AudioWitness> {
@@ -320,7 +338,7 @@ impl AudioSet {
                 .sync_all()?;
         }
         #[cfg(unix)]
-        self.directory.directory_file()?.sync_all()?;
+        self.staging_directory()?.directory_file()?.sync_all()?;
         Ok(())
     }
 
@@ -340,7 +358,8 @@ impl AudioSet {
                 "Audio export stopped",
             ));
         }
-        let staged_identity = same_file::Handle::from_file(self.directory.directory_file()?)?;
+        let staged_identity =
+            same_file::Handle::from_file(self.staging_directory()?.directory_file()?)?;
         let current = self.private.dir.open_child_dir(OsStr::new(STAGED_SET))?;
         let current_identity = same_file::Handle::from_file(current.directory_file()?)?;
         if !same_handles(&staged_identity, &current_identity)? {
@@ -430,7 +449,7 @@ impl AudioSet {
             .as_ref()
             .ok_or_else(|| io::Error::other("Missing output folder name"))?;
         let directory = self.private.parent.open_child_dir(OsStr::new(name))?;
-        let from = same_file::Handle::from_file(self.directory.directory_file()?)?;
+        let from = same_file::Handle::from_file(self.staging_directory()?.directory_file()?)?;
         let to = same_file::Handle::from_file(directory.directory_file()?)?;
         if !same_handles(&from, &to)? {
             return Err(io::Error::other(
@@ -458,13 +477,21 @@ impl AudioSet {
                 let expected = same_file::Handle::from_file(self.checked_file(name)?)?;
                 let component = OsStr::new(name);
                 let path = self.destination.join(name);
-                self.directory
-                    .move_exclusive(component, &self.private.parent, component)?;
+                self.staging_directory()?.move_exclusive(
+                    component,
+                    &self.private.parent,
+                    component,
+                )?;
                 self.owned.remove(name);
                 moved.push(path);
-                let actual = same_file::Handle::from_file(
-                    self.private.parent.open_regular(component, false)?,
-                )?;
+                let file = self
+                    .private
+                    .parent
+                    .open_regular(component, false)
+                    .map_err(|error| {
+                        io::Error::other(format!("Could not reopen the published file: {error}"))
+                    })?;
+                let actual = same_file::Handle::from_file(file)?;
                 if !same_handles(&expected, &actual)? {
                     return Err(io::Error::other("An output changed during publication"));
                 }
@@ -475,7 +502,9 @@ impl AudioSet {
             }
             #[cfg(unix)]
             self.private.parent.directory_file()?.sync_all()?;
-            self.discard()
+            self.discard().map_err(|error| {
+                io::Error::other(format!("Could not clean up audio staging: {error}"))
+            })
         })();
         match result {
             Ok(()) => Ok(published),
@@ -524,16 +553,18 @@ impl AudioSet {
         Ok(())
     }
 
-    pub fn discard(&self) -> io::Result<()> {
+    pub fn discard(&mut self) -> io::Result<()> {
         if self.private.removed.load(Ordering::Acquire) {
             return Ok(());
         }
-        let dir = &self.directory;
+        let Some(dir) = &self.directory else {
+            return self.private.remove_empty();
+        };
         let mut failure = None;
-        for name in self.owned.keys() {
+        self.owned.retain(|name, owned| {
             let discard = || -> io::Result<()> {
-                let candidate = same_file::Handle::from_file(self.checked_file(name)?)?;
                 let name = OsStr::new(name);
+                let candidate = same_file::Handle::from_file(owned.open_checked(dir, name)?)?;
                 let captured = self.private.capture(dir, name)?;
                 let captured_matches = self
                     .private
@@ -558,14 +589,17 @@ impl AudioSet {
             };
             if let Err(error) = discard() {
                 failure.get_or_insert(error);
+                true
+            } else {
+                false
             }
-        }
+        });
         match failure {
             Some(error) => Err(error),
             None => {
                 let name = OsStr::new(STAGED_SET);
                 let captured = self.private.capture(&self.private.dir, name)?;
-                let identity = same_file::Handle::from_file(self.directory.directory_file()?)?;
+                let identity = same_file::Handle::from_file(dir.directory_file()?)?;
                 let actual = self
                     .private
                     .dir
@@ -586,6 +620,10 @@ impl AudioSet {
                         "The changed staging directory was retained",
                     ));
                 }
+                // Windows keeps a removed directory pending until its last
+                // handle closes. Release it before retiring the private parent.
+                drop(identity);
+                self.directory.take();
                 self.private.dir.unlink_private(&captured, true)?;
                 self.private.forget(false, &captured);
                 self.private.remove_empty()

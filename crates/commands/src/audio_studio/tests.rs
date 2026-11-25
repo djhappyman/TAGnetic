@@ -167,6 +167,7 @@ fn split_saves_in_place_unless_a_folder_pattern_is_requested() {
     studio.export(&flat.id).unwrap();
     assert!(Path::new(&flat.outputs[0].path).is_file());
     assert!(wav.is_file());
+    assert_eq!(fs::read_dir(&music).unwrap().count(), 3);
 
     let mut draft = request(&music, &wav, "", "flac");
     draft.session_id = Some(source.id);
@@ -259,6 +260,7 @@ fn check_replacement_and_undo(folder: &str) {
         .iter()
         .all(|path| !Path::new(path).exists()));
     assert!(!music.join("Master - Tracks").exists());
+    assert_eq!(fs::read_dir(&music).unwrap().count(), 1);
     assert_eq!(fs::read(retained).unwrap(), original);
 }
 
