@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
+mod audio_studio;
 mod beatport_session_control;
 mod blocking;
 mod mcp_control;
@@ -2766,6 +2767,7 @@ async fn save_settings(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     providers: State<'_, ProviderState>,
+    studio: State<'_, audio_studio::StudioState>,
     settings: SettingsDto,
     expected_revision: Option<String>,
 ) -> Result<String, ErrorDto> {
@@ -2773,6 +2775,7 @@ async fn save_settings(
         settings_path(&app)?,
         state.inner().clone(),
         providers.inner().clone(),
+        Some(studio.inner().clone()),
         settings,
         expected_revision,
     )
@@ -2783,6 +2786,7 @@ async fn save_settings_at(
     path: PathBuf,
     state: AppState,
     providers: ProviderState,
+    studio: Option<audio_studio::StudioState>,
     settings: SettingsDto,
     expected_revision: Option<String>,
 ) -> Result<String, ErrorDto> {
@@ -2817,6 +2821,9 @@ async fn save_settings_at(
             // library half only when a library is open — so a change takes effect
             // without reopening either way.
             providers.apply_settings(&settings)?;
+            if let Some(studio) = studio {
+                studio.apply_settings(&settings);
+            }
             let revision = SETTINGS_REVISION.fetch_add(1, Ordering::SeqCst) + 1;
             let document_revision = tagrex_service::settings_revision(&document);
             Ok((settings, revision, document_revision))
@@ -2895,6 +2902,8 @@ fn main() {
                 .build(),
         )
         .manage(AppState::default())
+        .manage(audio_studio::StudioState::default())
+        .manage(audio_studio::Openings::default())
         .manage(ProviderState::default())
         .manage(ApplyControl::default())
         .manage(BpmControl::default())
@@ -2912,6 +2921,7 @@ fn main() {
             // opened (#166), so it takes the saved network settings here rather
             // than waiting for a library or a trip through Settings › Save.
             let settings = read_settings(&app.handle().clone());
+            app.state::<audio_studio::StudioState>().apply_settings(&settings);
             app.state::<ProviderState>()
                 .apply_settings(&settings)
                 .map_err(|error| std::io::Error::other(error.text))?;
@@ -2924,6 +2934,25 @@ fn main() {
         })
         .manage(Player::new())
         .invoke_handler(tauri::generate_handler![
+            audio_studio::audio_split_open,
+            audio_studio::audio_split_loading,
+            audio_studio::audio_split_cancel_open,
+            audio_studio::audio_split_close,
+            audio_studio::audio_split_peaks,
+            audio_studio::audio_split_treatment,
+            audio_studio::audio_split_transport,
+            audio_studio::audio_split_audition_output,
+            audio_studio::audio_split_status,
+            audio_studio::audio_split_preview,
+            audio_studio::audio_split_export,
+            audio_studio::audio_split_undo_replacement,
+            audio_studio::audio_split_progress,
+            audio_studio::audio_split_cancel,
+            audio_studio::audio_split_reveal,
+            audio_studio::audio_split_can_add,
+            audio_studio::audio_split_cue,
+            audio_studio::audio_split_write_cue,
+            audio_studio::audio_split_discogs,
             mcp_control::mcp_status,
             mcp_control::mcp_agent_status,
             mcp_control::mcp_control_agent,
@@ -3288,6 +3317,7 @@ mod tests {
             root.join("settings.json"),
             state.clone(),
             providers.clone(),
+            None,
             super::SettingsDto {
                 bpm_max_minutes: 7,
                 ..Default::default()
@@ -3339,6 +3369,7 @@ mod tests {
             path.clone(),
             state,
             providers.clone(),
+            None,
             super::SettingsDto {
                 bpm_max_minutes: 9,
                 ..Default::default()
@@ -3382,6 +3413,7 @@ mod tests {
             path.clone(),
             super::AppState::default(),
             super::ProviderState::default(),
+            None,
             initial,
             Some(revision),
         ));
@@ -3412,6 +3444,7 @@ mod tests {
             path.clone(),
             super::AppState::default(),
             super::ProviderState::default(),
+            None,
             edited,
             Some(revision),
         ))
@@ -3441,6 +3474,7 @@ mod tests {
             path.clone(),
             super::AppState::default(),
             super::ProviderState::default(),
+            None,
             defaults,
             Some(revision),
         ))

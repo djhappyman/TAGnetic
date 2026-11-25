@@ -4,7 +4,8 @@
 //! The one invariant everything else follows from: **no module writes tags or
 //! renames files directly** — every operation is compiled into a
 //! [`plan::ChangePlan`], previewed, applied through [`plan::Executor`], and
-//! journaled for rollback.
+//! journaled for rollback. Newly encoded audio can be tagged in private,
+//! identity-bound staging before any output is published.
 
 pub mod cover;
 pub mod export;

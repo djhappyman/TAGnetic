@@ -1,6 +1,7 @@
 <script lang="ts">
   import { fieldHue } from '../js/field-pattern.js';
   import { X } from '@lucide/svelte';
+  import { Tabs, TabsList, TabsTab } from '@ui-sdk/svelte/tabs';
   import ControllerDialog from './ControllerDialog.svelte';
   import FieldPatternInput from './FieldPatternInput.svelte';
   import { Button } from '$lib/components/ui/button/index.js';
@@ -57,11 +58,8 @@
       if (opened && request === epoch) error = String(reason);
     });
   }
-  function switchTab(event: KeyboardEvent, other: string) {
-    if (working || !['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
-    event.preventDefault();
-    kind = event.key === 'Home' ? 'build' : event.key === 'End' ? 'extract' : other;
-    document.getElementById(kind === 'build' ? 'format-build-tab' : 'format-extract-tab')?.focus();
+  function chooseTab(value: string | null) {
+    if (!working && (value === 'build' || value === 'extract')) kind = value;
   }
   function connect(node: HTMLElement) {
     root = node.closest('.controller-dialog-root')!;
@@ -106,12 +104,20 @@
       <h2 id="ribbon-format-title">Format fields</h2>
       <Button variant="ghost" size="icon-sm" disabled={working} aria-label="Close dialog" onclick={close}><X size={17}/></Button>
     </div>
-    <div class="format-mode-switch" role="tablist" aria-label="Format operation">
-      <button id="format-build-tab" type="button" role="tab" aria-selected={kind === 'build'} aria-controls="format-fields-panel" tabindex={kind === 'build' ? 0 : -1} disabled={working}
-        onclick={() => { kind = 'build'; }} onkeydown={event => switchTab(event, 'extract')}>Build a field</button>
-      <button id="format-extract-tab" type="button" role="tab" aria-selected={kind === 'extract'} aria-controls="format-fields-panel" tabindex={kind === 'extract' ? 0 : -1} disabled={working}
-        onclick={() => { kind = 'extract'; }} onkeydown={event => switchTab(event, 'build')}>Extract fields</button>
-    </div>
+    <Tabs value={kind} onValueChange={chooseTab} style="display: contents">
+      <TabsList class="format-mode-switch" aria-label="Format operation">
+        <TabsTab value="build" disabled={working}>
+          {#snippet render({ props })}
+            <button {...props} class="format-mode-tab" id="format-build-tab" aria-controls="format-fields-panel" type="button" disabled={working}>Build a field</button>
+          {/snippet}
+        </TabsTab>
+        <TabsTab value="extract" disabled={working}>
+          {#snippet render({ props })}
+            <button {...props} class="format-mode-tab" id="format-extract-tab" aria-controls="format-fields-panel" type="button" disabled={working}>Extract fields</button>
+          {/snippet}
+        </TabsTab>
+      </TabsList>
+    </Tabs>
     <div id="format-fields-panel" class="ribbon-dialog-fields format-fields-content" data-format-kind={kind} role="tabpanel" aria-labelledby={kind === 'build' ? 'format-build-tab' : 'format-extract-tab'}>
       <label class="ribbon-field"><span>{kind === 'build' ? 'Apply to' : 'Pull from'}</span>
         {#if kind === 'build'}
@@ -163,15 +169,15 @@
 <style>
   .format-fields-dialog.modal { --controller-modal-width:560px; height:min(470px,calc(100dvh - 48px)); gap:0; overflow:hidden; }
   .ribbon-tool-header { flex:none; margin-bottom:var(--sp-4); }
-  .format-mode-switch { display:flex; flex:none; gap:4px; }
-  .format-mode-switch button { position:relative; flex:1; min-height:38px; padding:8px 12px; border:0; border-radius:var(--r-inset) var(--r-inset) 0 0; background:transparent; color:var(--muted); font:inherit; font-weight:500; cursor:pointer; }
-  .format-mode-switch button[aria-selected=true] { background:var(--bg); color:var(--text); }
+  .format-fields-dialog :global(.format-mode-switch) { display:flex; flex:none; gap:4px; }
+  button.format-mode-tab { position:relative; flex:1; min-height:38px; padding:8px 12px; border:0; border-radius:var(--r-inset) var(--r-inset) 0 0; background:transparent; color:var(--muted); font:inherit; font-weight:500; cursor:pointer; }
+  button.format-mode-tab[aria-selected=true] { background:var(--bg); color:var(--text); }
   #format-build-tab[aria-selected=true]::after, #format-extract-tab[aria-selected=true]::before { content:''; position:absolute; bottom:0; width:var(--r-inset); height:var(--r-inset); pointer-events:none; }
   #format-build-tab[aria-selected=true]::after { right:calc(-1 * var(--r-inset)); background:radial-gradient(circle at 100% 0,transparent calc(var(--r-inset) - .5px),var(--bg) var(--r-inset)); }
   #format-extract-tab[aria-selected=true]::before { left:calc(-1 * var(--r-inset)); background:radial-gradient(circle at 0 0,transparent calc(var(--r-inset) - .5px),var(--bg) var(--r-inset)); }
-  .format-mode-switch button[aria-selected=false] { border-radius:var(--r-inset); }
-  .format-mode-switch button:hover:not(:disabled) { color:var(--text); }
-  .format-mode-switch button:focus-visible { outline:2px solid var(--accent); outline-offset:-3px; }
+  button.format-mode-tab[aria-selected=false] { border-radius:var(--r-inset); }
+  button.format-mode-tab:hover:not(:disabled) { color:var(--text); }
+  button.format-mode-tab:focus-visible { outline:2px solid var(--accent); outline-offset:-3px; }
   .format-fields-content { flex:1; min-height:0; gap:var(--sp-3); border-radius:0 0 var(--r-inset) var(--r-inset); }
   .format-fields-content[data-format-kind=build] { border-top-right-radius:var(--r-inset); }
   .format-fields-content[data-format-kind=extract] { border-top-left-radius:var(--r-inset); }

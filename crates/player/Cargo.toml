@@ -14,6 +14,7 @@ fuzzing = []
 
 [dependencies]
 tagrex-core.workspace = true
+tagrex-audio-workbench = { path = "../audio-workbench" }
 serde = { version = "1", features = ["derive"] }
 # Native audio backend for the preview player: a rodio Sink queues tracks
 # back-to-back for gapless playback, decoding every format we handle (incl. OGG)

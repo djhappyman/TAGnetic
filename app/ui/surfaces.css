@@ -69,17 +69,18 @@
 @media (prefers-reduced-motion: reduce) {
   .controller-dialog-content, .controller-dialog-overlay, .controller-popover-content, .controller-context-content { animation-duration: .01ms !important; }
 }
-.controller-tooltip-root { position: fixed; inset: 0 auto auto 0; z-index: 120; pointer-events: none; }
+.controller-tooltip-root { position: fixed; inset: 0 auto auto 0; z-index: 180; pointer-events: none; }
 .controller-tooltip-content {
-  background: var(--text);
-  color: var(--bg);
+  background: var(--tip-bg);
+  color: var(--tip-text);
   border-radius: var(--r-control);
   padding: var(--sp-2) var(--sp-3);
   max-width: min(320px, calc(100vw - 16px));
   font: inherit;
   font-size: var(--type-help-size);
+  box-shadow: var(--ui-menu-shadow);
 }
-.controller-tooltip-content .tip-kbd { color: inherit; opacity: .65; }
+.controller-tooltip-content .tip-kbd { color: inherit; opacity: 1; }
 .controller-toast-home { display: none; }
 [data-sonner-toaster].controller-toaster {
   left: var(--controller-toast-left, 50%);

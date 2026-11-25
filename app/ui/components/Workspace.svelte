@@ -3,6 +3,7 @@
   import { onMount } from 'svelte';
   import { t } from '../js/i18n.js';
   import { FolderOpen, FolderPlus, Undo2, Redo2, ListChecks, ListX, ArrowDown, ArrowUp, Group, ChevronDown, PanelRightOpen, PanelRightClose } from '@lucide/svelte';
+  import FileCommandToolbar from './FileCommandToolbar.svelte';
   import RibbonTools from './RibbonTools.svelte';
   import BrandWordmark from './BrandWordmark.svelte';
   import AgentActivity from './AgentActivity.svelte';
@@ -20,6 +21,8 @@
   import NativeCheckbox from './controls/NativeCheckbox.svelte';
   import NativeSlider from './controls/NativeSlider.svelte';
   import * as Tabs from '$lib/components/ui/tabs/index.js';
+  import { cn } from '$lib/utils.js';
+  import { Tabs as NavigationTabs, TabsList as NavigationList, TabsTab as NavigationTab } from '@ui-sdk/svelte/tabs';
   import * as Table from '$lib/components/ui/table/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
@@ -34,6 +37,7 @@
   let dock = $state<WorkspaceLayout>();
   let mode = $state<WorkspaceMode>('tagger');
   let subtab = $state<WorkspaceSubtab>('online');
+  // Crossing Duplicates resets the library query, so tool arrows move focus only.
   const primaryTab = $derived(mode === 'tagger' && subtab === 'online' ? 'online' : mode);
   function changePrimaryTab(value: string) {
     if (value === 'online') {
@@ -158,35 +162,35 @@
       <BrandWordmark />
     </div>
 
-    <Tabs.Root value={primaryTab} onValueChange={changePrimaryTab} class="primary-navigation">
-    <Tabs.List class="mode-tabs" aria-label="Tools">
-      <Tabs.Trigger value="tagger">
-{#snippet child({ props })}
+    <NavigationTabs value={primaryTab} activation="manual" onValueChange={(value) => { if (value) changePrimaryTab(value); }} class="primary-navigation">
+    <NavigationList class={cn(Tabs.tabsListVariants({}), "mode-tabs")} data-slot="tabs-list" data-variant="default" aria-label="Tools">
+      <NavigationTab value="tagger">
+{#snippet render({ props })}
 <Button {...props} data-slot="button" variant="ghost" size="sm" class="mode-tab" id="workspace-tags-tab" aria-controls="panel-tagger" data-mode="tagger" data-i18n-title="mode.tagger.title" title="Edit tags manually and manage cover art" data-i18n-aria-label="mode.tagger.label" aria-label="Tags"><svg class="ico"><use href="#i-tag"/></svg><span class="lbl" data-i18n="mode.tagger.label">Tags</span></Button>
 {/snippet}
-</Tabs.Trigger>
-      <Tabs.Trigger value="online">
-{#snippet child({ props })}
+</NavigationTab>
+      <NavigationTab value="online">
+{#snippet render({ props })}
 <Button {...props} data-slot="button" variant="ghost" size="sm" class="mode-tab" id="workspace-online-tab" aria-controls="panel-tagger" data-mode="online" data-i18n-title="inspector.onlineHeading" title="Find a release" data-i18n-aria-label="tagger.online" aria-label="Online"><svg class="ico"><use href="#i-search"/></svg><span class="lbl" data-i18n="tagger.online">Online</span></Button>
 {/snippet}
-</Tabs.Trigger>
-      <Tabs.Trigger value="renamer">
-{#snippet child({ props })}
+</NavigationTab>
+      <NavigationTab value="renamer">
+{#snippet render({ props })}
 <Button {...props} data-slot="button" variant="ghost" size="sm" class="mode-tab" id="workspace-renamer-tab" aria-controls="panel-renamer" data-mode="renamer" data-i18n-title="mode.renamer.title" title="Rename files and move them into folders" data-i18n-aria-label="mode.renamer.label" aria-label="Rename"><svg class="ico"><use href="#i-rename"/></svg><span class="lbl" data-i18n="mode.renamer.label">Rename</span></Button>
 {/snippet}
-</Tabs.Trigger>
-      <Tabs.Trigger value="deduplicator">
-{#snippet child({ props })}
+</NavigationTab>
+      <NavigationTab value="deduplicator">
+{#snippet render({ props })}
 <Button {...props} data-slot="button" variant="ghost" size="sm" class="mode-tab" id="query-mode-toggle" aria-controls="panel-deduplicator" aria-pressed={mode === 'deduplicator'} data-mode="deduplicator" data-i18n-title="mode.deduplicator.title" title="Find likely duplicate files in the open library" data-i18n-aria-label="mode.deduplicator.label" aria-label="Duplicates"><svg class="ico"><use href="#i-dedup"/></svg><span class="lbl" data-i18n="mode.deduplicator.label">Duplicates</span></Button>
 {/snippet}
-</Tabs.Trigger>
-      <Tabs.Trigger value="exporter">
-{#snippet child({ props })}
+</NavigationTab>
+      <NavigationTab value="exporter">
+{#snippet render({ props })}
 <Button {...props} data-slot="button" variant="ghost" size="sm" class="mode-tab" id="workspace-exporter-tab" aria-controls="panel-exporter" data-mode="exporter" data-i18n-title="mode.exporter.title" title="Export playlists, tables, and reports" data-i18n-aria-label="mode.exporter.label" aria-label="Export"><svg class="ico"><use href="#i-export"/></svg><span class="lbl" data-i18n="mode.exporter.label">Export</span></Button>
 {/snippet}
-</Tabs.Trigger>
-    </Tabs.List>
-    </Tabs.Root>
+</NavigationTab>
+    </NavigationList>
+    </NavigationTabs>
     <FilterPanel>
       <div class="filter-ctl field is-empty">
         <span class="query-mode-label" aria-hidden="true"><svg class="ico"><use href="#i-search"/></svg></span>
@@ -241,7 +245,7 @@
   <DockWorkspace bind:controller={dock} drawer closed={sidebarClosed}>
   <DockModule moduleId="files" title="Files" defaultArea="left" headerless movable={false}>
   <div class="ribbon-strip">
-  <div class="command-toolbar command-ribbon" role="group" aria-label="File commands">
+  <FileCommandToolbar>
     <div class="ribbon-group" role="group" aria-label="Folders">
       <Button id="ribbon-open-folder" variant="ghost" size="icon-sm" class="icon ribbon-command" title="Open folder" aria-label="Open folder" disabled={applying}><FolderOpen class="ico" size={17} strokeWidth={1.7} /></Button>
       <Button id="ribbon-add-folder" variant="ghost" size="icon-sm" class="icon ribbon-command" title="Add folder to the current list" aria-label="Add folder" disabled={applying}><FolderPlus class="ico" size={17} strokeWidth={1.7} /></Button>
@@ -271,7 +275,7 @@
 
     </div>
     <RibbonTools />
-  </div>
+  </FileCommandToolbar>
   </div>
   <section class="files-col">
     <div class="file-view-tabs" role="tablist" aria-label="File views" data-i18n-aria-label="staging.views">
@@ -407,24 +411,26 @@
     <Tabs.Content value="tagger" id="panel-tagger" aria-labelledby={subtab === 'online' ? 'workspace-online-tab' : 'workspace-tags-tab'} class="mode-panel">
 <Tabs.Root bind:value={subtab} class="controller-tabs-root" onValueChange={(value) => changeTab(value, true)}>
       <div class="source-navigation" hidden={subtab === 'online'}>
-      <Tabs.List class="subtabs" data-i18n-aria-label="tagger.mode" aria-label="Tagging mode">
-        <Tabs.Trigger value="editor">
-{#snippet child({ props })}
-<Button {...props} data-slot="button" variant="ghost" size="sm" class="subtab" data-subtab="editor" type="button" data-i18n="tagger.editor">Editor</Button>
+      <NavigationTabs value={subtab} onValueChange={(value) => { if (value) changeTab(value, true); }} class="controller-tabs-root">
+      <NavigationList class={cn(Tabs.tabsListVariants({}), "subtabs")} data-slot="tabs-list" data-variant="default" data-i18n-aria-label="tagger.mode" aria-label="Tagging mode">
+        <NavigationTab value="editor">
+{#snippet render({ props })}
+<Button {...props} data-slot="button" variant="ghost" size="sm" class="subtab" id="source-editor-tab" aria-controls="subtab-editor" data-subtab="editor" type="button" data-i18n="tagger.editor">Editor</Button>
 {/snippet}
-</Tabs.Trigger>
-        <Tabs.Trigger value="filename">
-{#snippet child({ props })}
-<Button {...props} data-slot="button" variant="ghost" size="sm" class="subtab" data-subtab="filename" type="button" data-i18n="tagger.fromName">From name</Button>
+</NavigationTab>
+        <NavigationTab value="filename">
+{#snippet render({ props })}
+<Button {...props} data-slot="button" variant="ghost" size="sm" class="subtab" id="source-filename-tab" aria-controls="subtab-filename" data-subtab="filename" type="button" data-i18n="tagger.fromName">From name</Button>
 {/snippet}
-</Tabs.Trigger>
-        <Tabs.Trigger value="fromtext">
-{#snippet child({ props })}
-<Button {...props} data-slot="button" variant="ghost" size="sm" class="subtab" data-subtab="fromtext" type="button" data-i18n="tagger.fromText">From text</Button>
+</NavigationTab>
+        <NavigationTab value="fromtext">
+{#snippet render({ props })}
+<Button {...props} data-slot="button" variant="ghost" size="sm" class="subtab" id="source-fromtext-tab" aria-controls="subtab-fromtext" data-subtab="fromtext" type="button" data-i18n="tagger.fromText">From text</Button>
 {/snippet}
-</Tabs.Trigger>
+</NavigationTab>
 
-      </Tabs.List>
+      </NavigationList>
+      </NavigationTabs>
 
       </div>
 
@@ -488,7 +494,7 @@
 
       </Tabs.Content>
 
-      <Tabs.Content value="editor" id="subtab-editor" class="subtab-panel editor" hidden>
+      <Tabs.Content value="editor" id="subtab-editor" aria-labelledby="source-editor-tab" class="subtab-panel editor" hidden>
         <div class="editor-scroll">
         <div id="transformation-pane" class="transformations-scroll docked-transformations">
       <div id="transform-home"></div>
@@ -546,7 +552,7 @@
 
       </Tabs.Content>
 
-      <Tabs.Content value="filename" id="subtab-filename" class="subtab-panel from-name" hidden>
+      <Tabs.Content value="filename" id="subtab-filename" aria-labelledby="source-filename-tab" class="subtab-panel from-name" hidden>
         <div class="from-name-scroll"><div class="panel-block">
           <div class="mask-row">
             <div class="field">
@@ -569,7 +575,7 @@
         </div>
       </Tabs.Content>
 
-      <Tabs.Content value="fromtext" id="subtab-fromtext" class="subtab-panel from-name" hidden>
+      <Tabs.Content value="fromtext" id="subtab-fromtext" aria-labelledby="source-fromtext-tab" class="subtab-panel from-name" hidden>
         <div class="from-name-scroll"><div class="panel-block">
           <div class="mask-row">
             <div class="field">
@@ -607,25 +613,29 @@
     <Tabs.Content value="generator" id="panel-generator" class="mode-panel" hidden>
 
       <Tabs.Root bind:value={generatorJob} class="generator-jobs-root" style="display: contents">
-      <Tabs.List class="gen-jobs" aria-label="Generator job" data-i18n-aria-label="generator.jobs">
-        <Tabs.Trigger value="transform" id="gen-job-transform">
-          {#snippet child({ props })}<Button {...props} variant="ghost" size="sm" class="gen-job" data-i18n="generator.job.transform">Transform</Button>{/snippet}
-        </Tabs.Trigger>
-        <Tabs.Trigger value="number" id="gen-job-number">
-          {#snippet child({ props })}<Button {...props} variant="ghost" size="sm" class="gen-job" data-i18n="generator.job.number">Number</Button>{/snippet}
-        </Tabs.Trigger>
-        <Tabs.Trigger value="sides" id="gen-job-sides">
-          {#snippet child({ props })}<Button {...props} variant="ghost" size="sm" class="gen-job" data-i18n="generator.job.sides">Vinyl sides</Button>{/snippet}
-        </Tabs.Trigger>
-      </Tabs.List>
+      <NavigationTabs value={generatorJob} onValueChange={(value) => {
+        if (value === 'transform' || value === 'number' || value === 'sides') generatorJob = value;
+      }} class="controller-tabs-root">
+        <NavigationList class={cn(Tabs.tabsListVariants({}), "gen-jobs")} data-slot="tabs-list" data-variant="default" aria-label="Generator job" data-i18n-aria-label="generator.jobs">
+          <NavigationTab value="transform">
+            {#snippet render({ props })}<Button {...props} id="gen-job-transform" aria-controls="gen-panel-transform" variant="ghost" size="sm" class="gen-job" data-i18n="generator.job.transform">Transform</Button>{/snippet}
+          </NavigationTab>
+          <NavigationTab value="number">
+            {#snippet render({ props })}<Button {...props} id="gen-job-number" aria-controls="gen-panel-number" variant="ghost" size="sm" class="gen-job" data-i18n="generator.job.number">Number</Button>{/snippet}
+          </NavigationTab>
+          <NavigationTab value="sides">
+            {#snippet render({ props })}<Button {...props} id="gen-job-sides" aria-controls="gen-panel-sides" variant="ghost" size="sm" class="gen-job" data-i18n="generator.job.sides">Vinyl sides</Button>{/snippet}
+          </NavigationTab>
+        </NavigationList>
+      </NavigationTabs>
 
-      <Tabs.Content value="transform" hidden={generatorJob !== 'transform'}><p class="hint muted">Choose transformations from the Tags sidebar.</p></Tabs.Content>
+      <Tabs.Content value="transform" id="gen-panel-transform" aria-labelledby="gen-job-transform" hidden={generatorJob !== 'transform'}><p class="hint muted">Choose transformations from the Tags sidebar.</p></Tabs.Content>
 
-      <Tabs.Content value="number" class="panel-block" hidden={generatorJob !== 'number'}>
+      <Tabs.Content value="number" id="gen-panel-number" aria-labelledby="gen-job-number" class="panel-block" hidden={generatorJob !== 'number'}>
         <Button variant="outline" onclick={() => { const dialog = document.getElementById('ribbon-number-dialog'); if (dialog) dialog.hidden = false; }}>Open Autonumber</Button>
       </Tabs.Content>
 
-      <Tabs.Content value="sides" class="panel-block" hidden={generatorJob !== 'sides'}>
+      <Tabs.Content value="sides" id="gen-panel-sides" aria-labelledby="gen-job-sides" class="panel-block" hidden={generatorJob !== 'sides'}>
         <h2><span data-i18n="generator.vinylSides">Vinyl sides</span> <span id="vinyl-count" class="muted"></span></h2>
 
         <div class="panel-actions">

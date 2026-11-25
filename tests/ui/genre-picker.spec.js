@@ -94,6 +94,10 @@ test('genre suggestions and field fit a narrow dock and locked fields cannot ope
   const menu=page.locator('.genre-options'); await expect(menu).toBeVisible();
   const box=await menu.boundingBox(); expect(box.x).toBeGreaterThanOrEqual(0); expect(box.x+box.width).toBeLessThanOrEqual(376);
   await input(page).press('Escape');
+  const workspace=page.getByRole('tablist',{name:'Workspace module'});
+  await workspace.getByRole('tab',{name:'Files',exact:true}).click();
+  await page.locator('#staged-tab').click();
+  await workspace.getByRole('tab',{name:'Inspector',exact:true}).click();
   await page.locator('.fe-row').filter({has:page.locator('input[data-key="genre"]')}).locator('.fe-lock').click();
   await expect(input(page)).toBeDisabled(); await expect(toggle(page)).toBeDisabled();
 });

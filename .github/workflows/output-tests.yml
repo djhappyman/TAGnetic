@@ -4,6 +4,11 @@ on:
     paths:
       - crates/commands/src/output.rs
       - crates/commands/src/output/**
+      - crates/commands/src/audio_studio.rs
+      - crates/commands/src/audio_studio/**
+      - crates/audio-workbench/**
+      - crates/player/src/studio*
+      - crates/player/src/studio/**
       - .github/workflows/output-tests.yml
   workflow_dispatch:
 permissions:
@@ -40,6 +45,8 @@ jobs:
             # exFAT has no Windows ACLs; the NTFS-only ACL regression runs in normal CI.
             cargo test -p tagrex-commands output::tests -- --nocapture --skip traverse_only_parent_can_be_pinned_without_listing
             if ($LASTEXITCODE -ne 0) { throw 'Output tests failed on exFAT' }
+            cargo test --locked -p tagrex-commands --lib audio_studio::tests
+            if ($LASTEXITCODE -ne 0) { throw 'Audio studio tests failed on exFAT' }
           } finally {
             Remove-Item Env:TAGREX_OUTPUT_TEST_ROOT -ErrorAction SilentlyContinue
             @"
@@ -93,3 +100,4 @@ jobs:
           # Ordinary APFS CI retains every positive publication/rollback case.
           cargo test -p tagrex-commands output::tests::apple_volume_capability_preflights_publication_without_namespace_effects -- --exact --nocapture
           cargo test -p tagrex-commands output::tests::held_candidate_identity_survives_growth_and_refuses_an_identical_replacement -- --exact --nocapture
+          cargo test --locked -p tagrex-commands audio_set_respects_volume_capability -- --nocapture

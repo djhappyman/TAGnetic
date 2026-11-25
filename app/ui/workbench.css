@@ -542,6 +542,11 @@ body button[data-slot="button"].settings-nav-item { min-height: 34px; border-rad
   .settings-field .accent-picker { justify-content: flex-start; }
 }
 .settings-search input { border-radius:var(--input-radius); min-height:var(--ctl-h); }
+.settings-search-control { position:relative; }
+.settings-search-control input { padding-inline-end:36px; }
+body button.settings-search-clear { position:absolute; inset-block-start:50%; inset-inline-end:4px; transform:translateY(-50%); display:grid; place-items:center; width:24px; height:24px; min-height:0; padding:0; border:0; border-radius:var(--r-compact); box-shadow:none; background:transparent; color:var(--muted); }
+body button.settings-search-clear:hover { color:var(--text); background:var(--row-hover); }
+body button.settings-search-clear:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
 /* Reorderable rows are a list, without a separate outlined box per item. */
 .settings-field .prio-list { gap: 2px; }
 .settings-field .prio-item { border: 0; background: transparent; border-radius: 8px; padding: 8px 10px; }

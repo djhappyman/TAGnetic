@@ -64,6 +64,8 @@ test('locking preserves the input, draft and focused unlock button, and honors r
   await expect(page.locator('#diff-apply')).toBeEnabled();
   await title.evaluate(node => { window.retainedInspectorInput=node; });
   const lock = page.locator('#editor-field-title').locator('xpath=ancestor::div[contains(@class,"fe-row")]').locator('.fe-lock');
+  await expect(lock).toBeHidden();
+  await page.locator('#staged-tab').click();
   await lock.click();
   await expect(title).toBeDisabled();
   expect(await title.evaluate(node => node===window.retainedInspectorInput)).toBe(true);

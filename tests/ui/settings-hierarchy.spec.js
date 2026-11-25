@@ -55,6 +55,38 @@ test('settings category keyboard navigation and language selection stay connecte
   await expect(page.locator('#set-lang')).toHaveValue('de');
 });
 
+test('settings search keeps filtered categories reachable without clearing the query on arrow keys', async ({ page }) => {
+  const search = page.locator('#settings-search');
+  const categories = page.locator('#settings-nav-list');
+  await search.fill('JPEG quality');
+  await page.keyboard.press('Tab');
+  await expect(page.locator('.settings-search-clear')).toBeFocused();
+  await page.keyboard.press('Tab');
+  const result = categories.getByRole('tab', { name: 'Tags and covers' });
+  await expect(result).toBeFocused();
+  await result.press('End');
+  await expect(search).toHaveValue('JPEG quality');
+  await result.press('Enter');
+  await expect(search).toHaveValue('');
+  await expect(result).toHaveAttribute('aria-selected', 'true');
+});
+
+test('settings radio choices expose the checked value and apply keyboard changes', async ({ page }) => {
+  const appearance = page.getByRole('radiogroup', { name: 'Appearance' });
+  const automatic = appearance.getByRole('radio', { name: 'Auto' });
+  const light = appearance.getByRole('radio', { name: 'Light' });
+  const dark = appearance.getByRole('radio', { name: 'Dark' });
+  await automatic.focus();
+  await automatic.press('ArrowRight');
+  await expect(light).toBeFocused();
+  await expect(light).toHaveAttribute('aria-checked', 'true');
+  await expect(automatic).toHaveAttribute('tabindex', '-1');
+  await light.press('ArrowRight');
+  await expect(dark).toBeFocused();
+  await expect(dark).toHaveAttribute('aria-checked', 'true');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+});
+
 test('switches remain aligned with their label and retain native label activation', async ({ page }) => {
   await page.locator('#settings-search').fill('Safe file names');
   const label = page.locator('label[for="set-portable-names-control"]');

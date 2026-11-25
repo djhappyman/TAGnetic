@@ -30,6 +30,26 @@ async function settings(page) {
   await expect(page.getByRole('dialog', { name: 'Settings', exact: true })).toBeVisible();
 }
 
+test('settings search clears with a button and returns focus without closing Settings', async ({ page }) => {
+  await settings(page);
+  const search = page.getByRole('searchbox', { name: 'Search settings' });
+  const clear = page.getByRole('button', { name: 'Clear the filter' });
+  await expect(clear).toHaveCount(0);
+  await search.fill('no settings match this');
+  await expect(page.getByText('No matching settings.')).toBeVisible();
+  await clear.press('Enter');
+  await expect(search).toHaveValue('');
+  await expect(search).toBeFocused();
+  await expect(clear).toHaveCount(0);
+  await expect(page.getByText('No matching settings.')).toBeHidden();
+  await expect(page.getByRole('dialog', { name: 'Settings', exact: true })).toBeVisible();
+  await search.fill('Appearance');
+  await expect(clear).toBeVisible();
+  await search.press('Escape');
+  await expect(clear).toHaveCount(0);
+  await expect(search).toBeFocused();
+});
+
 test('shadcn switches track silent native property writes and emit one change per user action', async ({ page }) => {
   await settings(page);
   // Exercise the retained switch bridge independently of the fork's hidden update UI.
@@ -267,6 +287,8 @@ test('mounted shadcn editor controls preserve legacy values, content and single 
   await title.fill('A newly staged title');
   await expect(title).toHaveClass(/dirty/);
   const lock = page.locator('#fields-body .fe-row:has(input[data-key="title"]) .fe-lock');
+  await expect(lock).toBeHidden();
+  await page.locator('#staged-tab').click();
   await expect(lock).toHaveAttribute('data-slot', 'button');
   await expect(lock.locator('svg')).toHaveCount(1);
   await lock.evaluate(button => {
@@ -288,7 +310,7 @@ test('provider actions mount real components while artwork tiles and native trac
   await expect(card.locator('.release-import')).toHaveAttribute('data-slot', 'button');
   await expect(card.locator('.release-cover')).not.toHaveAttribute('data-component-element');
   await card.locator('.release-head').click();
-  await expect(card).toHaveAttribute('aria-expanded', 'true');
+  await expect(card.locator('.release-head')).toHaveAttribute('aria-expanded', 'true');
   await expect(card.locator('[data-act="automatch"], .tracklist-actions, .tk-fit, .tk-delta')).toHaveCount(0);
   await expect(card.locator('.tk-head .tk-lead')).toHaveCSS('box-shadow', 'none');
   const checkbox = card.locator('tbody [role="checkbox"]').first();

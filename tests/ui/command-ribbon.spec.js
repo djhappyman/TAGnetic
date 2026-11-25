@@ -20,8 +20,8 @@ async function picker(page, path) {
 const paths = page => page.evaluate(() => window.tagrex.tracks.map(t => t.path));
 const selected = page => page.evaluate(() => [...window.tagrex.selection]);
 
-test('eighteen commands have eight group dividers and selection follows the filtered model', async ({ page }) => {
-  await expect(page.locator('.command-ribbon button.ribbon-command')).toHaveCount(18);
+test('twenty commands have eight group dividers and selection follows the filtered model', async ({ page }) => {
+  await expect(page.locator('.command-ribbon button.ribbon-command')).toHaveCount(20);
   await expect(page.locator('.ribbon-divider')).toHaveCount(8);
   await expect(page.locator('#more-btn')).toBeHidden();
   await page.locator('#ribbon-clear-selection').click();
@@ -36,6 +36,55 @@ test('eighteen commands have eight group dividers and selection follows the filt
   await expect(page.locator('#tracks-body tr[data-path]')).toHaveCount(1);
   await page.locator('#ribbon-select-all').click();
   expect(await selected(page)).toHaveLength(1);
+});
+
+test('file commands use one Tab stop with arrow navigation and native activation', async ({ page }) => {
+  const ribbon = page.getByRole('toolbar', { name: 'File commands' });
+  const open = ribbon.locator('#ribbon-open-folder');
+  const add = ribbon.locator('#ribbon-add-folder');
+  const selectAll = ribbon.locator('#ribbon-select-all');
+  const convertAudio = ribbon.getByRole('button', { name: 'Convert audio' });
+
+  await expect(ribbon.locator('button.ribbon-command[tabindex="0"]')).toHaveCount(1);
+  await expect(open).toHaveAttribute('tabindex', '0');
+  await open.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(add).toBeFocused();
+  await page.keyboard.press('ArrowRight');
+  await expect(selectAll).toBeFocused(); // Undo and Redo are unavailable.
+  await page.keyboard.press('End');
+  await expect(convertAudio).toBeFocused(); // Lyrics is unavailable.
+  await page.keyboard.press('ArrowRight');
+  await expect(open).toBeFocused();
+  await page.keyboard.press('Home');
+  await expect(open).toBeFocused();
+
+  await page.keyboard.press('Tab');
+  await expect(ribbon.locator(':focus')).toHaveCount(0);
+  await page.keyboard.press('Shift+Tab');
+  await expect(open).toBeFocused();
+
+  await ribbon.locator('#ribbon-clear-selection').click();
+  await expect(ribbon.locator('#ribbon-clear-selection')).toBeDisabled();
+  await expect(open).toHaveAttribute('tabindex', '0');
+  await selectAll.focus();
+  await page.keyboard.press('Space');
+  expect(new Set(await selected(page))).toEqual(new Set(await paths(page)));
+});
+
+test('audio commands and their divider share the desktop command row', async ({ page }) => {
+  await page.setViewportSize({ width: 1120, height: 800 });
+  await page.locator('#group-btn').click();
+  await page.locator('#group-menu [data-group="album"]').click();
+  await expect(page.locator('#toggle-groups')).toBeVisible();
+  const ribbon = page.getByRole('toolbar', { name: 'File commands' });
+  const audio = ribbon.getByRole('group', { name: 'Audio', exact: true });
+  await expect(audio.getByRole('button', { name: 'Split recording' })).toBeVisible();
+  await expect(audio.getByRole('button', { name: 'Convert audio' })).toBeVisible();
+  await expect(audio.locator('.ribbon-divider')).toBeVisible();
+  await expect.poll(() => ribbon.locator('button.ribbon-command:visible').evaluateAll(buttons => {
+    return new Set(buttons.map(button => button.getBoundingClientRect().top)).size;
+  })).toBe(1);
 });
 
 test('Open uses a directory chooser; cancelling Open or Add leaves the list intact', async ({ page }) => {
@@ -94,7 +143,7 @@ for (const mode of ['light', 'dark']) test(`ribbon fits a narrow ${mode} window`
 
 
 test('every ribbon command has a themed hover hint, including disabled commands', async ({ page }) => {
-  for (const id of ['ribbon-open-folder', 'ribbon-add-folder', 'undo', 'ribbon-select-all', 'ribbon-clear-selection', 'ribbon-move-down', 'ribbon-move-up', 'group-btn', 'ribbon-remove-tags', 'ribbon-rename-folder', 'ribbon-format-values', 'ribbon-autonumber', 'ribbon-import-artwork', 'ribbon-export-artwork', 'ribbon-artwork-options', 'ribbon-lyrics']) {
+  for (const id of ['ribbon-open-folder', 'ribbon-add-folder', 'undo', 'ribbon-select-all', 'ribbon-clear-selection', 'ribbon-move-down', 'ribbon-move-up', 'group-btn', 'ribbon-remove-tags', 'ribbon-rename-folder', 'ribbon-format-values', 'ribbon-autonumber', 'ribbon-import-artwork', 'ribbon-export-artwork', 'ribbon-artwork-options', 'ribbon-audio-split', 'ribbon-audio-convert', 'ribbon-lyrics']) {
     const button = page.locator('#' + id);
     await button.hover();
     const text = await button.getAttribute('aria-description');
@@ -176,6 +225,34 @@ test('artwork importer uses a string or first-image option and stages without wr
   expect(changed).toHaveLength(2);
   await expect(page.locator('#ribbon-lyrics')).toBeDisabled();
   await expect(page.locator('#ribbon-lyrics')).toHaveAttribute('aria-description',/coming later/);
+});
+
+test('artwork export retains keyboard focus and prevents a second request while pending', async ({ page }) => {
+  await page.evaluate(() => {
+    const resolve = Promise.resolve;
+    window.exportsStarted = 0;
+    Promise.resolve = function (value) {
+      if (Array.isArray(value?.written) && Array.isArray(value?.skipped_no_cover)) {
+        window.exportsStarted++;
+        return new Promise(done => { window.finishExport = () => done(value); });
+      }
+      return resolve.call(this, value);
+    };
+  });
+  const button = page.locator('#ribbon-export-artwork');
+  await button.focus();
+  await page.keyboard.press('Enter');
+  await expect(button).toHaveAttribute('aria-busy', 'true');
+  await expect(button).toHaveAttribute('aria-disabled', 'true');
+  await expect(button).toBeFocused();
+
+  await page.keyboard.press('Enter');
+  expect(await page.evaluate(() => window.exportsStarted)).toBe(1);
+  await expect(page.locator('[data-ui-sdk-announcer][aria-live="polite"]')).toHaveText('Exporting artwork');
+  await page.evaluate(() => window.finishExport());
+  await expect(button).not.toHaveAttribute('aria-busy', 'true');
+  await expect(button).toBeEnabled();
+  await expect(button).toBeFocused();
 });
 
 test('Format values stages field patterns and closes without applying', async ({ page }) => {

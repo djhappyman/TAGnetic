@@ -273,8 +273,10 @@ test('a narrow dock preserves the desktop editor structure in its own scrollport
   await tab(page, 'editor');
   const title = await box(page, '#fields-body input[data-key="title"]');
   expect(title.width).toBeGreaterThanOrEqual(140);
-  // Field locks stay reachable and clickable at the narrow width.
+  // The file view keeps the inspector clear, including at the narrow width.
   const lock = page.locator('#fields-body .fe-row').filter({ has: page.locator('input[data-key="title"]') }).locator('.fe-lock');
+  await expect(lock).toBeHidden();
+  await page.locator('#staged-tab').click();
   const lockBox = await lock.boundingBox();
   expect(lockBox.width).toBeGreaterThanOrEqual(24);
   expect(lockBox.height).toBeGreaterThanOrEqual(24);
@@ -283,6 +285,7 @@ test('a narrow dock preserves the desktop editor structure in its own scrollport
   await expect(page.locator('#fields-body input[data-key="title"]')).toBeDisabled();
   await page.keyboard.press('Enter');
   await expect(page.locator('#fields-body input[data-key="title"]')).toBeEnabled();
+  await page.locator('#files-tab').click();
   // Sidebar tabs have no info controls; pattern tools remain available.
   await tab(page, 'filename');
   await expect(page.locator('.mode-col .inspector-help')).toHaveCount(0);
@@ -291,6 +294,7 @@ test('a narrow dock preserves the desktop editor structure in its own scrollport
 
 test('dock menus use menu geometry and compact controls keep a 24px hit box', async ({ page }) => {
   await tab(page, 'editor');
+  await page.locator('#staged-tab').click();
   const geometry = await page.evaluate(() => {
     const size = (node) => { const rect = node.getBoundingClientRect(); return { width: rect.width, height: rect.height }; };
     const pick = (selector) => document.querySelector(selector);

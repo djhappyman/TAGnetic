@@ -1,5 +1,6 @@
 <script lang="ts">
   import { Info, X } from '@lucide/svelte';
+  import { Tabs, TabsList, TabsTab } from '@ui-sdk/svelte/tabs';
   import ControllerDialog from './ControllerDialog.svelte';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
@@ -8,7 +9,11 @@
   import { runRibbonAction } from '../js/ribbon-actions.js';
   import { numberWidth, setNumberWidth } from '../js/number-format.js';
   let {selected=0,busy=false}:{selected?:number;busy?:boolean}=$props();
-  const tabs=['tracks','disc','vinyl'] as const;
+  const tabs = [
+    { value: 'tracks', label: 'Autonumber' },
+    { value: 'disc', label: 'Disc' },
+    { value: 'vinyl', label: 'Vinyl' },
+  ] as const;
   let tab=$state<'tracks'|'disc'|'vinyl'>('tracks');
   let start=$state<number|undefined>(1),disc=$state('1');
   let trackWidth=$state('1'),discWidth=$state('1');
@@ -22,10 +27,10 @@
   const inputValid=$derived(tab==='tracks'?start!=null&&Number.isSafeInteger(start)&&start>=1:tab==='disc'?/^\d+$/.test(disc.trim())&&Number.isSafeInteger(Number(disc))&&Number(disc)>=1:true);
   const canRun=$derived(inputValid&&selected>0&&!busy&&!working&&(pending?(tab!=='vinyl'||!!result?.matched&&!result.invalid):!!result?.matched&&!result.invalid));
   function close(){if(!working)root.hidden=true;}
-  function switchTab(event:KeyboardEvent){
-    if(working||!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
-    event.preventDefault();tab=event.key==='Home'?'tracks':event.key==='End'?'vinyl':tabs[(tabs.indexOf(tab)+(event.key==='ArrowLeft'?2:1))%tabs.length];
-    document.getElementById(`number-${tab}-tab`)?.focus();
+  function chooseTab(value: string | null) {
+    if (working) return;
+    const next = tabs.find(item => item.value === value);
+    if (next) tab = next.value;
   }
   function connect(node:HTMLElement){
     root=node.closest('.controller-dialog-root')!;
@@ -77,11 +82,17 @@
       <h2 id="ribbon-number-title">Numbering <span id="autonum-count" class="ribbon-selection-count"></span></h2>
       <Button variant="ghost" size="icon-sm" aria-label="Close dialog" disabled={working} onclick={close}><X size={17}/></Button>
     </div>
-    <div class="number-mode-switch" role="tablist" aria-label="Numbering action">
-      <button id="number-tracks-tab" type="button" role="tab" aria-selected={tab==='tracks'} aria-controls="number-tracks-panel" tabindex={tab==='tracks'?0:-1} disabled={working} onclick={()=>{tab='tracks';}} onkeydown={switchTab}>Autonumber</button>
-      <button id="number-disc-tab" type="button" role="tab" aria-selected={tab==='disc'} aria-controls="number-disc-panel" tabindex={tab==='disc'?0:-1} disabled={working} onclick={()=>{tab='disc';}} onkeydown={switchTab}>Disc</button>
-      <button id="number-vinyl-tab" type="button" role="tab" aria-selected={tab==='vinyl'} aria-controls="number-vinyl-panel" tabindex={tab==='vinyl'?0:-1} disabled={working} onclick={()=>{tab='vinyl';}} onkeydown={switchTab}>Vinyl</button>
-    </div>
+    <Tabs value={tab} onValueChange={chooseTab} style="display: contents">
+      <TabsList class="number-mode-switch" aria-label="Numbering action">
+        {#each tabs as { value, label } (value)}
+          <TabsTab {value} disabled={working}>
+            {#snippet render({ props })}
+              <button {...props} class="number-mode-tab" id={`number-${value}-tab`} aria-controls={`number-${value}-panel`} type="button" disabled={working}>{label}</button>
+            {/snippet}
+          </TabsTab>
+        {/each}
+      </TabsList>
+    </Tabs>
     <div class="ribbon-dialog-fields autonumber-content" data-number-tab={tab}>
       <div id="number-tracks-panel" class="autonumber-pane" role="tabpanel" aria-labelledby="number-tracks-tab" hidden={tab!=='tracks'}>
         <div class="autonumber-fields">
@@ -131,10 +142,10 @@
   .autonumber-content[data-number-tab=disc] { border-top-left-radius:var(--r-inset); border-top-right-radius:var(--r-inset); }
   .autonumber-content[data-number-tab=vinyl] { border-top-left-radius:var(--r-inset); }
   .autonumber-pane { display:flex; flex-direction:column; gap:var(--sp-4); }
-  .number-mode-switch { display:flex; flex:none; gap:4px; }
-  .number-mode-switch button { position:relative; flex:1; min-height:38px; padding:8px 12px; border:0; border-radius:var(--r-inset); background:transparent; color:var(--muted); font:inherit; font-weight:500; cursor:pointer; }
-  .number-mode-switch button[aria-selected=true] { border-radius:var(--r-inset) var(--r-inset) 0 0; background:var(--bg); color:var(--text); }
-  .number-mode-switch button:focus-visible { outline:2px solid var(--accent); outline-offset:-3px; }
+  .autonumber-dialog :global(.number-mode-switch) { display:flex; flex:none; gap:4px; }
+  button.number-mode-tab { position:relative; flex:1; min-height:38px; padding:8px 12px; border:0; border-radius:var(--r-inset); background:transparent; color:var(--muted); font:inherit; font-weight:500; cursor:pointer; }
+  button.number-mode-tab[aria-selected=true] { border-radius:var(--r-inset) var(--r-inset) 0 0; background:var(--bg); color:var(--text); }
+  button.number-mode-tab:focus-visible { outline:2px solid var(--accent); outline-offset:-3px; }
   #number-tracks-tab[aria-selected=true]::after, #number-disc-tab[aria-selected=true]::before, #number-disc-tab[aria-selected=true]::after, #number-vinyl-tab[aria-selected=true]::before { content:''; position:absolute; bottom:0; width:var(--r-inset); height:var(--r-inset); pointer-events:none; }
   #number-tracks-tab[aria-selected=true]::after, #number-disc-tab[aria-selected=true]::after { right:calc(-1 * var(--r-inset)); background:radial-gradient(circle at 100% 0,transparent calc(var(--r-inset) - .5px),var(--bg) var(--r-inset)); }
   #number-disc-tab[aria-selected=true]::before, #number-vinyl-tab[aria-selected=true]::before { left:calc(-1 * var(--r-inset)); background:radial-gradient(circle at 0 0,transparent calc(var(--r-inset) - .5px),var(--bg) var(--r-inset)); }

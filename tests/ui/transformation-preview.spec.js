@@ -234,6 +234,7 @@ test('typing while rules are active retains raw input and previews transformatio
 
 test('field locks are honored and changing a lock recomputes the checked preset', async ({ page }) => {
   const lock = page.locator('#fields-body .fe-row').filter({ has: page.locator('input[data-key="title"]') }).locator('.fe-lock');
+  await page.locator('#staged-tab').click();
   await lock.click(); await tick(page, 'Upper titles');
   await expect.poll(() => calls(page, 'preview_live_edits')).toBe(1);
   await expect.poll(() => page.evaluate(() => document.getElementById('status-transform-scope').getAttribute('aria-busy'))).toBe('false');

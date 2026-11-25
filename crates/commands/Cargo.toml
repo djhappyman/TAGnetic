@@ -9,6 +9,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+tagrex-audio-workbench = { path = "../audio-workbench" }
 tagrex-core.workspace = true
 tagrex-providers-discogs = { path = "../providers-discogs" }
 tagrex-providers-musicbrainz = { path = "../providers-musicbrainz" }
@@ -54,3 +55,6 @@ windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
 [target.'cfg(target_vendor = "apple")'.dependencies]
 # Descriptor-bound volume capability preflight; this release is already locked.
 libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

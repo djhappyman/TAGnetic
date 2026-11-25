@@ -1,7 +1,9 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { nextControlId } from '$lib/control-id';
-  import * as Select from '$lib/components/ui/select/index.js';
+  import Check from '@lucide/svelte/icons/check';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
+  import { Select, SelectContent, SelectItem, SelectItemIndicator, SelectTrigger } from '@ui-sdk/svelte/select';
 
   let { native }: { native: HTMLSelectElement } = $props();
   type Choice = { token: string; label: string; description: string; disabled: boolean; hidden: boolean; option: HTMLOptionElement };
@@ -12,10 +14,13 @@
   let title = $state('');
   let trigger = $state<HTMLButtonElement | null>(null);
   let open = $state(false);
+  let retainOptions = $state(false);
   let optionGeneration = 0;
   let nativeObserver: MutationObserver | undefined;
   let labels: HTMLLabelElement[] = [];
   const selection = $derived(choices[selectedIndex]);
+  const visibleChoices = $derived(choices.filter(choice => !choice.hidden));
+  const items = $derived(visibleChoices.map(({ token, label, disabled }) => ({ value: token, label, disabled })));
   const triggerId = untrack(() => `${native.id || nextControlId('select')}-control`);
   const nonLabelContent = '.app-select, select, input, button, textarea';
 
@@ -70,7 +75,7 @@
     if (records?.length) synchronizeMutations(records);
     else selectedIndex = native.selectedIndex;
   }
-  function choose(next: string) {
+  function choose(next: string | null) {
     untrack(() => {
       synchronizeValue();
       const index = choices.findIndex(choice => choice.token === next);
@@ -108,11 +113,18 @@
     // labels, so clicking their text opens the same accessible select.
     const activateLabel = (event: MouseEvent) => {
       const target = event.target;
-      if (!(target instanceof Element) || target.closest('button, input, select, textarea, a') || native.disabled || native.hidden) return;
-      // Bits opens on pointer/keyboard down; a label's browser activation only
-      // sends click. Open it directly for label text and avoid a second click.
+      if (!(target instanceof Element)) return;
+      if (target.closest('[data-controller-popup]')) {
+        // A top-layer popup still bubbles through its wrapping label.
+        // Suppress the label's synthetic trigger click after choosing an option.
+        event.preventDefault();
+        return;
+      }
+      if (target.closest('button, input, select, textarea, a') || native.disabled || native.hidden) return;
+      // Open directly so a wrapping label cannot deliver a second click.
       event.preventDefault();
       trigger?.focus();
+      retainOptions = true;
       open = true;
     };
     labelTargets.forEach(({ label }) => {
@@ -166,15 +178,33 @@
 </script>
 
 <span class="app-select-proxy" {@attach attachProxy}></span>
-<Select.Root type="single" bind:open value={selection?.token || ''} onValueChange={choose} {disabled}>
-  <Select.Trigger bind:ref={trigger} id={triggerId} aria-label={name || undefined} {title} class="app-select-trigger" data-proxy-id={native.id} onkeydowncapture={dismiss}>
-    <span class="app-select-label">{selection?.label}</span>
-  </Select.Trigger>
-  <Select.Content class="app-select-menu" data-controller-popup align="start" collisionPadding={8} onkeydowncapture={dismiss}>
-    {#each choices.filter(choice => !choice.hidden) as choice (choice.token)}
-      <Select.Item value={choice.token} label={choice.label} disabled={choice.disabled}>
+<Select bind:open value={selection?.token ?? null} {items} {disabled}
+  onOpenChange={next => { if (next) retainOptions = true; }}
+  onOpenChangeComplete={next => { if (!next && !open) retainOptions = false; }}
+  onValueChange={(next, details) => {
+  // Reflect the native select's value after its listeners run. Cancel the SDK
+  // write so its hidden form field cannot emit a second input/change pair.
+  if (details.reason !== 'reset' && details.reason !== 'restore') choose(next);
+  details.cancel();
+}}>
+  <SelectTrigger id={triggerId} aria-label={name || undefined} {title} class="app-select-trigger" data-proxy-id={native.id} data-state={open ? 'open' : 'closed'} onkeydowncapture={dismiss}>
+    {#snippet render({ props })}
+      <button type="button" {...props} bind:this={trigger}>
+        <span class="app-select-label">{selection?.label}</span>
+        <ChevronDown class="size-4 shrink-0 pointer-events-none" aria-hidden="true" />
+      </button>
+    {/snippet}
+  </SelectTrigger>
+  <SelectContent class={retainOptions ? 'app-select-menu' : undefined} data-state={open ? 'open' : 'closed'} data-controller-popup align="start" sideOffset={4} collisionPadding={8} onkeydowncapture={dismiss}>
+    {#if retainOptions}
+      {#each visibleChoices as choice (choice.token)}
+        <SelectItem value={choice.token} label={choice.label} disabled={choice.disabled}>
           <span class="app-select-choice"><span>{choice.label}</span>{#if choice.description}<span class="app-select-description">{choice.description}</span>{/if}</span>
-      </Select.Item>
-    {/each}
-  </Select.Content>
-</Select.Root>
+          <SelectItemIndicator class="pointer-events-none absolute right-2 flex size-4 items-center justify-center">
+            <Check class="size-4" aria-hidden="true" />
+          </SelectItemIndicator>
+        </SelectItem>
+      {/each}
+    {/if}
+  </SelectContent>
+</Select>

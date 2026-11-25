@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.14] - 2026-11-25
+
+Tagnetic can now turn a long recording into a set of named, tagged tracks.
+Open the editor from the command ribbon or the file table’s right-click menu.
+
+### Added
+
+- **Split recordings by ear, from a CUE sheet, or from a Discogs tracklist.**
+  Add, move, merge and remove cuts, trim the start of a recording, save drafts,
+  and export your edited cuts as a CUE sheet.
+- **Waveform editor.** Scroll to zoom around the pointer, middle-drag to pan,
+  or drag the overview to move through a long recording. Numbered track headers
+  link cuts to the track list. Click a cut to hear it, or drag out a loop to
+  check a transition. The brighter waveform contour follows the recorded
+  energy. Stereo view shows the actual left and right channels on one scale.
+- **Audio treatments.** Normalise the whole recording to keep the balance between
+  tracks. Mix to mono or keep the cleaner channel. Reduce rumble or 50/60 Hz
+  mains hum. Switch to **Hear original** to compare before export.
+- **Fast splits, exact cuts and conversion.** Copy compatible MP3 or FLAC audio
+  frames for fast splits, or re-encode for exact cuts and audio treatments.
+  Convert whole recordings to MP3 or FLAC with the same export workflow.
+- **Tag and name the whole set.** Edit artist and title in the track list, set
+  shared album tags and cover art once, and build filenames and optional
+  folders with tag chips and presets. Audition the reviewed output list.
+- **Save beside the original, pick a folder, or replace with recovery.** Tagnetic
+  verifies new files before replacing the source, updates the open library,
+  and offers Undo backed by a recovery copy.
+
+### Changed
+
+- File commands, settings choices, switches and dropdowns use shared controls
+  with consistent focus and keyboard behaviour.
+- Tooltips follow the theme and dismiss on interaction and dialog close. The
+  file table shows a delayed filename hint when the name is cut off.
+- Field locks are available in Staged review, leaving more room for values in
+  the main editor.
+
+### Fixed
+
+- Split MP3s start playing when double-clicked in the file table, including
+  files with an empty opening block used for gapless timing.
+- Waveform drags keep tracking the pointer outside the waveform. Zooming and
+  selecting tracks keep the editing area stable.
+- Updated the cookie and filesystem dependencies to versions with published fixes.
+
 ## [1.4.13] - 2026-11-22
 
 ### Added

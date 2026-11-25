@@ -37,6 +37,24 @@ pub struct DiscogsProvider {
     token: String,
 }
 
+/// Track list rows before normalizing time or flattening subtracks.
+pub struct TimingTrack {
+    pub kind: String,
+    pub position: String,
+    pub title: String,
+    pub performer: String,
+    pub duration: String,
+    pub children: Vec<TimingTrack>,
+}
+
+pub struct TimingRelease {
+    pub tracks: Vec<TimingTrack>,
+    pub title: String,
+    pub artist: String,
+    pub year: Option<u16>,
+    pub genre: String,
+}
+
 impl DiscogsProvider {
     pub fn new(token: impl Into<String>) -> Self {
         Self::build(token, None).expect("no proxy can't fail")
@@ -147,6 +165,80 @@ impl DiscogsProvider {
 
         Ok(FetchedImage { mime, data })
     }
+
+    pub fn fetch_timing(&self, id: &str) -> Result<TimingRelease, ProviderError> {
+        if id.is_empty() || id.len() > 18 || !id.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(ProviderError::Other(
+                "Enter a numeric Discogs release ID.".into(),
+            ));
+        }
+        let body = self.get(&format!("{API_BASE}/releases/{id}"), &[])?;
+        parse_timing(&body)
+    }
+}
+
+fn parse_timing(body: &str) -> Result<TimingRelease, ProviderError> {
+    let root: Value =
+        serde_json::from_str(body).map_err(|error| ProviderError::Other(error.to_string()))?;
+    let rows = root["tracklist"]
+        .as_array()
+        .ok_or_else(|| ProviderError::Other("This Discogs release has no track list.".into()))?;
+    let cleaner = artist_cleaner();
+    let artist = join_artists(root.get("artists"), &cleaner).unwrap_or_default();
+    let mut tracks = timing_rows(rows, &cleaner, 0, &mut 1_000)?;
+    if !artist.eq_ignore_ascii_case("various")
+        && root["artists"]
+            .as_array()
+            .is_some_and(|artists| artists.len() == 1)
+    {
+        for track in &mut tracks {
+            if track.performer.is_empty() {
+                track.performer.clone_from(&artist);
+            }
+        }
+    }
+    let mut genre = string_array(root.get("styles"));
+    if genre.is_empty() {
+        genre = string_array(root.get("genres"));
+    }
+    Ok(TimingRelease {
+        tracks,
+        title: root["title"].as_str().unwrap_or_default().into(),
+        artist,
+        year: value_to_year(&root["year"]),
+        genre: genre.join("; "),
+    })
+}
+
+fn timing_rows(
+    rows: &[Value],
+    cleaner: &TransformChain,
+    depth: usize,
+    remaining: &mut usize,
+) -> Result<Vec<TimingTrack>, ProviderError> {
+    if depth > 12 || rows.len() > *remaining {
+        return Err(ProviderError::Other(
+            "Discogs track list exceeds the supported size.".into(),
+        ));
+    }
+    *remaining -= rows.len();
+    rows.iter()
+        .map(|row| {
+            let text = |field: &str| row[field].as_str().unwrap_or_default().to_owned();
+            let children = match row["sub_tracks"].as_array() {
+                Some(children) => timing_rows(children, cleaner, depth + 1, remaining)?,
+                None => Vec::new(),
+            };
+            Ok(TimingTrack {
+                kind: text("type_"),
+                position: text("position"),
+                title: text("title"),
+                performer: join_artists(row.get("artists"), cleaner).unwrap_or_default(),
+                duration: text("duration"),
+                children,
+            })
+        })
+        .collect()
 }
 
 impl MetadataProvider for DiscogsProvider {
@@ -726,6 +818,36 @@ fn is_discogs_https(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timing_retains_nested_and_missing_durations_and_single_release_credit() {
+        let release = parse_timing(
+            r#"{
+            "title":"Side by Side", "year":1994, "artists":[{"name":"Artist (4)"}],
+            "genres":["Electronic"], "styles":["Breakbeat"],
+            "tracklist":[
+                {"type_":"heading","title":"Side A"},
+                {"type_":"index","title":"Medley","position":"A1","duration":"4:47","sub_tracks":[
+                    {"type_":"track","position":"A1a","title":"Opening","duration":"1:52"},
+                    {"type_":"track","position":"A1b","title":"Next","duration":"1:99"}
+                ]},
+                {"type_":"track","position":"B1","title":"End","artists":[{"name":"Guest"}]}
+            ]
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(release.title, "Side by Side");
+        assert_eq!(release.artist, "Artist");
+        assert_eq!(release.year, Some(1994));
+        assert_eq!(release.genre, "Breakbeat");
+        assert_eq!(release.tracks[0].kind, "heading");
+        assert_eq!(release.tracks[1].kind, "index");
+        assert_eq!(release.tracks[1].duration, "4:47");
+        assert_eq!(release.tracks[1].performer, "Artist");
+        assert_eq!(release.tracks[1].children[1].duration, "1:99");
+        assert_eq!(release.tracks[2].performer, "Guest");
+        assert!(release.tracks[2].duration.is_empty());
+    }
 
     /// A server that answers 429 with a `Retry-After` (with the whitespace HTTP
     /// allows around it) is a rate limit for as long as it asks, end to end.

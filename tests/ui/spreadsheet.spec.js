@@ -76,16 +76,19 @@ async function copy(page) {
   });
 }
 
-test('mode and subtab arrow keys activate the existing controller panes', async ({ page }) => {
+test('tools confirm keyboard focus and source arrows activate the existing controller panes', async ({ page }) => {
   await page.locator('.mode-tab[data-mode="tagger"]').focus();
   await page.keyboard.press('ArrowRight');
   await expect(page.locator('#subtab-online')).toBeVisible();
   await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('Enter');
   await expect(page.locator('#panel-renamer')).toBeVisible();
   await expect(page.locator('.mode-tab[data-mode="renamer"]')).toHaveAttribute('aria-selected', 'true');
   await page.keyboard.press('End');
+  await page.keyboard.press('Enter');
   await expect(page.locator('#panel-exporter')).toBeVisible();
   await page.keyboard.press('Home');
+  await page.keyboard.press('Enter');
   await expect(page.locator('#panel-tagger')).toBeVisible();
   await page.locator('.subtab[data-subtab="filename"]').focus();
   await page.keyboard.press('ArrowLeft');
@@ -528,12 +531,17 @@ test('read-only and locked range reasons remain visible as lock state changes', 
   await cell(page, 'artist').click();
   await openTagSource(page, 'editor');
   const lock = page.locator('#fields-body .fe-row').filter({ has: page.locator('input[data-key="artist"]') }).locator('.fe-lock');
+  await page.locator('#staged-tab').click();
   await lock.click();
+  await page.locator('#files-tab').click();
   await expect(cell(page, 'artist')).toHaveAttribute('aria-readonly', 'true');
+  await cell(page, 'artist').click();
   await expect(page.locator('#spreadsheet-tools')).toContainText('Artist is locked');
+  await page.locator('#staged-tab').click();
   await lock.click();
+  await page.locator('#files-tab').click();
   await expect(cell(page, 'artist')).toHaveAttribute('aria-readonly', 'false');
-  await cell(page, 'artist').focus();
+  await cell(page, 'artist').click();
   await page.keyboard.press('Shift+F10');
   await expect(page.getByRole('menuitem', { name: /^Paste/ })).not.toHaveAttribute('aria-disabled', 'true');
   await page.keyboard.press('Escape');

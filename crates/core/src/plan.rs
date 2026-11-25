@@ -2416,6 +2416,7 @@ pub(crate) fn open_bound_file(
 struct MetadataBinding {
     logical: PathBuf,
     identity: std::rc::Rc<same_file::Handle>,
+    staged_audio: bool,
 }
 thread_local! {static METADATA_PATHS:std::cell::RefCell<Vec<MetadataBinding>>=const{std::cell::RefCell::new(Vec::new())};}
 fn metadata_identity(path: &Path) -> Option<std::rc::Rc<same_file::Handle>> {
@@ -2426,6 +2427,16 @@ fn metadata_identity(path: &Path) -> Option<std::rc::Rc<same_file::Handle>> {
             .rev()
             .find(|binding| binding.logical == path)
             .map(|binding| binding.identity.clone())
+    })
+}
+pub(crate) fn is_staged_audio(path: &Path) -> bool {
+    METADATA_PATHS.with(|paths| {
+        paths
+            .borrow()
+            .iter()
+            .rev()
+            .find(|binding| binding.logical == path)
+            .is_some_and(|binding| binding.staged_audio)
     })
 }
 struct MetadataPathGuard;
@@ -2458,6 +2469,7 @@ fn with_bound_path<T>(
             paths.borrow_mut().push(MetadataBinding {
                 logical: path.to_path_buf(),
                 identity: identity.clone(),
+                staged_audio: false,
             });
         });
         Some(MetadataPathGuard)
@@ -2470,6 +2482,56 @@ fn with_bound_path<T>(
     if held.is_some() {
         open_bound_file(path, false, false).map_err(PlanError::Io)?;
     }
+    Ok(result)
+}
+
+/// Apply the library's tag-writing policy to newly encoded audio in private
+/// staging. The caller owns publication and rollback by set. Existing library
+/// files still go through the journaled executor.
+pub fn tag_staged_audio(
+    file: &TrackFile,
+    held: &std::fs::File,
+    covers: &[crate::model::CoverArt],
+) -> Result<(), PlanError> {
+    with_staged_audio(&file.path, held, || {
+        TagEngine::write(file)?;
+        if !covers.is_empty() {
+            TagEngine::write_covers(&file.path, covers)?;
+        }
+        Ok(())
+    })
+}
+
+/// On-disk tag and artwork readback bound to the staged output's identity.
+pub fn read_staged_audio(
+    path: &Path,
+    held: &std::fs::File,
+) -> Result<(TrackFile, Vec<crate::model::CoverArt>), PlanError> {
+    with_staged_audio(path, held, || {
+        Ok((TagEngine::read(path)?, TagEngine::read_covers(path)?))
+    })
+}
+
+fn with_staged_audio<T>(
+    path: &Path,
+    held: &std::fs::File,
+    operation: impl FnOnce() -> Result<T, crate::model::TagIoError>,
+) -> Result<T, PlanError> {
+    let identity = held
+        .try_clone()
+        .and_then(same_file::Handle::from_file)
+        .map_err(PlanError::Io)?;
+    METADATA_PATHS.with(|paths| {
+        paths.borrow_mut().push(MetadataBinding {
+            logical: path.to_path_buf(),
+            identity: std::rc::Rc::new(identity),
+            staged_audio: true,
+        });
+    });
+    let _binding = MetadataPathGuard;
+    open_bound_file(path, false, false).map_err(PlanError::Io)?;
+    let result = operation()?;
+    open_bound_file(path, false, false).map_err(PlanError::Io)?;
     Ok(result)
 }
 

@@ -439,6 +439,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "built"
+version = "0.7.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56ed6191a7e78c36abdb16ab65341eefd73d64d303fffccdbb00d51e4205967b"
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -636,9 +642,9 @@ checksum = "be95d4a884358a21a199689323c29e9256b4a1b315e22f183d155422041d3a9a"
 
 [[package]]
 name = "cookie"
-version = "0.18.2"
+version = "0.18.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a373e3602691c3cdea496d2f0ee5935151e6168fe87739483c463db1b2f2f87"
+checksum = "d55f2d6c30eeec7d5c6f98bd4395d4abb1895629eab97ee6522d340623615f8a"
 dependencies = [
  "time",
  "version_check",
@@ -761,6 +767,21 @@ checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "crc"
+version = "3.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5eb8a2a1cd12ab0d987a5d5e825195d372001a4094a0376319d5a0ad71c1ba0d"
+dependencies = [
+ "crc-catalog",
+]
+
+[[package]]
+name = "crc-catalog"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "217698eaf96b4a3f0bc4f3662aaa55bdf913cd54d7204591faa790070c6d0853"
 
 [[package]]
 name = "crc32fast"
@@ -891,6 +912,15 @@ dependencies = [
  "darling_core",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "dasp_frame"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2a3937f5fe2135702897535c8d4a5553f8b116f76c1529088797f2eee7c5cd6"
+dependencies = [
+ "dasp_sample",
 ]
 
 [[package]]
@@ -1123,6 +1153,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "ebur128"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4cc730f4c2c61221890fbec2ccc3dd645e93a5e83d67c4ccd3552d90f513149"
+dependencies = [
+ "bitflags 1.3.2",
+ "dasp_frame",
+ "dasp_sample",
+ "smallvec",
+]
+
+[[package]]
 name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1312,6 +1354,21 @@ name = "fixedbitset"
 version = "0.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
+
+[[package]]
+name = "flacenc"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74c892c2b5fa08f967e8b5ad29121570b4762202f2402033ce08479ec65eccd0"
+dependencies = [
+ "built",
+ "crc",
+ "heapless",
+ "md-5",
+ "num-traits",
+ "rustversion",
+ "seq-macro",
+]
 
 [[package]]
 name = "flatbuffers"
@@ -1804,6 +1861,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hash32"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47d60b12902ba28e2730cd37e95b8c9223af2808df9e902d4df49588d1470606"
+dependencies = [
+ "byteorder",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1843,6 +1909,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
 dependencies = [
  "hashbrown 0.17.1",
+]
+
+[[package]]
+name = "heapless"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bfb9eb618601c89945a70e254898da93b13be0388091d42117462b265bb3fad"
+dependencies = [
+ "hash32",
+ "stable_deref_trait",
 ]
 
 [[package]]
@@ -2564,6 +2640,16 @@ dependencies = [
  "log",
  "tendril",
  "web_atoms",
+]
+
+[[package]]
+name = "md-5"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+dependencies = [
+ "cfg-if",
+ "digest 0.10.7",
 ]
 
 [[package]]
@@ -4167,9 +4253,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "1.1.5"
+version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
+checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 dependencies = [
  "bitflags 2.13.2",
  "errno",
@@ -4267,6 +4353,12 @@ dependencies = [
  "rubato 0.16.2",
  "rustfft",
 ]
+
+[[package]]
+name = "rusty_mp3"
+version = "1.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1741bfe603a47c4bb263f00d4f8d65a97ae4a970a26287f1c38ff00aa9a52ae"
 
 [[package]]
 name = "same-file"
@@ -4408,6 +4500,12 @@ dependencies = [
  "serde",
  "serde_core",
 ]
+
+[[package]]
+name = "seq-macro"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1bc711410fbe7399f390ca1c3b60ad0f53f80e95c5eb935e52268a0e2cd49acc"
 
 [[package]]
 name = "serde"
@@ -5086,7 +5184,7 @@ dependencies = [
 
 [[package]]
 name = "tagrex"
-version = "1.4.13"
+version = "1.4.14"
 dependencies = [
  "base64 0.23.1",
  "block2 0.6.2",
@@ -5125,8 +5223,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tagrex-audio-workbench"
+version = "1.4.14"
+dependencies = [
+ "ebur128",
+ "encoding_rs",
+ "flacenc",
+ "rusty_mp3",
+ "serde",
+ "symphonia",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "tagrex-commands"
-version = "1.4.13"
+version = "1.4.14"
 dependencies = [
  "base64 0.23.1",
  "getrandom 0.3.4",
@@ -5139,12 +5251,14 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "symphonia",
+ "tagrex-audio-workbench",
  "tagrex-core",
  "tagrex-providers-bandcamp",
  "tagrex-providers-beatport",
  "tagrex-providers-discogs",
  "tagrex-providers-musicbrainz",
  "tagrex-providers-soundeo",
+ "tempfile",
  "thiserror 2.0.21",
  "trash",
  "windows-sys 0.61.2",
@@ -5152,7 +5266,7 @@ dependencies = [
 
 [[package]]
 name = "tagrex-core"
-version = "1.4.13"
+version = "1.4.14"
 dependencies = [
  "encoding_rs",
  "httpdate",
@@ -5171,7 +5285,7 @@ dependencies = [
 
 [[package]]
 name = "tagrex-mcp"
-version = "1.4.13"
+version = "1.4.14"
 dependencies = [
  "libc",
  "rmcp",
@@ -5188,7 +5302,7 @@ dependencies = [
 
 [[package]]
 name = "tagrex-player"
-version = "1.4.13"
+version = "1.4.14"
 dependencies = [
  "anyhow",
  "beat-this",
@@ -5196,12 +5310,13 @@ dependencies = [
  "rten",
  "rten-tensor",
  "serde",
+ "tagrex-audio-workbench",
  "tagrex-core",
 ]
 
 [[package]]
 name = "tagrex-providers-bandcamp"
-version = "1.4.13"
+version = "1.4.14"
 dependencies = [
  "serde_json",
  "tagrex-core",
@@ -5210,7 +5325,7 @@ dependencies = [
 
 [[package]]
 name = "tagrex-providers-beatport"
-version = "1.4.13"
+version = "1.4.14"
 dependencies = [
  "serde",
  "serde_json",
@@ -5220,7 +5335,7 @@ dependencies = [
 
 [[package]]
 name = "tagrex-providers-discogs"
-version = "1.4.13"
+version = "1.4.14"
 dependencies = [
  "serde_json",
  "tagrex-core",
@@ -5229,7 +5344,7 @@ dependencies = [
 
 [[package]]
 name = "tagrex-providers-musicbrainz"
-version = "1.4.13"
+version = "1.4.14"
 dependencies = [
  "serde_json",
  "tagrex-core",
@@ -5238,7 +5353,7 @@ dependencies = [
 
 [[package]]
 name = "tagrex-providers-soundeo"
-version = "1.4.13"
+version = "1.4.14"
 dependencies = [
  "regex",
  "tagrex-core",
@@ -5247,7 +5362,7 @@ dependencies = [
 
 [[package]]
 name = "tagrex-service"
-version = "1.4.13"
+version = "1.4.14"
 dependencies = [
  "base64 0.23.1",
  "getrandom 0.3.4",

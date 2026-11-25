@@ -9,6 +9,7 @@ use std::time::Duration;
 struct NativeSpan<S> {
     source: S,
     remaining: Option<usize>,
+    first_sample: Option<f32>,
 }
 impl<S: Source> Iterator for NativeSpan<S> {
     type Item = f32;
@@ -19,7 +20,7 @@ impl<S: Source> Iterator for NativeSpan<S> {
         if let Some(remaining) = &mut self.remaining {
             *remaining -= 1;
         }
-        self.source.next()
+        self.first_sample.take().or_else(|| self.source.next())
     }
 }
 type Converter<S> = ChannelCountConverter<SampleRateConverter<NativeSpan<S>>>;
@@ -44,13 +45,33 @@ impl<S: Source> Fixed<S> {
         fixed.next = fixed.pull();
         fixed
     }
-    fn convert(source: S, channels: rodio::ChannelCount, rate: rodio::SampleRate) -> Converter<S> {
-        let remaining = source.current_span_len().map(|n| n.min(32_768));
+    fn convert(
+        mut source: S,
+        channels: rodio::ChannelCount,
+        rate: rodio::SampleRate,
+    ) -> Converter<S> {
+        let mut span_len = source.current_span_len();
+        // A fully trimmed opening packet can look like EOF until the decoder
+        // advances. Keep the first sample and read the new span's format.
+        let first_sample = if span_len == Some(0) {
+            let sample = source.next();
+            if sample.is_some() {
+                span_len = source.current_span_len().filter(|&len| len > 0);
+            }
+            sample
+        } else {
+            None
+        };
+        let remaining = span_len.map(|n| n.min(32_768));
         let native_channels = source.channels();
         let native_rate = source.sample_rate();
         ChannelCountConverter::new(
             SampleRateConverter::new(
-                NativeSpan { source, remaining },
+                NativeSpan {
+                    source,
+                    remaining,
+                    first_sample,
+                },
                 native_rate,
                 rate,
                 native_channels,
@@ -116,3 +137,58 @@ impl<S: Source> Source for Fixed<S> {
     }
 }
 impl<S: Source> super::controlled::FixedFormat for Fixed<S> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Symphonia can initially report an empty span for gapless MP3s.
+    // The next iterator read advances past the trimmed packet.
+    struct TrimmedLeadIn(usize);
+
+    impl Iterator for TrimmedLeadIn {
+        type Item = f32;
+
+        fn next(&mut self) -> Option<f32> {
+            let sample = [-0.75, 0.5, -0.25, 1.0].get(self.0).copied()?;
+            self.0 += 1;
+            Some(sample)
+        }
+    }
+
+    impl Source for TrimmedLeadIn {
+        fn current_span_len(&self) -> Option<usize> {
+            Some(if (1..4).contains(&self.0) { 4 } else { 0 })
+        }
+
+        fn channels(&self) -> rodio::ChannelCount {
+            rodio::ChannelCount::new(2).unwrap()
+        }
+
+        fn sample_rate(&self) -> rodio::SampleRate {
+            rodio::SampleRate::new(44_100).unwrap()
+        }
+
+        fn total_duration(&self) -> Option<Duration> {
+            None
+        }
+
+        fn try_seek(&mut self, _: Duration) -> Result<(), rodio::source::SeekError> {
+            self.0 = 0;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn empty_leading_span_does_not_end_playback() {
+        let source = TrimmedLeadIn(0);
+        let (channels, rate) = (source.channels(), source.sample_rate());
+        let mut fixed = Fixed::new(source, channels, rate);
+        let samples = fixed.by_ref().collect::<Vec<_>>();
+        assert_eq!(samples, [-0.75, 0.5, -0.25, 1.0]);
+        assert_eq!(fixed.next(), None);
+
+        fixed.try_seek(Duration::ZERO).unwrap();
+        assert_eq!(fixed.collect::<Vec<_>>(), samples);
+    }
+}

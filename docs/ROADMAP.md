@@ -40,12 +40,66 @@ Use [tracker #51](https://github.com/djhappyman/TAGnetic/issues/51) and the
 [backend handoff](design/backend-resumption.md); never restore an old whole-tree
 patch over current main. UI exposure does not complete the saved-recipe editor.
 
+## Product priorities — artwork and library cleanup
+
+The order below reflects the current priorities for desktop features.
+
+1. **Optimize embedded artwork.** Start with front covers across the selection,
+   with a maximum dimension and a choice of quality or target size. Skip covers
+   that already meet the settings and avoid upscaling. Encode each identical
+   source image once per output configuration and reuse it across files.
+   Preserve distinct sleeves and other embedded pictures. Start with JPEG for
+   opaque covers and PNG where transparency matters. Consider opt-in WebP after
+   verifying support in the relevant audio containers and players. Preview old
+   and new dimensions and sizes, estimated savings and skipped covers before
+   staging changes for Apply and Undo. [Artwork epic #40](https://github.com/djhappyman/TAGnetic/issues/40)
+2. **Album and pack checkup.** Show missing or inconsistent covers, duplicate
+   track positions, numbering gaps and conflicting label or catalogue values by
+   album or folder. When a source edition is matched, show missing or unmatched
+   tracks against that edition. Selecting a finding should open the affected
+   rows and the relevant repair action.
+3. **Finish the duplicate workflow.** Audition two copies from the same playback
+   position, pick a keeper and stage selected tags or artwork from the other
+   copy onto it. Keep the choice of which files to retain with the user.
+4. **Finish the saved recipe editor.** Expose field copying, combining,
+   extraction, selective removal and keep-only steps in a single reusable
+   cleanup recipe. Add artwork optimization as a recipe step once the standalone
+   action is ready. [Field recipe epic #33](https://github.com/djhappyman/TAGnetic/issues/33) · [Workflow recipe epic #35](https://github.com/djhappyman/TAGnetic/issues/35)
+5. **Open playlists and import spreadsheet corrections.** Open local M3U/M3U8
+   files in playlist order and report missing entries. Map CSV/TSV columns to
+   fields, match by filename or path independently of the current sort, and
+   preview ambiguous or unmatched rows. [Playlist epic #41](https://github.com/djhappyman/TAGnetic/issues/41) · [Import epic #37](https://github.com/djhappyman/TAGnetic/issues/37)
+
+**Batch scope.** Carry the visible and filtered-out selection counts into
+batch previews so the user can confirm which files the action will affect.
+Start with artwork and recipes. Preserve the existing selection and unrelated
+staged edits through review and Apply.
+
+## Audio conversion and recording splits
+
+The audio studio shares a Rust workflow for conversion, splitting, tagging and
+output verification. See [audio studio design](design/audio-split-studio.md).
+
+- [x] **Convert selected recordings.** Open the converter from the command
+  ribbon or file context menu. Review MP3 or FLAC outputs, choose quality and a
+  destination, and see conflicts or metadata warnings before saving.
+- [x] **Keep originals or replace them with recovery.** Save alongside the
+  originals by default. Replacement moves originals to a recovery folder after
+  verifying the new files, updates the open library and offers Undo.
+- [x] **Split from a CUE sheet, Discogs timings or by ear.** Add and move cuts in
+  a zoomable waveform with scrubbing, audition and loops. Fast splitting keeps
+  the original audio when splitting MP3 to MP3 or FLAC to FLAC. Exact cuts are
+  available when re-encoding.
+- [x] **Tag and save split tracks together.** Set shared recording tags and
+  artwork and edit each track's artist and title. Use tag chips and presets for
+  filenames and optional folders. Review and audition the outputs, save a
+  draft or export the cut list as a CUE sheet.
+
 ## Next — connect remaining built capabilities
 
-- Add field-copying, combining, extraction, removal and keep-only recipe controls.
 - Expose supported split/merge/deduplicate value tools without promising general
   repeated-field storage beyond the admitted native model.
-- Connect the import, playlist/report and artwork foundations in focused slices.
+- Connect the remaining report and artwork foundations in focused slices.
 - Verify each complete workflow with disposable fixtures and independent readback,
   retaining Preview/Review/Apply/Undo, selection and unrelated staged edits.
 

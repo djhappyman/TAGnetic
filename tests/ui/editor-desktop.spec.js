@@ -80,8 +80,11 @@ test('compilation respects field locks and unavailable native flag metadata', as
   await selectAll(page);
   const toggle = page.locator('#editor-compilation-control');
   const lock = page.locator('.fe-compilation .fe-lock');
+  await expect(lock).toBeHidden();
+  await page.locator('#staged-tab').click();
   await lock.click(); await expect(toggle).toBeDisabled(); await expect(page.locator('#diff-apply')).toBeDisabled();
   await lock.click(); await expect(toggle).toBeEnabled();
+  await page.locator('#files-tab').click();
   await page.locator('#tracks-body tr[data-path]').first().click();
   await page.evaluate(() => { delete window.tagrex.tracks[1].compilation_field; });
   await page.locator('#tracks-body tr[data-path]').last().click({ modifiers: ['Shift'] });

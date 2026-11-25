@@ -49,26 +49,54 @@ test('controller changes update tab state without synthesizing clicks and preser
   expect(await page.evaluate(() => window.tabClicks)).toBe(0);
 });
 
-test('keyboard mode and source navigation keeps controller state and panels in sync', async ({ page }) => {
-  await mode(page, 'tagger').focus();
+test('tool arrows browse before activation and source arrows keep mounted panels in sync', async ({ page }) => {
+  const online = mode(page, 'online');
+  const tags = mode(page, 'tagger');
+  const rename = mode(page, 'renamer');
+  const duplicates = mode(page, 'deduplicator');
+  await expect(online).toHaveAttribute('aria-selected', 'true');
+  const filter = page.locator('#filter');
+  await filter.fill('current library search');
+  await online.focus();
   await page.keyboard.press('ArrowRight');
-  await expect(mode(page, 'online')).toBeFocused();
+  await expect(rename).toBeFocused();
+  await page.keyboard.press('ArrowRight');
+  await expect(duplicates).toBeFocused();
+  await expect(duplicates).toHaveAttribute('aria-pressed', 'false');
+  await expect(online).toHaveAttribute('aria-selected', 'true');
   await expect(page.locator('#subtab-online')).toBeVisible();
-  await page.keyboard.press('ArrowRight');
-  await expect(mode(page, 'renamer')).toBeFocused();
-  await expect(mode(page, 'renamer')).toHaveAttribute('aria-selected', 'true');
+  await expect(filter).toHaveValue('current library search');
+
+  await page.keyboard.press('ArrowLeft');
+  await expect(rename).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(rename).toHaveAttribute('aria-selected', 'true');
   await expect(page.locator('#panel-renamer')).toBeVisible();
   await page.keyboard.press('Home');
-  await expect(mode(page, 'tagger')).toHaveAttribute('aria-selected', 'true');
-  await subtab(page, 'filename').focus();
-  await page.keyboard.press('ArrowLeft');
-  await expect(subtab(page, 'editor')).toBeFocused();
-  await expect(subtab(page, 'editor')).toHaveAttribute('aria-selected', 'true');
-  await expect(page.locator('#subtab-editor')).toBeVisible();
-  // The controller's remembered source is read when switching back to TAGGER.
+  await expect(tags).toBeFocused();
+  await page.keyboard.press('Space');
+  await expect(tags).toHaveAttribute('aria-selected', 'true');
+  await expect(tags).toHaveAttribute('aria-controls', 'panel-tagger');
+
+  const editor = subtab(page, 'editor');
+  const fromName = subtab(page, 'filename');
+  const editorPanel = page.locator('#subtab-editor');
+  const initialEditorPanel = await editorPanel.elementHandle();
+  await editor.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(fromName).toBeFocused();
+  await expect(fromName).toHaveAttribute('aria-selected', 'true');
+  await expect(fromName).toHaveAttribute('aria-controls', 'subtab-filename');
+  await expect(page.getByRole('tabpanel', { name: 'From name', exact: true })).toBeVisible();
+  await expect(editorPanel).toBeHidden();
+  await page.keyboard.press('Home');
+  await expect(editor).toBeFocused();
+  await expect(editorPanel).toBeVisible();
+  expect(await editorPanel.evaluate((panel, initialPanel) => panel === initialPanel, initialEditorPanel)).toBe(true);
+
   await page.evaluate(() => { window.tagrex.setMode('renamer'); window.tagrex.setMode('tagger'); });
-  await expect(subtab(page, 'editor')).toHaveAttribute('aria-selected', 'true');
-  await expect(page.locator('#subtab-editor')).toBeVisible();
+  await expect(editor).toHaveAttribute('aria-selected', 'true');
+  await expect(editorPanel).toBeVisible();
 });
 
 test('generator jobs support roving focus and numbering opens its shared wizard', async ({ page }) => {
@@ -100,6 +128,41 @@ test('generator jobs support roving focus and numbering opens its shared wizard'
   await expect(panel.getByRole('button',{name:'Open Autonumber',exact:true})).toBeVisible();
 });
 
+
+test('numbering and formatting keep their draft inputs through keyboard tab changes', async ({ page }) => {
+  await page.evaluate(async () => {
+    document.getElementById('root').value = '/music';
+    await window.tagrex.openLibrary();
+  });
+  await page.locator('#ribbon-autonumber').click();
+  const numbering = page.getByRole('dialog', { name: /Numbering/ });
+  const tracks = numbering.getByRole('tab', { name: 'Autonumber' });
+  const disc = numbering.getByRole('tab', { name: 'Disc' });
+  const firstTrack = numbering.locator('#autonum-start');
+  await firstTrack.fill('17');
+  await tracks.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(disc).toBeFocused();
+  await expect(numbering.getByRole('tabpanel', { name: 'Disc' })).toBeVisible();
+  await expect(firstTrack).toBeHidden();
+  await page.keyboard.press('Home');
+  await expect(tracks).toBeFocused();
+  await expect(firstTrack).toHaveValue('17');
+  await numbering.getByRole('button', { name: 'Cancel', exact: true }).click();
+
+  await page.locator('#ribbon-format-values').click();
+  const formatting = page.getByRole('dialog', { name: 'Format fields' });
+  const build = formatting.getByRole('tab', { name: 'Build a field' });
+  const extract = formatting.getByRole('tab', { name: 'Extract fields' });
+  await formatting.locator('#ribbon-format-pattern').fill('A draft value');
+  await build.focus();
+  await page.keyboard.press('End');
+  await expect(extract).toBeFocused();
+  await expect(formatting.getByRole('tabpanel', { name: 'Extract fields' })).toBeVisible();
+  await page.keyboard.press('Home');
+  await expect(build).toBeFocused();
+  await expect(formatting.locator('#ribbon-format-pattern')).toHaveText('A draft value');
+});
 
 test('Tags and Online are separate segments and preserve a manual draft and selection', async ({page}) => {
   await page.evaluate(async () => { document.getElementById('root').value = '/music'; await window.tagrex.openLibrary(); });

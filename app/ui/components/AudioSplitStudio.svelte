@@ -1,0 +1,1884 @@
+<script lang="ts">
+  import { onMount, tick } from 'svelte';
+  import { AudioLines, ChevronDown, ChevronLeft, ChevronRight, CircleStop, Disc3, Ellipsis, FilePlus2, FolderOpen, ImagePlus, Pause, Pencil, Play, Redo2, Repeat, RotateCcw, Scissors, Undo2, X } from '@lucide/svelte';
+  import * as Dialog from '$lib/components/ui/dialog/index.js';
+  import * as ContextMenu from '$lib/components/ui/context-menu/index.js';
+  import * as DropdownMenu from '$lib/components/ui/dropdown-menu/index.js';
+  import { Button } from '$lib/components/ui/button/index.js';
+  import { Input } from '$lib/components/ui/input/index.js';
+  import { attachGenrePicker } from '$lib/genre-picker';
+  import { savedSettings, tracks as libraryTracks } from '../js/state.js';
+  import AudioSplitWaveform from './AudioSplitWaveform.svelte';
+  import AudioSplitOutput from './AudioSplitOutput.svelte';
+  import AudioSplitTreatment from './AudioSplitTreatment.svelte';
+  import AudioSplitImport from './AudioSplitImport.svelte';
+  import {
+    audioCommand, choosePath, closeAudioSplitSession, defaultSplitFilePattern, frameAtTime, hasDraft, hasTreatment, leaf, noTreatment, peakValues, readDraft, readTreatment,
+    recordingCover, recoverAudioSplitSession, rememberAudioSplitSession, saveDraft, stem, timeLabel,
+    type AudioTreatment, type TreatmentAnalysis, type Cue, type Draft, type ExportResult, type Format, type FrameRange, type Launch, type Loading, type PeakTile, type Progress, type ReplacementUndo, type Review, type SaveMode, type Source, type SplitMethod, type Status, type Tags, type Track,
+  } from '../js/audio-split';
+
+  let { launch, onclose }: { launch: Launch; onclose: () => void } = $props();
+  const split = $derived(launch.mode === 'split');
+  const title = $derived(split ? 'Split recording' : 'Convert audio');
+  const maxFiles = 200;
+  const recordingFields = [
+    ['album', 'Album'], ['albumartist', 'Album Artist'], ['year', 'Year'], ['genre', 'Genre'], ['comment', 'Comment'],
+  ] as const;
+  const trackFields = [['artist', 'Artist'], ['title', 'Title']] as const;
+  type TrackEdit = { id: string; field: 'tags' | 'start' };
+  let editor = $state.raw<TrackEdit | null>(null);
+  let trackMenuId = $state('');
+  let source = $state.raw<Source | null>(null);
+  let tracks = $state.raw<Track[]>([]);
+  const editingTrack = $derived(tracks.find(track => track.id === editor?.id));
+  let previous = $state.raw<Draft[]>([]);
+  let next = $state.raw<Draft[]>([]);
+  let tags = $state.raw<Tags>({});
+  let importedTags = $state.raw<Tags>({});
+  let artworkPath = $state('');
+  const coverPreview = $derived(source ? recordingCover(source.path, artworkPath).catch(() => '') : '');
+  let hasSaved = $state(false);
+  let dirty = $state(false);
+  let loading = $state(false);
+  let loadingInfo = $state.raw<Loading | null>(null);
+  let openingRequest = '';
+  let openingPoll: ReturnType<typeof setTimeout>;
+  let phase = $state<'edit' | 'review' | 'export' | 'finished'>('edit');
+  let working = $state(false);
+  let previewing = $state(false);
+  let reviewRequested = false;
+  let stopping = $state(false);
+  let closeRequested = $state(false);
+  let closeSaveError = $state('');
+  let closeTrigger: HTMLElement | null = null;
+  let error = $state('');
+  let notice = $state('');
+  let draftAnnouncement = $state('');
+  let showHelp = $state(false);
+  let waveformMenuOpen = $state(false);
+  let treatment = $state.raw<AudioTreatment>(noTreatment);
+  let treatmentAnalysis = $state.raw<TreatmentAnalysis | null>(null);
+  let treatmentBusy = $state(false);
+  let treatmentError = $state('');
+  let hearOriginal = $state(false);
+  let treatmentVersion = 0;
+  let selected = $state('');
+  let rangeAnchor = '';
+  let rangeIds = $state.raw<string[]>([]);
+  let playhead = $state(0);
+  let playing = $state(false);
+  let loopRegion = $state.raw<FrameRange | null>(null);
+  let loopEnabled = $state(false);
+  let buffering = $state(false);
+  let follow = $state(false);
+  let start = $state(0);
+  let end = $state(1);
+  let overview = $state.raw(new Float32Array());
+  let stereoOverview = $state.raw(new Float32Array());
+  let overviewRms = $state.raw(new Float32Array());
+  let stereoOverviewRms = $state.raw(new Float32Array());
+  let stereoView = $state(false);
+  const hasStereo = $derived(stereoOverview.length > 0);
+  let tile = $state.raw<PeakTile | null>(null);
+  let saveMode = $state<SaveMode>('beside');
+  let destination = $state('');
+  let backupDirectory = $state('');
+  let createFolder = $state(false);
+  let folderPattern = $state('');
+  let namePattern = $state('');
+  let format = $state<Format>('mp3');
+  let splitMethod = $state<SplitMethod>('copy');
+  let bitrate = $state(192);
+  let review = $state.raw<Review | null>(null);
+  let lastReview = $state.raw<Review | null>(null);
+  let outputAudition = $state<number | null>(null);
+  let outputClosing: Promise<void> | undefined;
+  let outputPoll: ReturnType<typeof setTimeout>;
+  let outputCheck: ReturnType<typeof setTimeout>;
+  let checkingOutput = $state(false);
+  let progress = $state.raw<Progress | null>(null);
+  let finished = $state.raw<string[]>([]);
+  let backups = $state.raw<string[]>([]);
+  let restored = $state.raw<string[]>([]);
+  let exportWarnings = $state.raw<string[]>([]);
+  let publishedId = $state('');
+  let canUndoReplacement = $state(false);
+  let libraryRemoved = $state.raw<string[]>();
+  let canRefreshLibrary = $state(false);
+  let refreshingLibrary = $state(false);
+  let importMenuOpen = $state(false);
+  let importMode = $state<'cue' | 'discogs' | null>(null);
+  let cue = $state.raw<Cue>();
+  let pendingCue = $state('');
+  let cuePath = $state('');
+  let cueEncoding = $state<'utf8' | 'windows1252'>('utf8');
+  let cueLoading = $state(false);
+  function focusHeader(node: HTMLHeadingElement) {
+    requestAnimationFrame(() => { if (node.isConnected && !node.closest('[data-audio-studio]')?.contains(document.activeElement)) node.focus(); });
+  }
+  let list = $state<HTMLDivElement>();
+  let serial = 0;
+  let active = true;
+  let frameClock = { frame: 0, observed: 0 };
+  let animation = 0;
+  let playheadAnimation = 0;
+  let playheadTravel = $state<{ from: number; progress: number } | null>(null);
+  const visualPlayhead = $derived(playheadTravel
+    ? playheadTravel.from + (playhead - playheadTravel.from) * playheadTravel.progress : playhead);
+  let viewportAnimation = 0;
+  let viewportGoal: { first: number; range: number } | null = null;
+  let viewportMotion = { first: 0, range: 1, time: 0 };
+  let waveformDragging = false;
+  let pollTimer: ReturnType<typeof setTimeout>;
+  let peaksTimer: ReturnType<typeof setTimeout>;
+  let generation = 0;
+  let transportVersion = 0;
+  let seekInFlight = false;
+  let queuedSeek: { frame: number; sequence: number } | null = null;
+  let scrubbing = false;
+
+  const currentIndex = $derived(tracks.findIndex(track => track.id === selected));
+  const current = $derived(tracks[currentIndex]);
+  const menuTrackIndex = $derived(tracks.findIndex(track => track.id === trackMenuId));
+  const canMerge = $derived(rangeIds.length > 1 && rangeIds.includes(trackMenuId));
+  const included = $derived(tracks.filter(track => track.include).length);
+  const sampleRate = $derived(source?.sampleRate || 44100);
+  const total = $derived(source?.frames || 0);
+  const duration = $derived(timeLabel(total, sampleRate, 1));
+  const readout = $derived(playing && !buffering ? timeLabel(Math.floor(playhead * 10 / sampleRate) * sampleRate / 10, sampleRate, 1) : timeLabel(playhead, sampleRate));
+  const canEdit = $derived(!!source && !working && !loading && phase === 'edit');
+  const treated = $derived(hasTreatment(treatment));
+  const treatmentReady = $derived(!treated || (!!treatmentAnalysis && !treatmentBusy));
+  const canCopy = $derived(split && !treated && source?.originalFormat === format);
+  const copying = $derived(canCopy && splitMethod === 'copy');
+  const canEnterReview = $derived(split ? !!source && included > 0 && treatmentReady : launch.paths.length > 0 && launch.paths.length <= maxFiles);
+  const reviewReady = $derived(canEnterReview && (saveMode !== 'folder' || !!destination.trim()) &&
+    (!createFolder || !!folderPattern.trim()));
+  const reviewingOutput = $derived(previewing || checkingOutput);
+  const note = (message: string) => { notice = message; };
+  const fail = (message: string) => { error = message.replace(/^Error: /, ''); };
+  const newId = () => `segment-${++serial}`;
+  const initial = (): Track => ({ id: newId(), startFrame: 0, include: true, tags: {} });
+
+  const draft = (): Draft => ({ tracks, tags, importedTags, artworkPath, treatment });
+
+  function capture() {
+    previous = [...previous.slice(-49), draft()];
+    next = [];
+    dirty = true;
+    invalidate();
+  }
+
+  function restore(nextDraft: Draft) {
+    tracks = nextDraft.tracks;
+    rangeIds = [];
+    rangeAnchor = '';
+    tags = nextDraft.tags;
+    importedTags = nextDraft.importedTags || {};
+    artworkPath = nextDraft.artworkPath;
+    const settings = readTreatment(nextDraft.treatment);
+    replaceTreatment(hasStereo ? settings : { ...settings, mono: 'off' });
+    if (!tracks.some(track => track.id === selected)) selected = tracks[0]?.id || '';
+    invalidate();
+  }
+
+  function history(redo: boolean) {
+    const from = redo ? next : previous;
+    const change = from.at(-1);
+    if (!change || !canEdit) return;
+    if (redo) {
+      next = next.slice(0, -1);
+      previous = [...previous, draft()];
+    } else {
+      previous = previous.slice(0, -1);
+      next = [...next, draft()];
+    }
+    restore(change);
+    dirty = true;
+    draftAnnouncement = redo ? 'Draft change restored' : 'Draft change undone';
+  }
+
+  function discardReview(plan: Review) {
+    void audioCommand('cancel', { id: plan.id }).catch(() => {});
+  }
+
+  function invalidate() {
+    if (phase === 'export' || phase === 'finished') return;
+    generation++;
+    stopOutputAudition();
+    if (review) discardReview(review);
+    review = null;
+    error = '';
+  }
+
+  onMount(() => {
+    if (split) namePattern = defaultSplitFilePattern;
+    if (split && launch.paths.length === 1) void openRecording(launch.paths[0]);
+    if (!split && launch.paths.length && launch.paths.every(path => /\.mp3$/i.test(path))) format = 'flac';
+    return () => {
+      active = false;
+      clearTimeout(outputCheck);
+      stopOutputAudition();
+      if (review && phase !== 'export') discardReview(review);
+      clearTimeout(pollTimer);
+      clearTimeout(peaksTimer);
+      clearTimeout(openingPoll);
+      if (openingRequest) void audioCommand('cancel_open', { requestId: openingRequest }).catch(() => {});
+      cancelAnimationFrame(animation);
+      cancelAnimationFrame(viewportAnimation);
+      cancelAnimationFrame(playheadAnimation);
+      if (source) void closeAudioSplitSession(source.id).catch(console.error);
+    };
+  });
+
+  async function openRecording(path: string) {
+    const requestId = crypto.getRandomValues(new Uint32Array(4)).join('-');
+    if (openingRequest) void audioCommand('cancel_open', { requestId: openingRequest }).catch(() => {});
+    clearTimeout(openingPoll);
+    openingRequest = requestId;
+    loading = true;
+    loadingInfo = null;
+    error = '';
+    async function pollOpening() {
+      if (!active || openingRequest !== requestId) return;
+      try {
+        const state = await audioCommand<Loading | null>('loading', { requestId });
+        if (!active || openingRequest !== requestId) return;
+        loadingInfo = state;
+      } catch { return; }
+      if (active && openingRequest === requestId) openingPoll = setTimeout(() => void pollOpening(), 250);
+    }
+    try {
+      await recoverAudioSplitSession();
+      if (!active || openingRequest !== requestId) return;
+      const opening = audioCommand<Source>('open', { path, requestId });
+      openingPoll = setTimeout(() => void pollOpening(), 250);
+      const opened = await opening;
+      if (!active || openingRequest !== requestId) { await closeAudioSplitSession(opened.id); return; }
+      if (!Number.isSafeInteger(opened.frames) || opened.frames < 1 || !opened.sampleRate) {
+        await closeAudioSplitSession(opened.id);
+        throw new Error('This recording has no readable timeline.');
+      }
+      if (source) await closeAudioSplitSession(source.id);
+      source = opened;
+      rememberAudioSplitSession(opened.id);
+      format = opened.originalFormat || 'mp3';
+      splitMethod = 'copy';
+      if (opened.sampleRate < 32000 && bitrate > 160) bitrate = 128;
+      tracks = [initial()];
+      selected = tracks[0].id;
+      rangeIds = [];
+      rangeAnchor = '';
+      loopRegion = null;
+      loopEnabled = false;
+      previous = [];
+      next = [];
+      tags = {};
+      importedTags = {};
+      artworkPath = '';
+      treatment = noTreatment;
+      treatmentAnalysis = null;
+      treatmentBusy = false;
+      treatmentError = '';
+      hearOriginal = false;
+      treatmentVersion++;
+      hasSaved = hasDraft(opened);
+      playhead = 0;
+      playing = false;
+      buffering = false;
+      scrubbing = false;
+      start = 0;
+      end = opened.frames;
+      overview = peakValues(opened.overview || []);
+      stereoOverview = peakValues(opened.stereoOverview || []);
+      overviewRms = peakValues(opened.overviewRms || []);
+      stereoOverviewRms = peakValues(opened.stereoOverviewRms || []);
+      stereoView = false;
+      tile = null;
+      if (!overview.length) requestPeaks(0);
+      dirty = false;
+      invalidate();
+      if (pendingCue) {
+        const cuePath = pendingCue;
+        pendingCue = '';
+        await loadCue(cuePath);
+      }
+    } catch (reason) { if (active && openingRequest === requestId) fail(String(reason)); }
+    finally {
+      if (openingRequest === requestId) {
+        openingRequest = '';
+        clearTimeout(openingPoll);
+        if (active) { loading = false; loadingInfo = null; }
+      }
+    }
+  }
+
+  async function chooseRecording(allowCue: boolean) {
+    try {
+      const filters = [{ name: 'Recordings', extensions: allowCue ? ['mp3', 'wav', 'aif', 'aiff', 'flac', 'cue'] : ['mp3', 'wav', 'aif', 'aiff', 'flac'] }];
+      const path = await choosePath({ filters });
+      if (!path || !active) return;
+      if (allowCue && /\.cue$/i.test(path)) {
+        pendingCue = path;
+        note('Select the recording named in the CUE sheet.');
+        await chooseRecording(false);
+      } else await openRecording(path);
+    } catch (reason) { fail(String(reason)); }
+  }
+
+  let viewportVersion = 0;
+  function requestPeaks(delay = 42) {
+    clearTimeout(peaksTimer);
+    const opened = source;
+    const revision = ++viewportVersion;
+    if (!opened) return;
+    if (start === 0 && end === opened.frames && overview.length) return;
+    const size = end - start;
+    const stereo = hasStereo;
+    if (tile && tile.start <= start && tile.end >= end &&
+      tile.values.length * size >= (stereo ? 1600 : 800) * (tile.end - tile.start)) return;
+    const extra = Math.round(size * 0.30);
+    const first = Math.max(0, start - extra);
+    const last = Math.min(opened.frames, end + extra);
+    peaksTimer = setTimeout(async () => {
+      try {
+        const energy = !!opened.overviewRms?.length;
+        const bins = 1024;
+        const data = await audioCommand<ArrayBuffer | number[]>('peaks', {
+          id: opened.id, startFrame: first, endFrame: last, bins,
+          ...(stereo ? { stereo } : {}), ...(energy ? { energy } : {}),
+        });
+        if (!active || revision !== viewportVersion || source?.id !== opened.id) return;
+        const samples = peakValues(data);
+        const bandValues = Math.min(bins, last - first) * (stereo ? 2 : 1);
+        const hasEnergy = energy && samples.length === bandValues * 3;
+        const values = hasEnergy ? samples.subarray(0, bandValues * 2) : samples;
+        const rms = hasEnergy ? samples.subarray(bandValues * 2) : undefined;
+        if (first === 0 && last === opened.frames && !overview.length) {
+          overview = values;
+          if (rms) overviewRms = rms;
+        } else tile = { start: first, end: last, values, rms, stereo };
+      } catch (reason) {
+        if (active && revision === viewportVersion) fail(String(reason));
+      }
+    }, delay);
+  }
+
+  function viewportBounds(first: number, size: number) {
+    const range = Math.min(total, Math.max(1, Math.round(size)));
+    return { first: Math.round(Math.max(0, Math.min(total - range, first))), range };
+  }
+
+  function applyViewport(first: number, size: number, load: boolean) {
+    const target = viewportBounds(first, size);
+    if (target.first === start && target.first + target.range === end) return false;
+    start = target.first;
+    end = start + target.range;
+    if (load) requestPeaks();
+    return true;
+  }
+
+  function stopViewportMotion() {
+    cancelAnimationFrame(viewportAnimation);
+    viewportAnimation = 0;
+    viewportGoal = null;
+  }
+
+  function viewport(first: number, size: number) {
+    const wasMoving = viewportAnimation !== 0;
+    stopViewportMotion();
+    if (!applyViewport(first, size, true) && wasMoving) requestPeaks();
+  }
+
+  function easeViewport(now: number) {
+    const target = viewportGoal;
+    if (!target) return;
+    const motion = viewportMotion;
+    const remaining = Math.max(Math.abs(target.first - motion.first), Math.abs(target.range - motion.range));
+    if (remaining <= Math.max(1, target.range / 900)) {
+      applyViewport(target.first, target.range, false);
+      stopViewportMotion();
+      requestPeaks(0);
+      return;
+    }
+    const elapsed = Math.min(48, Math.max(1, now - motion.time));
+    const progress = 1 - Math.exp(-elapsed / 32);
+    const size = motion.range * (target.range / motion.range) ** progress;
+    // Move the range and its origin by the same fraction to preserve the anchor.
+    const delta = target.range - motion.range;
+    const positionProgress = Math.abs(delta) < 0.01 ? progress : (size - motion.range) / delta;
+    const first = motion.first + (target.first - motion.first) * positionProgress;
+    viewportMotion = { first, range: size, time: now };
+    applyViewport(first, size, false);
+    viewportAnimation = requestAnimationFrame(easeViewport);
+  }
+
+  function animateViewport(first: number, size: number) {
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      viewport(first, size);
+      return;
+    }
+    const target = viewportBounds(first, size);
+    const from = viewportGoal ?? { first: start, range: end - start };
+    if (target.first === from.first && target.range === from.range) return;
+    viewportGoal = target;
+    if (viewportAnimation) return;
+    clearTimeout(peaksTimer);
+    viewportVersion++;
+    viewportMotion = { first: start, range: end - start, time: performance.now() };
+    viewportAnimation = requestAnimationFrame(easeViewport);
+  }
+
+  function wheelZoom(delta: number, fraction: number) {
+    const first = viewportGoal?.first ?? start;
+    const range = viewportGoal?.range ?? end - start;
+    const size = Math.min(total, Math.max(Math.round(sampleRate / 8), range * Math.exp(delta * 0.0021)));
+    animateViewport(first + (range - size) * fraction, size);
+  }
+
+  function waveformGesture(activeGesture: boolean) {
+    waveformDragging = activeGesture;
+    if (activeGesture) stopPlayheadTravel();
+    if (activeGesture && viewportAnimation) {
+      stopViewportMotion();
+      requestPeaks();
+    }
+  }
+
+  function zoom(step: number, around = playhead) {
+    const currentLeft = viewportGoal?.first ?? start;
+    const currentSize = Math.max(1, viewportGoal?.range ?? end - start);
+    const size = step > 0 ? Math.max(sampleRate / 8, currentSize / 2) : Math.min(total, currentSize * 2);
+    const fraction = Math.max(0, Math.min(1, (around - currentLeft) / currentSize));
+    animateViewport(around - size * fraction, size);
+  }
+
+  function zoomToCut() {
+    if (!current) return;
+    const size = Math.min(total, sampleRate * 8);
+    animateViewport(current.startFrame - size / 2, size);
+  }
+
+  function movePreview(frame: number) {
+    playhead = frame;
+    scrubbing = true;
+  }
+
+  function cancelPreview(frame: number) {
+    scrubbing = false;
+    if (!playing || buffering) playhead = frame;
+  }
+
+  function stopPlayheadTravel() {
+    cancelAnimationFrame(playheadAnimation);
+    playheadTravel = null;
+  }
+
+  function seek(frame: number, reveal = true) {
+    if (!source) return;
+    const leavingLoop = loopEnabled && loopRegion && (frame < loopRegion.start || frame >= loopRegion.end);
+    if (leavingLoop) loopEnabled = false;
+    stopPlayheadTravel();
+    scrubbing = false;
+    playhead = Math.max(0, Math.min(frame, total - 1));
+    if (reveal && (playhead < start || playhead >= end)) viewport(playhead - (end - start) / 2, end - start);
+    if (leavingLoop && playing) { void transport('play', playhead); return; }
+    clearTimeout(pollTimer);
+    buffering = playing;
+    queuedSeek = { frame: playhead, sequence: ++transportVersion };
+    void flushSeek();
+  }
+
+  async function flushSeek() {
+    const opened = source;
+    if (!opened || !active || seekInFlight || !queuedSeek) return;
+    const { frame, sequence } = queuedSeek;
+    queuedSeek = null;
+    seekInFlight = true;
+    try {
+      await audioCommand('transport', { id: opened.id, action: 'seek', frame, sequence });
+      if (active && source?.id === opened.id && sequence === transportVersion) {
+        frameClock = { frame, observed: performance.now() };
+        if (playing) scheduleStatus(opened.id, sequence, 20);
+      }
+    } catch (reason) {
+      if (active && sequence === transportVersion) {
+        fail(String(reason));
+        playing = false;
+        buffering = false;
+      }
+    } finally { seekInFlight = false; if (queuedSeek) void flushSeek(); }
+  }
+
+  function clockFrame(now: number) {
+    const frame = frameClock.frame + Math.round((now - frameClock.observed) * sampleRate / 1000);
+    if (loopEnabled && loopRegion && frame >= loopRegion.end) {
+      return loopRegion.start + (frame - loopRegion.start) % (loopRegion.end - loopRegion.start);
+    }
+    return Math.max(0, Math.min(total - 1, frame));
+  }
+
+  function paintPlayback(now: number) {
+    if (!active || !playing) { animation = 0; return; }
+    if (!buffering && !scrubbing) {
+      playhead = clockFrame(now);
+      if (follow && !waveformDragging && !viewportAnimation && playhead >= end && end < total) viewport(playhead, end - start);
+    }
+    animation = requestAnimationFrame(paintPlayback);
+  }
+
+  function scheduleStatus(id: string, sequence: number, delay: number) {
+    clearTimeout(pollTimer);
+    pollTimer = setTimeout(() => void pollPlayback(id, sequence), delay);
+  }
+
+  async function pollPlayback(id: string, sequence: number) {
+    const current = () => active && playing && source?.id === id && sequence === transportVersion;
+    if (!current()) return;
+    try {
+      const status = await audioCommand<Status>('status', { id, sequence });
+      if (!current()) return;
+      if (!status || status.loading || (status.sequence !== undefined && status.sequence !== sequence)) {
+        buffering = true;
+        scheduleStatus(id, sequence, 45);
+        return;
+      }
+      const now = performance.now();
+      const predicted = clockFrame(now);
+      const drift = status.frame - predicted;
+      const reset = buffering || !status.playing || Math.abs(drift) > sampleRate / 4;
+      frameClock = { frame: reset ? status.frame : predicted + Math.round(drift * 0.3), observed: now };
+      buffering = false;
+      if (!scrubbing) {
+        if (reset) playhead = status.frame;
+        playing = status.playing;
+      }
+    } catch (reason) {
+      if (!current()) return;
+      fail(String(reason));
+      playing = false;
+      buffering = false;
+    }
+    if (current()) scheduleStatus(id, sequence, 170);
+  }
+
+  async function transport(action: 'play' | 'pause' | 'audition', frame = playhead, endFrame?: number) {
+    if (!source) return;
+    stopPlayheadTravel();
+    const id = source.id;
+    frame = Math.max(0, Math.min(frame, total - 1));
+    const sequence = ++transportVersion;
+    queuedSeek = null;
+    scrubbing = false;
+    error = '';
+    clearTimeout(pollTimer);
+    cancelAnimationFrame(animation);
+    frameClock = { frame, observed: performance.now() };
+    playhead = frame;
+    playing = action !== 'pause';
+    buffering = playing;
+    if (playing) animation = requestAnimationFrame(paintPlayback);
+    try {
+      const listening = action !== 'pause' && treated && treatmentReady && !hearOriginal;
+      await audioCommand('transport', { id, action, frame, endFrame, sequence, ...(listening ? { treatment } : {}) });
+      if (active && source?.id === id && playing && sequence === transportVersion) scheduleStatus(id, sequence, 20);
+    } catch (reason) {
+      if (active && sequence === transportVersion) {
+        fail(String(reason));
+        playing = false;
+        buffering = false;
+      }
+    }
+  }
+
+  function restartListening() {
+    if (!playing) return;
+    if (loopEnabled && loopRegion) void transport('audition', loopRegion.start, loopRegion.end);
+    else void transport('play');
+  }
+
+  function toggleOriginal() {
+    hearOriginal = !hearOriginal;
+    restartListening();
+  }
+
+  function changeTreatment(settings: AudioTreatment) {
+    capture();
+    replaceTreatment(settings);
+  }
+
+  function replaceTreatment(settings: AudioTreatment) {
+    const opened = source;
+    if (!opened || (settings.normalize === treatment.normalize && settings.mono === treatment.mono
+      && settings.rumble === treatment.rumble && settings.hum === treatment.hum)) return;
+    const revision = ++treatmentVersion;
+    const wasBusy = treatmentBusy;
+    treatment = settings;
+    treatmentAnalysis = null;
+    treatmentError = '';
+    treatmentBusy = hasTreatment(settings);
+    if (!treatmentBusy) {
+      hearOriginal = false;
+      if (wasBusy) void audioCommand('treatment', { id: opened.id, treatment: settings }).catch(() => {});
+      restartListening();
+      return;
+    }
+    void audioCommand<TreatmentAnalysis>('treatment', { id: opened.id, treatment: settings }).then(result => {
+      if (!active || revision !== treatmentVersion || source?.id !== opened.id) return;
+      treatmentAnalysis = result;
+      treatmentBusy = false;
+      if (!hearOriginal) restartListening();
+    }).catch(reason => {
+      if (!active || revision !== treatmentVersion || source?.id !== opened.id) return;
+      treatmentBusy = false;
+      treatmentError = String(reason).replace(/^Error: /, '');
+    });
+  }
+
+  function audition() {
+    if (!current || !source) return;
+    auditionBoundary(current.startFrame);
+  }
+
+  function auditionBoundary(frame: number) {
+    if (!source || !Number.isSafeInteger(frame) || frame <= 0 || frame >= total || phase === 'export') return;
+    const radius = 2 * sampleRate;
+    const region = { start: Math.max(0, frame - radius), end: Math.min(total, frame + radius) };
+    if (phase === 'edit') setLoop(region, true);
+    else {
+      loopEnabled = false;
+      void transport('audition', region.start, region.end);
+    }
+  }
+
+  function togglePlayback() {
+    if (playing) void transport('pause');
+    else if (loopEnabled && loopRegion) void transport('audition', loopRegion.start, loopRegion.end);
+    else void transport('play');
+  }
+
+  function trackRange(id: string) {
+    const index = tracks.findIndex(track => track.id === id);
+    return index < 0 ? null : { start: tracks[index].startFrame, end: tracks[index + 1]?.startFrame ?? total };
+  }
+
+  function setLoop(region: FrameRange, play = playing) {
+    if (!source || region.start < 0 || region.end > total || region.start >= region.end) return;
+    loopRegion = region;
+    loopEnabled = true;
+    if (play) void transport('audition', region.start, region.end);
+  }
+
+  function loopTrack(id: string) {
+    const region = trackRange(id);
+    if (!region) return;
+    selection(id);
+    if (region.start < start || region.start >= end) animateViewport(region.start - (end - start) / 2, end - start);
+    setLoop(region, true);
+  }
+
+  function toggleLoop(id = selected) {
+    if (loopEnabled) {
+      loopEnabled = false;
+      if (playing) void transport('play');
+    } else {
+      const region = loopRegion ?? trackRange(id);
+      if (region) setLoop(region);
+    }
+  }
+
+  function zoomToLoop() {
+    if (!loopRegion) return;
+    const size = Math.max(sampleRate / 8, (loopRegion.end - loopRegion.start) * 1.1);
+    animateViewport((loopRegion.start + loopRegion.end - size) / 2, size);
+  }
+
+  function clearLoop() {
+    if (loopEnabled) toggleLoop();
+    loopRegion = null;
+  }
+
+  function selection(id: string, extend = false) {
+    if (!tracks.some(track => track.id === id)) return;
+    if (extend) {
+      const anchor = tracks.findIndex(track => track.id === (rangeAnchor || selected));
+      const at = tracks.findIndex(track => track.id === id);
+      const origin = anchor < 0 ? at : anchor;
+      rangeAnchor = tracks[origin].id;
+      rangeIds = tracks.slice(Math.min(origin, at), Math.max(origin, at) + 1).map(track => track.id);
+    } else {
+      rangeAnchor = id;
+      rangeIds = [];
+    }
+    selected = id;
+    void tick().then(() => {
+      const control = list?.querySelector<HTMLElement>('.track[data-current="true"]');
+      if (!control || !list) return;
+      // Keep selection in view without scrolling the entire dialog off the waveform.
+      const bounds = list.getBoundingClientRect();
+      const row = control.getBoundingClientRect();
+      if (row.top < bounds.top) list.scrollTop -= bounds.top - row.top;
+      else if (row.bottom > bounds.bottom) list.scrollTop += row.bottom - bounds.bottom;
+    });
+  }
+
+  function selectTrack(track: Track, extend = false) {
+    if (extend) { selection(track.id, true); return; }
+    selection(track.id);
+    const from = visualPlayhead;
+    const frame = track.startFrame;
+    const range = end - start;
+    seek(frame, false);
+    if (frame < start || frame >= end) animateViewport(frame - range / 2, range);
+    if (from === frame || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const startedAt = performance.now();
+    playheadTravel = { from, progress: 0 };
+    function travel(now: number) {
+      const fraction = Math.min(1, Math.max(0, (now - startedAt) / 200));
+      if (fraction === 1) { playheadTravel = null; return; }
+      playheadTravel = { from, progress: 1 - (1 - fraction) ** 3 };
+      playheadAnimation = requestAnimationFrame(travel);
+    }
+    playheadAnimation = requestAnimationFrame(travel);
+  }
+
+  function addCut() {
+    addCutAt(playhead);
+  }
+
+  function addCutAt(frame: number) {
+    if (!canEdit) return;
+    if (tracks.length >= maxFiles) { fail('A draft can contain up to ' + maxFiles + ' tracks.'); return; }
+    if (frame <= tracks[0].startFrame || frame >= total) { fail('Choose a position after the start of Track 1.'); return; }
+    if (tracks.some(track => track.startFrame === frame)) { fail('A cut already exists at this position.'); return; }
+    capture();
+    const track = { ...initial(), startFrame: frame };
+    tracks = [...tracks, track].sort((left, right) => left.startFrame - right.startFrame);
+    selected = track.id;
+    error = '';
+    draftAnnouncement = 'Cut added at ' + timeLabel(frame, sampleRate);
+  }
+
+  function playFromCut(id: string, frame: number) {
+    selection(id);
+    loopEnabled = false;
+    void transport('play', frame);
+  }
+
+  function moveCut(id: string, frame: number) {
+    const index = tracks.findIndex(track => track.id === id);
+    if (!canEdit || index < 0) return;
+    const track = tracks[index];
+    const lower = index === 0 ? 0 : tracks[index - 1].startFrame + 1;
+    const upper = (tracks[index + 1]?.startFrame ?? total) - 1;
+    const nextFrame = Math.min(upper, Math.max(lower, frame));
+    if (track.startFrame === nextFrame) return;
+    capture();
+    tracks = tracks.map(item => item === track ? {
+      ...item, startFrame: nextFrame,
+      ...(item.pregapFrame != null && item.pregapFrame >= nextFrame ? { pregapFrame: undefined, index00: undefined } : {}),
+    } : item);
+    draftAnnouncement = (index === 0 ? 'Track 1 starts at ' : 'Cut moved to ') + timeLabel(nextFrame, sampleRate);
+  }
+
+  function trimStart(frame: number) {
+    const first = tracks[0];
+    if (!first) return;
+    selection(first.id);
+    moveCut(first.id, frame);
+  }
+
+  function exactTime(id: string, value: string) {
+    const index = tracks.findIndex(track => track.id === id);
+    if (index < 0) return;
+    const frame = frameAtTime(value, sampleRate);
+    const lower = index === 0 ? 0 : tracks[index - 1].startFrame + 1;
+    const upper = tracks[index + 1]?.startFrame ?? total;
+    if (frame === null || frame < lower || frame >= upper) {
+      fail('Enter a valid time between the neighboring cuts.');
+    } else {
+      error = '';
+      moveCut(id, frame);
+    }
+  }
+
+  function removeCutAt(id: string) {
+    const index = tracks.findIndex(track => track.id === id);
+    if (!canEdit || index < 1) return;
+    capture();
+    rangeIds = [];
+    rangeAnchor = '';
+    if (id === selected) selected = tracks[index + 1]?.id ?? tracks[index - 1].id;
+    tracks = tracks.filter(track => track.id !== id);
+    draftAnnouncement = 'Cut removed. The earlier track keeps its tags.';
+  }
+
+  function focusTrack(id: string) {
+    void tick().then(() => document.getElementById(`studio-row-${id}`)?.focus());
+  }
+
+  function removeTrackSplit(id: string) {
+    const index = tracks.findIndex(track => track.id === id);
+    if (!canEdit || index < 1) return;
+    const next = tracks[index + 1]?.id ?? tracks[index - 1].id;
+    removeCutAt(id);
+    selection(next);
+    focusTrack(next);
+  }
+
+  function mergeTracks() {
+    if (!canEdit || rangeIds.length < 2) return;
+    const [first, ...rest] = rangeIds;
+    const discarded = new Set(rest);
+    capture();
+    tracks = tracks.filter(track => !discarded.has(track.id));
+    selection(first);
+    focusTrack(first);
+    draftAnnouncement = `${rest.length + 1} tracks merged. The first track keeps its tags.`;
+  }
+
+  function canMoveToPlayhead(index: number) {
+    return index >= 0 && playhead !== tracks[index].startFrame
+      && playhead >= (index === 0 ? 0 : tracks[index - 1].startFrame + 1)
+      && playhead < (tracks[index + 1]?.startFrame ?? total);
+  }
+
+  function moveToPlayhead(id: string) {
+    if (!canMoveToPlayhead(tracks.findIndex(track => track.id === id))) return;
+    selection(id);
+    moveCut(id, playhead);
+  }
+
+  function jump(direction: number) {
+    const target = direction > 0 ? tracks.find(track => track.startFrame > playhead) : tracks.slice().reverse().find(track => track.startFrame < playhead);
+    if (target) selectTrack(target);
+  }
+
+  function timelineKeys(event: KeyboardEvent) {
+    if (event.isComposing || event.altKey) return;
+    const key = event.key.toLowerCase();
+    if ((event.metaKey || event.ctrlKey) && key === 'z') { event.preventDefault(); history(event.shiftKey); }
+    else if (!event.metaKey && !event.ctrlKey) {
+      if (key === ' ') {
+        event.preventDefault();
+        if (event.shiftKey) audition();
+        else togglePlayback();
+      }
+      else if (key === 'm') { event.preventDefault(); addCut(); }
+      else if (key === 'l') { event.preventDefault(); toggleLoop(); }
+      else if (key === '[' || key === ']') { event.preventDefault(); jump(key === '[' ? -1 : 1); }
+      else if (key === '+' || key === '=') { event.preventDefault(); zoom(1); }
+      else if (key === '-') { event.preventDefault(); zoom(-1); }
+      else if (key === 'z' && current) { event.preventDefault(); zoomToCut(); }
+      else if (key === '0') { event.preventDefault(); animateViewport(0, total); }
+    }
+  }
+
+  function updateTrack(id: string, change: Partial<Track>) {
+    if (!canEdit || !tracks.some(track => track.id === id)) return;
+    capture();
+    tracks = tracks.map(track => track.id === id ? { ...track, ...change } : track);
+  }
+
+  function changeRecordingTag(field: string, value: string) {
+    if (value === (recordingTag(field) ?? '')) return;
+    capture();
+    tags = { ...tags, [field]: value };
+  }
+
+  async function beginEdit(id: string, field: TrackEdit['field']) {
+    if (!canEdit || !tracks.some(track => track.id === id)) return;
+    const edit = { id, field };
+    editor = edit;
+    selection(id);
+    await tick();
+    if (editor !== edit) return;
+    const input = document.getElementById(field === 'start' ? 'studio-cut-start' : 'studio-track-artist') as HTMLInputElement | null;
+    input?.focus();
+    input?.select();
+  }
+
+  function finishEdit(edit: TrackEdit, commit: boolean, refocus = false) {
+    if (editor !== edit) return;
+    editor = null;
+    if (commit) {
+      const track = tracks.find(track => track.id === edit.id);
+      if (track && edit.field === 'start') {
+        const input = document.getElementById('studio-cut-start') as HTMLInputElement | null;
+        if (input) exactTime(edit.id, input.value);
+      } else if (track) {
+        const patch: Tags = {};
+        for (const [key] of trackFields) {
+          const input = document.getElementById(`studio-track-${key}`) as HTMLInputElement | null;
+          if (input && input.value !== (trackTag(track, key) ?? '')) patch[key] = input.value;
+        }
+        if (Object.keys(patch).length) updateTrack(track.id, { tags: { ...track.tags, ...patch } });
+      }
+    }
+    if (refocus) void tick().then(() => {
+      if (editor) return;
+      const trigger = edit.field === 'start'
+        ? document.querySelector<HTMLElement>(`[data-audio-studio] [data-cut-id="${CSS.escape(edit.id)}"]`)
+          ?? document.querySelector<HTMLElement>('[data-audio-studio] .scrubber')
+        : document.getElementById(`studio-row-${edit.id}`);
+      trigger?.focus({ preventScroll: true });
+    });
+  }
+
+  function editKeys(event: KeyboardEvent, edit: TrackEdit) {
+    if (event.isComposing || (event.key !== 'Enter' && event.key !== 'Escape')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    finishEdit(edit, event.key === 'Enter', true);
+  }
+
+  function leaveTrackFields(event: FocusEvent, edit: TrackEdit) {
+    if (!(event.currentTarget as HTMLElement).contains(event.relatedTarget as Node | null)) finishEdit(edit, true);
+  }
+
+  function prepareTrackMenu(event: MouseEvent) {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button[data-track-id]');
+    if (!button?.dataset.trackId) { event.preventDefault(); return; }
+    trackMenuId = button.dataset.trackId;
+  }
+
+  function trackKeys(event: KeyboardEvent, id: string) {
+    if (event.isComposing || event.altKey) return;
+    if (event.metaKey || event.ctrlKey) { timelineKeys(event); return; }
+    if (event.key === 'F2') {
+      event.preventDefault();
+      void beginEdit(id, 'tags');
+    } else if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+      event.preventDefault();
+      const row = event.currentTarget as HTMLElement;
+      const box = row.getBoundingClientRect();
+      row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: box.left + 24, clientY: box.top + box.height / 2 }));
+    } else if (event.key === 'Delete') {
+      event.preventDefault();
+      removeTrackSplit(id);
+    } else if (event.key.toLowerCase() === 'l') {
+      event.preventDefault();
+      toggleLoop(id);
+    } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+      event.preventDefault();
+      const index = tracks.findIndex(track => track.id === id);
+      const neighbor = tracks[index + (event.key === 'ArrowUp' ? -1 : 1)];
+      if (!neighbor) return;
+      if (event.shiftKey) {
+        if (!rangeIds.length) rangeAnchor = id;
+        selection(neighbor.id, true);
+      }
+      focusTrack(neighbor.id);
+    }
+  }
+
+  function restoreTrackMenuFocus(event: Event) {
+    event.preventDefault();
+    if (!editor) document.getElementById(`studio-row-${trackMenuId}`)?.focus({ preventScroll: true });
+  }
+
+  function recordingTagKeys(event: KeyboardEvent, value: string) {
+    if (event.defaultPrevented || event.isComposing || (event.key !== 'Enter' && event.key !== 'Escape')) return;
+    const input = event.currentTarget as HTMLInputElement | HTMLTextAreaElement;
+    if (input instanceof HTMLTextAreaElement && event.key === 'Enter') return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.key === 'Escape') input.value = value;
+    input.blur();
+  }
+
+  function connectGenre(input: HTMLInputElement) {
+    return attachGenrePicker(input, () => libraryTracks.map(track => track.tags?.genre ?? ''),
+      () => (savedSettings as { multi_value_separator?: string }).multi_value_separator || '; ');
+  }
+
+  function resetRecordingTag(field: string) {
+    const copy = { ...tags };
+    delete copy[field];
+    capture();
+    tags = copy;
+    document.getElementById(`studio-recording-${field}`)?.focus({ preventScroll: true });
+  }
+
+  function save() {
+    if (!source) return;
+    try {
+      saveDraft(source, { ...draft(), view: { playhead, start, end, selected, follow, stereo: stereoView } });
+      dirty = false;
+      hasSaved = true;
+      draftAnnouncement = 'Draft saved';
+    }
+    catch (reason) { fail(String(reason)); }
+  }
+
+  function reopen() {
+    if (!source) return;
+    try {
+      const stored = readDraft(source);
+      if (!stored) return;
+      capture();
+      restore(stored);
+      serial = Math.max(serial, ...stored.tracks.map(track => Number(track.id.match(/^segment-(\d+)$/)?.[1] || 0)));
+      if (stored.view) {
+        const saved = stored.view;
+        if (tracks.some(track => track.id === saved.selected)) selection(saved.selected);
+        follow = saved.follow === true;
+        stereoView = hasStereo && saved.stereo === true;
+        if ([saved.start, saved.end, saved.playhead].every(Number.isSafeInteger)
+          && saved.start >= 0 && saved.end > saved.start && saved.end <= total) {
+          viewport(saved.start, saved.end - saved.start);
+          seek(saved.playhead, false);
+        }
+      }
+      dirty = false;
+      draftAnnouncement = 'Saved draft reopened';
+    } catch (reason) { fail(String(reason)); }
+  }
+
+  function studioKeys(event: KeyboardEvent) {
+    if (!event.isComposing && !event.altKey && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's' && source && phase === 'edit') {
+      event.preventDefault();
+      event.stopPropagation();
+      if (editor) finishEdit(editor, true);
+      else if (document.activeElement instanceof HTMLElement && document.activeElement.id.startsWith('studio-recording-')) {
+        document.activeElement.blur();
+      }
+      save();
+    }
+  }
+
+  async function focusOutput(id: string) {
+    await tick();
+    const heading = document.getElementById(id);
+    heading?.focus({ preventScroll: true });
+    heading?.scrollIntoView({ block: 'nearest' });
+  }
+
+  async function loadCue(path?: string, encoding: 'utf8' | 'windows1252' = 'utf8') {
+    if (!source || cueLoading) return;
+    const opened = source;
+    cueLoading = true;
+    try {
+      const selectedPath = path || await choosePath({ filters: [{ name: 'CUE sheet', extensions: ['cue'] }] });
+      if (!selectedPath || !active) return;
+      cuePath = selectedPath;
+      cueEncoding = encoding;
+      cue = undefined;
+      importMode = 'cue';
+      error = '';
+      const result = await audioCommand<Cue>('cue', { id: opened.id, path: selectedPath, encoding });
+      if (active && source?.id === opened.id) cue = result;
+    } catch (reason) { if (active) fail(String(reason)); }
+    finally { if (active) cueLoading = false; }
+  }
+
+  const sharedTags = () => ({ ...importedTags, ...tags });
+  const recordingTag = (key: string) => tags[key] ?? importedTags[key] ?? source?.tags?.[key];
+  const trackTag = (track: Track, key: string) =>
+    track.tags[key] ?? tags[key] ?? track.suggestedTags?.[key] ??
+    (track.leadIn && key === 'title' ? 'Lead-in' : recordingTag(key));
+
+  function outputTracks() {
+    return tracks.map(({ tags: overrides, suggestedTags, leadIn, position: _position, ...track }) => {
+      const values: Tags = { ...(leadIn ? { title: 'Lead-in' } : {}), ...suggestedTags };
+      // Native per-track overrides win over shared values. Apply an explicit
+      // shared edit to any inherited suggestion before sending that override.
+      for (const key of Object.keys(values)) if (Object.hasOwn(tags, key)) values[key] = tags[key];
+      return { ...track, leadIn, tags: { ...values, ...overrides } };
+    });
+  }
+
+  function closeImporter() {
+    importMode = null;
+    void tick().then(() => document.getElementById('studio-import-cuts')?.focus());
+  }
+
+  function applyImport(imported: Track[], defaults: Tags, replace: boolean) {
+    if (!source) return;
+    const frames = source.frames;
+    const valid = imported.filter(track => track.startFrame >= 0 && track.startFrame < frames);
+    if (!valid.length) return;
+    const pristine = tracks.length === 1 && tracks[0].startFrame === 0 && tracks[0].include
+      && !Object.keys(tracks[0].tags).length && !tracks[0].suggestedTags;
+    const useCueStarts = importMode === 'cue' && (replace || pristine);
+    const combined = new Map<number, Track>();
+    for (const track of useCueStarts ? [] : replace ? [initial()] : tracks) combined.set(track.startFrame, track);
+    for (const track of valid) {
+      const existing = combined.get(track.startFrame);
+      combined.set(track.startFrame, {
+        ...(existing || track), ...track, id: existing?.id || newId(),
+        tags: existing?.tags || {},
+        suggestedTags: { ...existing?.suggestedTags, ...track.tags },
+        leadIn: false,
+      });
+    }
+    const first = combined.get(0);
+    if (first && valid.every(track => track.startFrame > 0)
+      && !Object.keys(first.tags).length && !first.suggestedTags?.title) {
+      combined.set(0, { ...first, leadIn: true });
+    }
+    if (combined.size > maxFiles) { fail('A draft can contain up to ' + maxFiles + ' tracks.'); return; }
+    capture();
+    importedTags = replace ? defaults : { ...importedTags, ...defaults };
+    tracks = [...combined.values()].sort((a, b) => a.startFrame - b.startFrame);
+    selected = tracks[0].id;
+    closeImporter();
+    draftAnnouncement = 'Imported splits are ready to adjust.';
+  }
+
+  async function writeCue() {
+    if (!source) return;
+    const importedLeadIn = tracks[0]?.leadIn && tracks[1]?.index01 != null;
+    if (tracks.some((track, index) => !track.include && !(index === 0 && importedLeadIn))) {
+      fail('A CUE sheet cannot omit audio between tracks or at the end. Restore omitted tracks or export audio files.');
+      return;
+    }
+    error = '';
+    try {
+      const path = await choosePath({ defaultPath: stem(source.path) + '.cue', filters: [{ name: 'CUE sheet', extensions: ['cue'] }] }, true);
+      if (!path || !active) return;
+      const warnings = await audioCommand<string[]>('write_cue', { id: source.id, path, segments: outputTracks(), tags: sharedTags() });
+      note(['CUE sheet saved to ' + path, ...warnings].join('. '));
+    } catch (reason) { if (active) fail(String(reason)); }
+  }
+
+  function changeOutput(delayed = false) {
+    clearTimeout(outputCheck);
+    invalidate();
+    checkingOutput = delayed;
+    if (!delayed) { void preview(); return; }
+    outputCheck = setTimeout(() => {
+      checkingOutput = false;
+      void preview();
+    }, 220);
+  }
+
+  async function browseOutput(backup = false) {
+    try {
+      const previous = backup ? backupDirectory : destination.trim();
+      const picked = await choosePath({ directory: true, ...(previous ? { defaultPath: previous } : {}) });
+      if (!picked || !active || phase !== 'review' || saveMode !== (backup ? 'replace' : 'folder')) return;
+      if (picked === previous && !error) return;
+      if (backup) backupDirectory = picked;
+      else destination = picked;
+      changeOutput();
+    } catch (reason) { if (active) fail(String(reason)); }
+  }
+
+  async function browseArtwork() {
+    try {
+      const picked = await choosePath({ filters: [{ name: 'Cover artwork', extensions: ['jpg', 'jpeg', 'png'] }] });
+      if (picked && active) { capture(); artworkPath = picked; }
+    } catch (reason) { if (active) fail(String(reason)); }
+  }
+
+  function replacementAllowed() {
+    return (launch.canReplace ? launch.canReplace() : !launch.pendingPaths?.length);
+  }
+
+  function reviewAndSave() {
+    if (!canEnterReview || loading) return;
+    phase = 'review';
+    notice = '';
+    if (playing) void transport('pause');
+    void focusOutput('studio-save-heading');
+    void preview();
+  }
+
+  function backToEditing() {
+    clearTimeout(outputCheck);
+    checkingOutput = false;
+    invalidate();
+    lastReview = null;
+    phase = 'edit';
+    if (playing) void transport('pause');
+    void focusOutput('audio-split-title');
+  }
+
+  async function preview() {
+    await tick();
+    if (!active || phase !== 'review' || !reviewReady) return;
+    if (previewing) { reviewRequested = true; return; }
+    if (saveMode === 'replace' && !replacementAllowed()) {
+      fail('Apply or clear the pending library changes for these files before replacing them.');
+      return;
+    }
+    const revision = generation;
+    const pattern = namePattern.trim();
+    previewing = true;
+    error = '';
+    try {
+      const result = await audioCommand<Review>('preview', { request: {
+        sources: source ? [source.path] : launch.paths,
+        sessionId: source?.id,
+        segments: source ? outputTracks() : undefined,
+        tags: source ? sharedTags() : {},
+        artworkPath: artworkPath || undefined,
+        saveMode,
+        destination: saveMode === 'folder' ? destination.trim() : '',
+        backupDirectory: saveMode === 'replace' ? backupDirectory || undefined : undefined,
+        folderPattern: createFolder ? folderPattern.trim() : undefined,
+        format, splitMethod: treated ? 'exact' : canCopy ? splitMethod : undefined,
+        ...(treated ? { treatment } : {}),
+        bitrate: format === 'mp3' && !copying ? bitrate : undefined,
+        namePattern: split && pattern === defaultSplitFilePattern ? undefined : pattern || undefined,
+      } });
+      if (active && phase === 'review' && generation === revision) {
+        review = result;
+        lastReview = result;
+      } else discardReview(result);
+    } catch (reason) { if (active && generation === revision) fail(String(reason)); }
+    finally {
+      if (active) {
+        previewing = false;
+        if (reviewRequested) {
+          reviewRequested = false;
+          void preview();
+        }
+      }
+    }
+  }
+
+  function stopOutputAudition() {
+    clearTimeout(outputPoll);
+    if (outputAudition === null || !review) return;
+    const sequence = ++transportVersion;
+    outputClosing = (source
+      ? audioCommand<void>('transport', { id: source.id, action: 'pause', sequence })
+      : closeAudioSplitSession(review.id)).catch(console.error);
+    outputAudition = null;
+  }
+
+  async function auditionOutput(index: number) {
+    const plan = review;
+    if (!plan || phase !== 'review' || reviewingOutput || working) return;
+    if (outputAudition === index) { stopOutputAudition(); return; }
+    const id = plan.id;
+    const owner = source?.id ?? id;
+    const sequence = ++transportVersion;
+    const current = () => active && review?.id === id && transportVersion === sequence;
+    clearTimeout(outputPoll);
+    outputAudition = index;
+
+    async function poll() {
+      if (!current()) return;
+      try {
+        const status = await audioCommand<Status>('status', { id: owner, sequence, audition: true });
+        if (!current()) return;
+        if (!status.loading && status.sequence === sequence && !status.playing) {
+          stopOutputAudition();
+          return;
+        }
+        outputPoll = setTimeout(() => void poll(), 120);
+      } catch (reason) {
+        if (current()) { stopOutputAudition(); fail(String(reason)); }
+      }
+    }
+
+    try {
+      await outputClosing;
+      if (!current()) return;
+      if (!source) rememberAudioSplitSession(id, true);
+      await audioCommand('audition_output', { id, index, sequence });
+      if (current()) void poll();
+    } catch (reason) {
+      if (current()) { stopOutputAudition(); fail(String(reason)); }
+    }
+  }
+
+  async function runExport() {
+    const plan = review;
+    if (!plan || previewing || working) return;
+    if (saveMode === 'replace' && !replacementAllowed()) {
+      fail('Apply or clear the pending library changes for these files before replacing them.');
+      return;
+    }
+    stopOutputAudition();
+    phase = 'export';
+    working = true;
+    stopping = false;
+    error = '';
+    if (playing) void transport('pause');
+    let settled = false;
+    async function poll() {
+      if (settled || !active || !plan) return;
+      try {
+        const update = await audioCommand<Progress>('progress', { id: plan.id });
+        if (!settled && active && update) progress = update;
+      } catch { /* The export response owns the reported error. */ }
+      if (!settled && active) setTimeout(() => void poll(), 250);
+    }
+    progress = { completed: 0, total: plan.outputs.length, phase: 'Preparing audio' };
+    try {
+      const exporting = audioCommand<ExportResult>('export', { id: plan.id });
+      void poll();
+      const result = await exporting;
+      if (active) {
+        finished = result.paths;
+        backups = result.backups || [];
+        exportWarnings = result.warnings || [];
+        publishedId = plan.id;
+        phase = 'finished';
+        review = null;
+        dirty = false;
+        canUndoReplacement = !!result.replaced?.length;
+        libraryRemoved = result.replaced?.length ? result.replaced : undefined;
+        canRefreshLibrary = false;
+        void focusOutput('audio-split-done-heading');
+        if (launch.refreshLibrary && libraryRemoved) {
+          canRefreshLibrary = true;
+          await refreshCompleted();
+        } else if (launch.refreshLibrary) {
+          void audioCommand<boolean>('can_add', { id: plan.id }).then(canAdd => {
+            if (active && publishedId === plan.id) canRefreshLibrary = canAdd;
+          }).catch(() => {});
+        }
+      }
+    } catch (reason) {
+      if (active) { fail(String(reason)); phase = 'review'; review = null; }
+    } finally {
+      settled = true;
+      if (active) { progress = null; working = false; stopping = false; }
+    }
+  }
+
+  async function stopExport() {
+    if (!review || stopping) return;
+    stopping = true;
+    try { await audioCommand('cancel', { id: review.id }); }
+    catch (reason) { fail(String(reason)); stopping = false; }
+  }
+
+  async function revealFinished() {
+    if (!publishedId) return;
+    try { await audioCommand('reveal', { id: publishedId }); }
+    catch (reason) { if (active) fail(String(reason)); }
+  }
+
+  async function refreshCompleted() {
+    if (!launch.refreshLibrary || refreshingLibrary) return;
+    refreshingLibrary = true;
+    try {
+      if (!await launch.refreshLibrary(restored.length ? restored : finished, libraryRemoved)) {
+        throw new Error('The files were saved on disk. The library view could not be updated.');
+      }
+      canRefreshLibrary = false;
+      error = '';
+    } catch (reason) { if (active) fail(String(reason)); }
+    finally { refreshingLibrary = false; }
+  }
+
+  async function undoReplacement() {
+    if (!canUndoReplacement || working) return;
+    working = true;
+    error = '';
+    try {
+      const result = await audioCommand<ReplacementUndo>('undo_replacement', { id: publishedId });
+      if (!active) return;
+      restored = result.paths;
+      exportWarnings = result.warnings || [];
+      libraryRemoved = result.removed;
+      canUndoReplacement = false;
+      if (launch.refreshLibrary) {
+        canRefreshLibrary = true;
+        await refreshCompleted();
+      }
+      if (active) void focusOutput('audio-split-done-heading');
+    } catch (reason) { if (active) fail(String(reason)); }
+    finally { if (active) working = false; }
+  }
+
+  function keepEditing() {
+    closeRequested = false;
+  }
+
+  function restoreCloseFocus(event: Event) {
+    event.preventDefault();
+    if (!active || closeRequested) return;
+    const target = closeTrigger?.isConnected ? closeTrigger : document.getElementById('studio-close');
+    target?.focus({ preventScroll: true });
+  }
+
+  function saveAndClose() {
+    save();
+    if (!dirty) onclose();
+    else closeSaveError = error;
+  }
+
+  function requestClose() {
+    if (closeRequested || phase === 'export' || working) return;
+    if (!dirty || !split) { onclose(); return; }
+    closeTrigger = document.activeElement instanceof HTMLElement && document.activeElement.closest('[data-audio-studio]')
+      ? document.activeElement : null;
+    closeSaveError = '';
+    closeRequested = true;
+  }
+
+
+</script>
+
+<Dialog.Root open={true} onOpenChange={open => { if (!open) requestClose(); }}>
+  <Dialog.Content class="audio-split-dialog" overlayProps={{ class:'controller-dialog-overlay audio-split-overlay' }}
+    showCloseButton={false} data-audio-studio aria-labelledby="audio-split-title" aria-describedby="audio-split-summary"
+    onkeydown={studioKeys}
+    onOpenAutoFocus={event => event.preventDefault()}
+    onCloseAutoFocus={event => event.preventDefault()}
+    onEscapeKeydown={(event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (closeRequested) keepEditing();
+      else if (importMenuOpen) importMenuOpen = false;
+      else if (importMode) closeImporter();
+      else if (waveformMenuOpen) waveformMenuOpen = false;
+      else if (editor) finishEdit(editor, false, true);
+      else requestClose();
+    }}>
+    <div class="studio" data-controller-popup>
+      <header class="header">
+        <div class="identity">
+          <h2 id="audio-split-title" tabindex="-1" {@attach focusHeader}>{title}</h2>
+          <p id="audio-split-summary">
+            {#if split && source}<span title={source.path}>{leaf(source.path)}</span><span class="duration">{duration}</span>
+            {:else if split && launch.paths.length === 1}<span>{leaf(launch.paths[0])}</span>
+            {:else if split}Choose a recording or CUE sheet
+            {:else}{launch.paths.length} {launch.paths.length === 1 ? 'source file' : 'source files'}{/if}
+          </p>
+        </div>
+      </header>
+      <Button id="studio-close" variant="ghost" size="icon-sm" title="Close" aria-label="Close audio studio" onclick={requestClose} disabled={working}><X size={16}/></Button>
+      <div class="scroll">
+        {#if error}<p class="error" role="alert">{error}</p>{/if}
+        <div class="sr-only" aria-live="polite">{draftAnnouncement}</div>
+        {#if launch.pendingPaths?.length && phase === 'edit'}<p class="help">These files have pending library edits. Audio tools use the saved tags from disk.</p>{/if}
+        {#if loading}
+          <div class="opening">
+            <p role="status"><AudioLines size={20}/> {loadingInfo ? 'Reading the recording…' : 'Opening the recording…'}</p>
+            {#if loadingInfo?.frames}
+              <progress max={loadingInfo.frames} value={Math.min(loadingInfo.frames, loadingInfo.scannedFrames)} aria-label="Recording scan progress"></progress>
+            {:else if loadingInfo?.scannedFrames}
+              <span class="help">Read {timeLabel(loadingInfo.scannedFrames, loadingInfo.sampleRate, 0)} so far</span>
+            {/if}
+            {#if loadingInfo && loadingInfo.overview.length && loadingInfo.scannedFrames}
+              {@const interim = peakValues(loadingInfo.overview)}
+              {@const extent = Math.max(loadingInfo.frames, loadingInfo.scannedFrames)}
+              <AudioSplitWaveform start={0} end={extent} total={extent} sampleRate={loadingInfo.sampleRate}
+                overview={interim} overviewRms={peakValues(loadingInfo.overviewRms || [])} coverage={loadingInfo.scannedFrames / extent}
+                playhead={0} tracks={[]} selected="" readonly/>
+            {/if}
+          </div>
+        {:else if split && !source}
+          <div class="empty">
+            <FolderOpen size={26}/>
+            {#if launch.paths.length > 1}<p>Splitting takes one recording at a time.</p>{/if}
+            <Button onclick={() => chooseRecording(true)}>Choose recording or CUE…</Button>
+            {#if pendingCue}<p>{leaf(pendingCue)} · choose its master recording</p>{/if}
+          </div>
+        {:else if phase === 'edit'}
+          {#if split && source}
+            <div class="timeline-area">
+              <div class="toolbar transport">
+                <Button variant="secondary" size="icon-sm" aria-label={playing ? 'Pause audio' : 'Play audio'} title={playing ? 'Pause (Space)' : 'Play (Space)'} onclick={togglePlayback}>
+                  {#if playing}<Pause size={16}/>{:else}<Play size={16}/>{/if}
+                </Button>
+                <Button class="loop-toggle" variant="ghost" size="icon-sm" aria-label="Loop preview" aria-pressed={loopEnabled}
+                  aria-keyshortcuts="L" title={loopEnabled ? 'Disable loop (L)' : 'Enable loop (L)'} onclick={() => toggleLoop()}>
+                  <Repeat size={15}/>
+                </Button>
+                <span class="time">{readout}</span>
+                <Button variant="ghost" size="sm" onclick={addCut} disabled={!canEdit}><Scissors size={15}/> Add cut</Button>
+                <div class="waveform-options">
+                  {#if hasStereo}
+                    <Button class="stereo-toggle" variant="ghost" size="sm" aria-label="Show left and right channels"
+                      aria-pressed={stereoView}
+                      title={stereoView ? 'Switch to combined waveform' : 'Show left and right channels'}
+                      onclick={() => stereoView = !stereoView}>
+                      {stereoView ? 'Left + Right' : 'Combined'}
+                    </Button>
+                  {/if}
+                  <AudioSplitTreatment settings={treatment} stereo={hasStereo} original={hearOriginal} busy={treatmentBusy}
+                    analysis={treatmentAnalysis} error={treatmentError} onchange={changeTreatment} oncompare={toggleOriginal}/>
+                  <DropdownMenu.Root bind:open={waveformMenuOpen}>
+                    <DropdownMenu.Trigger>
+                      {#snippet child({ props })}
+                        <Button {...props} variant="ghost" size="icon-sm" aria-label="Waveform options" title="Waveform options"><Ellipsis size={18}/></Button>
+                      {/snippet}
+                    </DropdownMenu.Trigger>
+                    <DropdownMenu.Content class="studio-waveform-options" align="end">
+                      <DropdownMenu.Item onSelect={() => jump(-1)}><ChevronLeft size={15}/> Previous cut <DropdownMenu.Shortcut>[</DropdownMenu.Shortcut></DropdownMenu.Item>
+                      <DropdownMenu.Item onSelect={() => jump(1)}><ChevronRight size={15}/> Next cut <DropdownMenu.Shortcut>]</DropdownMenu.Shortcut></DropdownMenu.Item>
+                      <DropdownMenu.Separator/>
+                      <DropdownMenu.Item onSelect={() => zoom(1)}>Zoom in <DropdownMenu.Shortcut>+</DropdownMenu.Shortcut></DropdownMenu.Item>
+                      <DropdownMenu.Item onSelect={() => zoom(-1)}>Zoom out <DropdownMenu.Shortcut>−</DropdownMenu.Shortcut></DropdownMenu.Item>
+                      <DropdownMenu.Item onSelect={zoomToCut} disabled={!current}>Zoom to cut <DropdownMenu.Shortcut>Z</DropdownMenu.Shortcut></DropdownMenu.Item>
+                      <DropdownMenu.Item onSelect={zoomToLoop} disabled={!loopRegion}>Zoom to loop</DropdownMenu.Item>
+                      {#if loopRegion}<DropdownMenu.Item onSelect={clearLoop}>Clear loop</DropdownMenu.Item>{/if}
+                      <DropdownMenu.Item onSelect={() => animateViewport(0, total)}>Fit recording <DropdownMenu.Shortcut>0</DropdownMenu.Shortcut></DropdownMenu.Item>
+                      <DropdownMenu.Separator/>
+                      <DropdownMenu.CheckboxItem bind:checked={follow} closeOnSelect>Follow playhead</DropdownMenu.CheckboxItem>
+                      <DropdownMenu.Item onSelect={() => showHelp = !showHelp}>{showHelp ? 'Hide waveform shortcuts' : 'Waveform shortcuts'}</DropdownMenu.Item>
+                    </DropdownMenu.Content>
+                  </DropdownMenu.Root>
+                </div>
+              </div>
+              {#if editor?.field === 'start' && editingTrack}
+                {@const edit = editor}
+                <label class="cut-time-edit">
+                  {editingTrack.id === tracks[0].id ? 'Track 1 start' : 'Cut time'}
+                  <input id="studio-cut-start" aria-label="Track start time" value={timeLabel(editingTrack.startFrame, sampleRate, 6)}
+                    onkeydown={event => editKeys(event, edit)} onblur={() => finishEdit(edit, true)}/>
+                </label>
+              {/if}
+              <AudioSplitWaveform {start} {end} {total} {sampleRate} tile={start === 0 && end === total ? null : tile}
+                {overview} {stereoOverview} {overviewRms} {stereoOverviewRms} stereo={stereoView} {playhead} {visualPlayhead} {playing} {tracks} {selected}
+                {loopRegion} {loopEnabled} onloop={setLoop} ontrack={selectTrack} trackTitle={track => trackTag(track, 'title')} onmove={movePreview} onseek={seek}
+                oncancel={cancelPreview} onselect={selection} onmarker={moveCut} onviewport={viewport} onwheelzoom={wheelZoom}
+                ongesture={waveformGesture} onkey={timelineKeys} onplaymarker={playFromCut} onadd={addCutAt}
+                oneditmarker={id => beginEdit(id, 'start')} onremovemarker={removeCutAt} ontrim={trimStart}
+                onrestoremarker={id => updateTrack(id, { include: true })}
+                onmovetoplayhead={moveToPlayhead} canmove={id => canMoveToPlayhead(tracks.findIndex(track => track.id === id))}/>
+              <p class="waveform-hint" aria-live="polite">{buffering ? 'Buffering preview…' : treatmentBusy ? 'Measuring recording…' : hearOriginal ? 'Listening to the original' : ''}</p>
+              {#if showHelp}
+                <p class="help">Scroll to zoom, middle-drag to pan, and Shift-drag to mark a loop. L toggles the loop. Space plays or pauses, Shift+Space loops around the selected cut, and M adds a cut. In the track list, Shift-click or Shift+Up/Down selects a range, F2 edits tags, and Delete removes a split.</p>
+              {/if}
+            </div>
+            {#if importMode}
+              <AudioSplitImport {source} {playhead} mode={importMode} {cue} {cueEncoding} {cueLoading}
+                onencoding={(encoding) => loadCue(cuePath, encoding)} onapply={applyImport} oncancel={closeImporter} onerror={fail}/>
+            {/if}
+
+            <div class="editor">
+              <section class="track-panel" aria-label="Tracks">
+                <div class="column-top">
+                  <h3>Tracks</h3>
+                  <DropdownMenu.Root bind:open={importMenuOpen}>
+                    <DropdownMenu.Trigger>
+                      {#snippet child({ props })}
+                        <Button {...props} id="studio-import-cuts" variant="secondary" size="sm" disabled={!canEdit || cueLoading}>Import splits <ChevronDown size={13}/></Button>
+                      {/snippet}
+                    </DropdownMenu.Trigger>
+                    <DropdownMenu.Content class="studio-import-menu" align="end">
+                      <DropdownMenu.Item onSelect={() => loadCue()}><FilePlus2 size={16}/> Import CUE…</DropdownMenu.Item>
+                      <DropdownMenu.Item onSelect={() => importMode = 'discogs'}><Disc3 size={16}/> Use Discogs…</DropdownMenu.Item>
+                    </DropdownMenu.Content>
+                  </DropdownMenu.Root>
+                </div>
+                <ContextMenu.Root>
+                  <ContextMenu.Trigger disabled={!canEdit}>
+                    {#snippet child({ props })}
+                      <div {...props} class="track-list" bind:this={list} oncontextmenucapture={prepareTrackMenu}>
+                        {#each tracks as track, index (track.id)}
+                          {@const trackEnd = tracks[index + 1]?.startFrame ?? total}
+                          {@const edit = editor?.id === track.id && editor.field !== 'start' ? editor : null}
+                          {#snippet trackNumber()}
+                            <span class="track-number" title={track.position}>{String(index + 1).padStart(2, '0')}</span>
+                          {/snippet}
+                          {#snippet trackTimes()}
+                            <span class="track-time"><span class="sr-only">Start </span>{timeLabel(track.startFrame, sampleRate, 1)}</span>
+                            <span class="track-time"><span class="sr-only">Length </span>{timeLabel(trackEnd - track.startFrame, sampleRate, 1)}</span>
+                          {/snippet}
+                          {#if edit}
+                            <div class="track editing">
+                              {@render trackNumber()}
+                              <div class="track-edit-fields" onfocusout={event => leaveTrackFields(event, edit)}>
+                                {#each trackFields as [key, label] (key)}
+                                  <Input id={`studio-track-${key}`} aria-label={`${label} for track ${index + 1}`} placeholder={label}
+                                    value={trackTag(track, key) ?? ''} maxlength={512} spellcheck={false} onkeydown={event => editKeys(event, edit)}/>
+                                {/each}
+                              </div>
+                              {@render trackTimes()}
+                            </div>
+                          {:else}
+                            <button type="button" id={`studio-row-${track.id}`} data-track-id={track.id}
+                              class={['track', { excluded: !track.include }]} aria-pressed={selected === track.id || rangeIds.includes(track.id)}
+                              data-current={selected === track.id} aria-haspopup="menu" aria-keyshortcuts="Shift+F10 F2 Delete L"
+                              onclick={event => selectTrack(track, event.shiftKey)} onkeydown={event => trackKeys(event, track.id)}>
+                              {@render trackNumber()}
+                              <span class="track-title">
+                                <strong>{trackTag(track, 'title') || `Track ${index + 1}`}</strong>
+                                {#if !track.include}<small>Omitted in saved draft</small>
+                                {:else if trackTag(track, 'artist')}<small>{trackTag(track, 'artist')}</small>{/if}
+                              </span>
+                              {@render trackTimes()}
+                            </button>
+                          {/if}
+                        {/each}
+                      </div>
+                    {/snippet}
+                  </ContextMenu.Trigger>
+                  <ContextMenu.Content class="studio-track-menu" onCloseAutoFocus={restoreTrackMenuFocus}>
+                    <ContextMenu.Item onSelect={() => beginEdit(trackMenuId, 'tags')}>Edit Artist/Title <ContextMenu.Shortcut aria-hidden="true">F2</ContextMenu.Shortcut></ContextMenu.Item>
+                    <ContextMenu.Item onSelect={() => loopTrack(trackMenuId)}>Loop track</ContextMenu.Item>
+                    <ContextMenu.Item onSelect={() => moveToPlayhead(trackMenuId)} disabled={!canMoveToPlayhead(menuTrackIndex)}>Move split to playhead</ContextMenu.Item>
+                    {#if canMerge}<ContextMenu.Item onSelect={mergeTracks}>Merge adjacent tracks</ContextMenu.Item>{/if}
+                    {#if menuTrackIndex === 0}
+                      <ContextMenu.Item onSelect={() => trimStart(0)} disabled={!tracks[0]?.startFrame}>Reset start</ContextMenu.Item>
+                    {:else}
+                      <ContextMenu.Item onSelect={() => removeTrackSplit(trackMenuId)} disabled={menuTrackIndex < 1}>Remove split <ContextMenu.Shortcut aria-hidden="true">Del</ContextMenu.Shortcut></ContextMenu.Item>
+                    {/if}
+                  </ContextMenu.Content>
+                </ContextMenu.Root>
+              </section>
+              <section class="tag-panel" aria-label="Recording tags">
+                <div class="toolbar draft-actions" role="group" aria-label="Draft actions">
+                  <Button variant="ghost" size="icon-sm" onclick={() => history(false)} title="Undo draft change" aria-label="Undo draft change" disabled={!previous.length || !canEdit}><Undo2 size={16}/></Button>
+                  <Button variant="ghost" size="icon-sm" onclick={() => history(true)} title="Redo draft change" aria-label="Redo draft change" disabled={!next.length || !canEdit}><Redo2 size={16}/></Button>
+                  <Button variant="ghost" size="sm" onclick={save} disabled={!canEdit} aria-keyshortcuts="Control+s Meta+s">Save draft</Button>
+                  <Button variant="ghost" size="sm" onclick={reopen} disabled={!hasSaved || !canEdit}>Reopen draft</Button>
+                </div>
+                <div class="recording-editor">
+                  {#snippet recordingField(key: string, label: string)}
+                    {@const override = Object.hasOwn(tags, key)}
+                    {@const value = recordingTag(key) ?? ''}
+                    {@const inputId = `studio-recording-${key}`}
+                    {@const accessibleLabel = `Recording ${label.toLowerCase()}`}
+                    <div class={['tag-field', { edited: override }]}>
+                      <label for={inputId}>{label}</label>
+                      <div class="tag-input">
+                        {#if key === 'comment'}
+                          <textarea id={inputId} class="field-input" data-slot="textarea" aria-label={accessibleLabel} {value}
+                            spellcheck={false} placeholder={override && !value ? 'Cleared' : ''} maxlength="512"
+                            onkeydown={event => recordingTagKeys(event, value)} onblur={event => changeRecordingTag(key, event.currentTarget.value)}
+                            disabled={!canEdit}></textarea>
+                        {:else}
+                          <input id={inputId} class="field-input" data-slot="input" aria-label={accessibleLabel} {value}
+                            spellcheck={false} placeholder={override && !value ? 'Cleared' : ''}
+                            inputmode={key === 'year' || key === 'disc' ? 'numeric' : key === 'bpm' ? 'decimal' : 'text'}
+                            maxlength="512" onkeydown={event => recordingTagKeys(event, value)}
+                            onblur={event => changeRecordingTag(key, event.currentTarget.value)}
+                            {@attach key === 'genre' ? connectGenre : undefined} disabled={!canEdit}/>
+                        {/if}
+                        {#if override}
+                          <button type="button" class="tag-reset" aria-label={`Reset recording ${label.toLowerCase()}`} title="Use source value"
+                            onclick={() => resetRecordingTag(key)} disabled={!canEdit}><RotateCcw size={13}/></button>
+                        {/if}
+                      </div>
+                    </div>
+                  {/snippet}
+                  <div class="recording-fields">
+                    {#each recordingFields as [key, label] (key)}
+                      {@render recordingField(key, label)}
+                    {/each}
+                    <div class="recording-pair">
+                      {@render recordingField('bpm', 'BPM')}
+                      {@render recordingField('key', 'Key')}
+                    </div>
+                  </div>
+                  <div class="studio-cover cover-compact">
+                    <div class="cover-compact-header">
+                      <h3>Cover art</h3>
+                      <DropdownMenu.Root>
+                        <DropdownMenu.Trigger class="cover-edit" aria-label="Edit cover art" title="Edit cover art" disabled={!canEdit}><Pencil size={14}/></DropdownMenu.Trigger>
+                        <DropdownMenu.Content class="studio-cover-menu" align="end">
+                          <DropdownMenu.Item onSelect={browseArtwork}>Replace cover…</DropdownMenu.Item>
+                          {#if artworkPath}
+                            <DropdownMenu.Item onSelect={() => { capture(); artworkPath = ''; }}>Use recording cover</DropdownMenu.Item>
+                          {/if}
+                        </DropdownMenu.Content>
+                      </DropdownMenu.Root>
+                    </div>
+                    {#snippet coverTarget(image: string)}
+                      {#if image}
+                        <button type="button" class="cover-main-image" aria-label="Replace front cover" title={artworkPath ? leaf(artworkPath) : 'Recording cover'} onclick={browseArtwork} disabled={!canEdit}>
+                          <img src={image} alt="Front cover" draggable="false"/>
+                        </button>
+                      {:else}
+                        <button type="button" class="cover-empty-target" aria-label="Choose front cover…" title={artworkPath ? leaf(artworkPath) : undefined} onclick={browseArtwork} disabled={!canEdit}>
+                          <ImagePlus size={20} aria-hidden="true"/>
+                          <span>{artworkPath ? leaf(artworkPath) : 'Choose cover…'}</span>
+                        </button>
+                      {/if}
+                    {/snippet}
+                    {#await coverPreview}
+                      {@render coverTarget('')}
+                    {:then image}
+                      {@render coverTarget(image)}
+                    {/await}
+                  </div>
+                </div>
+              </section>
+            </div>
+          {:else if launch.paths.length > maxFiles}
+            <p class="help">Choose up to {maxFiles} files at a time for conversion.</p>
+          {:else}
+            <ul class="conversion-sources" aria-label="Source files">
+              {#each launch.paths as path (path)}<li title={path}>{leaf(path)}</li>{/each}
+            </ul>
+          {/if}
+        {:else}
+          <AudioSplitOutput {split} {canCopy} {copying} {treated} blocked={working} {sampleRate} bind:saveMode bind:destination bind:backupDirectory
+            sourcePaths={source ? [source.path] : launch.paths} bind:createFolder bind:folderPattern bind:format bind:splitMethod bind:bitrate bind:namePattern
+            review={review ?? (reviewReady && reviewingOutput ? lastReview : null)} {progress} {finished} {backups} {restored} {exportWarnings}
+            previewing={reviewingOutput} {outputAudition} onbrowse={browseOutput} onchange={changeOutput} onaudition={auditionOutput}/>
+        {/if}
+      </div>
+      <footer class="footer">
+        <div class="notice" role="status">{notice}</div>
+        <div class="toolbar">
+          {#if phase === 'export'}
+            <Button variant="secondary" size="sm" onclick={stopExport} disabled={stopping}><CircleStop size={16}/>{stopping ? 'Stopping…' : 'Stop export'}</Button>
+          {:else if phase === 'finished'}
+            {#if finished.length && !restored.length}<Button variant="secondary" size="sm" onclick={revealFinished} disabled={working}>Open output folder</Button>{/if}
+            {#if canRefreshLibrary}<Button variant="secondary" size="sm" onclick={refreshCompleted} disabled={working || refreshingLibrary}>{libraryRemoved ? 'Update library view' : 'Add to open library'}</Button>{/if}
+            {#if canUndoReplacement}<Button variant="secondary" size="sm" onclick={undoReplacement} disabled={working || refreshingLibrary}>Undo replacement</Button>{/if}
+            <Button size="sm" onclick={onclose} disabled={working || refreshingLibrary}>Done</Button>
+          {:else if phase === 'review'}
+            <Button variant="secondary" size="sm" onclick={backToEditing}>Back to editing</Button>
+            {#if review}
+              <Button size="sm" onclick={runExport} disabled={working || previewing || !review.outputs.length}>
+                {saveMode === 'replace' ? 'Replace with' : 'Save'} {review.outputs.length} {split ? (review.outputs.length === 1 ? 'track' : 'tracks') : (review.outputs.length === 1 ? 'file' : 'files')}
+              </Button>
+            {:else if reviewReady}
+              <Button size="sm" onclick={preview} disabled={reviewingOutput}>{reviewingOutput ? 'Checking files…' : 'Review files'}</Button>
+            {/if}
+          {:else}
+            {#if source}<Button variant="secondary" size="sm" onclick={writeCue} disabled={working}>Export CUE…</Button>{/if}
+            <Button size="sm" onclick={reviewAndSave} disabled={loading || !canEnterReview}>Review &amp; save</Button>
+          {/if}
+        </div>
+      </footer>
+    </div>
+    <Dialog.Root open={closeRequested} onOpenChange={open => { if (!open) keepEditing(); }}>
+      <Dialog.Content class="split-close-dialog" role="alertdialog" showCloseButton={false}
+        overlayProps={{ class: 'split-close-overlay' }}
+        onInteractOutside={event => event.preventDefault()}
+        onOpenAutoFocus={event => { event.preventDefault(); document.getElementById('keep-split-editing')?.focus(); }}
+        onCloseAutoFocus={restoreCloseFocus}
+        onEscapeKeydown={event => { event.preventDefault(); event.stopPropagation(); keepEditing(); }}>
+        <Dialog.Title>Save split draft?</Dialog.Title>
+        <Dialog.Description>Keep your cuts and tag changes for later.</Dialog.Description>
+        {#if closeSaveError}<p class="error" role="alert">{closeSaveError}</p>{/if}
+        <footer class="close-actions">
+          <Button id="keep-split-editing" variant="ghost" size="sm" onclick={keepEditing}>Keep editing</Button>
+          <Button variant="destructive" size="sm" onclick={onclose}>Discard changes</Button>
+          <Button size="sm" onclick={saveAndClose}>Save &amp; close</Button>
+        </footer>
+      </Dialog.Content>
+    </Dialog.Root>
+  </Dialog.Content>
+</Dialog.Root>
+
+<style>
+  :global(.audio-split-dialog[data-slot="dialog-content"]) { width:min(1040px,calc(100vw - 24px)); max-width:none; max-height:calc(100dvh - 24px); padding:0; z-index:133; border:1px solid var(--ui-muted-border); border-radius:var(--r-dialog); background:var(--panel); color:var(--text); display:flex; flex-direction:column; box-shadow:0 16px 48px rgb(0 0 0 / .32); }
+  :global(.audio-split-overlay[data-slot="dialog-overlay"]) { z-index:132; }
+  :global(.split-close-overlay[data-slot="dialog-overlay"]) { z-index:134; }
+  :global(.split-close-dialog[data-slot="dialog-content"]) {
+    z-index:135; width:min(420px, calc(100vw - 24px)); max-width:none;
+    padding:var(--sp-5); gap:var(--sp-2); border:1px solid var(--ui-muted-border);
+    background:var(--panel); color:var(--text); border-radius:var(--r-dialog-compact);
+    box-shadow:var(--ui-menu-shadow);
+  }
+  :global(.split-close-dialog [data-slot="dialog-title"]) { font-size:var(--type-dialog-size); font-weight:var(--fw-strong); line-height:var(--lh-tight); }
+  :global(.split-close-dialog [data-slot="dialog-description"]) { color:var(--muted); }
+  .close-actions { display:flex; justify-content:flex-end; flex-wrap:wrap; gap:var(--sp-1) var(--sp-2); margin-block-start:var(--sp-3); }
+  .close-actions :global(button) { border-radius:var(--r-pill); }
+  .close-actions :global(button[data-variant="destructive"]:focus-visible) { outline-color:var(--del); }
+  :global(:is(.studio-import-menu,.studio-waveform-options,.studio-cover-menu)[data-slot="dropdown-menu-content"]) { z-index:134; width:max-content; }
+  :global(body:has([data-audio-studio]) .genre-options[data-slot="popover-content"]) { z-index:137; }
+  :global(.studio-track-menu[data-slot="context-menu-content"]) { z-index:137; }
+  .studio { --studio-inset:var(--sp-4); position:relative; display:grid; min-height:0; grid-template-rows:auto minmax(0,1fr) auto; }
+  .header, .footer { display:flex; align-items:center; gap:var(--sp-3); padding:var(--sp-3) var(--studio-inset); }
+  .header { padding-inline-end:calc(var(--studio-inset) + 28px); }
+  .studio :global(#studio-close) { position:absolute; inset-block-start:var(--sp-2); inset-inline-end:var(--sp-2); z-index:1; border:0; border-radius:var(--r-circle); background:transparent; color:var(--muted); }
+  .studio :global(#studio-close:hover:not(:disabled)) { background:var(--row-hover); color:var(--text); }
+  :global(.close-start) .header { padding-inline-start:calc(var(--studio-inset) + 28px); padding-inline-end:var(--studio-inset); }
+  :global(.close-start) .studio :global(#studio-close) { inset-inline-start:var(--sp-2); inset-inline-end:auto; }
+  .identity { min-width:0; }
+  h2 { margin:0; font-size:var(--type-dialog-size); font-weight:var(--fw-strong); }
+  .identity p { margin:0; color:var(--muted); display:flex; gap:var(--sp-2); align-items:baseline; }
+  .identity p span:first-child { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+  .duration { flex-shrink:0; font-family:var(--font-literal); }
+  .scroll { overflow:auto; overscroll-behavior:contain; margin-inline:var(--studio-inset); padding:var(--studio-inset); min-height:0; display:flex; flex-direction:column; align-items:stretch; gap:var(--sp-4); background:var(--bg); border-radius:var(--r-inset); }
+  .scroll > * { flex-shrink:0; }
+  .scroll :global(button:is([data-slot="button"],[data-slot="dropdown-menu-trigger"])) { background:transparent; border:0; box-shadow:none; }
+  .scroll :global(button:is([data-slot="button"],[data-slot="dropdown-menu-trigger"]):is(:hover,[aria-expanded="true"]):not(:disabled)) { background:var(--row-hover); color:var(--text); }
+  .timeline-area { display:grid; gap:var(--sp-1); }
+  .waveform-hint { margin:0; color:var(--muted); font-size:var(--text-xs); }
+  .waveform-hint:empty { display:none; }
+  .toolbar { display:flex; gap:var(--sp-1); align-items:center; flex-wrap:wrap; }
+  .transport .time { font-family:var(--font-literal); font-variant-numeric:tabular-nums; min-width:8ch; }
+  .transport :global(button.loop-toggle[aria-pressed="true"]) { color:var(--accent-ink); background:var(--sel-tint); }
+  .waveform-options { margin-inline-start:auto; display:flex; align-items:center; gap:var(--sp-1); }
+  .transport :global(button.stereo-toggle[aria-pressed="true"]), .transport :global(button.audio-tools-trigger[data-treated="true"]) {
+    color:var(--accent-ink); background:var(--sel-tint);
+  }
+  .editor { display:grid; gap:var(--sp-2); grid-template-columns:minmax(0,1.12fr) minmax(0,1fr); margin-block-start:calc(-1 * var(--sp-2)); }
+  .track-panel, .tag-panel { min-width:0; display:grid; align-content:start; gap:var(--sp-2); padding:var(--sp-2); background:var(--panel); border-radius:var(--r-inset); }
+  .editor h3 { font-size:var(--text-sm); font-weight:600; margin:0; }
+  .column-top, .draft-actions { display:flex; align-items:center; min-height:28px; }
+  .column-top { justify-content:space-between; padding-inline-start:var(--sp-2); gap:var(--sp-1); }
+  .column-top :global(#studio-import-cuts) { background:var(--bg); border-radius:var(--r-pill); }
+  .column-top :global(#studio-import-cuts:is(:hover,[aria-expanded="true"]):not(:disabled)) { background:var(--row-hover); }
+  .draft-actions { justify-content:flex-end; }
+  .track-list { display:grid; max-height:264px; overflow:auto; padding:2px; gap:2px; }
+  .track { display:grid; grid-template-columns:2ch minmax(0,1fr) 7ch 7ch; gap:var(--sp-2); align-items:center; width:100%; height:auto; min-height:var(--ctl-h); border-radius:var(--r-compact); border:0; padding:6px var(--sp-2); color:var(--text); background:transparent; text-align:left; }
+  .track:nth-child(even):not(:hover,.editing,[aria-pressed="true"]) { background:var(--row-stripe,color-mix(in srgb,var(--text) 3%,var(--bg))); }
+  .track:hover { background:var(--row-hover); }
+  .track:is([aria-pressed=true],.editing) { background:var(--row-sel); }
+  .track[aria-pressed=true]:hover { background:var(--row-sel-hover); }
+  .track:is([aria-pressed=true],.editing) .track-number { color:var(--accent-ink); font-weight:var(--fw-strong); }
+  .track:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+  .track-number, .track-time { font-family:var(--font-literal); font-variant-numeric:tabular-nums; color:var(--muted); }
+  .track-title { display:grid; min-width:0; }
+  .track-title strong, .track-title small { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .track-title strong { font-weight:500; }
+  .track-title small { color:var(--muted); }
+  .track.excluded .track-title strong { text-decoration:line-through; color:var(--muted); }
+  .track-edit-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:var(--sp-1); min-width:0; }
+  .track-edit-fields :global(input) { width:100%; height:28px; min-width:0; padding-inline:var(--sp-2); background:var(--bg); color:var(--text); border:0; border-radius:var(--input-radius); box-shadow:none; }
+  .track-edit-fields :global(input:focus) { outline:2px solid var(--accent); outline-offset:-1px; }
+  .track-edit-fields :global(input::placeholder), .tag-input input::placeholder { color:var(--field-ghost,var(--muted)); opacity:1; }
+  .recording-editor { display:grid; align-items:start; gap:var(--sp-5); }
+  .recording-fields { display:grid; gap:var(--sp-2); }
+  .recording-pair { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:var(--sp-3); }
+  .recording-pair .tag-field + .tag-field { grid-template-columns:3.5ch minmax(0,1fr); }
+  .tag-field { display:grid; grid-template-columns:9ch minmax(0,1fr); align-items:center; gap:var(--sp-1); }
+  .tag-field > label { color:var(--label); font-size:var(--text-xs); line-height:var(--lh-snug); }
+  .tag-field.edited > label { color:var(--accent-ink); }
+  .tag-input { position:relative; min-width:0; }
+  .tag-input .field-input { display:block; width:100%; font-family:var(--font-value); background:var(--bg); border:0; box-shadow:none; }
+  .tag-input textarea { min-height:74px; padding:var(--sp-2); border-radius:var(--input-radius); color:var(--text); resize:vertical; }
+  .tag-input textarea:focus { outline:2px solid var(--accent); outline-offset:0; }
+  .tag-field.edited .field-input { padding-inline-end:26px; }
+  .tag-input:has(:global(.genre-picker-host)) input { padding-inline-end:28px; }
+  .tag-field.edited .tag-input:has(:global(.genre-picker-host)) input { padding-inline-end:51px; }
+  .tag-reset, .tag-input :global(button.genre-toggle) { position:absolute; inset:0 0 0 auto; display:grid; place-items:center; width:23px; height:32px; min-height:0; padding:0; background:transparent; border:0; border-radius:var(--r-control); color:var(--muted); }
+  .tag-input:has(:global(.genre-picker-host)) .tag-reset { right:24px; }
+  .tag-reset { z-index:1; opacity:0; pointer-events:none; }
+  .tag-input:is(:hover,:focus-within) .tag-reset { opacity:1; pointer-events:auto; }
+  .tag-reset:hover, .tag-input :global(button.genre-toggle:hover) { color:var(--text); background:var(--row-hover); }
+  .tag-input :global(.genre-combobox input:focus) { outline:none; box-shadow:none; }
+  .studio-cover .cover-compact-header { min-height:28px; margin-bottom:var(--sp-2); gap:var(--sp-1); }
+  .studio-cover h3 { white-space:nowrap; }
+  .studio-cover :global(button.cover-edit) { flex:0 0 24px; width:24px; min-width:24px; height:24px; min-height:24px; display:grid; place-items:center; padding:0; border:0; background:transparent; color:var(--muted); }
+  .studio-cover :global(button.cover-edit:is(:hover,[data-state="open"])) { background:var(--row-hover); color:var(--text); }
+  .studio-cover button.cover-empty-target, .studio-cover button.cover-main-image { display:grid; place-content:center; justify-items:center; gap:var(--sp-1); width:min(100%,200px); height:auto; margin-inline:auto; padding:var(--sp-2); border-radius:var(--r-media); background:transparent; color:var(--muted); text-align:center; font-size:var(--text-xs); line-height:1.3; }
+  .studio-cover button.cover-empty-target { min-height:144px; border:1px dashed var(--border); }
+  .studio-cover button.cover-main-image { border:0; padding:0; overflow:hidden; }
+  .studio-cover button.cover-main-image img { width:auto; max-width:100%; max-height:200px; object-fit:contain; }
+  .studio-cover button.cover-empty-target:hover:not(:disabled) { background:var(--sel-tint); border-color:var(--accent); }
+  .studio-cover button span { width:100%; overflow:hidden; text-overflow:ellipsis; }
+  .cut-time-edit { display:flex; align-items:center; gap:var(--sp-2); color:var(--muted); font-size:var(--text-xs); }
+  .cut-time-edit input { width:17ch; font-family:var(--font-literal); background:var(--panel); }
+  input { min-width:0; height:32px; padding:0 var(--sp-2); border-radius:var(--input-radius); border:0; color:var(--text); background:var(--bg); }
+  input:focus { outline:2px solid var(--accent); outline-offset:0; }
+  .empty { min-height:190px; display:grid; place-content:center; place-items:center; gap:var(--sp-2); color:var(--muted); text-align:center; }
+  .opening { display:grid; gap:var(--sp-2); }
+  .opening p { display:flex; gap:var(--sp-2); align-items:center; color:var(--muted); margin:0; }
+  .opening progress { width:100%; accent-color:var(--accent); }
+  .empty p, .help, .error { margin:0; }
+  .help { padding:var(--sp-2) var(--sp-3); background:var(--panel); border-radius:var(--r-control); color:var(--text); }
+  .notice:empty { display:none; }
+  .notice { color:var(--muted); overflow-wrap:anywhere; min-width:0; flex:1 1 200px; font-size:var(--text-xs); }
+  .error { padding:var(--sp-2) var(--sp-3); border-inline-start:2px solid var(--danger); color:var(--text); background:var(--bg); border-radius:var(--r-control); }
+  .conversion-sources { margin:0; padding:var(--sp-2) var(--sp-4); max-height:180px; overflow:auto; background:var(--bg); border-radius:var(--r-inset); }
+  .conversion-sources li { padding:var(--sp-1); overflow-wrap:anywhere; }
+  .footer { justify-content:space-between; flex-wrap:wrap; }
+  .footer .toolbar { margin-inline-start:auto; justify-content:flex-end; }
+  .footer :global(button[data-slot="button"]) { border-radius:var(--r-pill); }
+  .footer :global(button[data-variant="secondary"]) { background:var(--bg); }
+  .footer :global(button[data-variant="secondary"]:hover:not(:disabled)) { background:var(--row-hover); }
+  @media (max-width:700px) { .studio { --studio-inset:var(--sp-3); } .editor { grid-template-columns:minmax(0,1fr); } }
+  @media (max-width:450px) { .track { grid-template-columns:2ch minmax(0,1fr) 6ch 6ch; gap:var(--sp-1); } }
+  @media (prefers-reduced-motion: reduce) { :global(.audio-split-dialog[data-slot="dialog-content"]) { animation:none; } }
+</style>
