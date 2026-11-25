@@ -229,7 +229,10 @@ impl Iterator for Speaker {
                 }
             }
         }
-        self.channel = (self.channel + 1) % self.channels.get();
+        self.channel += 1;
+        if self.channel == self.channels.get() {
+            self.channel = 0;
+        }
         if self.silent {
             return Some(0.0);
         }
