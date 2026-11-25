@@ -25,7 +25,9 @@ mod fixed;
 mod mailbox;
 mod mp4;
 mod router;
+mod studio;
 pub use mailbox::PlayerError;
+pub use studio::{StudioAudition, StudioPreviewState, StudioStatus};
 pub mod tempo;
 
 use controlled::{Control, Controlled, Ticket};
@@ -83,6 +85,7 @@ enum Cmd {
     Stop,
     Seek(f64),
     SetVolume(f32),
+    Studio(studio::Command),
 }
 
 /// Handle to the audio thread. `Send + Sync`, so it lives directly in Tauri's
@@ -90,6 +93,7 @@ enum Cmd {
 pub struct Player {
     tx: mailbox::Sender,
     status: Arc<Mutex<PlayerStatus>>,
+    studio_status: studio::Shared,
 }
 
 impl Player {
@@ -97,8 +101,16 @@ impl Player {
         let (tx, rx) = mailbox::channel();
         let status = Arc::new(Mutex::new(PlayerStatus::default()));
         let status_for_thread = Arc::clone(&status);
-        std::thread::spawn(move || audio_thread(rx, status_for_thread, open_output));
-        Self { tx, status }
+        let studio_status = studio::Shared::default();
+        let studio_for_thread = studio_status.clone();
+        std::thread::spawn(move || {
+            audio_thread(rx, status_for_thread, studio_for_thread, open_output)
+        });
+        Self {
+            tx,
+            status,
+            studio_status,
+        }
     }
 
     pub fn play(&self, path: PathBuf) -> Result<(), PlayerError> {
@@ -128,6 +140,90 @@ impl Player {
             .unwrap_or_else(|p| p.into_inner())
             .clone()
     }
+
+    pub fn studio_play(
+        &self,
+        owner: String,
+        file: std::fs::File,
+        start: Duration,
+        end: Duration,
+        audition: Option<StudioAudition>,
+        sample_rate: u32,
+    ) -> Result<(), PlayerError> {
+        self.studio_play_request(
+            owner,
+            0,
+            StudioPlayback {
+                file,
+                start,
+                end,
+                audition,
+                sample_rate,
+                seek_index: None,
+            },
+        )
+    }
+
+    pub fn studio_play_request(
+        &self,
+        owner: String,
+        sequence: u64,
+        request: StudioPlayback,
+    ) -> Result<(), PlayerError> {
+        self.tx.send(Cmd::Studio(studio::Command::Play {
+            owner,
+            sequence,
+            file: request.file,
+            start: request.start,
+            end: request.end,
+            audition: request.audition,
+            sample_rate: request.sample_rate,
+            seek_index: request.seek_index,
+        }))
+    }
+
+    pub fn studio_seek(&self, owner: String, position: Duration) -> Result<(), PlayerError> {
+        self.studio_seek_sequenced(owner, 0, position)
+    }
+
+    pub fn studio_seek_sequenced(
+        &self,
+        owner: String,
+        sequence: u64,
+        position: Duration,
+    ) -> Result<(), PlayerError> {
+        self.tx.send(Cmd::Studio(studio::Command::Seek {
+            owner,
+            sequence,
+            position,
+        }))
+    }
+
+    pub fn studio_pause(&self, owner: String) -> Result<(), PlayerError> {
+        self.studio_pause_sequenced(owner, 0)
+    }
+
+    pub fn studio_pause_sequenced(&self, owner: String, sequence: u64) -> Result<(), PlayerError> {
+        self.tx
+            .send(Cmd::Studio(studio::Command::Pause { owner, sequence }))
+    }
+
+    pub fn studio_close(&self, owner: String) -> Result<(), PlayerError> {
+        self.tx.send(Cmd::Studio(studio::Command::Close { owner }))
+    }
+
+    pub fn studio_status(&self, owner: &str) -> StudioStatus {
+        self.studio_status.for_owner(owner)
+    }
+}
+
+pub struct StudioPlayback {
+    pub file: std::fs::File,
+    pub start: Duration,
+    pub end: Duration,
+    pub audition: Option<StudioAudition>,
+    pub sample_rate: u32,
+    pub seek_index: Option<std::sync::Arc<tagrex_audio_workbench::SeekIndex>>,
 }
 
 impl Default for Player {
@@ -169,6 +265,10 @@ trait Output {
     type Sink: Sink;
 
     fn sink(&self, volume: f32) -> Self::Sink;
+
+    fn studio_router(&self) -> Option<router::Handle> {
+        None
+    }
 }
 
 /// The sink operations the playback loop uses, so the loop does not depend on
@@ -238,6 +338,7 @@ impl Sink for DevicePlayer {
 struct Device {
     _output: MixerDeviceSink,
     router: router::Handle,
+    studio_router: std::cell::OnceCell<router::Handle>,
 }
 
 impl DevicePlayer {
@@ -258,6 +359,19 @@ impl Output for Device {
     fn sink(&self, volume: f32) -> DevicePlayer {
         DevicePlayer::new(&self.router, volume)
     }
+
+    fn studio_router(&self) -> Option<router::Handle> {
+        Some(
+            self.studio_router
+                .get_or_init(|| {
+                    let (channels, rate) = self.router.format();
+                    let (handle, source) = router::Router::new(channels, rate);
+                    self._output.mixer().add(source);
+                    handle
+                })
+                .clone(),
+        )
+    }
 }
 
 /// The playback loop.
@@ -267,8 +381,12 @@ impl Output for Device {
 /// developer machine the real opener would find the sound card and prove
 /// nothing about the no-device path — and, through [`Output`], with a sink that
 /// needs no sound card at all.
-fn audio_thread<O, F>(rx: mailbox::Receiver, status: Arc<Mutex<PlayerStatus>>, mut open: F)
-where
+fn audio_thread<O, F>(
+    rx: mailbox::Receiver,
+    status: Arc<Mutex<PlayerStatus>>,
+    studio_status: studio::Shared,
+    mut open: F,
+) where
     O: Output,
     F: FnMut() -> Result<O, DeviceSinkError>,
 {
@@ -298,6 +416,7 @@ where
     // Whether the decoder refused the last seek on the current track (#190).
     let mut seek_refused = false;
     let mut pending_seek: Option<PendingSeek> = None;
+    let mut studio = studio::Actor::new(studio_status);
     // What the UI was last told. Compared before anything is built, so a tick
     // that changes nothing costs no allocation and takes no lock.
     let mut published = StatusKey::default();
@@ -323,14 +442,31 @@ where
         // nothing queued there is nothing to advance and nothing to report, so
         // it parks until a command arrives instead of ticking an idle player
         // five times a second.
-        let wait = if pending_seek.is_some() {
+        let wait = if pending_seek.is_some() || studio.needs_tick() {
             Duration::from_millis(10)
         } else if queue.is_empty() {
             IDLE_WAIT
         } else {
             PLAYING_TICK
         };
-        match rx.recv_timeout(wait) {
+        let received = rx.recv_timeout(wait);
+        if let Ok(cmd) = &received {
+            // The main controls belong to the user even while Studio is
+            // open. A later Studio close cannot revive older playback.
+            if matches!(
+                cmd,
+                Cmd::Play(_) | Cmd::Pause | Cmd::Resume | Cmd::Stop | Cmd::Seek(_)
+            ) && studio.revoke()
+                && matches!(cmd, Cmd::Seek(_))
+                && !paused
+            {
+                if let Some(sink) = sink.as_ref() {
+                    sink.play();
+                }
+                clock.resume();
+            }
+        }
+        match received {
             Ok(cmd) => match cmd {
                 Cmd::Play(path) => {
                     if let Some(pending) = pending_seek.take() {
@@ -411,6 +547,7 @@ where
                     if let Some(sink) = sink.as_ref() {
                         sink.set_volume(volume);
                     }
+                    studio.set_volume(volume);
                 }
                 Cmd::Seek(secs) => {
                     if !queue.is_empty() {
@@ -460,6 +597,28 @@ where
                         }
                     }
                 }
+                Cmd::Studio(command) => {
+                    let owned_before = studio.owns_output();
+                    if command.requests_play() && studio.accepts(&command) && device.is_none() {
+                        match open() {
+                            Ok(fresh) => device = Some(fresh),
+                            Err(err) => eprintln!("audio: Studio output is unavailable: {err}"),
+                        }
+                    }
+                    studio.handle(command, device.as_ref(), volume);
+                    if !owned_before && studio.owns_output() && !queue.is_empty() && !paused {
+                        if let Some(sink) = sink.as_ref() {
+                            sink.pause();
+                        }
+                        clock.pause();
+                    }
+                    if owned_before && !studio.owns_output() && !paused {
+                        if let Some(sink) = sink.as_ref() {
+                            sink.play();
+                        }
+                        clock.resume();
+                    }
+                }
             },
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
@@ -477,7 +636,14 @@ where
                     Ok((target, acknowledged)) => {
                         // Paused seeks stay frozen; running seeks include the
                         // small acknowledgement-to-publication interval.
-                        clock.seek_at(target, if paused { Instant::now() } else { acknowledged });
+                        clock.seek_at(
+                            target,
+                            if paused || studio.owns_output() {
+                                Instant::now()
+                            } else {
+                                acknowledged
+                            },
+                        );
                         pending.ticket.accept();
                         seek_refused = false;
                     }
@@ -496,13 +662,22 @@ where
             }
         }
 
+        let owned_before = studio.owns_output();
+        studio.tick();
+        if owned_before && !studio.owns_output() && !paused {
+            if let Some(sink) = sink.as_ref() {
+                sink.play();
+            }
+            clock.resume();
+        }
+
         // The sink drains sources as they finish. When it holds fewer than our
         // queue, a track boundary was crossed: drop the finished front and
         // restart the clock for the new current track.
         while queue.len() > sink.as_ref().map_or(0, Sink::len) && !queue.is_empty() {
             queue.pop_front();
             clock.start();
-            if paused {
+            if paused || studio.owns_output() {
                 clock.pause();
             }
             seek_refused = false; // a new track, and a new answer on seeking
@@ -519,7 +694,7 @@ where
             StatusKey::of(
                 &queue,
                 &clock,
-                paused,
+                paused || studio.owns_output() && !queue.is_empty(),
                 seek_refused,
                 device.is_none(),
                 pending_seek.is_some(),
@@ -546,6 +721,7 @@ fn open_output() -> Result<Device, DeviceSinkError> {
     Ok(Device {
         _output: output,
         router,
+        studio_router: std::cell::OnceCell::new(),
     })
 }
 
@@ -1349,10 +1525,15 @@ mod test_support {
                 if watching {
                     allocations::watch_current_thread();
                 }
-                audio_thread(rx, status_for_thread, move || {
-                    attempts_for_thread.fetch_add(1, Ordering::SeqCst);
-                    open()
-                });
+                audio_thread(
+                    rx,
+                    status_for_thread,
+                    studio::Shared::default(),
+                    move || {
+                        attempts_for_thread.fetch_add(1, Ordering::SeqCst);
+                        open()
+                    },
+                );
                 let _ = done_tx.send(());
             });
             Self {
@@ -2231,7 +2412,9 @@ mod real_sink_without_hardware {
         let status = Arc::new(Mutex::new(PlayerStatus::default()));
         let shared = status.clone();
         let actor = std::thread::spawn(move || {
-            audio_thread(rx, shared, || Ok(OutputHarness(handle.clone())))
+            audio_thread(rx, shared, studio::Shared::default(), || {
+                Ok(OutputHarness(handle.clone()))
+            })
         });
         (tx, status, router, actor)
     }
@@ -2337,7 +2520,10 @@ mod real_sink_without_hardware {
         }
         raw.sort_by(f64::total_cmp);
         controlled.sort_by(f64::total_cmp);
-        println!("12s synthetic AIFF, seven warm samples, decode + 48kHz stereo conversion + sample checksum; real converter median {:.3}ms max {:.3}ms; controlled median {:.3}ms max {:.3}ms", raw[3], raw[6], controlled[3], controlled[6]);
+        println!(
+            "12s synthetic AIFF, seven warm samples, decode + 48kHz stereo conversion + sample checksum; real converter median {:.3}ms max {:.3}ms; controlled median {:.3}ms max {:.3}ms",
+            raw[3], raw[6], controlled[3], controlled[6]
+        );
         clean_up(&track);
     }
     #[test]
@@ -2414,7 +2600,9 @@ mod real_sink_without_hardware {
                 "{extension} paused seek failed: {:?}",
                 paused_ticket.poll()
             );
-            println!("{extension}: initial native span {first_span:?}; midstream ack after {consumed} output samples; paused ack after {paused_consumed}");
+            println!(
+                "{extension}: initial native span {first_span:?}; midstream ack after {consumed} output samples; paused ack after {paused_consumed}"
+            );
         }
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2545,7 +2733,9 @@ mod actor_seek_ownership {
         let status = Arc::new(Mutex::new(PlayerStatus::default()));
         let out = output.clone();
         let state = status.clone();
-        let actor = std::thread::spawn(move || audio_thread(rx, state, || Ok(out.clone())));
+        let actor = std::thread::spawn(move || {
+            audio_thread(rx, state, studio::Shared::default(), || Ok(out.clone()))
+        });
         let track = playable_file(name, 10);
         tx.send(Cmd::Play(track.clone())).unwrap();
         wait_until("actor to install the controlled source", || {

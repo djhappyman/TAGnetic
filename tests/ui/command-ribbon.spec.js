@@ -20,8 +20,8 @@ async function picker(page, path) {
 const paths = page => page.evaluate(() => window.tagrex.tracks.map(t => t.path));
 const selected = page => page.evaluate(() => [...window.tagrex.selection]);
 
-test('eighteen commands have eight group dividers and selection follows the filtered model', async ({ page }) => {
-  await expect(page.locator('.command-ribbon button.ribbon-command')).toHaveCount(18);
+test('twenty commands have eight group dividers and selection follows the filtered model', async ({ page }) => {
+  await expect(page.locator('.command-ribbon button.ribbon-command')).toHaveCount(20);
   await expect(page.locator('.ribbon-divider')).toHaveCount(8);
   await expect(page.locator('#more-btn')).toBeHidden();
   await page.locator('#ribbon-clear-selection').click();
@@ -43,7 +43,7 @@ test('file commands use one Tab stop with arrow navigation and native activation
   const open = ribbon.locator('#ribbon-open-folder');
   const add = ribbon.locator('#ribbon-add-folder');
   const selectAll = ribbon.locator('#ribbon-select-all');
-  const artworkSettings = ribbon.locator('#ribbon-artwork-options');
+  const convertAudio = ribbon.getByRole('button', { name: 'Convert audio' });
 
   await expect(ribbon.locator('button.ribbon-command[tabindex="0"]')).toHaveCount(1);
   await expect(open).toHaveAttribute('tabindex', '0');
@@ -53,7 +53,7 @@ test('file commands use one Tab stop with arrow navigation and native activation
   await page.keyboard.press('ArrowRight');
   await expect(selectAll).toBeFocused(); // Undo and Redo are unavailable.
   await page.keyboard.press('End');
-  await expect(artworkSettings).toBeFocused(); // Lyrics is unavailable.
+  await expect(convertAudio).toBeFocused(); // Lyrics is unavailable.
   await page.keyboard.press('ArrowRight');
   await expect(open).toBeFocused();
   await page.keyboard.press('Home');
@@ -70,6 +70,21 @@ test('file commands use one Tab stop with arrow navigation and native activation
   await selectAll.focus();
   await page.keyboard.press('Space');
   expect(new Set(await selected(page))).toEqual(new Set(await paths(page)));
+});
+
+test('audio commands and their divider share the desktop command row', async ({ page }) => {
+  await page.setViewportSize({ width: 1120, height: 800 });
+  await page.locator('#group-btn').click();
+  await page.locator('#group-menu [data-group="album"]').click();
+  await expect(page.locator('#toggle-groups')).toBeVisible();
+  const ribbon = page.getByRole('toolbar', { name: 'File commands' });
+  const audio = ribbon.getByRole('group', { name: 'Audio', exact: true });
+  await expect(audio.getByRole('button', { name: 'Split recording' })).toBeVisible();
+  await expect(audio.getByRole('button', { name: 'Convert audio' })).toBeVisible();
+  await expect(audio.locator('.ribbon-divider')).toBeVisible();
+  await expect.poll(() => ribbon.locator('button.ribbon-command:visible').evaluateAll(buttons => {
+    return new Set(buttons.map(button => button.getBoundingClientRect().top)).size;
+  })).toBe(1);
 });
 
 test('Open uses a directory chooser; cancelling Open or Add leaves the list intact', async ({ page }) => {
@@ -128,7 +143,7 @@ for (const mode of ['light', 'dark']) test(`ribbon fits a narrow ${mode} window`
 
 
 test('every ribbon command has a themed hover hint, including disabled commands', async ({ page }) => {
-  for (const id of ['ribbon-open-folder', 'ribbon-add-folder', 'undo', 'ribbon-select-all', 'ribbon-clear-selection', 'ribbon-move-down', 'ribbon-move-up', 'group-btn', 'ribbon-remove-tags', 'ribbon-rename-folder', 'ribbon-format-values', 'ribbon-autonumber', 'ribbon-import-artwork', 'ribbon-export-artwork', 'ribbon-artwork-options', 'ribbon-lyrics']) {
+  for (const id of ['ribbon-open-folder', 'ribbon-add-folder', 'undo', 'ribbon-select-all', 'ribbon-clear-selection', 'ribbon-move-down', 'ribbon-move-up', 'group-btn', 'ribbon-remove-tags', 'ribbon-rename-folder', 'ribbon-format-values', 'ribbon-autonumber', 'ribbon-import-artwork', 'ribbon-export-artwork', 'ribbon-artwork-options', 'ribbon-audio-split', 'ribbon-audio-convert', 'ribbon-lyrics']) {
     const button = page.locator('#' + id);
     await button.hover();
     const text = await button.getAttribute('aria-description');

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { AudioLines, Scissors } from '@lucide/svelte';
   import PatternInput from './PatternInput.svelte';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
@@ -40,6 +41,9 @@
       <ControllerMenuItem cmd="bpm"><svg class="ico"><use href="#i-metronome"/></svg><span data-i18n="toolbar.detectBpm">Detect BPM</span><span class="ctx-key" data-action="detectBpm"></span></ControllerMenuItem>
       <ControllerMenuItem cmd="clear"><svg class="ico"><use href="#i-eraser"/></svg><span data-i18n="editor.clearTags">Clear tags</span><span class="ctx-key" data-action="clearTags"></span></ControllerMenuItem>
       <ControllerMenuItem cmd="formats"><svg class="ico"><use href="#i-tag"/></svg><span data-i18n="staging.tagFormats">Tag formats…</span></ControllerMenuItem>
+      <ContextMenu.Separator class="ctx-sep" />
+      <ControllerMenuItem cmd="split-audio"><Scissors class="ico" size={16} strokeWidth={1.7}/><span>Split recording…</span></ControllerMenuItem>
+      <ControllerMenuItem cmd="convert-audio"><AudioLines class="ico" size={16} strokeWidth={1.7}/><span>Convert audio…</span></ControllerMenuItem>
       <ContextMenu.Separator class="ctx-sep" />
       <ControllerMenuItem cmd="hide"><svg class="ico"><use href="#i-list-remove"/></svg><span class="ctx-label" data-i18n="ctx.removeFromList">Remove from the list</span></ControllerMenuItem>
       <ContextMenu.Separator class="ctx-sep" />

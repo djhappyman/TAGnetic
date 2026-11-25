@@ -308,7 +308,7 @@ test('provider actions mount real components while artwork tiles and native trac
   await expect(card.locator('.release-import')).toHaveAttribute('data-slot', 'button');
   await expect(card.locator('.release-cover')).not.toHaveAttribute('data-component-element');
   await card.locator('.release-head').click();
-  await expect(card).toHaveAttribute('aria-expanded', 'true');
+  await expect(card.locator('.release-head')).toHaveAttribute('aria-expanded', 'true');
   await expect(card.locator('[data-act="automatch"], .tracklist-actions, .tk-fit, .tk-delta')).toHaveCount(0);
   await expect(card.locator('.tk-head .tk-lead')).toHaveCSS('box-shadow', 'none');
   const checkbox = card.locator('tbody [role="checkbox"]').first();

@@ -2,6 +2,9 @@
 //! destructive public-name operation first captures into a private directory.
 //! Restart recovery is a separate protocol; these held proofs are process-local.
 use super::Directory;
+
+pub(crate) mod audio_replace;
+pub(crate) mod audio_set;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
@@ -283,6 +286,11 @@ fn windows_witness(file: &File) -> io::Result<WindowsWitness> {
         Ok((native, basic.ChangeTime, basic.FileAttributes))
     }
 }
+#[cfg(windows)]
+pub(crate) fn windows_change_time(file: &File) -> io::Result<i64> {
+    windows_witness(file).map(|(_, change, _)| change)
+}
+
 pub(super) fn same_handles(
     left: &same_file::Handle,
     right: &same_file::Handle,
@@ -681,11 +689,21 @@ impl Directory {
         Ok(file)
     }
     fn child(&self, name: &OsStr, created: &mut bool) -> io::Result<Self> {
+        #[cfg(windows)]
+        let _guard = self.operation_guard()?;
+        #[cfg(unix)]
+        rustix::fs::mkdirat(&self.fd, name, rustix::fs::Mode::from_bits_truncate(0o700))?;
+        #[cfg(windows)]
+        std::fs::create_dir(self.path.join(name))?;
+        #[cfg(not(any(unix, windows)))]
+        return Err(io::ErrorKind::Unsupported.into());
+        *created = true;
+        self.open_child_dir(name)
+    }
+    fn open_child_dir(&self, name: &OsStr) -> io::Result<Self> {
         #[cfg(unix)]
         {
-            use rustix::fs::{mkdirat, openat, Mode, OFlags};
-            mkdirat(&self.fd, name, Mode::from_bits_truncate(0o700))?;
-            *created = true;
+            use rustix::fs::{openat, Mode, OFlags};
             let fd = openat(
                 &self.fd,
                 name,
@@ -701,8 +719,7 @@ impl Directory {
         {
             use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
             let path = self.path.join(name);
-            std::fs::create_dir(&path)?;
-            *created = true;
+            let _guard = self.operation_guard()?;
             let file = std::fs::OpenOptions::new()
                 .read(true)
                 .share_mode(0x1 | 0x2 | 0x4)

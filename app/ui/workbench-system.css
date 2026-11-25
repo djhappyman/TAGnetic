@@ -4,10 +4,12 @@
   --workbench-chrome: var(--panel);
   --workbench-surface: var(--panel);
   --workbench-seam: color-mix(in srgb,var(--border) 35%,transparent);
+  --workbench-row-tint: 18%;
+  --workbench-row-hover-tint: 26%;
 }
 :root[data-palette] {
-  --row-sel:color-mix(in srgb,var(--accent) 18%,var(--bg));
-  --row-sel-hover:color-mix(in srgb,var(--accent) 26%,var(--bg));
+  --row-sel:color-mix(in srgb,var(--accent) var(--workbench-row-tint),var(--bg));
+  --row-sel-hover:color-mix(in srgb,var(--accent) var(--workbench-row-hover-tint),var(--bg));
 }
 body .topbar { padding:var(--sp-3) var(--sp-4) var(--sp-2); gap:var(--sp-2); background:var(--panel); }
 body .topbar-main { display:grid; grid-template-columns:auto auto minmax(180px,1fr) auto; align-items:center; gap:var(--sp-3); min-height:40px; }
@@ -85,6 +87,48 @@ body #tracks .track-artwork, body #tracks .track-artwork .ico { width:14px; heig
 body #tracks .track-artwork[data-cover-state='missing'] { color:var(--muted); opacity:.25; }
 body #tracks .track-artwork[data-cover-state='unknown'] { color:var(--muted); opacity:.45; }
 body #tracks :is(th,td).artwork-col { border:0; }
+/* Keep split rows at their content height. The recording inspector sets the
+   desktop panel height, and the track list scrolls within the remaining space. */
+[data-audio-studio] .editor > .track-panel { grid-template-rows:auto minmax(0,1fr); align-content:stretch; }
+[data-audio-studio] .track-panel > .track-list {
+  contain:size;
+  min-height:0;
+  max-height:none;
+  grid-auto-rows:max-content;
+  align-content:start;
+  gap:0;
+  padding:0;
+  border-radius:var(--r-compact);
+}
+[data-audio-studio] .track-panel .track-list > .track {
+  --split-row-base:var(--panel);
+  border-radius:0;
+  background:var(--split-row-base);
+}
+[data-audio-studio] .track-panel .track-list > .track:nth-child(even) { --split-row-base:var(--bg); }
+[data-audio-studio] .track-panel .track-list > .track:hover { background:var(--row-hover); }
+[data-audio-studio] .track-panel .track-list > .track:is([aria-pressed="true"],.editing) {
+  background:color-mix(in srgb,var(--accent) var(--workbench-row-tint),var(--split-row-base));
+}
+[data-audio-studio] .track-panel .track-list > .track[aria-pressed="true"]:hover {
+  background:color-mix(in srgb,var(--accent) var(--workbench-row-hover-tint),var(--split-row-base));
+}
+/* An in-flight seek belongs to the transport and must not push the editor down. */
+[data-audio-studio] .timeline-area { position:relative; }
+[data-audio-studio] .timeline-area > .waveform-hint {
+  position:absolute;
+  inset-block-start:0;
+  inset-inline-end:calc(28px + var(--sp-1));
+  max-inline-size:25%;
+  min-block-size:28px;
+  align-content:center;
+  line-height:1;
+  text-align:end;
+  pointer-events:none;
+}
+@media (max-width:700px) {
+  [data-audio-studio] .track-panel > .track-list { contain:none; max-height:min(44dvh,360px); }
+}
 /* Inspector and filter geometry live in their component owners. */
 body .dock-module-chrome #presets-edit { background:transparent; border-color:transparent; color:var(--muted); }
 @property --footer-aside-width { syntax:'<length>'; inherits:false; initial-value:260px; }
@@ -261,14 +305,16 @@ body .ribbon-strip .command-ribbon { width:100%; }
 /* Comfortable controls use the available strip, with only a modest expansion
    after folding the sidebar. Compression is continuous rather than two jumps. */
 body .ribbon-strip .command-ribbon {
-  --ribbon-hit:clamp(28px,calc(100cqw / 20),32px);
+  --ribbon-hit:clamp(28px,calc((100cqw - 104px) / 20),32px);
   --ribbon-glyph:clamp(17px,calc(100cqw / 36),19px);
-  max-width:760px; justify-content:space-between; gap:clamp(3px,calc(100cqw / 24 - 20px),8px);
+  --ribbon-gap:3px;
+  max-width:760px; justify-content:space-between; gap:6px var(--ribbon-gap);
 }
+body .ribbon-strip .ribbon-audio > .ribbon-divider { margin-inline-end:var(--ribbon-gap); }
 body .ribbon-strip .command-ribbon button.ribbon-command[data-slot='button'] { width:var(--ribbon-hit); padding:5px; }
 body .ribbon-strip .command-ribbon button.ribbon-menu-trigger[data-slot='button'] { width:calc(var(--ribbon-hit) + 8px); }
 body .ribbon-strip .command-ribbon .ribbon-command .ico { width:var(--ribbon-glyph); height:var(--ribbon-glyph); }
-@container ribbon (max-width:600px) { body .command-ribbon .ribbon-group { gap:0; } }
+@container ribbon (max-width:700px) { body .command-ribbon .ribbon-group { gap:0; } }
 @container ribbon (max-width:480px) { body .ribbon-strip .command-ribbon { justify-content:flex-start; } }
 
 /* Header cells stay above edited data cells on both scroll axes. Pinned file,

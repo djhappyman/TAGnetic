@@ -36,11 +36,8 @@
   --del: #dc2626;
   --row-hover: #eef1f5;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
-  /* The tooltip is the one surface that inverts: a dark bubble over a light UI
-     (#230). In dark it lifts off the background instead, because a near-black
-     bubble on a near-black window is not a bubble. */
-  --tip-bg: #1a1d23;
-  --tip-text: #ffffff;
+  --tip-bg: var(--panel);
+  --tip-text: var(--text);
 
   /* ---- design-system tokens (from the Claude Design pass, #76) ----
      Colour stays above; the rest is theme-independent and lives here once.
@@ -203,8 +200,6 @@
     --del: #f87171;
     --row-hover: #242832;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
-    --tip-bg: #343a45;
-    --tip-text: #e6e8ec;
     /* Dark needs a much stronger row-selection tint than light to read on the
        near-black table. */
     --row-sel: color-mix(in srgb, var(--accent) 46%, var(--bg));
@@ -228,8 +223,6 @@
   --del: #f87171;
   --row-hover: #242832;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --tip-bg: #343a45;
-  --tip-text: #e6e8ec;
   /* Dark needs a much stronger row-selection tint than light to read on the
      near-black table. */
   --row-sel: color-mix(in srgb, var(--accent) 46%, var(--bg));
@@ -707,9 +700,7 @@ button.io > .ico,
   height: 14px;
 }
 
-/* The app's own tooltip (#230). Positioned by tooltip.js; dark in both themes
-   the way a tooltip is everywhere, small, and never wide enough to read as a
-   panel — one line of what a glyph would have said in words. */
+/* Tooltip text wraps without exceeding the available width. */
 .tooltip {
   position: fixed;
   z-index: 200;
@@ -1048,8 +1039,8 @@ body.panel-collapsed .col-splitter {
   pointer-events: none;
   padding: 3px 8px;
   font-size: var(--text-xs);
-  color: var(--text);
-  background: var(--bg);
+  color: var(--tip-text);
+  background: var(--tip-bg);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.16);

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/audio-workbench",
     "crates/core",
     "crates/commands",
     "crates/player",

@@ -305,6 +305,10 @@ type PublicationHook = Box<dyn FnMut(&Path)>;
 thread_local! { static PUBLICATION_HOOK: std::cell::RefCell<Option<PublicationHook>> = const { std::cell::RefCell::new(None) }; }
 
 mod ownership;
+pub(crate) use ownership::audio_replace::{AudioReplacement, CompletedReplacement};
+pub use ownership::audio_set::{write_new_cue, AudioDestination, AudioPublishedFolder, AudioSet};
+#[cfg(windows)]
+pub(crate) use ownership::windows_change_time;
 pub use ownership::OutputError;
 
 /// Stage and validate the entire batch before publication. Ownership failures

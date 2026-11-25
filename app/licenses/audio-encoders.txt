@@ -1,0 +1,7 @@
+TAGnetic uses the following Rust audio encoders under the Apache License 2.0:
+
+- flacenc (https://github.com/yotarok/flacenc-rs)
+- rusty_mp3 (https://github.com/Remade-With-Rust/remade_ffmpeg_rs)
+
+See Apache-2.0.txt for the licence text. FFmpeg and reference FLAC are
+development verification tools and are separate from the installed app.
