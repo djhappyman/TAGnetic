@@ -267,6 +267,8 @@ test('mounted shadcn editor controls preserve legacy values, content and single 
   await title.fill('A newly staged title');
   await expect(title).toHaveClass(/dirty/);
   const lock = page.locator('#fields-body .fe-row:has(input[data-key="title"]) .fe-lock');
+  await expect(lock).toBeHidden();
+  await page.locator('#staged-tab').click();
   await expect(lock).toHaveAttribute('data-slot', 'button');
   await expect(lock.locator('svg')).toHaveCount(1);
   await lock.evaluate(button => {

@@ -72,7 +72,7 @@ test('discard restores number and text values without leaving phantom staging',a
   await expect(page.locator('#staged-edits')).toBeHidden();await expect(page.locator('.field-input.dirty')).toHaveCount(0);
 });
 
-test('the editor keeps its bottom fade and lock buttons sit inside complete field surfaces',async({page})=>{
+test('the editor keeps its bottom fade and shows field locks only in Staged',async({page})=>{
   await selectAll(page);const port=page.locator('.editor-scroll');
   await port.evaluate(node=>{node.style.maxHeight='350px';node.scrollTop=0;});
   await expect(port).toHaveClass(/can-scroll-down/);
@@ -81,10 +81,18 @@ test('the editor keeps its bottom fade and lock buttons sit inside complete fiel
   for(const key of ['title','year','bpm','key','genre']){
     const input=page.locator(`#editor-field-${key}`),row=input.locator('xpath=ancestor::div[contains(@class,"fe-row")]');
     await input.scrollIntoViewIfNeeded();await row.hover();
-    const field=await input.boundingBox(),lock=await row.locator('.fe-lock').boundingBox();
-    expect(lock.x).toBeGreaterThanOrEqual(field.x);expect(lock.x+lock.width).toBeLessThanOrEqual(field.x+field.width+1);
+    const field=await input.boundingBox();
+    await expect(row.locator('.fe-lock')).toBeHidden();
     const cell=await row.locator('.fe-cell').boundingBox();expect(field.width).toBeCloseTo(cell.width,0);
   }
+  await page.locator('#staged-tab').click();
+  const title=page.locator('#editor-field-title');
+  const lock=title.locator('xpath=ancestor::div[contains(@class,"fe-row")]').locator('.fe-lock');
+  await title.hover();
+  await expect(lock).toBeVisible();
+  const field=await title.boundingBox(), control=await lock.boundingBox();
+  expect(control.x).toBeGreaterThanOrEqual(field.x);
+  expect(control.x+control.width).toBeLessThanOrEqual(field.x+field.width+1);
 });
 
 for(const theme of ['light','dark'])test(`mixed values and rounded disclosure hierarchy stay distinct (${theme})`,async({page},info)=>{
@@ -132,6 +140,7 @@ test('clear remains keyboard accessible and respects empty and locked fields',as
   await page.keyboard.press('Tab');await expect(clear).toBeFocused();await page.keyboard.press('Enter');
   await expect(input).toBeFocused();await expect(clear).toBeHidden();await expect(page.locator('#staged-edits')).toBeVisible();
   await page.locator('#diff-discard').click();
+  await page.locator('#staged-tab').click();
   const row=input.locator('xpath=ancestor::div[contains(@class,"fe-row")]');await row.hover();await row.locator('.fe-lock').click();
   await expect(input).toBeDisabled();await expect(clear).toBeDisabled();await expect(clear).toBeHidden();
   await row.locator('.fe-lock').click();await expect(input).toBeEnabled();await input.focus();
@@ -152,9 +161,7 @@ for(const theme of ['dark','light'])test(`clear and lock actions fit the fields 
     expect(after.width).toBeCloseTo(before.width,0);expect(button.width).toBeGreaterThanOrEqual(24);
     expect(button.x).toBeGreaterThanOrEqual(after.x);expect(button.x+button.width).toBeLessThanOrEqual(after.x+after.width+1);
     const lock=input.locator('xpath=ancestor::div[contains(@class,"fe-row")]').locator('.fe-lock');
-    if(await lock.evaluate(node=>getComputedStyle(node).opacity==='1')){
-      const bounds=await lock.boundingBox();expect(button.x+button.width<=bounds.x+1||bounds.x+bounds.width<=button.x+1).toBe(true);
-    }
+    await expect(lock).toBeHidden();
   }
   await page.locator('#editor-field-title').hover();
   await page.locator('.mode-col').screenshot({path:info.outputPath(`field-clear-${theme}.png`)});
