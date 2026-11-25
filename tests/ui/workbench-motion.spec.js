@@ -36,6 +36,42 @@ test('toolbar hints warm only after a hint appears and Escape restores the first
   await expect(page.locator('#controller-tooltip-content')).toBeVisible();
 });
 
+test('hints outside the ribbon use the same delay and follow the active theme', async ({ page }) => {
+  const time = new Date('2026-01-01T00:00:00Z');
+  await page.clock.install({ time });
+  await page.clock.pauseAt(new Date(time.getTime() + 1000));
+  await page.mouse.move(0, 0);
+  await page.keyboard.press('Escape');
+  const anchor = page.locator('#settings-open');
+  const tip = page.locator('#controller-tooltip-content');
+  await anchor.hover();
+  await page.clock.runFor(400);
+  await expect(tip).toBeHidden();
+  await page.clock.runFor(80);
+  await expect(tip).toHaveText('Settings');
+
+  for (const theme of ['light', 'dark']) {
+    await page.evaluate(theme => {
+      document.documentElement.dataset.palette = 'navy';
+      document.documentElement.dataset.theme = theme;
+    }, theme);
+    expect(await tip.evaluate(node => {
+      const sample = document.createElement('span');
+      sample.style.backgroundColor = 'var(--panel)';
+      sample.style.color = 'var(--text)';
+      document.body.append(sample);
+      const expected = getComputedStyle(sample);
+      const rendered = getComputedStyle(node);
+      const matches = rendered.backgroundColor === expected.backgroundColor && rendered.color === expected.color;
+      sample.remove();
+      return matches;
+    })).toBe(true);
+  }
+  await page.mouse.move(0, 0);
+  await page.clock.runFor(200);
+  await expect(tip).toBeHidden();
+});
+
 for (const theme of ['light', 'dark']) test(`navigation settles on the latest tab without shifting the table (${theme})`, async ({ page }) => {
   await page.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
   const table = await page.locator('#files-view').boundingBox();

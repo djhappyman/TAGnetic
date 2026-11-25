@@ -243,13 +243,9 @@
 }
 :root[data-palette] {
   --shadow: 0 1px 3px rgb(0 0 0 / .12);
-  --tip-bg: #252b36;
-  --tip-text: #ffffff;
 }
 :root[data-palette][data-theme="dark"] {
   --shadow: 0 1px 3px rgb(0 0 0 / .3);
-  --tip-bg: color-mix(in srgb, var(--panel) 86%, var(--text));
-  --tip-text: var(--text);
 }
 
 

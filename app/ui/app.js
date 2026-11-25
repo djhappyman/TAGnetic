@@ -2525,8 +2525,8 @@ function updateRefreshButton() {
 // folder says now, not to start again. What cannot survive is anything keyed to
 // a path that has gone: a selection entry and a pending edit for a file no
 // longer there are dropped, and everything still present keeps both.
-async function refreshLibrary() {
-  if (!openedRoot || diffByPath) return;
+async function refreshLibrary(expectedPaths = [], replacedPaths = []) {
+  if (!openedRoot || diffByPath) return false;
   const btn = el("lib-refresh");
   btn.disabled = true;
   try {
@@ -2540,6 +2540,11 @@ async function refreshLibrary() {
     const order = handOrder();
     setTracks(fresh);
     sortKeepingHandOrder(order); // the sort stays, as everything else does (#526)
+    if (replacedPaths.length) {
+      for (const path of expectedPaths) {
+        if (present.has(path)) selection.add(path);
+      }
+    }
     // Nothing left selected but files to select: the same rule the open path
     // follows, so an operation is never aimed at nothing without saying so.
     if (selection.size === 0) {
@@ -2567,8 +2572,10 @@ async function refreshLibrary() {
         dropped,
       })
     );
+    return expectedPaths.every(path => present.has(path));
   } catch (e) {
     toast(String(e), true);
+    return false;
   } finally {
     updateRefreshButton();
   }
@@ -3350,6 +3357,7 @@ function hideFileCtx() {
   fileCtxPaths = [];
 }
 
+let fileCtxAudioOpener = null;
 function showFileCtx(x, y, tr) {
   const path = tr.dataset.path;
   // Right-clicking inside the selection acts on all of it; right-clicking
@@ -3383,6 +3391,7 @@ function showFileCtx(x, y, tr) {
   bpmItem.disabled = bpmRunning() || bpmButton.disabled;
   fileCtx.querySelector('[data-cmd="clear"]').disabled = el("clear-tags").disabled;
   for (const key of fileCtx.querySelectorAll(".ctx-key")) key.textContent = formatCombo(comboOf(key.dataset.action));
+  fileCtxAudioOpener = tr;
   fileCtx.returnFocusTo = document.activeElement;
   fileCtx.hidden = false;
   placeContextMenu(fileCtx, x, y);
@@ -3428,6 +3437,7 @@ fileCtx.addEventListener("click", (e) => {
   const item = e.target.closest(".ctx-item");
   if (!item) return;
   const paths = fileCtxPaths;
+  const opener = fileCtx.returnFocusTo === document.body ? fileCtxAudioOpener : fileCtx.returnFocusTo;
   hideFileCtx();
   if (!paths.length) return;
   if (item.dataset.cmd === "hide") {
@@ -3438,6 +3448,8 @@ fileCtx.addEventListener("click", (e) => {
   } else if (item.dataset.cmd === "bpm") {
     // Opening the menu made `paths` the selection, which is what these act on.
     el("detect-bpm").click();
+  } else if (item.dataset.cmd === "split-audio" || item.dataset.cmd === "convert-audio") {
+    launchAudioTools(item.dataset.cmd === "split-audio" ? "split" : "convert", paths, opener);
   } else if (item.dataset.cmd === "formats") {
     refreshTagFormats();
     el("tag-formats-modal").hidden = false;
@@ -3536,6 +3548,27 @@ async function addFolderToList(root) {
   try { await openDrop(paths, { restore: savedView }); }
   finally { ribbonFolderBusy = false; appendTypedFolder = false; }
 }
+function launchAudioTools(mode, paths, opener) {
+  let ordered = paths;
+  if (mode === 'convert' && paths.length > 1) {
+    const remaining = new Set(paths);
+    ordered = [...viewPaths.filter(path => remaining.delete(path)), ...remaining];
+  }
+  const pendingPaths = ordered.filter(path => edits.has(path) || diffByPath?.has(path));
+  const libraryVersion = openVersion;
+  const refresh = (exported, replaced = []) => libraryVersion === openVersion &&
+    (!dropFolders || replaced.length > 0) && refreshLibrary(exported, replaced);
+  const canReplace = () => libraryVersion === openVersion && !diffByPath && !applying && !undoing &&
+    ordered.every(path => !edits.has(path));
+  document.dispatchEvent(new CustomEvent('tagrex:audio-studio', {
+    detail: { mode, paths: [...ordered], opener, pendingPaths,
+      canReplace, refreshLibrary: openedRoot ? refresh : undefined },
+  }));
+}
+document.addEventListener('tagrex:audio-entry', event => {
+  const { mode, opener } = event.detail;
+  launchAudioTools(mode, selectedPaths(), opener);
+});
 function syncRibbonSelection() {
   syncRenamePreviewButton();
   updateRedoControl();
@@ -3809,7 +3842,7 @@ connectRibbonActions(async (action, options) => {
 el("lib-action").addEventListener("click", () =>
   libraryIsDirty() ? (appendTypedFolder ? addFolderToList(rootInput.value) : openLibrary()) : browseForFolder()
 );
-el("lib-refresh").addEventListener("click", refreshLibrary);
+el("lib-refresh").addEventListener("click", () => refreshLibrary());
 el("root-display").addEventListener("click", editRootPath);
 el("root-recent").addEventListener("click", (e) => {
   e.stopPropagation();
@@ -5526,7 +5559,7 @@ window.tagrex = {
 
 // Outside editable fields Ctrl/Cmd+Z first reverts an un-applied import choice.
 document.addEventListener('keydown', event => {
-  if (applying || undoing) return;
+  if (applying || undoing || event.target.closest('[data-audio-studio]')) return;
   if (!(event.ctrlKey || event.metaKey) || event.shiftKey || event.key.toLowerCase() !== 'z') return;
   if (event.target.closest('input,textarea,[contenteditable="true"],[data-search-editor]')) return;
   if (undoLiveImport()) { event.preventDefault(); event.stopImmediatePropagation(); refreshFieldEditor({force:true}); }

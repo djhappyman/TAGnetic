@@ -37,6 +37,7 @@ pub mod duplicates;
 mod import_matching;
 mod output;
 pub use output::OutputError;
+pub mod audio_studio;
 pub mod query;
 mod query_members;
 mod read_cache;
@@ -2251,6 +2252,17 @@ impl ProviderHub {
         Ok(ReleaseDto::from(&release))
     }
 
+    pub fn audio_discogs_release(
+        &self,
+        token: &str,
+        release_id: &str,
+    ) -> Result<audio_studio::DiscogsRelease, AppError> {
+        self.with_retry("discogs", || {
+            Ok(self.discogs_provider(token)?.fetch_timing(release_id)?)
+        })
+        .map(audio_studio::DiscogsRelease::from)
+    }
+
     /// Download a provider image (e.g. a release's cover) and return it as a
     /// cover DTO, ready to feed straight into [`App::preview_cover_embed`] — the
     /// same shape a locally chosen file produces, so the fetched art flows
@@ -3108,6 +3120,58 @@ impl App {
     pub fn library_root(&self) -> &Path {
         let _policy = self.model_policy.enter();
         &self.library_root
+    }
+
+    /// The ordinary re-read command discovers new files below a recursive
+    /// library root. A dropped file set keeps its explicit membership.
+    pub fn can_discover_output_folder(&self, folder: &Path) -> bool {
+        self.file_filter.is_none()
+            && self
+                .library_root
+                .canonicalize()
+                .is_ok_and(|root| folder.starts_with(root))
+    }
+
+    pub fn recursive_audio_root(&self) -> Option<&Path> {
+        self.file_filter.is_none().then_some(&self.library_root)
+    }
+
+    /// Explicit file sets cannot discover replacements by themselves. Only
+    /// swap members of this session; recursive libraries re-scan as before.
+    pub fn sync_audio_file_set(&mut self, removed: &[String], added: &[String]) {
+        let Some(files) = &mut self.file_filter else {
+            return;
+        };
+        if removed.is_empty()
+            || !removed
+                .iter()
+                .all(|path| files.iter().any(|file| file == Path::new(path)))
+        {
+            return;
+        }
+        let Ok(root) = self.library_root.canonicalize() else {
+            return;
+        };
+        let Ok(added) = added
+            .iter()
+            .map(|path| Path::new(path).canonicalize())
+            .collect::<std::io::Result<Vec<_>>>()
+        else {
+            return;
+        };
+        if !added
+            .iter()
+            .all(|path| path.starts_with(&root) && path.is_file())
+        {
+            return;
+        }
+        files.retain(|file| !removed.iter().any(|path| file == Path::new(path)));
+        for path in added {
+            if !files.contains(&path) {
+                files.push(path);
+            }
+        }
+        self.invalidate_query();
     }
 
     /// Current query generation, without constructing a snapshot or reading files.

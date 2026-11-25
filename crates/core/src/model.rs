@@ -182,6 +182,50 @@ fn split_multi_value(value: &str) -> Vec<String> {
     split_multi_value_with(value, &multi_value_separator())
 }
 
+/// Canonical value that the ordinary tag writer and reader will round-trip
+/// when tagging newly encoded audio.
+pub fn normalize_staged_tag_value(
+    format: AudioFormat,
+    field: &TagField,
+    value: &str,
+) -> Option<String> {
+    if field.is_multi_value() {
+        let separator = multi_value_separator();
+        let mut values = split_multi_value_with(value, &separator);
+        if *field == TagField::Genre {
+            if format == AudioFormat::Mp3 {
+                let mut tag = Id3v2Tag::default();
+                tag.set_genre(values.join("\0"));
+                let normalized = tag
+                    .genres()
+                    .map(|genres| genres.map(str::to_owned).collect());
+                if let Some(normalized) = normalized {
+                    values = normalized;
+                }
+            }
+            let mut seen = HashSet::new();
+            values.retain(|genre| seen.insert(genre.to_ascii_lowercase()));
+        }
+        return Some(values.join(&separator));
+    }
+    if format == AudioFormat::Mp3 && *field == TagField::Year && policy::current().write_id3v23 {
+        if let Ok(mut stamp) = value.parse::<Timestamp>() {
+            if stamp.year < 1000 {
+                return None;
+            }
+            if stamp.day.is_none() {
+                stamp.month = None;
+            }
+            if stamp.minute.is_none() {
+                stamp.hour = None;
+            }
+            stamp.second = None;
+            return Some(stamp.to_string());
+        }
+    }
+    Some(value.to_owned())
+}
+
 /// Audio container formats we read and write. Covers everything the tag backend
 /// (lofty) supports; the preview player already decodes all of these.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2947,8 +2991,8 @@ impl TagEngine {
     /// AIFF/WAV are exactly where Serato writes DJ cue points. For those we edit
     /// the concrete tag; other formats round-trip through the generic one.
     ///
-    /// Only [`plan::Executor`](crate::plan::Executor) is allowed to call this —
-    /// see the crate-level invariant.
+    /// Called by [`plan::Executor`](crate::plan::Executor) for existing files and
+    /// [`plan::tag_staged_audio`](crate::plan::tag_staged_audio) for new exports.
     pub fn write(file: &TrackFile) -> Result<(), TagIoError> {
         let _request = exact::suspend_source();
         guarded(&file.path, || {
@@ -3092,7 +3136,8 @@ impl TagEngine {
     /// understand any of them. The silent frames exist only to make the parse
     /// succeed and are never written anywhere.
     ///
-    /// Only [`Executor`](crate::plan::Executor) should call this.
+    /// Called by [`Executor`](crate::plan::Executor) for existing files and
+    /// [`tag_staged_audio`](crate::plan::tag_staged_audio) for new exports.
     pub fn restore_id3v2_bytes(
         path: &Path,
         bytes: &[u8],
@@ -4815,6 +4860,31 @@ fn save_id3v2_tag_with(
     }
     tag.save_bound(path, options)?;
     if !dropped.is_empty() && matches!(container, FileType::Mpeg | FileType::Aac) {
+        if crate::plan::is_staged_audio(path) {
+            // No library preimage is needed for an unpublished candidate.
+            // Read the tag prefix alone, then let Lofty shift audio in bounded
+            // blocks. The scoped binding prevents reopening a replacement.
+            use lofty::io::FileLike;
+            use std::io::Read;
+            let mut file = crate::plan::open_metadata_file(path, true)?;
+            let mut header = [0; 10];
+            file.read_exact(&mut header)?;
+            if &header[..3] == b"ID3" {
+                let bytes = syncsafe_u32(&header[6..10]) as usize;
+                if bytes > 48 * 1024 * 1024 {
+                    return Err(TagIoError::Malformed(
+                        "Exported MP3 tag exceeds the staging limit".into(),
+                    ));
+                }
+                let mut tag = header.to_vec();
+                tag.resize(bytes + 10, 0);
+                file.read_exact(&mut tag[10..])?;
+                if let Some(spliced) = splice_v23_frames(&tag, &dropped) {
+                    file.splice(0..tag.len() as u64, &spliced)?;
+                }
+            }
+            return Ok(());
+        }
         let raw = exact::source_bytes(path)?;
         if raw.len() >= 10 && &raw[..3] == b"ID3" {
             let block_len = 10 + syncsafe_u32(&raw[6..10]) as usize;

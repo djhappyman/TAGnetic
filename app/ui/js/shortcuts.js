@@ -271,7 +271,7 @@ function findAction(combo) {
 }
 
 function onKeyDown(e) {
-  if (capturing || e.defaultPrevented || e.isComposing) return;
+  if (capturing || e.defaultPrevented || e.isComposing || e.target.closest?.("[data-audio-studio]")) return;
   const combo = comboFromEvent(e);
   if (!combo) return;
   const action = findAction(combo);

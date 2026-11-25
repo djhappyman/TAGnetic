@@ -1,6 +1,6 @@
-//! Bounded, nonblocking producer mailbox. Only trailing seek/volume updates
-//! commute; accepted transport controls keep their FIFO position.
-use super::Cmd;
+//! Bounded, nonblocking producer mailbox. Trailing seek/volume updates
+//! coalesce without moving across playback ownership or transport controls.
+use super::{studio, Cmd};
 use std::sync::mpsc::RecvTimeoutError;
 use std::{
     collections::VecDeque,
@@ -61,8 +61,9 @@ impl Sender {
                 *value = value.clamp(0.0, 1.0);
             }
             Cmd::Play(path) | Cmd::SetNext(path) if path.as_os_str().len() > 65_536 => {
-                return Err(PlayerError::InvalidValue)
+                return Err(PlayerError::InvalidValue);
             }
+            Cmd::Studio(command) if !command.valid() => return Err(PlayerError::InvalidValue),
             _ => {}
         }
         let mut state = self.0.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -74,7 +75,9 @@ impl Sender {
         let mut replace = None;
         if matches!(cmd, Cmd::Seek(_) | Cmd::SetVolume(_)) {
             for (i, old) in state.queue.iter().enumerate().rev() {
-                if !matches!(old, Cmd::Seek(_) | Cmd::SetVolume(_)) {
+                let volume_crosses_studio_seek = matches!(cmd, Cmd::SetVolume(_))
+                    && matches!(old, Cmd::Studio(studio::Command::Seek { .. }));
+                if !volume_crosses_studio_seek && !matches!(old, Cmd::Seek(_) | Cmd::SetVolume(_)) {
                     break;
                 }
                 if matches!(
@@ -85,6 +88,32 @@ impl Sender {
                     break;
                 }
             }
+        } else if let Cmd::Studio(studio::Command::Seek {
+            owner, sequence, ..
+        }) = &cmd
+        {
+            for (i, old) in state.queue.iter().enumerate().rev() {
+                match old {
+                    Cmd::Studio(studio::Command::Seek {
+                        owner: previous,
+                        sequence: previous_sequence,
+                        ..
+                    }) if previous == owner => {
+                        if *sequence != 0 && previous_sequence > sequence {
+                            return Ok(());
+                        }
+                        replace = Some(i);
+                        break;
+                    }
+                    Cmd::SetVolume(_) => {}
+                    _ => break,
+                }
+            }
+        } else if let Cmd::Studio(studio::Command::Close { owner }) = &cmd {
+            if matches!(state.queue.back(), Some(Cmd::Studio(studio::Command::Close { owner: previous })) if previous == owner)
+            {
+                return Ok(());
+            }
         } else if matches!(cmd, Cmd::SetNext(_))
             && matches!(state.queue.back(), Some(Cmd::SetNext(_)))
         {
@@ -93,7 +122,11 @@ impl Sender {
         if let Some(i) = replace {
             state.queue.remove(i);
         }
-        if state.queue.len() >= CAPACITY {
+        // Keep one extra slot to relinquish the preview when ordinary playback
+        // controls have filled the queue. Losing that close could suspend the
+        // main player even after the editor has been dismissed.
+        let reserve = usize::from(matches!(cmd, Cmd::Studio(studio::Command::Close { .. })));
+        if state.queue.len() >= CAPACITY + reserve {
             return Err(PlayerError::Busy);
         }
         state.queue.push_back(cmd);
@@ -175,6 +208,72 @@ mod tests {
         assert!(matches!(next(&rx), Cmd::Seek(3.0)));
         assert!(matches!(next(&rx), Cmd::Pause));
         assert!(matches!(next(&rx), Cmd::Seek(4.0)));
+    }
+
+    #[test]
+    fn a_late_studio_seek_cannot_replace_a_newer_queued_seek() {
+        let (sender, receiver) = channel();
+        let seek = |sequence| {
+            Cmd::Studio(studio::Command::Seek {
+                owner: "editor".into(),
+                sequence,
+                position: Duration::from_secs(sequence),
+            })
+        };
+        sender.send(seek(2)).unwrap();
+        sender.send(Cmd::SetVolume(0.5)).unwrap();
+        sender.send(seek(1)).unwrap();
+        assert!(matches!(
+            next(&receiver),
+            Cmd::Studio(studio::Command::Seek { sequence: 2, .. })
+        ));
+        assert!(matches!(next(&receiver), Cmd::SetVolume(_)));
+    }
+
+    #[test]
+    fn studio_seek_bursts_coalesce_by_owner_and_close_has_reserved_capacity() {
+        let (tx, rx) = channel();
+        let seek = |owner: &str, ms| {
+            Cmd::Studio(studio::Command::Seek {
+                owner: owner.into(),
+                sequence: 0,
+                position: Duration::from_millis(ms),
+            })
+        };
+        for i in 0..10_000 {
+            tx.send(seek("first", i)).unwrap();
+            tx.send(Cmd::SetVolume(0.5)).unwrap();
+        }
+        tx.send(seek("other", 15)).unwrap();
+        tx.send(seek("first", 123)).unwrap();
+        assert!(
+            matches!(next(&rx), Cmd::Studio(studio::Command::Seek {owner, position, ..}) if owner == "first" && position.as_millis() == 9_999)
+        );
+        assert!(matches!(next(&rx), Cmd::SetVolume(_)));
+        assert!(
+            matches!(next(&rx), Cmd::Studio(studio::Command::Seek {owner, ..}) if owner == "other")
+        );
+        assert!(
+            matches!(next(&rx), Cmd::Studio(studio::Command::Seek {owner, position, ..}) if owner == "first" && position.as_millis() == 123)
+        );
+        for _ in 0..CAPACITY {
+            tx.send(Cmd::Pause).unwrap();
+        }
+        tx.send(Cmd::Studio(studio::Command::Close {
+            owner: "first".into(),
+        }))
+        .unwrap();
+        tx.send(Cmd::Studio(studio::Command::Close {
+            owner: "first".into(),
+        }))
+        .unwrap();
+        assert_eq!(tx.send(seek("first", 123)), Err(PlayerError::Busy));
+        for _ in 0..CAPACITY {
+            assert!(matches!(next(&rx), Cmd::Pause));
+        }
+        assert!(
+            matches!(next(&rx), Cmd::Studio(studio::Command::Close { owner }) if owner == "first")
+        );
     }
     #[test]
     fn full_transport_queue_fails_explicitly_without_losing_accepted_controls() {
