@@ -144,6 +144,24 @@ async function waveformOption(page, studio, name) {
   await page.getByRole('menuitem', { name }).click();
 }
 
+test('opening waveform options clears its tooltip while the menu is open', async ({ page }) => {
+  await page.getByRole('button', { name: 'Split recording', exact: true }).click();
+  const studio = page.getByRole('dialog', { name: 'Split recording' });
+  const options = studio.getByRole('button', { name: 'Waveform options' });
+  const time = new Date('2026-01-01T00:00:00Z');
+  await page.clock.install({ time });
+  await page.clock.pauseAt(new Date(time.getTime() + 1000));
+  const tip = page.locator('#controller-tooltip-content');
+  await options.hover();
+  await page.clock.runFor(550);
+  await expect(tip).toBeVisible();
+  await expect(tip).toHaveText('Waveform options');
+  await options.click();
+  await page.clock.runFor(700);
+  await expect(page.getByRole('menuitem', { name: 'Zoom in' })).toBeVisible();
+  await expect(tip).toBeHidden();
+});
+
 async function editFromMenu(page, target, action) {
   await target.click({ button: 'right' });
   await page.getByRole('menuitem', { name: action, exact: true }).click();

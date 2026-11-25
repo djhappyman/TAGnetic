@@ -72,6 +72,62 @@ test('hints outside the ribbon use the same delay and follow the active theme', 
   await expect(tip).toBeHidden();
 });
 
+test('file tooltips show just the filename when the file column clips it', async ({ page }) => {
+  await page.evaluate(async () => {
+    document.getElementById('root').value = '/music';
+    await window.tagrex.openLibrary();
+  });
+  const time = new Date('2026-01-01T00:00:00Z');
+  await page.clock.install({ time });
+  await page.clock.pauseAt(new Date(time.getTime() + 1000));
+  const column = page.locator('#tracks th[data-sort="file"]');
+  const file = page.locator('#tracks-body tr[data-path] td.file').first();
+  const visibleName = (await file.textContent()).trim();
+  const tip = page.locator('#controller-tooltip-content');
+  const isClipped = () => file.evaluate(cell => cell.scrollWidth > cell.clientWidth);
+
+  await column.evaluate(header => { header.style.width = '420px'; });
+  await expect.poll(isClipped).toBe(false);
+  await file.hover();
+  await page.clock.runFor(600);
+  await expect(tip).toBeHidden();
+
+  await page.mouse.move(0, 0);
+  await column.evaluate(header => { header.style.width = '84px'; });
+  await expect.poll(isClipped).toBe(true);
+  await file.hover();
+  await page.clock.runFor(400);
+  await expect(tip).toBeHidden();
+  await page.clock.runFor(80);
+  await expect(tip).toBeVisible();
+  await expect(tip).toHaveText(visibleName);
+  await expect(file).not.toHaveAttribute('aria-description');
+});
+
+test('activating and closing a dialog clears hints without showing one on return focus', async ({ page }) => {
+  const time = new Date('2026-01-01T00:00:00Z');
+  await page.clock.install({ time });
+  await page.clock.pauseAt(new Date(time.getTime() + 1000));
+  const opener = page.locator('#settings-open');
+  const tip = page.locator('#controller-tooltip-content');
+  await opener.hover();
+  await page.clock.runFor(550);
+  await expect(tip).toHaveText('Settings');
+  await opener.click();
+  await page.clock.runFor(650);
+  await expect(page.getByRole('dialog', { name: 'Settings', exact: true })).toBeVisible();
+  await expect(tip).toBeHidden();
+  await page.keyboard.press('Escape');
+  await page.clock.runFor(700);
+  await expect(opener).toBeFocused();
+  await expect(tip).toBeHidden();
+  await page.mouse.move(0, 0);
+  await opener.hover();
+  await page.clock.runFor(650);
+  await expect(tip).toBeVisible();
+  await expect(tip).toHaveText('Settings');
+});
+
 for (const theme of ['light', 'dark']) test(`navigation settles on the latest tab without shifting the table (${theme})`, async ({ page }) => {
   await page.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
   const table = await page.locator('#files-view').boundingBox();

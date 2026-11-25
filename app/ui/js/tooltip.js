@@ -5,11 +5,17 @@ const descriptions = new WeakMap();
 const labels = new WeakMap();
 let initialized = false;
 let currentAnchor = null;
+let interactedAnchor = null;
+let focusedSurface = null;
+let restoringFocus = false;
+let waitingForPointer = false;
 let pendingHint;
 let warmUntil = 0;
 const OPEN_DELAY = 450;
 const SKIP_DELAY = 400;
 const RIBBON_BUTTON = '.command-ribbon button.ribbon-command';
+const DIALOG = '[role="dialog"], [role="alertdialog"]';
+const POPUP = DIALOG + ', [role="menu"], [role="listbox"]';
 
 function suppressTitle(target) {
   if (!(target instanceof Element) || !target.hasAttribute("title")) return;
@@ -61,6 +67,9 @@ export function hideTooltip(keepWarm = false) {
 }
 
 function hintText(element) {
+  if (element.hasAttribute('data-tooltip-overflow')) {
+    return element.scrollWidth > element.clientWidth ? element.textContent.trim() : '';
+  }
   const explicit = element.getAttribute('data-tooltip') || titles.get(element);
   if (explicit) return explicit;
   if (element.matches(RIBBON_BUTTON) ||
@@ -74,23 +83,42 @@ function hintAnchor(target) {
   for (let element = target; element && element !== document.body; element = element.parentElement) {
     if (!(element instanceof HTMLElement)) continue;
     suppressTitle(element);
-    if (hintText(element)) return element;
+    if (element.hasAttribute('data-tooltip-overflow') || hintText(element)) return element;
   }
   return null;
 }
 function revealHint(anchor, delay = OPEN_DELAY) {
-  if (!anchor || currentAnchor === anchor) return;
+  if (!anchor || currentAnchor === anchor || interactedAnchor === anchor || anchor.getAttribute('aria-expanded') === 'true') return;
   const warm = performance.now() < warmUntil;
   hideTooltip(true);
   currentAnchor = anchor;
   pendingHint = setTimeout(() => {
-    if (currentAnchor !== anchor || !anchor.isConnected || anchor.closest('[hidden], [inert]')) return;
+    if (currentAnchor !== anchor || !anchor.isConnected || anchor.closest('[hidden], [inert]')
+      || anchor.getAttribute('aria-expanded') === 'true') return;
     const text = hintText(anchor);
     if (text) {
       showControllerTooltip(anchor, text, '');
       warmUntil = Infinity;
     }
   }, delay === 0 || warm ? 0 : Number(anchor.getAttribute('data-tooltip-delay')) || delay);
+}
+
+function dismissAfterInteraction(event) {
+  restoringFocus = false;
+  interactedAnchor = hintAnchor(event.target);
+  hideTooltip();
+}
+
+function resumeHover(event) {
+  waitingForPointer = false;
+  if (event.pointerType !== 'touch') revealHint(hintAnchor(event.target));
+}
+
+function dismissForFocusHandoff() {
+  restoringFocus = true;
+  waitingForPointer = true;
+  hideTooltip();
+  document.addEventListener('pointermove', resumeHover, { once: true });
 }
 
 export function initTooltips() {
@@ -100,18 +128,32 @@ export function initTooltips() {
   suppressTitles(document.documentElement);
 
   document.addEventListener('pointerover', event => {
-    if (event.pointerType !== 'touch') revealHint(hintAnchor(event.target));
+    if (!waitingForPointer && event.pointerType !== 'touch') revealHint(hintAnchor(event.target));
   });
   document.addEventListener('pointerout', event => {
+    if (interactedAnchor?.contains(event.target) && !interactedAnchor.contains(event.relatedTarget)) interactedAnchor = null;
     if (currentAnchor?.contains(event.target) && !currentAnchor.contains(event.relatedTarget)) {
       if (warmUntil === Infinity) warmUntil = performance.now() + SKIP_DELAY;
       hideTooltip(true);
     }
   });
-  document.addEventListener('focusin', event => revealHint(hintAnchor(event.target), 0));
+  document.addEventListener('focusin', event => {
+    const surface = event.target instanceof Element ? event.target.closest(POPUP) : null;
+    if (surface !== focusedSurface) dismissForFocusHandoff();
+    focusedSurface = surface;
+    if (!restoringFocus) revealHint(hintAnchor(event.target), 0);
+  });
   document.addEventListener('focusout', event => { if (currentAnchor?.contains(event.target)) hideTooltip(); });
-  document.addEventListener('pointerdown', () => hideTooltip(), true);
-  document.addEventListener('keydown', event => { if (event.key === 'Escape') hideTooltip(); }, true);
+  document.addEventListener('pointerdown', dismissAfterInteraction, true);
+  document.addEventListener('click', dismissAfterInteraction, true);
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Tab' || event.key.startsWith('Arrow')) {
+      restoringFocus = false;
+      interactedAnchor = null;
+      hideTooltip();
+    } else dismissAfterInteraction(event);
+  }, true);
+  document.addEventListener('wheel', dismissAfterInteraction, { capture: true, passive: true });
   document.addEventListener('scroll', () => hideTooltip(), true);
   window.addEventListener('resize', () => hideTooltip());
   window.addEventListener('blur', () => hideTooltip());
@@ -119,15 +161,30 @@ export function initTooltips() {
   // Menus, virtual rows, translations and button states all create or rewrite
   // titles after startup. Keep descriptions current without pointermove work.
   const observer = new MutationObserver((records) => {
+    if (focusedSurface && !focusedSurface.isConnected) {
+      focusedSurface = null;
+      dismissForFocusHandoff();
+    }
     for (const record of records) {
-      if (record.type === "attributes") suppressTitle(record.target);
-      else for (const node of record.addedNodes) suppressTitles(node);
+      if (record.type !== 'attributes') {
+        for (const node of record.addedNodes) suppressTitles(node);
+      } else if (record.attributeName === 'title') {
+        suppressTitle(record.target);
+      } else if (record.attributeName === 'aria-expanded') {
+        if (record.target === currentAnchor && record.target.getAttribute('aria-expanded') === 'true') hideTooltip();
+      } else if ((record.attributeName === 'data-state' && record.oldValue === 'open'
+        && record.target.matches(DIALOG) && record.target.getAttribute('data-state') === 'closed')
+        || (record.attributeName === 'hidden' && record.target.hasAttribute('hidden')
+          && record.target.matches(DIALOG + ', .controller-dialog-root'))) {
+        dismissForFocusHandoff();
+      }
     }
   });
   observer.observe(document.documentElement, {
     subtree: true,
     childList: true,
     attributes: true,
-    attributeFilter: ["title"],
+    attributeOldValue: true,
+    attributeFilter: ['title', 'aria-expanded', 'data-state', 'hidden'],
   });
 }

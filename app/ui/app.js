@@ -831,6 +831,10 @@ function decorateTrackArtwork(row, track) {
   return row;
 }
 
+function filenameCellHtml(path) {
+  return `<td class="file" data-tooltip-overflow>${escapeHtml(fileName(path))}</td>`;
+}
+
 function buildTrackRow(track, groupKey) {
   const pending = edits.get(track.path);
   const tr = document.createElement("tr");
@@ -862,7 +866,7 @@ function buildTrackRow(track, groupKey) {
   if (isSel) tr.classList.add("selected");
   tr.innerHTML = `
       <td class="sel"></td>
-      <td class="file" title="${escapeHtml(track.path)}">${escapeHtml(fileName(track.path))}</td>`;
+      ${filenameCellHtml(track.path)}`;
   for (const field of tableColumnKeys()) {
     if (field === "file") continue; // rendered above (structural, always first)
     // A mask column (#150): computed, so read-only like Position — and it shows
@@ -920,7 +924,7 @@ function fillDiffRow(tr, track) {
     // Untouched row: current values, no apply tick, no editing/selection.
     tr.innerHTML =
       `<td class="sel"></td>` +
-      `<td class="file" title="${escapeHtml(track.path)}">${escapeHtml(fileName(track.path))}</td>`;
+      filenameCellHtml(track.path);
     for (const field of tableColumnKeys()) {
       if (field === "file") continue;
       const td = document.createElement("td");
@@ -981,7 +985,7 @@ function markLiveEditable(cell,track,field) {
 // revealed under "Show old values". A non-rename change keeps the plain name.
 function diffFileCellHtml(change, track) {
   if (!change.rename_to) {
-    return `<td class="file" title="${escapeHtml(track.path)}">${escapeHtml(fileName(track.path))}</td>`;
+    return filenameCellHtml(track.path);
   }
   const moved = diffDir(change.rename_to) !== diffDir(change.path);
   // Grouped by destination (#385), the header above already names the folder.
@@ -1926,6 +1930,7 @@ function patchMountedFields(keys = null, {rawInput = true} = {}) {
         template.innerHTML = diffFileCellHtml(change || {path}, track);
         const next = template.content.firstChild;
         file.replaceChildren(...next.childNodes); file.className = next.className; file.title = next.title;
+        file.toggleAttribute('data-tooltip-overflow', next.hasAttribute('data-tooltip-overflow'));
         file.dataset.destination = destination;
       }
     }
