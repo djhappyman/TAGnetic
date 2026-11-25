@@ -1,4 +1,5 @@
 import { createComponentElement } from "../lib/component-elements.js";
+import { isComposing } from "@ui-sdk/core";
 // What Settings offers beyond its own controls (#438, #439): a Reset to defaults
 // per group, and a search across all of them.
 //
@@ -52,7 +53,9 @@ export function initGroupResets(defs) {
     resetsQueued = true;
     queueMicrotask(() => { resetsQueued = false; refreshGroupResets(); });
   };
-  for (const type of ["input", "change", "click"]) body.addEventListener(type, scheduleResets);
+  for (const type of ["input", "change", "click", "tagnetic:setting-choice"]) {
+    body.addEventListener(type, scheduleResets);
+  }
 }
 
 // ---- the groups list on the left ----
@@ -93,6 +96,7 @@ function applyPane() {
   const groups = allGroups();
   const buttons = [...el("settings-nav-list").children];
   const current = activeIndex();
+  const firstResult = searching ? groups.findIndex((group) => !group.classList.contains(HIDDEN)) : current;
   groups.forEach((group, i) => {
     const hidden = !searching && i !== current;
     if (group.classList.contains("pane-hidden") !== hidden) group.classList.toggle("pane-hidden", hidden);
@@ -100,7 +104,7 @@ function applyPane() {
     if (!button) return;
     const selected = String(!searching && i === current);
     if (button.getAttribute("aria-selected") !== selected) button.setAttribute("aria-selected", selected);
-    const tabIndex = i === current ? 0 : -1;
+    const tabIndex = i === firstResult ? 0 : -1;
     if (button.tabIndex !== tabIndex) button.tabIndex = tabIndex;
     const buttonHidden = searching && group.classList.contains(HIDDEN);
     if (button.hidden !== buttonHidden) button.hidden = buttonHidden;
@@ -150,11 +154,24 @@ export function renderSettingsNav() {
   });
   while (list.children.length > groups.length) list.lastElementChild.remove();
   list.onkeydown = (event) => {
-    const step = { ArrowDown: 1, ArrowUp: -1 }[event.key];
-    if (!step) return;
+    if (event.defaultPrevented || isComposing(event) || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const buttons = [...list.children];
+    const visible = buttons.filter((button) => !button.hidden);
+    const current = visible.indexOf(event.target.closest("button"));
+    if (current < 0) return;
     event.preventDefault();
-    selectSettingsGroup(activeIndex() + step);
-    list.children[activeIndex()]?.focus();
+    const step = event.key === "ArrowDown" ? 1 : -1;
+    const next = event.key === "Home" ? 0 : event.key === "End" ? visible.length - 1
+      : Math.max(0, Math.min(current + step, visible.length - 1));
+    const target = visible[next];
+    if (el("settings-search").value.trim()) {
+      visible[current].tabIndex = -1;
+      target.tabIndex = 0;
+    } else {
+      selectSettingsGroup(buttons.indexOf(target));
+    }
+    target.focus();
   };
   applyPane();
 }
@@ -229,7 +246,7 @@ export function initSettingsSearch() {
   input.addEventListener("input", () => filterSettings(input.value));
   // Esc empties the box first; only an empty one lets Esc go on to close the sheet.
   input.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && input.value) {
+    if (event.key === "Escape" && input.value && !isComposing(event)) {
       event.stopPropagation();
       clearSettingsSearch();
     }

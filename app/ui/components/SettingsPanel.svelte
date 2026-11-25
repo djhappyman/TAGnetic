@@ -1,8 +1,11 @@
 <script lang="ts">
+  import SettingsChoice from './SettingsChoice.svelte';
   import NativeCheckbox from './controls/NativeCheckbox.svelte';
   import AgentConnections from './AgentConnections.svelte';
   import NativeSlider from './controls/NativeSlider.svelte';
   import { PALETTES } from '../js/palettes.js';
+  import { t } from '../js/i18n.js';
+  import { InputClear, InputGroup } from '@ui-sdk/svelte/input';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
   import { NativeSelect, NativeSelectOption } from '$lib/components/ui/native-select/index.js';
@@ -19,7 +22,12 @@
         <div class="settings-main">
         <nav class="settings-nav" data-i18n-aria-label="settings.groups" aria-label="Settings groups">
           <div class="settings-search">
-          <Input id="settings-search" type="search" data-i18n-placeholder="settings.search" placeholder="Search settings…" data-i18n-aria-label="settings.search" aria-label="Search settings" spellcheck="false" autocomplete="off"  />
+            <InputGroup class="settings-search-control">
+              <Input id="settings-search" type="search" data-i18n-placeholder="settings.search" placeholder="Search settings…" data-i18n-aria-label="settings.search" aria-label="Search settings" spellcheck="false" autocomplete="off" />
+              <InputClear class="settings-search-clear" data-i18n-aria-label="toolbar.clearFilter" aria-label={t('toolbar.clearFilter')}>
+                <svg class="ico" aria-hidden="true"><use href="#i-close" /></svg>
+              </InputClear>
+            </InputGroup>
           </div>
           <div id="settings-nav-list" class="settings-nav-list" role="tablist" aria-orientation="vertical"></div>
         </nav>
@@ -42,11 +50,12 @@
             <div class="settings-field">
               <div class="settings-row">
                 <span class="settings-label" data-i18n="settings.appearance">Appearance</span>
-                <div class="seg" id="set-theme" role="tablist" data-i18n-aria-label="settings.appearance" aria-label="Appearance">
-                  <Button variant="ghost" size="sm" class="seg-btn" type="button" data-theme-mode="auto" data-i18n="settings.language.auto">Auto</Button>
-                  <Button variant="ghost" size="sm" class="seg-btn" type="button" data-theme-mode="light" data-i18n="settings.theme.light">Light</Button>
-                  <Button variant="ghost" size="sm" class="seg-btn" type="button" data-theme-mode="dark" data-i18n="settings.theme.dark">Dark</Button>
-                </div>
+                <SettingsChoice id="set-theme" label="Appearance" labelKey="settings.appearance"
+                  optionAttribute="data-theme-mode" initial="auto" options={[
+                    { value: 'auto', label: 'Auto', labelKey: 'settings.language.auto' },
+                    { value: 'light', label: 'Light', labelKey: 'settings.theme.light' },
+                    { value: 'dark', label: 'Dark', labelKey: 'settings.theme.dark' }
+                  ]} />
               </div>
               <p class="settings-hint" data-i18n="settings.themeHint">Auto follows your system's light or dark appearance.</p>
             </div>
@@ -148,10 +157,11 @@
             <div class="settings-field">
               <div class="settings-row">
                 <span class="settings-label" data-i18n="settings.id3Version">ID3 version</span>
-                <div class="seg" id="set-id3" role="tablist" data-i18n-aria-label="settings.id3Version" aria-label="ID3 version">
-                  <Button variant="ghost" size="sm" class="seg-btn" type="button" data-id3="v23">ID3v2.3</Button>
-                  <Button variant="ghost" size="sm" class="seg-btn active" type="button" data-id3="v24">ID3v2.4</Button>
-                </div>
+                <SettingsChoice id="set-id3" label="ID3 version" labelKey="settings.id3Version"
+                  optionAttribute="data-id3" initial="v24" options={[
+                    { value: 'v23', label: 'ID3v2.3' },
+                    { value: 'v24', label: 'ID3v2.4' }
+                  ]} />
               </div>
               <p class="settings-hint" data-i18n="settings.id3Hint">Tag format for MP3, AIFF and WAV. Default: ID3v2.4.</p>
             </div>
@@ -265,11 +275,11 @@
             <div class="settings-field">
               <div class="settings-row">
                 <span class="settings-label" data-i18n="editor.coverArt">Cover art</span>
-                <div class="seg" id="set-import-cover" role="tablist" data-i18n-aria-label="settings.importCover" aria-label="Import cover art">
-                  <Button variant="ghost" size="sm" class="seg-btn" type="button" data-import-cover="never" data-i18n="settings.cover.never">Never</Button>
-                  <Button variant="ghost" size="sm" class="seg-btn active" type="button" data-import-cover="if-missing" data-i18n="settings.cover.ifMissing">If missing</Button>
-                  <Button variant="ghost" size="sm" class="seg-btn" type="button" data-import-cover="always" data-i18n="settings.cover.always">Always</Button>
-                </div>
+                <SettingsChoice id="set-import-cover" label="Import cover art" labelKey="settings.importCover"
+                  optionAttribute="data-import-cover" initial="always" options={[
+                    { value: 'never', label: 'Never', labelKey: 'settings.cover.never' },
+                    { value: 'always', label: 'Always', labelKey: 'settings.cover.always' }
+                  ]} />
               </div>
               <p class="settings-hint settings-detail" data-i18n="settings.importCoverHint" data-i18n-html><strong>If missing</strong> adds the release cover only to files without artwork. <strong>Always</strong> adds or replaces the front cover. One Undo restores both tags and artwork.</p>
             </div>
@@ -277,10 +287,11 @@
             <div class="settings-field">
               <div class="settings-row">
                 <span class="settings-label" data-i18n="importField.track">Track number</span>
-                <div class="seg" id="set-import-track" role="tablist" data-i18n-aria-label="settings.importTrack" aria-label="Import track number">
-                  <Button variant="ghost" size="sm" class="seg-btn active" type="button" data-import-track="number" data-i18n="settings.importTrack.number">Number</Button>
-                  <Button variant="ghost" size="sm" class="seg-btn" type="button" data-import-track="position" data-i18n="settings.importTrack.position">Vinyl position</Button>
-                </div>
+                <SettingsChoice id="set-import-track" label="Import track number" labelKey="settings.importTrack"
+                  optionAttribute="data-import-track" initial="number" options={[
+                    { value: 'number', label: 'Number', labelKey: 'settings.importTrack.number' },
+                    { value: 'position', label: 'Vinyl position', labelKey: 'settings.importTrack.position' }
+                  ]} />
               </div>
               <p class="settings-hint settings-detail" data-i18n="settings.importTrackHint" data-i18n-html>For vinyl positions such as A1: <strong>Number</strong> saves 1 and keeps A1 in POSITION. <strong>Vinyl position</strong> saves A1. MP4 always uses numbers. With Vinyl side → disc enabled, both options number tracks per side.</p>
             </div>
@@ -329,11 +340,12 @@
             <div class="settings-field">
               <div class="settings-row">
                 <span class="settings-label" data-i18n="settings.valueFont">Data font</span>
-                <div class="seg" id="set-value-font" role="tablist" data-i18n-aria-label="settings.valueFont" aria-label="Data font">
-                  <Button variant="ghost" size="sm" class="seg-btn" type="button" data-value-font="mono" data-i18n="settings.font.mono">Mono</Button>
-                  <Button variant="ghost" size="sm" class="seg-btn" type="button" data-value-font="sans" data-i18n="settings.font.sans">Interface</Button>
-                  <Button variant="ghost" size="sm" class="seg-btn" type="button" data-value-font="condensed" data-i18n="settings.font.condensed">Condensed</Button>
-                </div>
+                <SettingsChoice id="set-value-font" label="Data font" labelKey="settings.valueFont"
+                  optionAttribute="data-value-font" initial="mono" options={[
+                    { value: 'mono', label: 'Mono', labelKey: 'settings.font.mono' },
+                    { value: 'sans', label: 'Interface', labelKey: 'settings.font.sans' },
+                    { value: 'condensed', label: 'Condensed', labelKey: 'settings.font.condensed' }
+                  ]} />
               </div>
               <p class="settings-hint" data-i18n="settings.valueFontHint">Files, tags and tracklists. Patterns always use Mono.</p>
             </div>
@@ -360,10 +372,11 @@
             <div class="settings-field">
               <div class="settings-row">
                 <span class="settings-label" data-i18n="settings.badgeFont">Release badge font</span>
-                <div class="seg" id="set-badge-font" role="tablist" data-i18n-aria-label="settings.badgeFont" aria-label="Release badge font">
-                  <Button variant="ghost" size="sm" class="seg-btn" type="button" data-badge-font="mono" data-i18n="settings.font.mono">Mono</Button>
-                  <Button variant="ghost" size="sm" class="seg-btn" type="button" data-badge-font="sans" data-i18n="settings.font.sans">Interface</Button>
-                </div>
+                <SettingsChoice id="set-badge-font" label="Release badge font" labelKey="settings.badgeFont"
+                  optionAttribute="data-badge-font" initial="mono" options={[
+                    { value: 'mono', label: 'Mono', labelKey: 'settings.font.mono' },
+                    { value: 'sans', label: 'Interface', labelKey: 'settings.font.sans' }
+                  ]} />
               </div>
               <p class="settings-hint" data-i18n="settings.badgeFontHint">For catalogue numbers and track counts. Mono aligns numbers and distinguishes 0/8.</p>
             </div>

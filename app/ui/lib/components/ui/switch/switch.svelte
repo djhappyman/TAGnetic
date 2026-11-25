@@ -1,6 +1,7 @@
 <script lang="ts">
-	import { Switch as SwitchPrimitive } from "bits-ui";
-	import { cn, type WithoutChildrenOrChild } from "$lib/utils.js";
+	import { Switch as SwitchPrimitive, SwitchThumb } from "@ui-sdk/svelte/switch";
+	import type { ComponentProps } from "svelte";
+	import { cn } from "$lib/utils.js";
 
 	let {
 		ref = $bindable(null),
@@ -8,13 +9,14 @@
 		checked = $bindable(false),
 		size = "default",
 		...restProps
-	}: WithoutChildrenOrChild<SwitchPrimitive.RootProps> & {
+	}: ComponentProps<typeof SwitchPrimitive> & {
+		ref?: HTMLButtonElement | null;
 		size?: "sm" | "default";
 	} = $props();
 </script>
 
-<SwitchPrimitive.Root
-	bind:ref
+<SwitchPrimitive
+	data-state={checked ? "checked" : "unchecked"}
 	bind:checked
 	data-slot="switch"
 	data-size={size}
@@ -24,11 +26,15 @@
 	)}
 	{...restProps}
 >
-	<SwitchPrimitive.Thumb
+	{#snippet render({ props, state, children })}
+		<button {...props} bind:this={ref}>{@render children?.(state)}</button>
+	{/snippet}
+	<SwitchThumb
+		data-state={checked ? "checked" : "unchecked"}
 		data-slot="switch-thumb"
 		class={cn(
 			"bg-background dark:data-[state=unchecked]:bg-foreground dark:data-[state=checked]:bg-primary-foreground rounded-full group-data-[size=default]/switch:size-4 group-data-[size=sm]/switch:size-3 group-data-[size=default]/switch:data-[state=checked]:translate-x-[calc(100%_-_2px)] group-data-[size=sm]/switch:data-[state=checked]:translate-x-[calc(100%_-_2px)] group-data-[size=default]/switch:data-[state=unchecked]:translate-x-0 group-data-[size=sm]/switch:data-[state=unchecked]:translate-x-0 pointer-events-none block ring-0 transition-transform",
 			"rtl:data-[state=checked]:translate-x-[calc(-100%)]"
 		)}
 	/>
-</SwitchPrimitive.Root>
+</SwitchPrimitive>

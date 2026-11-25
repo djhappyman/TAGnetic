@@ -30,6 +30,26 @@ async function settings(page) {
   await expect(page.getByRole('dialog', { name: 'Settings', exact: true })).toBeVisible();
 }
 
+test('settings search clears with a button and returns focus without closing Settings', async ({ page }) => {
+  await settings(page);
+  const search = page.getByRole('searchbox', { name: 'Search settings' });
+  const clear = page.getByRole('button', { name: 'Clear the filter' });
+  await expect(clear).toHaveCount(0);
+  await search.fill('no settings match this');
+  await expect(page.getByText('No matching settings.')).toBeVisible();
+  await clear.press('Enter');
+  await expect(search).toHaveValue('');
+  await expect(search).toBeFocused();
+  await expect(clear).toHaveCount(0);
+  await expect(page.getByText('No matching settings.')).toBeHidden();
+  await expect(page.getByRole('dialog', { name: 'Settings', exact: true })).toBeVisible();
+  await search.fill('Appearance');
+  await expect(clear).toBeVisible();
+  await search.press('Escape');
+  await expect(clear).toHaveCount(0);
+  await expect(search).toBeFocused();
+});
+
 test('shadcn switches track silent native property writes and emit one change per user action', async ({ page }) => {
   await settings(page);
   // Exercise the retained switch bridge independently of the fork's hidden update UI.

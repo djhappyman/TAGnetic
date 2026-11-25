@@ -38,6 +38,40 @@ test('eighteen commands have eight group dividers and selection follows the filt
   expect(await selected(page)).toHaveLength(1);
 });
 
+test('file commands use one Tab stop with arrow navigation and native activation', async ({ page }) => {
+  const ribbon = page.getByRole('toolbar', { name: 'File commands' });
+  const open = ribbon.locator('#ribbon-open-folder');
+  const add = ribbon.locator('#ribbon-add-folder');
+  const selectAll = ribbon.locator('#ribbon-select-all');
+  const artworkSettings = ribbon.locator('#ribbon-artwork-options');
+
+  await expect(ribbon.locator('button.ribbon-command[tabindex="0"]')).toHaveCount(1);
+  await expect(open).toHaveAttribute('tabindex', '0');
+  await open.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(add).toBeFocused();
+  await page.keyboard.press('ArrowRight');
+  await expect(selectAll).toBeFocused(); // Undo and Redo are unavailable.
+  await page.keyboard.press('End');
+  await expect(artworkSettings).toBeFocused(); // Lyrics is unavailable.
+  await page.keyboard.press('ArrowRight');
+  await expect(open).toBeFocused();
+  await page.keyboard.press('Home');
+  await expect(open).toBeFocused();
+
+  await page.keyboard.press('Tab');
+  await expect(ribbon.locator(':focus')).toHaveCount(0);
+  await page.keyboard.press('Shift+Tab');
+  await expect(open).toBeFocused();
+
+  await ribbon.locator('#ribbon-clear-selection').click();
+  await expect(ribbon.locator('#ribbon-clear-selection')).toBeDisabled();
+  await expect(open).toHaveAttribute('tabindex', '0');
+  await selectAll.focus();
+  await page.keyboard.press('Space');
+  expect(new Set(await selected(page))).toEqual(new Set(await paths(page)));
+});
+
 test('Open uses a directory chooser; cancelling Open or Add leaves the list intact', async ({ page }) => {
   const before = await paths(page);
   await picker(page, null);
@@ -176,6 +210,34 @@ test('artwork importer uses a string or first-image option and stages without wr
   expect(changed).toHaveLength(2);
   await expect(page.locator('#ribbon-lyrics')).toBeDisabled();
   await expect(page.locator('#ribbon-lyrics')).toHaveAttribute('aria-description',/coming later/);
+});
+
+test('artwork export retains keyboard focus and prevents a second request while pending', async ({ page }) => {
+  await page.evaluate(() => {
+    const resolve = Promise.resolve;
+    window.exportsStarted = 0;
+    Promise.resolve = function (value) {
+      if (Array.isArray(value?.written) && Array.isArray(value?.skipped_no_cover)) {
+        window.exportsStarted++;
+        return new Promise(done => { window.finishExport = () => done(value); });
+      }
+      return resolve.call(this, value);
+    };
+  });
+  const button = page.locator('#ribbon-export-artwork');
+  await button.focus();
+  await page.keyboard.press('Enter');
+  await expect(button).toHaveAttribute('aria-busy', 'true');
+  await expect(button).toHaveAttribute('aria-disabled', 'true');
+  await expect(button).toBeFocused();
+
+  await page.keyboard.press('Enter');
+  expect(await page.evaluate(() => window.exportsStarted)).toBe(1);
+  await expect(page.locator('[data-ui-sdk-announcer][aria-live="polite"]')).toHaveText('Exporting artwork');
+  await page.evaluate(() => window.finishExport());
+  await expect(button).not.toHaveAttribute('aria-busy', 'true');
+  await expect(button).toBeEnabled();
+  await expect(button).toBeFocused();
 });
 
 test('Format values stages field patterns and closes without applying', async ({ page }) => {
