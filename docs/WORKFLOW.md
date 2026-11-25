@@ -15,9 +15,10 @@ the combined result. Delegation requires authorization from the current task.
 For interface styling, read [Interface rules](design/interface-rules.md) before
 changing surfaces, borders, inputs or focus treatments.
 
-Use the fork's current remote `main` as the base for personal work. Check the remote
-URL explicitly: this workspace's `origin` can refer to upstream and `fork` to the
-personal repository. Use an isolated checkout and preserve other threads' edits.
+For new app work, follow Mike's choice of checkout. If he has not specified one,
+ask whether to keep the changes on `main` in `personal-app` or use a separate
+worktree. For a new branch, check the remote URL and use the latest required
+fork checkpoint as its base. Preserve other threads' edits.
 
 Keep at most three active personal feature branches by default. Historical
 contribution branches are recovery material, not an active upstream work queue.
