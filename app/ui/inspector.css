@@ -260,7 +260,7 @@ body .mode-col .fe-row {
 body .mode-col .fe-row + .fe-row {
   margin-top: 0; /* the grid owns gaps for plain and paired rows alike */
 }
-/* The number row has no outer label rail; its shared lock sits inside the last field. */
+/* The number row has no outer label rail. */
 body .mode-col .fe-row.duo {
   grid-template-columns: 3px minmax(0, 1fr);
 }
@@ -303,11 +303,13 @@ body .mode-col .fe-comment > .fe-lock {
 }
 
 /* ---- inputs, selects, textareas: one control family -------------------- */
+body .mode-col { --field-lock-space:0px; }
+body.staged-view .mode-col { --field-lock-space:var(--ctl-hit); }
 body .mode-col .fe .field-input,
 body .mode-col .fe-comment textarea.field-input {
   height: var(--ctl-h);
   min-height: var(--ctl-h);
-  padding: 4px calc(2 * var(--ctl-hit) + var(--sp-2)) 4px var(--input-inset);
+  padding: 4px calc(var(--ctl-hit) + var(--field-lock-space) + var(--sp-2)) 4px var(--input-inset);
   border-radius: var(--input-radius);
   font-family: var(--font-value);
   font-size: var(--type-body-size);
@@ -437,7 +439,7 @@ body .mode-col .fe-compilation {
   grid-template-columns: 3px minmax(0, 1fr);
 }
 body .mode-col .fe-compilation-label {
-  padding-inline-end: calc(var(--ctl-hit) + var(--sp-1));
+  padding-inline-end: calc(var(--field-lock-space) + var(--sp-1));
   display: flex;
   align-items: center;
   gap: var(--sp-2);
@@ -465,7 +467,8 @@ body .mode-col .fe-add-row .fe-add-value {
   min-width: 96px;
 }
 
-/* ---- locks: 24px hit box, quiet until the row is in play --------------- */
+/* Field locks are only actionable while reviewing staged changes. */
+body:not(.staged-view) .mode-col .fe-lock { display:none; }
 body .mode-col button[data-slot='button'].fe-lock {
   position: absolute;
   right: var(--sp-1);
@@ -1230,7 +1233,7 @@ body .mode-col .fe-disclosure-content[hidden] { display:none; }
 body .mode-col .fe-disclosure-content > .fe-grid { padding-top:var(--sp-3); }
 /* Locks share the field footprint rather than reserving a separate gutter. */
 body .mode-col .fe-row:has(.genre-picker-host) > .fe-lock { right:34px; }
-body .mode-col .fe-row .genre-combobox .field-input { padding-right:86px; }
+body .mode-col .fe-row .genre-combobox .field-input { padding-right:calc(62px + var(--field-lock-space)); }
 /* The last compact value shares its tool slot: clear while editing it, lock
    when using the row. Neither action changes field width or shifts its value. */
 body .mode-col .fe-row.duo:has(.fe-duo-unit:last-child .fe-number:last-child:is(:hover,:focus-within)) > .fe-lock:not(:focus-visible) { opacity:0; pointer-events:none; }
@@ -1248,7 +1251,7 @@ body .mode-col #query-box .field-tools button:focus-visible { outline:none; box-
    field surface and uses the same 24px hit target as locks and search tools. */
 body .mode-col .fe-cell { position:relative; }
 body .mode-col button[data-slot='button'].fe-clear {
-  position:absolute; top:4px; right:28px; z-index:2;
+  position:absolute; top:4px; right:calc(var(--sp-1) + var(--field-lock-space)); z-index:2;
   width:var(--ctl-hit); min-width:var(--ctl-hit); height:var(--ctl-hit); min-height:var(--ctl-hit);
   padding:5px; border:0; border-radius:var(--r-compact); box-shadow:none;
   background:var(--bg); color:var(--muted); opacity:0; pointer-events:none;
@@ -1256,7 +1259,7 @@ body .mode-col button[data-slot='button'].fe-clear {
 }
 body .mode-col button.fe-clear[hidden] { display:none; }
 body .mode-col .fe-number > button.fe-clear { right:2px; }
-body .mode-col .fe-cell:has(.genre-picker-host) > button.fe-clear { right:60px; }
+body .mode-col .fe-cell:has(.genre-picker-host) > button.fe-clear { right:calc(36px + var(--field-lock-space)); }
 body .mode-col :is(.fe-cell,.fe-number):is(:hover,:focus-within) > button.fe-clear,
 body .mode-col button.fe-clear:focus-visible { opacity:1; pointer-events:auto; }
 body .mode-col button.fe-clear:hover { color:var(--text); background:var(--row-hover); }
