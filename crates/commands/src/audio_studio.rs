@@ -84,7 +84,7 @@ impl Stamp {
 
 struct Source {
     path: PathBuf,
-    identity: same_file::Handle,
+    identity: Mutex<Option<same_file::Handle>>,
     stamp: Stamp,
     info: audio::SourceInfo,
     analysis: Option<Analysis>,
@@ -123,7 +123,7 @@ impl Source {
         let tagged = TagEngine::read(&canonical).map_err(StudioError::new)?;
         let source = Self {
             path: canonical,
-            identity,
+            identity: Mutex::new(Some(identity)),
             stamp,
             info: analysis.source,
             analysis: (bins > 1).then_some(analysis),
@@ -139,10 +139,11 @@ impl Source {
     }
 
     fn open_current(&self) -> Result<File> {
+        let bound = lock(&self.identity)?;
         let file = open_regular(&self.path)?;
         let identity = same_file::Handle::from_file(file.try_clone().map_err(StudioError::new)?)
             .map_err(StudioError::new)?;
-        if identity != self.identity || Stamp::of(&file)? != self.stamp {
+        if bound.as_ref() != Some(&identity) || Stamp::of(&file)? != self.stamp {
             return Err(StudioError::new(
                 "The recording changed. Reopen it before continuing.",
             ));
@@ -198,12 +199,15 @@ impl Source {
         Ok(prepared)
     }
 
-    fn stamp_key(&self) -> String {
+    fn stamp_key(&self) -> Result<String> {
         use std::hash::{Hash, Hasher};
         let mut identity = std::collections::hash_map::DefaultHasher::new();
-        self.identity.hash(&mut identity);
+        lock(&self.identity)?
+            .as_ref()
+            .ok_or_else(|| StudioError::new("The recording was replaced"))?
+            .hash(&mut identity);
         let description = format!("{}:{:?}", identity.finish(), self.stamp);
-        format!("{:x}", Sha256::digest(description.as_bytes()))
+        Ok(format!("{:x}", Sha256::digest(description.as_bytes())))
     }
 }
 
@@ -683,7 +687,7 @@ impl Studio {
                 AudioFormat::Flac => Some("flac"),
                 _ => None,
             },
-            source_stamp: source.stamp_key(),
+            source_stamp: source.stamp_key()?,
             overview: flat_peaks(
                 source
                     .analysis
@@ -1285,10 +1289,16 @@ impl Studio {
                     return Err(StudioError::new("A recording was selected twice"));
                 }
                 let source = Arc::new(Source::load(path, 1, || false)?);
-                if sources
-                    .iter()
-                    .any(|previous| previous.identity == source.identity)
-                {
+                let already_selected = {
+                    let identity = lock(&source.identity)?;
+                    sources.iter().any(|previous| {
+                        previous
+                            .identity
+                            .lock()
+                            .is_ok_and(|previous| *previous == *identity)
+                    })
+                };
+                if already_selected {
                     return Err(StudioError::new(
                         "Two selections refer to the same recording",
                     ));
@@ -1510,7 +1520,7 @@ impl Studio {
             state.jobs.insert(id.to_owned(), job.clone());
             (plan, job)
         };
-        let result = execute(plan, &job, || self.policy.revision());
+        let result = execute(plan, &job, self);
         if let Ok(output) = &result {
             *lock(&job.result)? = Some(output.clone());
         }
@@ -1558,17 +1568,21 @@ impl Studio {
         let job = self.job(id)?;
         let result = self.published_result(id)?;
         let mut replacement = lock(&job.replacement)?;
-        replacement
+        let retained = replacement
             .as_ref()
             .ok_or_else(|| StudioError::new("This export has no replacement to undo"))?
             .undo()
             .map_err(StudioError::new)?;
         *replacement = None;
-        let warnings = lock(&job.published_folders)?
-            .drain(..)
-            .filter_map(|folder| folder.remove_if_empty().err())
-            .map(|error| format!("An empty output folder could not be removed. {error}"))
-            .collect();
+        let warnings =
+            lock(&job.published_folders)?
+                .drain(..)
+                .filter_map(|folder| folder.remove_if_empty().err())
+                .map(|error| format!("An empty output folder could not be removed. {error}"))
+                .chain(retained.iter().map(|path| {
+                    format!("An extra recovery item was retained at {}.", path.display())
+                }))
+                .collect();
         Ok(RestoreResult {
             paths: result.replaced,
             removed: result.paths,
@@ -1687,11 +1701,7 @@ fn check_space(destination: &AudioDestination, bytes: u64) -> Result<()> {
     Ok(())
 }
 
-fn execute(
-    mut plan: Plan,
-    job: &ExportState,
-    tag_revision: impl Fn() -> u64,
-) -> Result<ExportResult> {
+fn execute(mut plan: Plan, job: &ExportState, studio: &Studio) -> Result<ExportResult> {
     let cancelled = || job.cancelled.load(Ordering::Acquire);
     let check_stop = || {
         if cancelled() {
@@ -1702,7 +1712,7 @@ fn execute(
     };
     check_stop()?;
     let check_policy = || {
-        if tag_revision() != plan.tag_policy
+        if studio.policy.revision() != plan.tag_policy
             || tagrex_core::model::read_policy_revision() != plan.tag_policy
         {
             return Err(StudioError::new(
@@ -1928,11 +1938,39 @@ fn execute(
         let mut backups = Vec::new();
         let mut warnings = Vec::new();
         if let Some(replacement) = plan.replacement.take() {
+            let mut original_paths = BTreeSet::new();
             for (source, path) in replacement.backups() {
                 replaced.push(source.to_string_lossy().into_owned());
                 backups.push(path.to_string_lossy().into_owned());
+                original_paths.insert(source.to_path_buf());
             }
-            let completed = replacement.commit(&witnesses).map_err(StudioError::new)?;
+            let completed = replacement
+                .commit(&witnesses, || {
+                    // The original names are retired and their backups are
+                    // verified. Drop studio pins before Windows removes them.
+                    let mut state = studio.state.lock().unwrap_or_else(|p| p.into_inner());
+                    state.pending.retain(|_, pending| {
+                        !pending
+                            .files
+                            .iter()
+                            .any(|file| original_paths.contains(&file.source.path))
+                    });
+                    for source in plan
+                        .files
+                        .iter()
+                        .map(|file| &file.source)
+                        .chain(state.sources.values())
+                        .chain(&state.recent_sources)
+                        .filter(|source| original_paths.contains(&source.path))
+                    {
+                        source
+                            .identity
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .take();
+                    }
+                })
+                .map_err(StudioError::new)?;
             warnings.extend(
                 completed.retained_paths().iter().map(|path| {
                     format!("An extra recovery file was retained at {}.", path.display())

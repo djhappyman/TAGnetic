@@ -128,7 +128,7 @@ fn replacement_archives_original_and_undo_restores_bytes_and_attributes() {
     assert!(!backup.exists());
     assert!(fs::read_dir(&fixture.recovery).unwrap().next().is_none());
 
-    let completed = plan.commit(&fixture.witnesses()).unwrap();
+    let completed = plan.commit(&fixture.witnesses(), || {}).unwrap();
     assert!(completed.retained_paths().is_empty());
     assert!(!fixture.original.exists());
     assert_eq!(fs::read(&backup).unwrap(), fixture.original_bytes);
@@ -145,8 +145,8 @@ fn replacement_archives_original_and_undo_restores_bytes_and_attributes() {
         hex(&Sha256::digest(&fixture.original_bytes))
     );
 
-    completed.undo().unwrap();
-    completed.undo().unwrap();
+    assert!(completed.undo().unwrap().is_empty());
+    assert!(completed.undo().unwrap().is_empty());
     assert_eq!(fs::read(&fixture.original).unwrap(), fixture.original_bytes);
     assert_eq!(
         fs::metadata(&fixture.original).unwrap().modified().unwrap(),
@@ -186,14 +186,14 @@ fn replacement_rejects_switched_output_and_stale_original_without_side_effects()
     let moved = fixture.outputs[0].with_extension("prior");
     fs::rename(&fixture.outputs[0], &moved).unwrap();
     let foreign = wav(&fixture.outputs[0], 19);
-    assert!(plan.commit(&witnesses).is_err());
+    assert!(plan.commit(&witnesses, || {}).is_err());
     assert_eq!(fs::read(&fixture.outputs[0]).unwrap(), foreign);
     assert_eq!(fs::read(&moved).unwrap(), fixture.output_bytes[0]);
     assert_eq!(fs::read(&fixture.original).unwrap(), fixture.original_bytes);
 
     let plan = fixture.plan();
     let changed = wav(&fixture.original, 20);
-    assert!(plan.commit(&fixture.witnesses()).is_err());
+    assert!(plan.commit(&fixture.witnesses(), || {}).is_err());
     assert_eq!(fs::read(&fixture.original).unwrap(), changed);
     assert!(fs::read_dir(&fixture.recovery).unwrap().next().is_none());
 }
@@ -212,7 +212,7 @@ fn backup_folder_collision_never_retires_the_original() {
         .to_owned();
     fs::create_dir(&backup_dir).unwrap();
     fs::write(backup_dir.join("foreign.txt"), "keep me").unwrap();
-    assert!(plan.commit(&fixture.witnesses()).is_err());
+    assert!(plan.commit(&fixture.witnesses(), || {}).is_err());
     assert_eq!(fs::read(&fixture.original).unwrap(), fixture.original_bytes);
     assert_eq!(
         fs::read_to_string(backup_dir.join("foreign.txt")).unwrap(),
@@ -223,7 +223,7 @@ fn backup_folder_collision_never_retires_the_original() {
 #[test]
 fn undo_rejects_collisions_and_changed_outputs() {
     let Some(fixture) = Files::new() else { return };
-    let completed = fixture.plan().commit(&fixture.witnesses()).unwrap();
+    let completed = fixture.plan().commit(&fixture.witnesses(), || {}).unwrap();
     let foreign = wav(&fixture.original, 16);
     assert_eq!(
         completed.undo().unwrap_err().kind(),
@@ -266,7 +266,7 @@ fn replacement_and_undo_recover_after_partial_capture_failure() {
         }
         Ok(())
     })));
-    let failed = plan.commit(&fixture.witnesses());
+    let failed = plan.commit(&fixture.witnesses(), || {});
     set_observer(None);
     assert!(failed.is_err());
     assert_eq!(fs::read(&fixture.original).unwrap(), fixture.original_bytes);
@@ -274,7 +274,7 @@ fn replacement_and_undo_recover_after_partial_capture_failure() {
     assert_eq!(fs::read(&originals[0]).unwrap(), fixture.original_bytes);
     assert_eq!(fs::read(&originals[1]).unwrap(), second_bytes);
 
-    let completed = fixture.plan().commit(&fixture.witnesses()).unwrap();
+    let completed = fixture.plan().commit(&fixture.witnesses(), || {}).unwrap();
     let fail_at = fixture.outputs[1].clone();
     set_observer(Some(Box::new(move |event, path| {
         if event == Event::BackupCaptured && path == fail_at {
@@ -289,7 +289,7 @@ fn replacement_and_undo_recover_after_partial_capture_failure() {
     for (index, output) in fixture.outputs.iter().enumerate() {
         assert_eq!(fs::read(output).unwrap(), fixture.output_bytes[index]);
     }
-    completed.undo().unwrap();
+    assert!(completed.undo().unwrap().is_empty());
     assert_eq!(fs::read(&fixture.original).unwrap(), fixture.original_bytes);
     assert!(fixture.outputs.iter().all(|path| !path.exists()));
 }

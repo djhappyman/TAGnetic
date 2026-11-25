@@ -33,6 +33,7 @@ struct Undo {
     outputs: Vec<BoundFile>,
     archive: Option<Vec<VerifiedCopy>>,
     restored: Vec<BoundFile>,
+    retained: Vec<PathBuf>,
     complete: bool,
 }
 
@@ -376,8 +377,8 @@ impl<'a> Capture<'a> {
         self.original.rebind_after_rollback(self.checksum)
     }
 
-    fn discard(self) -> Vec<PathBuf> {
-        let result = (|| {
+    fn discard(self) -> Private {
+        let _: io::Result<()> = (|| {
             let current = self.private.dir.open_regular(&self.name, false)?;
             let identity = same_file::Handle::from_file(current.try_clone()?)?;
             if self.stamp != Stamp::of(&current, &current.metadata()?)?
@@ -389,14 +390,32 @@ impl<'a> Capture<'a> {
             drop(current);
             self.private.dir.unlink_private(&self.name, false)?;
             self.private.forget(false, &self.name);
-            self.private.remove_empty()?;
             sync_directory(&self.original.parent)
         })();
-        match result {
-            Ok(()) => Vec::new(),
-            Err(_) => self.private.retained_paths(),
-        }
+        self.private
     }
+}
+
+fn remove_retired_directories(directories: Vec<Private>) -> Vec<PathBuf> {
+    // On Windows, an unlinked file can keep its parent busy until the last
+    // ownership handle closes. Run this after releasing those handles.
+    directories
+        .into_iter()
+        .flat_map(|private| {
+            let paths = private.retained_paths();
+            if !paths.is_empty() {
+                return paths;
+            }
+            if private.remove_empty().is_ok() {
+                return Vec::new();
+            }
+            let mut paths = private.retained_paths();
+            if paths.is_empty() {
+                paths.push(private.path().unwrap_or_else(|_| private.dir.path.clone()));
+            }
+            paths
+        })
+        .collect()
 }
 
 fn restore_capture(private: &Private, name: &OsStr, original: &BoundFile) -> io::Result<()> {
@@ -492,7 +511,11 @@ impl AudioReplacement {
             .map(|original| (original.file.path.as_path(), original.backup.as_path()))
     }
 
-    pub fn commit(self, outputs: &[(PathBuf, AudioWitness)]) -> io::Result<CompletedReplacement> {
+    pub fn commit(
+        self,
+        outputs: &[(PathBuf, AudioWitness)],
+        release_sources: impl FnOnce(),
+    ) -> io::Result<CompletedReplacement> {
         let prepare = || {
             let mut seen: BTreeSet<_> = self
                 .originals
@@ -562,7 +585,8 @@ impl AudioReplacement {
                     return Err(rollback(error, captured));
                 }
             }
-            let retained = captured.into_iter().flat_map(Capture::discard).collect();
+            release_sources();
+            let retired = captured.into_iter().map(Capture::discard).collect();
             let originals = self
                 .originals
                 .into_iter()
@@ -572,6 +596,7 @@ impl AudioReplacement {
                     path: original.file.path,
                 })
                 .collect();
+            let retained = remove_retired_directories(retired);
             Ok(CompletedReplacement {
                 recovery,
                 originals,
@@ -595,7 +620,11 @@ impl AudioReplacement {
 #[cfg(test)]
 mod tests;
 
-fn restore_original(original: &OriginalLocation, backup: &VerifiedCopy) -> io::Result<BoundFile> {
+fn restore_original(
+    original: &OriginalLocation,
+    backup: &VerifiedCopy,
+    retained: &mut Vec<PathBuf>,
+) -> io::Result<BoundFile> {
     check_directory(&original.parent)?;
     ensure_missing(&original.path)?;
     let private = private_directory(&original.parent)?;
@@ -607,17 +636,26 @@ fn restore_original(original: &OriginalLocation, backup: &VerifiedCopy) -> io::R
     copy.file.current()?;
     check_directory(&original.parent)?;
     staging.move_exclusive(&copy.file.name, &original.parent, &original.name)?;
-    // A successful exclusive move is the restore boundary. Best-effort
-    // cleanup failures must not invite a second restore over that file.
-    let _ = private.dir.unlink_private(OsStr::new("restore"), true);
-    let _ = private.remove_empty();
-    let _ = sync_directory(&original.parent);
     let restored = BoundFile::in_directory(&original.parent, &original.name)?;
     if !same_handles(&restored.identity, &copy.file.identity)?
         || stream_checksum(&restored.current()?, restored.stamp()?, io::sink())? != backup.checksum
     {
         return Err(changed(&original.path));
     }
+    // Windows can only remove the staging directory once the handles to it
+    // are closed. The restored file has its own independent verification.
+    drop(copy);
+    drop(staging);
+    if private
+        .dir
+        .unlink_private(OsStr::new("restore"), true)
+        .is_ok()
+    {
+        retained.extend(remove_retired_directories(vec![private]));
+    } else {
+        retained.push(private.dir.path.clone());
+    }
+    let _ = sync_directory(&original.parent);
     Ok(restored)
 }
 
@@ -626,13 +664,13 @@ impl CompletedReplacement {
         &self.retained
     }
 
-    pub fn undo(&self) -> io::Result<()> {
+    pub fn undo(&self) -> io::Result<Vec<PathBuf>> {
         let mut undo = self
             .undo
             .lock()
             .map_err(|_| io::Error::other("Audio replacement state is unavailable"))?;
         if undo.complete {
-            return Ok(());
+            return Ok(Vec::new());
         }
         self.undo_inner(&mut undo).map_err(|error| {
             io::Error::new(
@@ -645,7 +683,7 @@ impl CompletedReplacement {
         })
     }
 
-    fn undo_inner(&self, undo: &mut Undo) -> io::Result<()> {
+    fn undo_inner(&self, undo: &mut Undo) -> io::Result<Vec<PathBuf>> {
         for output in &undo.outputs {
             output.current()?;
         }
@@ -687,7 +725,8 @@ impl CompletedReplacement {
             .zip(&self.backups)
             .skip(undo.restored.len())
         {
-            undo.restored.push(restore_original(original, backup)?);
+            undo.restored
+                .push(restore_original(original, backup, &mut undo.retained)?);
         }
         let captured = retire(
             undo.outputs
@@ -700,13 +739,13 @@ impl CompletedReplacement {
                 return Err(rollback(error, captured));
             }
         }
-        for capture in captured {
-            capture.discard();
-        }
+        let retired = captured.into_iter().map(Capture::discard).collect();
         undo.outputs.clear();
         undo.restored.clear();
         undo.archive = None;
         undo.complete = true;
-        Ok(())
+        let mut retained = std::mem::take(&mut undo.retained);
+        retained.extend(remove_retired_directories(retired));
+        Ok(retained)
     }
 }

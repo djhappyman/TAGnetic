@@ -204,6 +204,7 @@ fn check_replacement_and_undo(folder: &str) {
     let original = fs::read(&wav).unwrap();
     let studio = Studio::default();
     let source = studio.open(&wav, || false).unwrap();
+    let other_session = studio.open(&wav, || false).unwrap();
     let replace = || {
         let mut draft = request(&music, &wav, folder, "flac");
         draft.session_id = Some(source.id.clone());
@@ -234,6 +235,7 @@ fn check_replacement_and_undo(folder: &str) {
         .all(|path| Path::new(path).parent() == Some(music.join(folder).as_path())));
     assert_eq!(saved.replaced, [wav.to_string_lossy()]);
     assert_eq!(saved.backups, [retained.to_string_lossy()]);
+    assert!(saved.warnings.is_empty(), "{:?}", saved.warnings);
     assert!(!wav.exists());
     assert_eq!(fs::read(retained).unwrap(), original);
     assert!(retained.parent().unwrap().join("recovery.json").is_file());
@@ -253,15 +255,24 @@ fn check_replacement_and_undo(folder: &str) {
     let restored = studio.undo_replacement(&review.id).unwrap();
     assert_eq!(restored.paths, [wav.to_string_lossy()]);
     assert_eq!(restored.removed, saved.paths);
-    assert!(restored.warnings.is_empty());
+    assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
     assert_eq!(fs::read(&wav).unwrap(), original);
     assert!(restored
         .removed
         .iter()
         .all(|path| !Path::new(path).exists()));
     assert!(!music.join("Master - Tracks").exists());
-    assert_eq!(fs::read_dir(&music).unwrap().count(), 1);
+    let entries = fs::read_dir(&music)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(entries, [wav]);
     assert_eq!(fs::read(retained).unwrap(), original);
+    assert!(studio
+        .source(&other_session.id)
+        .unwrap()
+        .open_current()
+        .is_err());
 }
 
 #[test]
