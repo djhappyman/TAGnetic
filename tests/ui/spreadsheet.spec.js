@@ -76,16 +76,19 @@ async function copy(page) {
   });
 }
 
-test('mode and subtab arrow keys activate the existing controller panes', async ({ page }) => {
+test('tools confirm keyboard focus and source arrows activate the existing controller panes', async ({ page }) => {
   await page.locator('.mode-tab[data-mode="tagger"]').focus();
   await page.keyboard.press('ArrowRight');
   await expect(page.locator('#subtab-online')).toBeVisible();
   await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('Enter');
   await expect(page.locator('#panel-renamer')).toBeVisible();
   await expect(page.locator('.mode-tab[data-mode="renamer"]')).toHaveAttribute('aria-selected', 'true');
   await page.keyboard.press('End');
+  await page.keyboard.press('Enter');
   await expect(page.locator('#panel-exporter')).toBeVisible();
   await page.keyboard.press('Home');
+  await page.keyboard.press('Enter');
   await expect(page.locator('#panel-tagger')).toBeVisible();
   await page.locator('.subtab[data-subtab="filename"]').focus();
   await page.keyboard.press('ArrowLeft');

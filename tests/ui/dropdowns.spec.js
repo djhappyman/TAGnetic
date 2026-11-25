@@ -56,6 +56,23 @@ test('the source selector keeps its accessible name without a redundant visible 
   await expect(page.locator('.app-select-menu')).toHaveCount(0);
 });
 
+test('typing on a closed provider selector chooses a match through the native control once', async ({ page }) => {
+  const trigger = page.locator('#online-source-control');
+  const native = page.locator('#online-source');
+  await native.evaluate(select => {
+    window.providerChoiceEvents = [];
+    for (const type of ['input', 'change']) {
+      select.closest('.app-select').addEventListener(type, event => window.providerChoiceEvents.push([type, event.target.id]));
+    }
+  });
+  await trigger.press('m');
+  await expect(native).toHaveValue('musicbrainz');
+  await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+  await expect(trigger).toBeFocused();
+  await expect(page.locator('.app-select-menu')).toHaveCount(0);
+  expect(await page.evaluate(() => window.providerChoiceEvents)).toEqual([['input', 'online-source'], ['change', 'online-source']]);
+});
+
 test('changing an open option list closes stale choices and selecting again uses the current option', async ({ page }) => {
   await page.locator('#online-source-control').click();
   await expect(page.getByRole('option', { name: 'MusicBrainz', exact: true })).toBeVisible();

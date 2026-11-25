@@ -82,11 +82,14 @@ function updateSettingsDot() {
   el("settings-open").classList.toggle("has-token", !!el("discogs-token").value.trim());
 }
 
+// The Svelte radio group presents the controller's value after loading or reset.
+function reflectChoice(id, value) {
+  el(id).dispatchEvent(new CustomEvent('tagnetic:reflect-setting-choice', { detail: value }));
+}
+
 function setId3Choice(choice) {
   id3Choice = choice;
-  el("set-id3")
-    .querySelectorAll(".seg-btn")
-    .forEach((b) => b.classList.toggle("active", b.dataset.id3 === choice));
+  reflectChoice("set-id3", choice);
 }
 
 // BPM detection skips files longer than this many minutes (#538); 0 = no limit.
@@ -100,19 +103,12 @@ function bpmMaxFromForm() {
 function setImportCoverChoice(choice) {
   choice = choice === 'never' ? 'never' : 'always';
   importCoverChoice = choice;
-  el("set-import-cover")
-    .querySelectorAll(".seg-btn")
-    .forEach((b) => {
-      b.hidden = b.dataset.importCover === 'if-missing';
-      b.classList.toggle("active", b.dataset.importCover === choice);
-    });
+  reflectChoice("set-import-cover", choice);
 }
 
 function setImportTrackChoice(choice) {
   importTrackChoice = choice;
-  el("set-import-track")
-    .querySelectorAll(".seg-btn")
-    .forEach((b) => b.classList.toggle("active", b.dataset.importTrack === choice));
+  reflectChoice("set-import-track", choice);
 }
 
 // Reflect + apply a language choice (#50). Live, like the theme: the static
@@ -133,9 +129,7 @@ function setLanguageChoice(mode) {
 // slider — persisted immediately so the preview sticks).
 function setThemeChoice(mode) {
   applyTheme(mode);
-  el("set-theme")
-    .querySelectorAll(".seg-btn")
-    .forEach((b) => b.classList.toggle("active", b.dataset.themeMode === mode));
+  reflectChoice("set-theme", mode);
 }
 
 // Opening Settings only reflects the current choice. Each explicit selection
@@ -148,18 +142,14 @@ function setPaletteChoice(mode, choose = false) {
 
 function setBadgeFontChoice(mode) {
   applyBadgeFont(mode);
-  el("set-badge-font")
-    .querySelectorAll(".seg-btn")
-    .forEach((b) => b.classList.toggle("active", b.dataset.badgeFont === mode));
+  reflectChoice("set-badge-font", mode);
 }
 
 // Same live treatment for the value-font choice — the swap is visible behind the
 // settings sheet, so applying on click beats waiting for Save.
 function setValueFontChoice(mode) {
   applyValueFont(mode);
-  el("set-value-font")
-    .querySelectorAll(".seg-btn")
-    .forEach((b) => b.classList.toggle("active", b.dataset.valueFont === mode));
+  reflectChoice("set-value-font", mode);
 }
 
 function setInterfaceFontChoice(mode) {
@@ -615,24 +605,12 @@ el("settings-close").addEventListener("click", cancelSettings);
 el("settings-cancel").addEventListener("click", cancelSettings);
 el("settings-scrim").addEventListener("click", cancelSettings);
 el("settings-save").addEventListener("click", saveSettings);
-el("set-id3").addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-id3]");
-  if (btn) setId3Choice(btn.dataset.id3);
-});
-el("set-import-cover").addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-import-cover]");
-  if (btn) setImportCoverChoice(btn.dataset.importCover);
-});
-el("set-import-track").addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-import-track]");
-  if (btn) setImportTrackChoice(btn.dataset.importTrack);
-});
+el("set-id3").addEventListener("tagnetic:setting-choice", (event) => setId3Choice(event.detail));
+el("set-import-cover").addEventListener("tagnetic:setting-choice", (event) => setImportCoverChoice(event.detail));
+el("set-import-track").addEventListener("tagnetic:setting-choice", (event) => setImportTrackChoice(event.detail));
 el("set-lang").addEventListener("change", (e) => setLanguageChoice(e.target.value));
 // Theme is a live control — switch immediately on click.
-el("set-theme").addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-theme-mode]");
-  if (btn) setThemeChoice(btn.dataset.themeMode);
-});
+el("set-theme").addEventListener("tagnetic:setting-choice", (event) => setThemeChoice(event.detail));
 el('set-palette').addEventListener('change', event => {
   setPaletteChoice(event.target.value, true);
   refreshGroupResets();
@@ -643,10 +621,7 @@ el("set-interface-font").addEventListener("change", event => {
   refreshGroupResets();
 });
 
-el("set-value-font").addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-value-font]");
-  if (btn) setValueFontChoice(btn.dataset.valueFont);
-});
+el("set-value-font").addEventListener("tagnetic:setting-choice", (event) => setValueFontChoice(event.detail));
 el("set-prio-reset").addEventListener("click", resetPriority);
 el("set-shortcuts-reset").addEventListener("click", () => {
   endCapture();
@@ -664,10 +639,7 @@ el("set-tracklist-font").addEventListener("input", (e) => {
   applyTracklistFont(px);
   el("set-tracklist-font-val").textContent = `${px}px`;
 });
-el("set-badge-font").addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-badge-font]");
-  if (btn) setBadgeFontChoice(btn.dataset.badgeFont);
-});
+el("set-badge-font").addEventListener("tagnetic:setting-choice", (event) => setBadgeFontChoice(event.detail));
 // LAB media-glyph family: persist and repaint the Online badges live so the
 // change shows behind the sheet (online.js listens for the event).
 el("set-media-glyphs").addEventListener("change", (e) => {

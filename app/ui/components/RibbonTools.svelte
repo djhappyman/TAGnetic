@@ -3,14 +3,16 @@
   import ControllerDialog from './ControllerDialog.svelte';
   import FormatFieldsDialog from './FormatFieldsDialog.svelte';
   import AutonumberDialog from './AutonumberDialog.svelte';
-  import { Button } from '$lib/components/ui/button/index.js';
+  import { Button as SdkButton } from '@ui-sdk/svelte/button';
+  import { Button, buttonVariants } from '$lib/components/ui/button/index.js';
   import PatternInput from './PatternInput.svelte';
   import NativeCheckbox from './controls/NativeCheckbox.svelte';
   import { NativeSelect, NativeSelectOption } from '$lib/components/ui/native-select/index.js';
   import { runRibbonAction } from '../js/ribbon-actions.js';
   let selected = $state(0);
   let busy = $state(false);
-  let working = $state(false);
+  let workingAction = $state<string>();
+  const working = $derived(!!workingAction);
   let error = $state('');
   let pattern = $state('folder.jpg');
   let firstImage = $state(false);
@@ -39,14 +41,14 @@
   }
   async function perform(action: string, options: Record<string, unknown> = {}) {
     if (working) return;
-    error = ''; working = true;
+    error = ''; workingAction = action;
     const dialog = options.mode === 'write' ? document.getElementById('ribbon-' + ({number:'number', 'import-artwork':'import', 'remove-tags':'remove', 'format-values':'format'}[action]) + '-dialog') : null;
     if (dialog) dialog.hidden = true;
     try {
       const result = await runRibbonAction(action, options);
       if (result?.dialog) { const root = document.getElementById(result.dialog); if (root) root.hidden = true; }
     } catch (reason) { error = String(reason); if (dialog) dialog.hidden = false; }
-    finally { working = false; }
+    finally { workingAction = undefined; }
   }
 </script>
 
@@ -63,7 +65,11 @@
 <span class="ribbon-divider" aria-hidden="true"></span>
 <div class="ribbon-group" role="group" aria-label="Artwork">
   <Button id="ribbon-import-artwork" variant="ghost" size="icon-sm" class="icon ribbon-command" disabled={!selected || busy || working} title="Import artwork from each track’s folder" aria-label="Import artwork" onclick={() => open('import')}><ImagePlus class="ico" size={17} strokeWidth={1.7}/></Button>
-  <Button id="ribbon-export-artwork" variant="ghost" size="icon-sm" class="icon ribbon-command" disabled={!selected || busy || working} title="Export embedded front covers to image files" aria-label="Export artwork" onclick={() => perform('export-artwork')}><ImageUp class="ico" size={17} strokeWidth={1.7}/></Button>
+  <SdkButton id="ribbon-export-artwork" data-variant="ghost" data-size="icon-sm"
+    class={buttonVariants({ variant: 'ghost', size: 'icon-sm', class: 'icon ribbon-command' })}
+    disabled={!selected || busy || (working && workingAction !== 'export-artwork')}
+    pendingAnnouncement="Exporting artwork" title="Export embedded front covers to image files" aria-label="Export artwork"
+    onclick={() => perform('export-artwork')}><ImageUp class="ico" size={17} strokeWidth={1.7}/></SdkButton>
   <Button id="ribbon-artwork-options" variant="ghost" size="icon-sm" class="icon ribbon-command" disabled={busy || working} title="Artwork import size and quality settings" aria-label="Artwork settings" onclick={() => perform('artwork-settings')}><span class="ribbon-artwork-settings-icon"><ImageIcon class="ico" size={17} strokeWidth={1.7}/><SlidersHorizontal class="ribbon-artwork-sliders" size={9} strokeWidth={2}/></span></Button>
 </div>
 <span class="ribbon-divider" aria-hidden="true"></span>
