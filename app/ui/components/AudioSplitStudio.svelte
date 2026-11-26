@@ -1,11 +1,15 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { AudioLines, ChevronDown, ChevronLeft, ChevronRight, CircleStop, Disc3, Ellipsis, FilePlus2, FolderOpen, ImagePlus, Pause, Pencil, Play, Redo2, Repeat, RotateCcw, Scissors, Undo2, X } from '@lucide/svelte';
+  import { AudioLines, Check, ChevronDown, ChevronLeft, ChevronRight, CircleStop, Disc3, Ellipsis, FilePlus2, FolderOpen, ImagePlus, Pause, Pencil, Play, Redo2, Repeat, RotateCcw, Scissors, Settings2, Undo2, X } from '@lucide/svelte';
+  import { SegmentedControl, SegmentedControlItem } from '@ui-sdk/svelte/segmented-control';
+  import { Button as SdkButton } from '@ui-sdk/svelte/button';
+  import { Input } from '@ui-sdk/svelte/input';
+  import { Textarea } from '@ui-sdk/svelte/textarea';
+  import { createMenuController, Menu, MenuCheckboxItem, MenuContent, MenuItem, MenuItemIndicator, MenuSeparator, MenuShortcut, MenuTrigger } from '@ui-sdk/svelte/menu';
+  import { Progress as ProgressBar, ProgressIndicator, ProgressTrack } from '@ui-sdk/svelte/progress';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
-  import * as ContextMenu from '$lib/components/ui/context-menu/index.js';
-  import * as DropdownMenu from '$lib/components/ui/dropdown-menu/index.js';
-  import { Button } from '$lib/components/ui/button/index.js';
-  import { Input } from '$lib/components/ui/input/index.js';
+  import { buttonVariants } from '$lib/components/ui/button/button.svelte';
+  import Button from './AudioSplitButton.svelte';
   import { attachGenrePicker } from '$lib/genre-picker';
   import { savedSettings, tracks as libraryTracks } from '../js/state.js';
   import AudioSplitWaveform from './AudioSplitWaveform.svelte';
@@ -13,7 +17,7 @@
   import AudioSplitTreatment from './AudioSplitTreatment.svelte';
   import AudioSplitImport from './AudioSplitImport.svelte';
   import {
-    audioCommand, choosePath, closeAudioSplitSession, defaultSplitFilePattern, frameAtTime, hasDraft, hasTreatment, leaf, noTreatment, peakValues, readDraft, readTreatment,
+    activeEffectLabels, audioCommand, choosePath, closeAudioSplitSession, defaultSplitFilePattern, frameAtTime, hasDraft, hasTreatment, leaf, noTreatment, peakValues, readDraft, readTreatment, sameTreatment,
     recordingCover, recoverAudioSplitSession, rememberAudioSplitSession, saveDraft, stem, timeLabel,
     type AudioTreatment, type TreatmentAnalysis, type Cue, type Draft, type ExportResult, type Format, type FrameRange, type Launch, type Loading, type PeakTile, type Progress, type ReplacementUndo, type Review, type SaveMode, type Source, type SplitMethod, type Status, type Tags, type Track,
   } from '../js/audio-split';
@@ -57,12 +61,20 @@
   let draftAnnouncement = $state('');
   let showHelp = $state(false);
   let waveformMenuOpen = $state(false);
+  const studioMenus = { waveform: createMenuController(), imports: createMenuController(), tracks: createMenuController(), cover: createMenuController() };
+  let effectsOpen = $state(false);
   let treatment = $state.raw<AudioTreatment>(noTreatment);
   let treatmentAnalysis = $state.raw<TreatmentAnalysis | null>(null);
   let treatmentBusy = $state(false);
   let treatmentError = $state('');
+  let listeningError = $state('');
   let hearOriginal = $state(false);
   let treatmentVersion = 0;
+  let retuneVersion = 0;
+  let retuneFrame = 0;
+  let treatmentTimer: ReturnType<typeof setTimeout>;
+  let treatmentGesture = false;
+  let treatmentGestureCaptured = false;
   let selected = $state('');
   let rangeAnchor = '';
   let rangeIds = $state.raw<string[]>([]);
@@ -149,6 +161,7 @@
   const readout = $derived(playing && !buffering ? timeLabel(Math.floor(playhead * 10 / sampleRate) * sampleRate / 10, sampleRate, 1) : timeLabel(playhead, sampleRate));
   const canEdit = $derived(!!source && !working && !loading && phase === 'edit');
   const treated = $derived(hasTreatment(treatment));
+  const effects = $derived(activeEffectLabels(treatment));
   const treatmentReady = $derived(!treated || (!!treatmentAnalysis && !treatmentBusy));
   const canCopy = $derived(split && !treated && source?.originalFormat === format);
   const copying = $derived(canCopy && splitMethod === 'copy');
@@ -178,7 +191,7 @@
     importedTags = nextDraft.importedTags || {};
     artworkPath = nextDraft.artworkPath;
     const settings = readTreatment(nextDraft.treatment);
-    replaceTreatment(hasStereo ? settings : { ...settings, mono: 'off' });
+    replaceTreatment(hasStereo ? settings : { ...settings, mono: 'off', balance: 0, stereoWidth: 0, swapChannels: false, polarity: 'off' });
     if (!tracks.some(track => track.id === selected)) selected = tracks[0]?.id || '';
     invalidate();
   }
@@ -224,10 +237,12 @@
       clearTimeout(pollTimer);
       clearTimeout(peaksTimer);
       clearTimeout(openingPoll);
+      clearTimeout(treatmentTimer);
       if (openingRequest) void audioCommand('cancel_open', { requestId: openingRequest }).catch(() => {});
       cancelAnimationFrame(animation);
       cancelAnimationFrame(viewportAnimation);
       cancelAnimationFrame(playheadAnimation);
+      cancelAnimationFrame(retuneFrame);
       if (source) void closeAudioSplitSession(source.id).catch(console.error);
     };
   });
@@ -281,7 +296,14 @@
       treatmentAnalysis = null;
       treatmentBusy = false;
       treatmentError = '';
+      listeningError = '';
       hearOriginal = false;
+      effectsOpen = false;
+      clearTimeout(treatmentTimer);
+      cancelAnimationFrame(retuneFrame);
+      retuneFrame = 0;
+      treatmentGesture = false;
+      treatmentGestureCaptured = false;
       treatmentVersion++;
       hasSaved = hasDraft(opened);
       playhead = 0;
@@ -468,6 +490,7 @@
   function cancelPreview(frame: number) {
     scrubbing = false;
     if (!playing || buffering) playhead = frame;
+    else retuneListening();
   }
 
   function stopPlayheadTravel() {
@@ -500,7 +523,10 @@
       await audioCommand('transport', { id: opened.id, action: 'seek', frame, sequence });
       if (active && source?.id === opened.id && sequence === transportVersion) {
         frameClock = { frame, observed: performance.now() };
-        if (playing) scheduleStatus(opened.id, sequence, 20);
+        if (playing) {
+          scheduleStatus(opened.id, sequence, 20);
+          retuneListening();
+        }
       }
     } catch (reason) {
       if (active && sequence === transportVersion) {
@@ -550,6 +576,7 @@
       const reset = buffering || !status.playing || Math.abs(drift) > sampleRate / 4;
       frameClock = { frame: reset ? status.frame : predicted + Math.round(drift * 0.3), observed: now };
       buffering = false;
+      if (status.retuneFailed === retuneVersion) listeningError = 'Could not switch the preview. The previous audio is still playing.';
       if (!scrubbing) {
         if (reset) playhead = status.frame;
         playing = status.playing;
@@ -576,13 +603,18 @@
     cancelAnimationFrame(animation);
     frameClock = { frame, observed: performance.now() };
     playhead = frame;
+    listeningError = '';
     playing = action !== 'pause';
     buffering = playing;
     if (playing) animation = requestAnimationFrame(paintPlayback);
     try {
-      const listening = action !== 'pause' && treated && treatmentReady && !hearOriginal;
-      await audioCommand('transport', { id, action, frame, endFrame, sequence, ...(listening ? { treatment } : {}) });
-      if (active && source?.id === id && playing && sequence === transportVersion) scheduleStatus(id, sequence, 20);
+      const requestedTreatment = action !== 'pause' && !hearOriginal ? treatment : noTreatment;
+      const measured = treatmentAnalysis;
+      await audioCommand('transport', { id, action, frame, endFrame, sequence, ...(hasTreatment(requestedTreatment) ? { treatment: requestedTreatment } : {}) });
+      if (active && source?.id === id && playing && sequence === transportVersion) {
+        scheduleStatus(id, sequence, 20);
+        if (!sameTreatment(requestedTreatment, hearOriginal ? noTreatment : treatment) || measured !== treatmentAnalysis) retuneListening();
+      }
     } catch (reason) {
       if (active && sequence === transportVersion) {
         fail(String(reason));
@@ -592,48 +624,86 @@
     }
   }
 
-  function restartListening() {
-    if (!playing) return;
-    if (loopEnabled && loopRegion) void transport('audition', loopRegion.start, loopRegion.end);
-    else void transport('play');
+  function retuneListening() {
+    if (!playing || !source || retuneFrame) return;
+    retuneFrame = requestAnimationFrame(() => {
+      retuneFrame = 0;
+      if (!active || !playing || !source || scrubbing || seekInFlight) return;
+      const id = source.id;
+      const sequence = transportVersion;
+      const revision = ++retuneVersion;
+      const settings = hearOriginal ? noTreatment : treatment;
+      listeningError = '';
+      void audioCommand('transport', { id, action: 'retune', sequence, revision, treatment: settings }).catch(reason => {
+        if (active && source?.id === id && sequence === transportVersion && revision === retuneVersion) {
+          listeningError = String(reason).replace(/^Error: /, '');
+        }
+      });
+    });
   }
 
-  function toggleOriginal() {
-    hearOriginal = !hearOriginal;
-    restartListening();
+  function compareOriginal(original: boolean) {
+    if (original === hearOriginal) return;
+    hearOriginal = original;
+    retuneListening();
+  }
+
+  function previewEffects() {
+    if (!source || total < 2) return;
+    const length = Math.min(total, sampleRate * 8);
+    const from = Math.max(0, Math.min(playhead, total - length));
+    setLoop(loopEnabled && loopRegion ? loopRegion : { start: from, end: from + length }, true);
+  }
+
+  function hideEffects() {
+    effectsOpen = false;
+    treatmentGesture = false;
+    treatmentGestureCaptured = false;
+    document.getElementById('studio-audio-tools-button')?.focus();
   }
 
   function changeTreatment(settings: AudioTreatment) {
-    capture();
-    replaceTreatment(settings);
+    const nextSettings = readTreatment(settings);
+    if (sameTreatment(nextSettings, treatment)) return;
+    if (!treatmentGesture || !treatmentGestureCaptured) capture();
+    treatmentGestureCaptured = treatmentGesture;
+    replaceTreatment(nextSettings);
   }
 
   function replaceTreatment(settings: AudioTreatment) {
+    if (!source || sameTreatment(settings, treatment)) return;
+    treatment = settings;
+    if (!hasTreatment(settings)) hearOriginal = false;
+    retuneListening();
+    measureTreatment();
+  }
+
+  function measureTreatment(delay = 180) {
     const opened = source;
-    if (!opened || (settings.normalize === treatment.normalize && settings.mono === treatment.mono
-      && settings.rumble === treatment.rumble && settings.hum === treatment.hum)) return;
+    if (!opened) return;
+    const settings = treatment;
     const revision = ++treatmentVersion;
     const wasBusy = treatmentBusy;
-    treatment = settings;
+    clearTimeout(treatmentTimer);
     treatmentAnalysis = null;
     treatmentError = '';
     treatmentBusy = hasTreatment(settings);
     if (!treatmentBusy) {
-      hearOriginal = false;
       if (wasBusy) void audioCommand('treatment', { id: opened.id, treatment: settings }).catch(() => {});
-      restartListening();
       return;
     }
-    void audioCommand<TreatmentAnalysis>('treatment', { id: opened.id, treatment: settings }).then(result => {
-      if (!active || revision !== treatmentVersion || source?.id !== opened.id) return;
-      treatmentAnalysis = result;
-      treatmentBusy = false;
-      if (!hearOriginal) restartListening();
-    }).catch(reason => {
-      if (!active || revision !== treatmentVersion || source?.id !== opened.id) return;
-      treatmentBusy = false;
-      treatmentError = String(reason).replace(/^Error: /, '');
-    });
+    treatmentTimer = setTimeout(() => {
+      void audioCommand<TreatmentAnalysis>('treatment', { id: opened.id, treatment: settings }).then(result => {
+        if (!active || revision !== treatmentVersion || source?.id !== opened.id) return;
+        treatmentAnalysis = result;
+        treatmentBusy = false;
+        if (!hearOriginal) retuneListening();
+      }).catch(reason => {
+        if (!active || revision !== treatmentVersion || source?.id !== opened.id) return;
+        treatmentBusy = false;
+        treatmentError = String(reason).replace(/^Error: /, '');
+      });
+    }, delay);
   }
 
   function audition() {
@@ -938,9 +1008,11 @@
   }
 
   function prepareTrackMenu(event: MouseEvent) {
+    event.preventDefault();
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button[data-track-id]');
-    if (!button?.dataset.trackId) { event.preventDefault(); return; }
+    if (!button?.dataset.trackId || !canEdit) return;
     trackMenuId = button.dataset.trackId;
+    void studioMenus.tracks.open({ anchor: { x: event.clientX, y: event.clientY }, event });
   }
 
   function trackKeys(event: KeyboardEvent, id: string) {
@@ -973,9 +1045,19 @@
     }
   }
 
-  function restoreTrackMenuFocus(event: Event) {
+  async function restoreTrackMenuFocus(open: boolean) {
+    if (open) return;
+    const id = trackMenuId;
+    await tick();
+    if (!editor) document.getElementById(`studio-row-${id}`)?.focus({ preventScroll: true });
+  }
+
+  function popupKeys(event: KeyboardEvent, menu: keyof typeof studioMenus) {
+    if (event.key !== 'Escape') return;
     event.preventDefault();
-    if (!editor) document.getElementById(`studio-row-${trackMenuId}`)?.focus({ preventScroll: true });
+    event.stopPropagation();
+    studioMenus[menu].close();
+    if (menu !== 'tracks') studioMenus[menu].focus();
   }
 
   function recordingTagKeys(event: KeyboardEvent, value: string) {
@@ -1004,7 +1086,7 @@
   function save() {
     if (!source) return;
     try {
-      saveDraft(source, { ...draft(), view: { playhead, start, end, selected, follow, stereo: stereoView } });
+      saveDraft(source, { ...draft(), view: { playhead, start, end, selected, follow, stereo: stereoView, loop: loopRegion, loopEnabled } });
       dirty = false;
       hasSaved = true;
       draftAnnouncement = 'Draft saved';
@@ -1017,6 +1099,7 @@
     try {
       const stored = readDraft(source);
       if (!stored) return;
+      if (playing) void transport('pause');
       capture();
       restore(stored);
       serial = Math.max(serial, ...stored.tracks.map(track => Number(track.id.match(/^segment-(\d+)$/)?.[1] || 0)));
@@ -1025,11 +1108,16 @@
         if (tracks.some(track => track.id === saved.selected)) selection(saved.selected);
         follow = saved.follow === true;
         stereoView = hasStereo && saved.stereo === true;
+        const loop = saved.loop;
+        loopRegion = loop && Number.isSafeInteger(loop.start) && Number.isSafeInteger(loop.end)
+          && loop.start >= 0 && loop.end <= total && loop.end > loop.start ? loop : null;
+        loopEnabled = false;
         if ([saved.start, saved.end, saved.playhead].every(Number.isSafeInteger)
           && saved.start >= 0 && saved.end > saved.start && saved.end <= total) {
           viewport(saved.start, saved.end - saved.start);
           seek(saved.playhead, false);
         }
+        loopEnabled = loopRegion !== null && saved.loopEnabled === true;
       }
       dirty = false;
       draftAnnouncement = 'Saved draft reopened';
@@ -1428,9 +1516,10 @@
       event.preventDefault();
       event.stopPropagation();
       if (closeRequested) keepEditing();
-      else if (importMenuOpen) importMenuOpen = false;
+      else if (importMenuOpen) studioMenus.imports.close();
       else if (importMode) closeImporter();
-      else if (waveformMenuOpen) waveformMenuOpen = false;
+      else if (waveformMenuOpen) studioMenus.waveform.close();
+      else if (effectsOpen) hideEffects();
       else if (editor) finishEdit(editor, false, true);
       else requestClose();
     }}>
@@ -1455,7 +1544,9 @@
           <div class="opening">
             <p role="status"><AudioLines size={20}/> {loadingInfo ? 'Reading the recording…' : 'Opening the recording…'}</p>
             {#if loadingInfo?.frames}
-              <progress max={loadingInfo.frames} value={Math.min(loadingInfo.frames, loadingInfo.scannedFrames)} aria-label="Recording scan progress"></progress>
+              <ProgressBar class="recording-scan" max={loadingInfo.frames} value={Math.min(loadingInfo.frames, loadingInfo.scannedFrames)} aria-label="Recording scan progress">
+                <ProgressTrack class="recording-scan-track"><ProgressIndicator class="recording-scan-fill"/></ProgressTrack>
+              </ProgressBar>
             {:else if loadingInfo?.scannedFrames}
               <span class="help">Read {timeLabel(loadingInfo.scannedFrames, loadingInfo.sampleRate, 0)} so far</span>
             {/if}
@@ -1496,36 +1587,37 @@
                       {stereoView ? 'Left + Right' : 'Combined'}
                     </Button>
                   {/if}
-                  <AudioSplitTreatment settings={treatment} stereo={hasStereo} original={hearOriginal} busy={treatmentBusy}
-                    analysis={treatmentAnalysis} error={treatmentError} onchange={changeTreatment} oncompare={toggleOriginal}/>
-                  <DropdownMenu.Root bind:open={waveformMenuOpen}>
-                    <DropdownMenu.Trigger>
-                      {#snippet child({ props })}
-                        <Button {...props} variant="ghost" size="icon-sm" aria-label="Waveform options" title="Waveform options"><Ellipsis size={18}/></Button>
-                      {/snippet}
-                    </DropdownMenu.Trigger>
-                    <DropdownMenu.Content class="studio-waveform-options" align="end">
-                      <DropdownMenu.Item onSelect={() => jump(-1)}><ChevronLeft size={15}/> Previous cut <DropdownMenu.Shortcut>[</DropdownMenu.Shortcut></DropdownMenu.Item>
-                      <DropdownMenu.Item onSelect={() => jump(1)}><ChevronRight size={15}/> Next cut <DropdownMenu.Shortcut>]</DropdownMenu.Shortcut></DropdownMenu.Item>
-                      <DropdownMenu.Separator/>
-                      <DropdownMenu.Item onSelect={() => zoom(1)}>Zoom in <DropdownMenu.Shortcut>+</DropdownMenu.Shortcut></DropdownMenu.Item>
-                      <DropdownMenu.Item onSelect={() => zoom(-1)}>Zoom out <DropdownMenu.Shortcut>−</DropdownMenu.Shortcut></DropdownMenu.Item>
-                      <DropdownMenu.Item onSelect={zoomToCut} disabled={!current}>Zoom to cut <DropdownMenu.Shortcut>Z</DropdownMenu.Shortcut></DropdownMenu.Item>
-                      <DropdownMenu.Item onSelect={zoomToLoop} disabled={!loopRegion}>Zoom to loop</DropdownMenu.Item>
-                      {#if loopRegion}<DropdownMenu.Item onSelect={clearLoop}>Clear loop</DropdownMenu.Item>{/if}
-                      <DropdownMenu.Item onSelect={() => animateViewport(0, total)}>Fit recording <DropdownMenu.Shortcut>0</DropdownMenu.Shortcut></DropdownMenu.Item>
-                      <DropdownMenu.Separator/>
-                      <DropdownMenu.CheckboxItem bind:checked={follow} closeOnSelect>Follow playhead</DropdownMenu.CheckboxItem>
-                      <DropdownMenu.Item onSelect={() => showHelp = !showHelp}>{showHelp ? 'Hide waveform shortcuts' : 'Waveform shortcuts'}</DropdownMenu.Item>
-                    </DropdownMenu.Content>
-                  </DropdownMenu.Root>
+                  <Button id="studio-audio-tools-button" class="audio-tools-trigger" variant="ghost" size="sm" title="Open audio restoration tools"
+                    aria-controls="studio-audio-tools" aria-expanded={effectsOpen} data-treated={treated}
+                    onclick={() => { if (effectsOpen) hideEffects(); else effectsOpen = true; }}>
+                    <Settings2 size={15}/> Audio tools{effects.length ? ` · ${effects.length}` : ''}
+                  </Button>
+                  <Menu bind:open={waveformMenuOpen} controller={studioMenus.waveform}>
+                    <MenuTrigger data-slot="dropdown-menu-trigger" class={buttonVariants({ variant: 'ghost', size: 'icon-sm' })} aria-label="Waveform options" title="Waveform options"><Ellipsis size={18}/></MenuTrigger>
+                    <MenuContent class="app-select-menu studio-waveform-options" align="end" onkeydowncapture={event => popupKeys(event, 'waveform')}>
+                      <MenuItem onSelect={() => jump(-1)}><ChevronLeft size={15}/> Previous cut <MenuShortcut>[</MenuShortcut></MenuItem>
+                      <MenuItem onSelect={() => jump(1)}><ChevronRight size={15}/> Next cut <MenuShortcut>]</MenuShortcut></MenuItem>
+                      <MenuSeparator/>
+                      <MenuItem onSelect={() => zoom(1)}>Zoom in <MenuShortcut>+</MenuShortcut></MenuItem>
+                      <MenuItem onSelect={() => zoom(-1)}>Zoom out <MenuShortcut>−</MenuShortcut></MenuItem>
+                      <MenuItem onSelect={zoomToCut} disabled={!current}>Zoom to cut <MenuShortcut>Z</MenuShortcut></MenuItem>
+                      <MenuItem onSelect={zoomToLoop} disabled={!loopRegion}>Zoom to loop</MenuItem>
+                      {#if loopRegion}<MenuItem onSelect={clearLoop}>Clear loop</MenuItem>{/if}
+                      <MenuItem onSelect={() => animateViewport(0, total)}>Fit recording <MenuShortcut>0</MenuShortcut></MenuItem>
+                      <MenuSeparator/>
+                      <MenuCheckboxItem value="follow" bind:checked={follow} closeOnSelect>
+                        <span class="follow-check" aria-hidden="true"><MenuItemIndicator><Check size={14}/></MenuItemIndicator></span> Follow playhead
+                      </MenuCheckboxItem>
+                      <MenuItem onSelect={() => showHelp = !showHelp}>{showHelp ? 'Hide waveform shortcuts' : 'Waveform shortcuts'}</MenuItem>
+                    </MenuContent>
+                  </Menu>
                 </div>
               </div>
               {#if editor?.field === 'start' && editingTrack}
                 {@const edit = editor}
                 <label class="cut-time-edit">
                   {editingTrack.id === tracks[0].id ? 'Track 1 start' : 'Cut time'}
-                  <input id="studio-cut-start" aria-label="Track start time" value={timeLabel(editingTrack.startFrame, sampleRate, 6)}
+                  <Input id="studio-cut-start" aria-label="Track start time" value={timeLabel(editingTrack.startFrame, sampleRate, 6)}
                     onkeydown={event => editKeys(event, edit)} onblur={() => finishEdit(edit, true)}/>
                 </label>
               {/if}
@@ -1537,11 +1629,37 @@
                 oneditmarker={id => beginEdit(id, 'start')} onremovemarker={removeCutAt} ontrim={trimStart}
                 onrestoremarker={id => updateTrack(id, { include: true })}
                 onmovetoplayhead={moveToPlayhead} canmove={id => canMoveToPlayhead(tracks.findIndex(track => track.id === id))}/>
-              <p class="waveform-hint" aria-live="polite">{buffering ? 'Buffering preview…' : treatmentBusy ? 'Measuring recording…' : hearOriginal ? 'Listening to the original' : ''}</p>
+              {#if effectsOpen || treated}
+                <div class="audio-comparison">
+                  <SegmentedControl class="comparison-segments" aria-label="Audio preview source" value={hearOriginal || !treated ? 'original' : 'treated'}
+                    onValueChange={value => compareOriginal(value === 'original')}>
+                    <SegmentedControlItem class="comparison-choice" value="original">Original</SegmentedControlItem>
+                    <SegmentedControlItem class="comparison-choice" value="treated" disabled={!treated}>Treated</SegmentedControlItem>
+                  </SegmentedControl>
+                  <Button variant="ghost" size="sm" title="Repeat the current loop or eight seconds around the playhead" onclick={previewEffects} disabled={total < 2}>
+                    <Repeat size={14}/> Loop preview
+                  </Button>
+                  <span class="waveform-hint">Source waveform</span>
+                </div>
+              {/if}
+              {#if listeningError}
+                <div class="audio-comparison" role="status"><span class="waveform-hint">{listeningError}</span><Button variant="ghost" size="sm" onclick={retuneListening}>Retry preview</Button></div>
+              {/if}
+              {#if treatmentError && !effectsOpen}
+                <p class="waveform-hint" role="status">{treatmentError} <Button variant="ghost" size="sm" onclick={() => effectsOpen = true}>Open audio tools</Button></p>
+              {/if}
+              <p class="waveform-hint" aria-live="polite">{buffering ? 'Buffering preview…' : treated && hearOriginal ? 'Listening to the original. Effects still apply on export.' : treatmentBusy ? 'Preview uses an estimated level while measuring the recording…' : ''}</p>
               {#if showHelp}
                 <p class="help">Scroll to zoom, middle-drag to pan, and Shift-drag to mark a loop. L toggles the loop. Space plays or pauses, Shift+Space loops around the selected cut, and M adds a cut. In the track list, Shift-click or Shift+Up/Down selects a range, F2 edits tags, and Delete removes a split.</p>
               {/if}
             </div>
+            {#if effectsOpen}
+              <AudioSplitTreatment settings={treatment} stereo={hasStereo} {sampleRate} original={hearOriginal} busy={treatmentBusy}
+                analysis={treatmentAnalysis} error={treatmentError} onchange={changeTreatment} onretry={() => measureTreatment(0)}
+                oneditstart={() => { treatmentGesture = true; treatmentGestureCaptured = false; }}
+                oneditend={() => { treatmentGesture = false; treatmentGestureCaptured = false; }}
+                onclose={hideEffects}/>
+            {/if}
             {#if importMode}
               <AudioSplitImport {source} {playhead} mode={importMode} {cue} {cueEncoding} {cueLoading}
                 onencoding={(encoding) => loadCue(cuePath, encoding)} onapply={applyImport} oncancel={closeImporter} onerror={fail}/>
@@ -1551,22 +1669,16 @@
               <section class="track-panel" aria-label="Tracks">
                 <div class="column-top">
                   <h3>Tracks</h3>
-                  <DropdownMenu.Root bind:open={importMenuOpen}>
-                    <DropdownMenu.Trigger>
-                      {#snippet child({ props })}
-                        <Button {...props} id="studio-import-cuts" variant="secondary" size="sm" disabled={!canEdit || cueLoading}>Import splits <ChevronDown size={13}/></Button>
-                      {/snippet}
-                    </DropdownMenu.Trigger>
-                    <DropdownMenu.Content class="studio-import-menu" align="end">
-                      <DropdownMenu.Item onSelect={() => loadCue()}><FilePlus2 size={16}/> Import CUE…</DropdownMenu.Item>
-                      <DropdownMenu.Item onSelect={() => importMode = 'discogs'}><Disc3 size={16}/> Use Discogs…</DropdownMenu.Item>
-                    </DropdownMenu.Content>
-                  </DropdownMenu.Root>
+                  <Menu bind:open={importMenuOpen} controller={studioMenus.imports}>
+                    <MenuTrigger id="studio-import-cuts" data-slot="dropdown-menu-trigger" class={buttonVariants({ variant: 'secondary', size: 'sm' })} disabled={!canEdit || cueLoading}>Import splits <ChevronDown size={13}/></MenuTrigger>
+                    <MenuContent class="app-select-menu studio-import-menu" align="end" onkeydowncapture={event => popupKeys(event, 'imports')}>
+                      <MenuItem onSelect={() => { void loadCue(); }}><FilePlus2 size={16}/> Import CUE…</MenuItem>
+                      <MenuItem onSelect={() => importMode = 'discogs'}><Disc3 size={16}/> Use Discogs…</MenuItem>
+                    </MenuContent>
+                  </Menu>
                 </div>
-                <ContextMenu.Root>
-                  <ContextMenu.Trigger disabled={!canEdit}>
-                    {#snippet child({ props })}
-                      <div {...props} class="track-list" bind:this={list} oncontextmenucapture={prepareTrackMenu}>
+                <Menu controller={studioMenus.tracks} onOpenChange={restoreTrackMenuFocus}>
+                      <div class="track-list" bind:this={list} role="group" aria-label="Track list" oncontextmenu={prepareTrackMenu}>
                         {#each tracks as track, index (track.id)}
                           {@const trackEnd = tracks[index + 1]?.startFrame ?? total}
                           {@const edit = editor?.id === track.id && editor.field !== 'start' ? editor : null}
@@ -1589,7 +1701,7 @@
                               {@render trackTimes()}
                             </div>
                           {:else}
-                            <button type="button" id={`studio-row-${track.id}`} data-track-id={track.id}
+                            <SdkButton type="button" id={`studio-row-${track.id}`} data-track-id={track.id}
                               class={['track', { excluded: !track.include }]} aria-pressed={selected === track.id || rangeIds.includes(track.id)}
                               data-current={selected === track.id} aria-haspopup="menu" aria-keyshortcuts="Shift+F10 F2 Delete L"
                               onclick={event => selectTrack(track, event.shiftKey)} onkeydown={event => trackKeys(event, track.id)}>
@@ -1600,31 +1712,29 @@
                                 {:else if trackTag(track, 'artist')}<small>{trackTag(track, 'artist')}</small>{/if}
                               </span>
                               {@render trackTimes()}
-                            </button>
+                            </SdkButton>
                           {/if}
                         {/each}
                       </div>
-                    {/snippet}
-                  </ContextMenu.Trigger>
-                  <ContextMenu.Content class="studio-track-menu" onCloseAutoFocus={restoreTrackMenuFocus}>
-                    <ContextMenu.Item onSelect={() => beginEdit(trackMenuId, 'tags')}>Edit Artist/Title <ContextMenu.Shortcut aria-hidden="true">F2</ContextMenu.Shortcut></ContextMenu.Item>
-                    <ContextMenu.Item onSelect={() => loopTrack(trackMenuId)}>Loop track</ContextMenu.Item>
-                    <ContextMenu.Item onSelect={() => moveToPlayhead(trackMenuId)} disabled={!canMoveToPlayhead(menuTrackIndex)}>Move split to playhead</ContextMenu.Item>
-                    {#if canMerge}<ContextMenu.Item onSelect={mergeTracks}>Merge adjacent tracks</ContextMenu.Item>{/if}
+                  <MenuContent class="app-select-menu studio-track-menu" aria-label="Track actions" finalFocus="none" onkeydowncapture={event => popupKeys(event, 'tracks')}>
+                    <MenuItem onSelect={() => { void beginEdit(trackMenuId, 'tags'); }}>Edit Artist/Title <MenuShortcut aria-hidden="true">F2</MenuShortcut></MenuItem>
+                    <MenuItem onSelect={() => loopTrack(trackMenuId)}>Loop track</MenuItem>
+                    <MenuItem onSelect={() => moveToPlayhead(trackMenuId)} disabled={!canMoveToPlayhead(menuTrackIndex)}>Move split to playhead</MenuItem>
+                    {#if canMerge}<MenuItem onSelect={mergeTracks}>Merge adjacent tracks</MenuItem>{/if}
                     {#if menuTrackIndex === 0}
-                      <ContextMenu.Item onSelect={() => trimStart(0)} disabled={!tracks[0]?.startFrame}>Reset start</ContextMenu.Item>
+                      <MenuItem onSelect={() => trimStart(0)} disabled={!tracks[0]?.startFrame}>Reset start</MenuItem>
                     {:else}
-                      <ContextMenu.Item onSelect={() => removeTrackSplit(trackMenuId)} disabled={menuTrackIndex < 1}>Remove split <ContextMenu.Shortcut aria-hidden="true">Del</ContextMenu.Shortcut></ContextMenu.Item>
+                      <MenuItem onSelect={() => removeTrackSplit(trackMenuId)} disabled={menuTrackIndex < 1}>Remove split <MenuShortcut aria-hidden="true">Del</MenuShortcut></MenuItem>
                     {/if}
-                  </ContextMenu.Content>
-                </ContextMenu.Root>
+                  </MenuContent>
+                </Menu>
               </section>
               <section class="tag-panel" aria-label="Recording tags">
                 <div class="toolbar draft-actions" role="group" aria-label="Draft actions">
                   <Button variant="ghost" size="icon-sm" onclick={() => history(false)} title="Undo draft change" aria-label="Undo draft change" disabled={!previous.length || !canEdit}><Undo2 size={16}/></Button>
                   <Button variant="ghost" size="icon-sm" onclick={() => history(true)} title="Redo draft change" aria-label="Redo draft change" disabled={!next.length || !canEdit}><Redo2 size={16}/></Button>
                   <Button variant="ghost" size="sm" onclick={save} disabled={!canEdit} aria-keyshortcuts="Control+s Meta+s">Save draft</Button>
-                  <Button variant="ghost" size="sm" onclick={reopen} disabled={!hasSaved || !canEdit}>Reopen draft</Button>
+                  <Button variant="ghost" size="sm" onclick={reopen} disabled={!hasSaved || !canEdit}>{hasSaved && !dirty && !previous.length ? 'Continue draft' : 'Reopen draft'}</Button>
                 </div>
                 <div class="recording-editor">
                   {#snippet recordingField(key: string, label: string)}
@@ -1636,21 +1746,21 @@
                       <label for={inputId}>{label}</label>
                       <div class="tag-input">
                         {#if key === 'comment'}
-                          <textarea id={inputId} class="field-input" data-slot="textarea" aria-label={accessibleLabel} {value}
-                            spellcheck={false} placeholder={override && !value ? 'Cleared' : ''} maxlength="512"
+                          <Textarea id={inputId} class="field-input" data-slot="textarea" aria-label={accessibleLabel} {value}
+                            spellcheck={false} placeholder={override && !value ? 'Cleared' : ''} maxlength={512}
                             onkeydown={event => recordingTagKeys(event, value)} onblur={event => changeRecordingTag(key, event.currentTarget.value)}
-                            disabled={!canEdit}></textarea>
+                            disabled={!canEdit}/>
                         {:else}
-                          <input id={inputId} class="field-input" data-slot="input" aria-label={accessibleLabel} {value}
+                          <Input id={inputId} class="field-input" data-slot="input" aria-label={accessibleLabel} {value}
                             spellcheck={false} placeholder={override && !value ? 'Cleared' : ''}
                             inputmode={key === 'year' || key === 'disc' ? 'numeric' : key === 'bpm' ? 'decimal' : 'text'}
-                            maxlength="512" onkeydown={event => recordingTagKeys(event, value)}
+                            maxlength={512} onkeydown={event => recordingTagKeys(event, value)}
                             onblur={event => changeRecordingTag(key, event.currentTarget.value)}
                             {@attach key === 'genre' ? connectGenre : undefined} disabled={!canEdit}/>
                         {/if}
                         {#if override}
-                          <button type="button" class="tag-reset" aria-label={`Reset recording ${label.toLowerCase()}`} title="Use source value"
-                            onclick={() => resetRecordingTag(key)} disabled={!canEdit}><RotateCcw size={13}/></button>
+                          <SdkButton type="button" class="tag-reset" aria-label={`Reset recording ${label.toLowerCase()}`} title="Use source value"
+                            onclick={() => resetRecordingTag(key)} disabled={!canEdit}><RotateCcw size={13}/></SdkButton>
                         {/if}
                       </div>
                     </div>
@@ -1667,26 +1777,26 @@
                   <div class="studio-cover cover-compact">
                     <div class="cover-compact-header">
                       <h3>Cover art</h3>
-                      <DropdownMenu.Root>
-                        <DropdownMenu.Trigger class="cover-edit" aria-label="Edit cover art" title="Edit cover art" disabled={!canEdit}><Pencil size={14}/></DropdownMenu.Trigger>
-                        <DropdownMenu.Content class="studio-cover-menu" align="end">
-                          <DropdownMenu.Item onSelect={browseArtwork}>Replace cover…</DropdownMenu.Item>
+                      <Menu controller={studioMenus.cover}>
+                        <MenuTrigger class="cover-edit" aria-label="Edit cover art" title="Edit cover art" disabled={!canEdit}><Pencil size={14}/></MenuTrigger>
+                        <MenuContent class="app-select-menu studio-cover-menu" align="end" onkeydowncapture={event => popupKeys(event, 'cover')}>
+                          <MenuItem onSelect={() => { void browseArtwork(); }}>Replace cover…</MenuItem>
                           {#if artworkPath}
-                            <DropdownMenu.Item onSelect={() => { capture(); artworkPath = ''; }}>Use recording cover</DropdownMenu.Item>
+                            <MenuItem onSelect={() => { capture(); artworkPath = ''; }}>Use recording cover</MenuItem>
                           {/if}
-                        </DropdownMenu.Content>
-                      </DropdownMenu.Root>
+                        </MenuContent>
+                      </Menu>
                     </div>
                     {#snippet coverTarget(image: string)}
                       {#if image}
-                        <button type="button" class="cover-main-image" aria-label="Replace front cover" title={artworkPath ? leaf(artworkPath) : 'Recording cover'} onclick={browseArtwork} disabled={!canEdit}>
+                        <SdkButton type="button" class="cover-main-image" aria-label="Replace front cover" title={artworkPath ? leaf(artworkPath) : 'Recording cover'} onclick={browseArtwork} disabled={!canEdit}>
                           <img src={image} alt="Front cover" draggable="false"/>
-                        </button>
+                        </SdkButton>
                       {:else}
-                        <button type="button" class="cover-empty-target" aria-label="Choose front cover…" title={artworkPath ? leaf(artworkPath) : undefined} onclick={browseArtwork} disabled={!canEdit}>
+                        <SdkButton type="button" class="cover-empty-target" aria-label="Choose front cover…" title={artworkPath ? leaf(artworkPath) : undefined} onclick={browseArtwork} disabled={!canEdit}>
                           <ImagePlus size={20} aria-hidden="true"/>
                           <span>{artworkPath ? leaf(artworkPath) : 'Choose cover…'}</span>
-                        </button>
+                        </SdkButton>
                       {/if}
                     {/snippet}
                     {#await coverPreview}
@@ -1706,7 +1816,7 @@
             </ul>
           {/if}
         {:else}
-          <AudioSplitOutput {split} {canCopy} {copying} {treated} blocked={working} {sampleRate} bind:saveMode bind:destination bind:backupDirectory
+          <AudioSplitOutput {split} {canCopy} {copying} {treated} {effects} blocked={working} {sampleRate} bind:saveMode bind:destination bind:backupDirectory
             sourcePaths={source ? [source.path] : launch.paths} bind:createFolder bind:folderPattern bind:format bind:splitMethod bind:bitrate bind:namePattern
             review={review ?? (reviewReady && reviewingOutput ? lastReview : null)} {progress} {finished} {backups} {restored} {exportWarnings}
             previewing={reviewingOutput} {outputAudition} onbrowse={browseOutput} onchange={changeOutput} onaudition={auditionOutput}/>
@@ -1773,9 +1883,19 @@
   .close-actions { display:flex; justify-content:flex-end; flex-wrap:wrap; gap:var(--sp-1) var(--sp-2); margin-block-start:var(--sp-3); }
   .close-actions :global(button) { border-radius:var(--r-pill); }
   .close-actions :global(button[data-variant="destructive"]:focus-visible) { outline-color:var(--del); }
-  :global(:is(.studio-import-menu,.studio-waveform-options,.studio-cover-menu)[data-slot="dropdown-menu-content"]) { z-index:134; width:max-content; }
+  :global(:is(.studio-import-menu,.studio-waveform-options,.studio-cover-menu)) { z-index:134; width:max-content; }
   :global(body:has([data-audio-studio]) .genre-options[data-slot="popover-content"]) { z-index:137; }
-  :global(.studio-track-menu[data-slot="context-menu-content"]) { z-index:137; }
+  :global(.studio-track-menu) { z-index:137; }
+  :global(:is(.studio-import-menu,.studio-waveform-options,.studio-cover-menu,.studio-track-menu) :is([data-slot="menu-item"],[data-slot="menu-checkbox-item"])) {
+    display:flex; align-items:center; gap:var(--sp-2); min-height:30px; padding:0 var(--sp-2); border-radius:var(--r-control); cursor:default;
+  }
+  :global(:is(.studio-import-menu,.studio-waveform-options,.studio-cover-menu,.studio-track-menu) :is([data-slot="menu-item"],[data-slot="menu-checkbox-item"]):is(:focus,[data-highlighted],:hover):not([aria-disabled="true"])) {
+    outline:none; background:var(--row-hover); color:var(--text);
+  }
+  :global(:is(.studio-import-menu,.studio-waveform-options,.studio-cover-menu,.studio-track-menu) [aria-disabled="true"]) { opacity:.45; }
+  :global(:is(.studio-waveform-options,.studio-track-menu) [data-slot="menu-shortcut"]) { margin-inline-start:auto; color:var(--muted); }
+  :global(.studio-waveform-options [data-slot="menu-separator"]) { height:1px; margin:var(--sp-1) 0; background:var(--ui-muted-border); }
+  .follow-check { width:14px; color:var(--accent-ink); }
   .studio { --studio-inset:var(--sp-4); position:relative; display:grid; min-height:0; grid-template-rows:auto minmax(0,1fr) auto; }
   .header, .footer { display:flex; align-items:center; gap:var(--sp-3); padding:var(--sp-3) var(--studio-inset); }
   .header { padding-inline-end:calc(var(--studio-inset) + 28px); }
@@ -1790,11 +1910,18 @@
   .duration { flex-shrink:0; font-family:var(--font-literal); }
   .scroll { overflow:auto; overscroll-behavior:contain; margin-inline:var(--studio-inset); padding:var(--studio-inset); min-height:0; display:flex; flex-direction:column; align-items:stretch; gap:var(--sp-4); background:var(--bg); border-radius:var(--r-inset); }
   .scroll > * { flex-shrink:0; }
-  .scroll :global(button:is([data-slot="button"],[data-slot="dropdown-menu-trigger"])) { background:transparent; border:0; box-shadow:none; }
-  .scroll :global(button:is([data-slot="button"],[data-slot="dropdown-menu-trigger"]):is(:hover,[aria-expanded="true"]):not(:disabled)) { background:var(--row-hover); color:var(--text); }
+  .scroll :global(button:is([data-slot="button"],[data-slot="menu-trigger"])) { background:transparent; border:0; box-shadow:none; }
+  .scroll :global(button:is([data-slot="button"],[data-slot="menu-trigger"]):is(:hover,[aria-expanded="true"]):not(:disabled)) { background:var(--row-hover); color:var(--text); }
   .timeline-area { display:grid; gap:var(--sp-1); }
   .waveform-hint { margin:0; color:var(--muted); font-size:var(--text-xs); }
   .waveform-hint:empty { display:none; }
+  .audio-comparison { display:flex; align-items:center; gap:var(--sp-2); flex-wrap:wrap; }
+  .audio-comparison > .waveform-hint { margin-inline-start:auto; }
+  .audio-comparison :global(.comparison-segments) { display:inline-flex; align-items:center; gap:2px; padding:2px; border-radius:var(--r-pill); background:var(--panel); }
+  .audio-comparison :global(.comparison-choice) { border:0; background:transparent; color:var(--muted); border-radius:var(--r-pill); min-height:23px; padding-inline:var(--sp-2); font-size:var(--text-xs); }
+  .audio-comparison :global(.comparison-choice[aria-checked="true"]) { background:var(--sel-tint); color:var(--accent-ink); }
+  .audio-comparison :global(.comparison-choice:focus-visible) { outline:2px solid var(--accent); outline-offset:1px; }
+  .audio-comparison :global(.comparison-choice:disabled) { opacity:.55; }
   .toolbar { display:flex; gap:var(--sp-1); align-items:center; flex-wrap:wrap; }
   .transport .time { font-family:var(--font-literal); font-variant-numeric:tabular-nums; min-width:8ch; }
   .transport :global(button.loop-toggle[aria-pressed="true"]) { color:var(--accent-ink); background:var(--sel-tint); }
@@ -1811,23 +1938,23 @@
   .column-top :global(#studio-import-cuts:is(:hover,[aria-expanded="true"]):not(:disabled)) { background:var(--row-hover); }
   .draft-actions { justify-content:flex-end; }
   .track-list { display:grid; max-height:264px; overflow:auto; padding:2px; gap:2px; }
-  .track { display:grid; grid-template-columns:2ch minmax(0,1fr) 7ch 7ch; gap:var(--sp-2); align-items:center; width:100%; height:auto; min-height:var(--ctl-h); border-radius:var(--r-compact); border:0; padding:6px var(--sp-2); color:var(--text); background:transparent; text-align:left; }
-  .track:nth-child(even):not(:hover,.editing,[aria-pressed="true"]) { background:var(--row-stripe,color-mix(in srgb,var(--text) 3%,var(--bg))); }
-  .track:hover { background:var(--row-hover); }
-  .track:is([aria-pressed=true],.editing) { background:var(--row-sel); }
-  .track[aria-pressed=true]:hover { background:var(--row-sel-hover); }
-  .track:is([aria-pressed=true],.editing) .track-number { color:var(--accent-ink); font-weight:var(--fw-strong); }
-  .track:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+  .track-list :global(.track) { display:grid; grid-template-columns:2ch minmax(0,1fr) 7ch 7ch; gap:var(--sp-2); align-items:center; width:100%; height:auto; min-height:var(--ctl-h); border-radius:var(--r-compact); border:0; padding:6px var(--sp-2); color:var(--text); background:transparent; text-align:left; }
+  .track-list :global(.track:nth-child(even):not(:hover,.editing,[aria-pressed="true"])) { background:var(--row-stripe,color-mix(in srgb,var(--text) 3%,var(--bg))); }
+  .track-list :global(.track:hover) { background:var(--row-hover); }
+  .track-list :global(.track:is([aria-pressed=true],.editing)) { background:var(--row-sel); }
+  .track-list :global(.track[aria-pressed=true]:hover) { background:var(--row-sel-hover); }
+  :global(.track:is([aria-pressed=true],.editing)) .track-number { color:var(--accent-ink); font-weight:var(--fw-strong); }
+  .track-list :global(.track:focus-visible) { outline:2px solid var(--accent); outline-offset:-2px; }
   .track-number, .track-time { font-family:var(--font-literal); font-variant-numeric:tabular-nums; color:var(--muted); }
   .track-title { display:grid; min-width:0; }
   .track-title strong, .track-title small { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .track-title strong { font-weight:500; }
   .track-title small { color:var(--muted); }
-  .track.excluded .track-title strong { text-decoration:line-through; color:var(--muted); }
+  :global(.track.excluded) .track-title strong { text-decoration:line-through; color:var(--muted); }
   .track-edit-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:var(--sp-1); min-width:0; }
   .track-edit-fields :global(input) { width:100%; height:28px; min-width:0; padding-inline:var(--sp-2); background:var(--bg); color:var(--text); border:0; border-radius:var(--input-radius); box-shadow:none; }
   .track-edit-fields :global(input:focus) { outline:2px solid var(--accent); outline-offset:-1px; }
-  .track-edit-fields :global(input::placeholder), .tag-input input::placeholder { color:var(--field-ghost,var(--muted)); opacity:1; }
+  .track-edit-fields :global(input::placeholder), .tag-input :global(input::placeholder) { color:var(--field-ghost,var(--muted)); opacity:1; }
   .recording-editor { display:grid; align-items:start; gap:var(--sp-5); }
   .recording-fields { display:grid; gap:var(--sp-2); }
   .recording-pair { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:var(--sp-3); }
@@ -1836,36 +1963,37 @@
   .tag-field > label { color:var(--label); font-size:var(--text-xs); line-height:var(--lh-snug); }
   .tag-field.edited > label { color:var(--accent-ink); }
   .tag-input { position:relative; min-width:0; }
-  .tag-input .field-input { display:block; width:100%; font-family:var(--font-value); background:var(--bg); border:0; box-shadow:none; }
-  .tag-input textarea { min-height:74px; padding:var(--sp-2); border-radius:var(--input-radius); color:var(--text); resize:vertical; }
-  .tag-input textarea:focus { outline:2px solid var(--accent); outline-offset:0; }
-  .tag-field.edited .field-input { padding-inline-end:26px; }
-  .tag-input:has(:global(.genre-picker-host)) input { padding-inline-end:28px; }
-  .tag-field.edited .tag-input:has(:global(.genre-picker-host)) input { padding-inline-end:51px; }
-  .tag-reset, .tag-input :global(button.genre-toggle) { position:absolute; inset:0 0 0 auto; display:grid; place-items:center; width:23px; height:32px; min-height:0; padding:0; background:transparent; border:0; border-radius:var(--r-control); color:var(--muted); }
-  .tag-input:has(:global(.genre-picker-host)) .tag-reset { right:24px; }
-  .tag-reset { z-index:1; opacity:0; pointer-events:none; }
-  .tag-input:is(:hover,:focus-within) .tag-reset { opacity:1; pointer-events:auto; }
-  .tag-reset:hover, .tag-input :global(button.genre-toggle:hover) { color:var(--text); background:var(--row-hover); }
+  .tag-input :global(.field-input) { display:block; width:100%; font-family:var(--font-value); background:var(--bg); border:0; box-shadow:none; }
+  .tag-input :global(textarea) { min-height:74px; padding:var(--sp-2); border-radius:var(--input-radius); color:var(--text); resize:vertical; }
+  .tag-input :global(textarea:focus) { outline:2px solid var(--accent); outline-offset:0; }
+  .tag-field.edited :global(.field-input) { padding-inline-end:26px; }
+  .tag-input:has(:global(.genre-picker-host)) :global(input) { padding-inline-end:28px; }
+  .tag-field.edited .tag-input:has(:global(.genre-picker-host)) :global(input) { padding-inline-end:51px; }
+  .tag-input :global(.tag-reset), .tag-input :global(button.genre-toggle) { position:absolute; inset:0 0 0 auto; display:grid; place-items:center; width:23px; height:32px; min-height:0; padding:0; background:transparent; border:0; border-radius:var(--r-control); color:var(--muted); }
+  .tag-input:has(:global(.genre-picker-host)) :global(.tag-reset) { right:24px; }
+  .tag-input :global(.tag-reset) { z-index:1; opacity:0; pointer-events:none; }
+  .tag-input:is(:hover,:focus-within) :global(.tag-reset) { opacity:1; pointer-events:auto; }
+  :global(.tag-reset:hover), .tag-input :global(button.genre-toggle:hover) { color:var(--text); background:var(--row-hover); }
   .tag-input :global(.genre-combobox input:focus) { outline:none; box-shadow:none; }
   .studio-cover .cover-compact-header { min-height:28px; margin-bottom:var(--sp-2); gap:var(--sp-1); }
   .studio-cover h3 { white-space:nowrap; }
   .studio-cover :global(button.cover-edit) { flex:0 0 24px; width:24px; min-width:24px; height:24px; min-height:24px; display:grid; place-items:center; padding:0; border:0; background:transparent; color:var(--muted); }
   .studio-cover :global(button.cover-edit:is(:hover,[data-state="open"])) { background:var(--row-hover); color:var(--text); }
-  .studio-cover button.cover-empty-target, .studio-cover button.cover-main-image { display:grid; place-content:center; justify-items:center; gap:var(--sp-1); width:min(100%,200px); height:auto; margin-inline:auto; padding:var(--sp-2); border-radius:var(--r-media); background:transparent; color:var(--muted); text-align:center; font-size:var(--text-xs); line-height:1.3; }
-  .studio-cover button.cover-empty-target { min-height:144px; border:1px dashed var(--border); }
-  .studio-cover button.cover-main-image { border:0; padding:0; overflow:hidden; }
-  .studio-cover button.cover-main-image img { width:auto; max-width:100%; max-height:200px; object-fit:contain; }
-  .studio-cover button.cover-empty-target:hover:not(:disabled) { background:var(--sel-tint); border-color:var(--accent); }
-  .studio-cover button span { width:100%; overflow:hidden; text-overflow:ellipsis; }
+  .studio-cover :global(button.cover-empty-target), .studio-cover :global(button.cover-main-image) { display:grid; place-content:center; justify-items:center; gap:var(--sp-1); width:min(100%,200px); height:auto; margin-inline:auto; padding:var(--sp-2); border-radius:var(--r-media); background:transparent; color:var(--muted); text-align:center; font-size:var(--text-xs); line-height:1.3; }
+  .studio-cover :global(button.cover-empty-target) { min-height:144px; border:1px dashed var(--border); }
+  .studio-cover :global(button.cover-main-image) { border:0; padding:0; overflow:hidden; }
+  .studio-cover :global(button.cover-main-image img) { width:auto; max-width:100%; max-height:200px; object-fit:contain; }
+  .studio-cover :global(button.cover-empty-target:hover:not(:disabled)) { background:var(--sel-tint); border-color:var(--accent); }
+  .studio-cover :global(button span) { width:100%; overflow:hidden; text-overflow:ellipsis; }
   .cut-time-edit { display:flex; align-items:center; gap:var(--sp-2); color:var(--muted); font-size:var(--text-xs); }
-  .cut-time-edit input { width:17ch; font-family:var(--font-literal); background:var(--panel); }
-  input { min-width:0; height:32px; padding:0 var(--sp-2); border-radius:var(--input-radius); border:0; color:var(--text); background:var(--bg); }
-  input:focus { outline:2px solid var(--accent); outline-offset:0; }
+  .cut-time-edit :global(input) { width:17ch; font-family:var(--font-literal); background:var(--panel); }
+  .cut-time-edit :global(input), .tag-input :global(input) { min-width:0; height:32px; padding:0 var(--sp-2); border-radius:var(--input-radius); border:0; color:var(--text); background:var(--bg); }
+  .cut-time-edit :global(input:focus), .tag-input :global(input:focus) { outline:2px solid var(--accent); outline-offset:0; }
   .empty { min-height:190px; display:grid; place-content:center; place-items:center; gap:var(--sp-2); color:var(--muted); text-align:center; }
   .opening { display:grid; gap:var(--sp-2); }
   .opening p { display:flex; gap:var(--sp-2); align-items:center; color:var(--muted); margin:0; }
-  .opening progress { width:100%; accent-color:var(--accent); }
+  .opening :global(.recording-scan-track) { width:100%; height:4px; overflow:hidden; border-radius:var(--r-pill); background:var(--panel); }
+  .opening :global(.recording-scan-fill) { height:100%; border-radius:inherit; background:var(--accent); }
   .empty p, .help, .error { margin:0; }
   .help { padding:var(--sp-2) var(--sp-3); background:var(--panel); border-radius:var(--r-control); color:var(--text); }
   .notice:empty { display:none; }

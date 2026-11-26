@@ -1,9 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Bookmark, Copy, FileOutput, FolderOpen, Info, Play, Settings2, Square } from '@lucide/svelte';
-  import { Button } from '$lib/components/ui/button/index.js';
-  import * as DropdownMenu from '$lib/components/ui/dropdown-menu/index.js';
-  import * as Popover from '$lib/components/ui/popover/index.js';
+  import { Bookmark, Check, Copy, FileOutput, FolderOpen, Info, Play, Settings2, Square } from '@lucide/svelte';
+  import { Checkbox } from '@ui-sdk/svelte/checkbox';
+  import { Input } from '@ui-sdk/svelte/input';
+  import { createMenuController, Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from '@ui-sdk/svelte/menu';
+  import { createPopoverController, Popover, PopoverContent, PopoverTrigger } from '@ui-sdk/svelte/popover';
+  import { Progress as ProgressBar, ProgressIndicator, ProgressTrack } from '@ui-sdk/svelte/progress';
+  import { buttonVariants } from '$lib/components/ui/button/button.svelte';
+  import Button from './AudioSplitButton.svelte';
   import FieldPatternInput from './FieldPatternInput.svelte';
   import { fieldLabel } from '../js/fields.js';
   import { catalogue } from '../js/placeholders.js';
@@ -14,13 +18,14 @@
     split, canCopy, copying, treated, blocked, sampleRate, sourcePaths, saveMode = $bindable(), destination = $bindable(),
     backupDirectory = $bindable(), createFolder = $bindable(), folderPattern = $bindable(),
     format = $bindable(), splitMethod = $bindable(), bitrate = $bindable(), namePattern = $bindable(),
-    review, progress, previewing, finished, backups, restored, exportWarnings, outputAudition, onbrowse, onchange, onaudition,
+    review, progress, previewing, finished, backups, restored, exportWarnings, outputAudition, effects = [], onbrowse, onchange, onaudition,
   }: {
     split: boolean; canCopy: boolean; copying: boolean; treated: boolean; blocked: boolean; sampleRate: number; sourcePaths: string[];
     saveMode: SaveMode; destination: string; backupDirectory: string; createFolder: boolean; folderPattern: string;
     format: Format; bitrate: number; namePattern: string; splitMethod: SplitMethod;
     review: Review | null; progress: Progress | null; previewing: boolean; finished: string[]; backups: string[];
     restored: string[]; exportWarnings: string[]; outputAudition: number | null;
+    effects?: string[];
     onbrowse: (backup?: boolean) => void; onchange: (delayed?: boolean) => void; onaudition: (index: number) => void;
   } = $props();
 
@@ -29,10 +34,15 @@
     { value: 'beside', label: 'Save alongside original', icon: Copy },
   ] as const;
   const commonFields = ['track', 'title', 'artist', 'album', 'albumartist', 'disc', 'year', 'genre', 'comment'];
+  const patternMenu = createMenuController();
+  const methodInfo = createPopoverController();
   let fields = $state.raw(commonFields.map(key => ({ key, label: fieldLabel(key) })));
   let settingsOpen = $state(false);
   const sourceFolders = $derived([...new Set(sourcePaths.map(directory))]);
   const sourceFolder = $derived(sourceFolders.length === 1 ? sourceFolders[0] : 'Each original’s folder');
+  const fieldButton = buttonVariants({ variant: 'ghost', size: 'icon-sm', class: 'field-action' });
+  const progressMax = $derived(progress?.framesTotal && progress.framesDone !== undefined ? progress.framesTotal : progress?.total || 1);
+  const progressValue = $derived(progress?.framesTotal && progress.framesDone !== undefined ? progress.framesDone : progress?.total ? progress.completed : null);
   const warnings = $derived((review?.warnings || []).filter(warning =>
     warning !== 'MP3 players that ignore gapless timing tags may play a little extra audio at a cut.'
       && warning !== 'MP3 recordings will be encoded again.'
@@ -57,6 +67,15 @@
     else folderPattern = value;
     onchange(delayed);
   }
+
+  function popupKeys(event: KeyboardEvent, popup: typeof methodInfo | typeof patternMenu) {
+    if (event.key !== 'Escape') return;
+    // Let Escape dismiss this popup without also closing the surrounding dialog.
+    event.preventDefault();
+    event.stopPropagation();
+    popup.close();
+    popup.focus();
+  }
 </script>
 
 {#snippet patternEditor(target: 'file' | 'folder', label: string, value: string, placeholder: string)}
@@ -65,29 +84,8 @@
     <div class="action-field pattern-field">
       <FieldPatternInput id={'split-output-' + target + '-pattern'} {label} {value} {placeholder} disabled={blocked}
         {fields} onchange={value => choosePattern(target, value, true)}/>
-      <DropdownMenu.Root>
-        <DropdownMenu.Trigger>
-          {#snippet child({ props })}
-            <Button {...props} variant="ghost" size="icon-sm" class="field-action" disabled={blocked}
-              aria-label={label + ' presets'} title={label + ' presets'}><Bookmark size={15}/></Button>
-          {/snippet}
-        </DropdownMenu.Trigger>
-        <DropdownMenu.Content class="split-pattern-presets" align="end">
-          {#if target === 'folder'}
-            <DropdownMenu.Item onSelect={() => choosePattern(target, '%album%')}>Album</DropdownMenu.Item>
-            <DropdownMenu.Item onSelect={() => choosePattern(target, '%albumartist% - %album%')}>Album Artist – Album</DropdownMenu.Item>
-          {:else}
-            <DropdownMenu.Item onSelect={() => choosePattern(target, split ? defaultSplitFilePattern : '')}>{split ? 'Track number – Title (default)' : 'Source filename (default)'}</DropdownMenu.Item>
-            <DropdownMenu.Item onSelect={() => choosePattern(target, '%artist% - %title%')}>Artist – Title</DropdownMenu.Item>
-          {/if}
-          {#if maskPresets.length}
-            <DropdownMenu.Separator />
-            {#each maskPresets as preset (preset.name)}
-              <DropdownMenu.Item onSelect={() => choosePattern(target, preset.mask)}>{preset.name}</DropdownMenu.Item>
-            {/each}
-          {/if}
-        </DropdownMenu.Content>
-      </DropdownMenu.Root>
+      <MenuTrigger controller={patternMenu} payload={target} class={fieldButton} disabled={blocked}
+        aria-label={label + ' presets'} title={label + ' presets'}><Bookmark size={15}/></MenuTrigger>
     </div>
   </div>
 {/snippet}
@@ -99,10 +97,10 @@
     <fieldset disabled={blocked}>
       <legend><label for="split-save-address">Save location</label></legend>
       <div class={['action-field', 'address', { inactive: saveMode !== 'folder' }]}>
-        <input id="split-save-address" class="address-input" value={saveMode === 'folder' ? destination : sourceFolder}
+        <Input id="split-save-address" class="address-input" value={saveMode === 'folder' ? destination : sourceFolder}
           placeholder="Type a folder path" disabled={saveMode !== 'folder' || blocked} spellcheck="false"
           title={saveMode === 'folder' ? destination : sourceFolder}
-          oninput={event => { destination = event.currentTarget.value; onchange(true); }}/>
+          onValueChange={value => { destination = value; onchange(true); }}/>
         <Button variant="ghost" size="icon-sm" class="field-action" title="Choose output folder" aria-label="Choose output folder"
           disabled={saveMode !== 'folder' || blocked} onclick={() => onbrowse()}><FolderOpen size={15}/></Button>
         {#each saveChoices as choice (choice.value)}
@@ -147,21 +145,16 @@
                       <option value="exact">Exact cuts</option>
                     </select>
                   {:else}<span class="fixed-method">Exact cuts</span>{/if}
-                  <Popover.Root>
-                    <Popover.Trigger>
-                      {#snippet child({ props })}
-                        <Button {...props} variant="ghost" size="icon-sm" class="field-action" title="About split methods" aria-label="About split methods" disabled={blocked}>
-                          <Info size={15}/>
-                        </Button>
-                      {/snippet}
-                    </Popover.Trigger>
-                    <Popover.Content class="split-method-info" align="start" collisionPadding={12}>
+                  <Popover controller={methodInfo}>
+                    <PopoverTrigger class={fieldButton} title="About split methods" aria-label="About split methods" disabled={blocked}><Info size={15}/></PopoverTrigger>
+                    <PopoverContent class="split-method-info" align="start" sideOffset={4} collisionPadding={12} aria-label="Split methods"
+                      onkeydowncapture={event => popupKeys(event, methodInfo)}>
                       <p><strong>Fast split</strong> copies the audio as it is. It’s quick and keeps the same quality. Cuts may move slightly to the nearest spot the file can be cut. Some older MP3 players may play a little extra audio at a cut.</p>
                       <p><strong>Exact cuts</strong> split right where you put the markers. This takes longer because the app makes new audio files. Creating a new MP3 can reduce quality.</p>
                       {#if treated}<p>Audio treatments require encoding new files, so exact cuts are used.</p>
                       {:else if !canCopy}<p>Changing the file type requires making new audio files, so exact cuts are used.</p>{/if}
-                    </Popover.Content>
-                  </Popover.Root>
+                    </PopoverContent>
+                  </Popover>
                 </div>
               </div>
             {/if}
@@ -190,26 +183,53 @@
     </fieldset>
 
     {@render patternEditor('file', 'Filename pattern', namePattern, split ? 'Track number – Title' : 'Keep source filenames')}
-    <label class="new-folder">
-      <input type="checkbox" bind:checked={createFolder} disabled={blocked} onchange={() => onchange()}/> Create a new folder
-    </label>
+    <Checkbox checked={createFolder} class="new-folder" disabled={blocked}
+      onCheckedChange={next => { createFolder = next === true; onchange(); }}>
+      <span class="new-folder-check" aria-hidden="true">{#if createFolder}<Check size={12}/>{/if}</span>
+      Create a new folder
+    </Checkbox>
     {#if createFolder}
       {@render patternEditor('folder', 'Folder name', folderPattern, 'Type a name or a tag such as %album%')}
     {/if}
+
+    <Menu controller={patternMenu}>
+      <MenuContent class="app-select-menu split-pattern-presets" align="end" sideOffset={4}
+        onkeydowncapture={event => popupKeys(event, patternMenu)}>
+        {#snippet children({ payload })}
+          {@const target = payload === 'folder' ? 'folder' : 'file'}
+          {#if target === 'folder'}
+            <MenuItem onSelect={() => choosePattern(target, '%album%')}>Album</MenuItem>
+            <MenuItem onSelect={() => choosePattern(target, '%albumartist% - %album%')}>Album Artist – Album</MenuItem>
+          {:else}
+            <MenuItem onSelect={() => choosePattern(target, split ? defaultSplitFilePattern : '')}>{split ? 'Track number – Title (default)' : 'Source filename (default)'}</MenuItem>
+            <MenuItem onSelect={() => choosePattern(target, '%artist% - %title%')}>Artist – Title</MenuItem>
+          {/if}
+          {#if maskPresets.length}
+            <MenuSeparator />
+            {#each maskPresets as preset (preset.name)}
+              <MenuItem onSelect={() => choosePattern(target, preset.mask)}>{preset.name}</MenuItem>
+            {/each}
+          {/if}
+        {/snippet}
+      </MenuContent>
+    </Menu>
   </section>
 {/if}
 
 {#if review && !finished.length}
   <section class="review output-review" aria-label="Output review" aria-busy={previewing}>
     <h3 id="audio-split-review-heading" tabindex="-1">{review.outputs.length} {split ? (review.outputs.length === 1 ? 'track' : 'tracks') : (review.outputs.length === 1 ? 'file' : 'files')} to save</h3>
+    {#if effects.length}<p class="review-note"><strong>Effects on export</strong> · {effects.join(', ')}</p>{/if}
+    <p id="audio-split-output-audition-note" class="review-note">Audition previews up to four seconds from the start of each {split ? 'track' : 'file'}{treated ? ' with your effects' : ''}.</p>
     <ol aria-label="Output filenames">
       {#each review.outputs as output, index (output.path)}
         {@const filename = leaf(output.path)}
         {@const listening = outputAudition === index}
         <li class="output-row">
           <span title={output.path}>{filename}</span>
-          <Button variant="ghost" size="icon-sm" title={listening ? 'Stop audition' : 'Audition track'}
+          <Button variant="ghost" size="icon-sm" title={listening ? 'Stop audition' : 'Preview the first four seconds'}
             aria-label={(listening ? 'Stop audition of ' : 'Audition ') + filename} disabled={blocked || previewing}
+            aria-describedby="audio-split-output-audition-note"
             onclick={() => onaudition(index)}>
             {#if listening}<Square size={13}/>{:else}<Play size={14}/>{/if}
           </Button>
@@ -225,13 +245,9 @@
 {#if progress}
   <div class="export-progress">
     <p role="status">{progress.phase === 'copying' ? 'Copying audio frames' : progress.phase} · {progress.completed} of {progress.total} files</p>
-    {#if progress.framesTotal && progress.framesDone !== undefined}
-      <progress max={progress.framesTotal} value={progress.framesDone} aria-label="Audio export progress"></progress>
-    {:else if progress.total}
-      <progress max={progress.total} value={progress.completed} aria-label="Audio export progress"></progress>
-    {:else}
-      <progress aria-label="Audio export progress"></progress>
-    {/if}
+    <ProgressBar value={progressValue} max={progressMax} aria-label="Audio export progress">
+      <ProgressTrack class="split-output-progress-track"><ProgressIndicator class="split-output-progress-fill"/></ProgressTrack>
+    </ProgressBar>
   </div>
 {/if}
 
@@ -239,10 +255,11 @@
   <section class="review" aria-label="Completed files">
     {#if restored.length}
       <h3 id="audio-split-done-heading" tabindex="-1">Restored {restored.length} {restored.length === 1 ? 'original' : 'originals'}</h3>
+      {@render completedWarnings()}
       <ul>{#each restored as file (file)}<li class="output-path">{file}</li>{/each}</ul>
     {:else}
       <h3 id="audio-split-done-heading" tabindex="-1">Saved {finished.length} {finished.length === 1 ? 'file' : 'files'}</h3>
-      {#each exportWarnings as warning, index (index)}<p class="warning">{warning}</p>{/each}
+      {@render completedWarnings()}
       <ul>{#each finished as file (file)}<li class="output-path">{file}</li>{/each}</ul>
       {#if backups.length}
         <div class="backups">
@@ -254,6 +271,10 @@
   </section>
 {/if}
 
+{#snippet completedWarnings()}
+  {#each [...new Set(exportWarnings)] as warning (warning)}<p class="warning">{warning}</p>{/each}
+{/snippet}
+
 <style>
   .save-settings { display:grid; gap:var(--sp-3); }
   fieldset { min-width:0; border:0; padding:0; margin:0; }
@@ -262,14 +283,14 @@
   h3 { color:var(--text); font-weight:600; font-size:var(--text-sm); }
   .save-settings > h3 { margin:0; font-size:var(--text-lg); }
   .action-field { display:flex; align-items:center; min-width:0; min-height:var(--ctl-h); border-radius:var(--input-radius); background:var(--panel); }
-  .action-field:has(:is(input, select, :global(.app-select-trigger), :global(.field-pattern-editor)):focus-visible) { outline:2px solid var(--accent); }
+  .action-field:has(:is(:global(.address-input), select, :global(.app-select-trigger), :global(.field-pattern-editor)):focus-visible) { outline:2px solid var(--accent); }
   .action-field :global(.field-action) { flex:none; margin-inline-end:2px; }
   .action-field :global(.field-action:focus-visible) { outline:2px solid var(--accent); outline-offset:-2px; }
   .action-field :global(.location-mode[aria-pressed="true"]) { background:var(--row-sel); color:var(--text); }
   .address { transition:background-color 140ms ease; }
   .address.inactive { background:color-mix(in srgb, var(--panel) 55%, var(--bg)); }
-  .address-input { flex:1; width:100%; outline:none; background:transparent; }
-  .address-input:disabled { color:var(--muted); }
+  .address :global(.address-input) { flex:1; width:100%; min-width:0; height:32px; padding:0 var(--sp-2); border-radius:var(--input-radius); border:0; outline:none; background:transparent; color:var(--text); }
+  .address :global(.address-input:disabled) { color:var(--muted); }
   .recovery { display:flex; align-items:center; flex-wrap:wrap; gap:var(--sp-1) var(--sp-2); margin-block-start:var(--sp-1); }
   .recovery, .format-mode { color:var(--muted); font-size:var(--text-xs); overflow-wrap:anywhere; }
   .format-mode { margin:0; align-self:end; line-height:var(--ctl-h); }
@@ -287,15 +308,20 @@
   .pattern { display:grid; gap:var(--sp-1); }
   .pattern-field :global(.field-pattern-control) { background:transparent; }
   .pattern-field :global(.field-pattern-control:focus-within) { outline:none; }
-  .new-folder { display:flex; align-items:center; gap:var(--sp-1); color:var(--text); width:fit-content; }
-  .new-folder input { margin:0; accent-color:var(--accent); }
-  select, .address-input { min-width:0; height:32px; padding:0 var(--sp-2); border-radius:var(--input-radius); border:0; color:var(--text); }
-  select { width:100%; background:transparent; outline:none; }
-  :global(.split-pattern-presets) { z-index:140; }
-  :global(.split-method-info) { z-index:140; width:min(21rem, calc(100vw - 24px)); background:var(--bg); color:var(--text); }
+  .save-settings :global(button.new-folder) { display:flex; align-items:center; gap:var(--sp-2); color:var(--text); width:fit-content; padding:var(--sp-1) var(--sp-2); margin-inline-start:calc(-1 * var(--sp-2)); border:0; border-radius:var(--r-compact); background:transparent; }
+  .save-settings :global(button.new-folder:hover:enabled) { background:var(--row-hover); }
+  .save-settings :global(button.new-folder:focus-visible) { outline:2px solid var(--accent); }
+  .save-settings :global(button.new-folder:disabled) { opacity:.5; }
+  .new-folder-check { width:15px; height:15px; display:grid; place-items:center; border:1px solid var(--border); border-radius:4px; background:var(--bg); }
+  :global(button.new-folder[aria-checked="true"]) .new-folder-check { border-color:var(--accent); background:var(--accent); color:var(--primary-foreground); }
+  select { width:100%; min-width:0; height:32px; padding:0 var(--sp-2); border-radius:var(--input-radius); border:0; background:transparent; outline:none; color:var(--text); }
+  :global(.app-select-menu.split-pattern-presets [data-slot='menu-item']) { display:flex; align-items:center; min-height:32px; border-radius:var(--r-menu-item); padding:var(--sp-1) var(--sp-3); cursor:default; outline:none; }
+  :global(.split-pattern-presets [role='separator']) { border-top:1px solid var(--border); margin:var(--sp-1) var(--sp-2); }
+  :global(.split-method-info) { z-index:140; display:grid; gap:var(--sp-2); width:min(21rem, calc(100vw - 24px)); padding:var(--sp-3); border:1px solid var(--border); border-radius:var(--r-inset); background:var(--bg); color:var(--text); box-shadow:0 12px 32px rgb(0 0 0 / .25); }
   :global(.split-method-info p) { margin:0; line-height:1.45; }
   .review { background:var(--panel); border-radius:var(--r-inset); padding:var(--sp-3); }
   .output-review { margin-block-start:var(--sp-1); }
+  .review-note { color:var(--muted); margin:0 0 var(--sp-2); font-size:var(--text-xs); }
   ol, ul { list-style:none; margin:0; padding:0; max-height:240px; overflow:auto; overscroll-behavior:contain; }
   li { border-radius:var(--r-compact); padding:var(--sp-1) var(--sp-2); }
   .output-row { display:flex; align-items:center; justify-content:space-between; gap:var(--sp-2); padding-block:0; }
@@ -309,6 +335,9 @@
   .backups h4 { margin:0; font-size:var(--text-sm); font-weight:var(--fw-medium); }
   .export-progress { display:grid; gap:var(--sp-1); }
   .export-progress p { margin:0; }
-  progress { width:100%; accent-color:var(--accent); }
-  @media (prefers-reduced-motion: reduce) { .address { transition:none; } }
+  .export-progress :global(.split-output-progress-track) { height:5px; overflow:hidden; border-radius:5px; background:var(--panel); }
+  .export-progress :global(.split-output-progress-fill) { height:100%; width:var(--progress-value, 25%); border-radius:inherit; background:var(--accent); }
+  .export-progress :global(.split-output-progress-fill[data-indeterminate]) { animation:progress-travel 1.2s linear infinite alternate; }
+  @keyframes progress-travel { from { transform:translateX(0); } to { transform:translateX(300%); } }
+  @media (prefers-reduced-motion: reduce) { .address { transition:none; } .export-progress :global(.split-output-progress-fill[data-indeterminate]) { animation:none; } }
 </style>

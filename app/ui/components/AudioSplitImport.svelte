@@ -1,5 +1,9 @@
 <script lang="ts">
-  import { Button } from '$lib/components/ui/button/index.js';
+  import { Check } from '@lucide/svelte';
+  import { Checkbox } from '@ui-sdk/svelte/checkbox';
+  import { Input } from '@ui-sdk/svelte/input';
+  import { NumberInput, NumberInputControl } from '@ui-sdk/svelte/number-input';
+  import Button from './AudioSplitButton.svelte';
   import { audioCommand, leaf, openDiscogsRelease, timeLabel, type Cue, type Proposal, type Source, type Tags, type Track } from '../js/audio-split';
 
   let { source, playhead, mode, cue, cueEncoding, cueLoading, onencoding, onapply, oncancel, onerror }: {
@@ -16,8 +20,8 @@
   let anchors = $state<Anchor[]>([]);
   let working = $state(false);
   let releaseId = $state('');
-  let from = $state(1);
-  let to = $state(1);
+  let from = $state<number | null>(1);
+  let to = $state<number | null>(1);
   let overwrite = $state(false);
   let cueConfirmed = $state(false);
   let live = true;
@@ -81,7 +85,7 @@
 
   function anchor() {
     const count = proposal?.rows.length ?? 0;
-    if (!Number.isInteger(from) || !Number.isInteger(to) || from < 1 || to < from || to > count) {
+    if (from === null || to === null || !Number.isInteger(from) || !Number.isInteger(to) || from < 1 || to < from || to > count) {
       onerror('Choose a valid first and last track.');
       return;
     }
@@ -133,6 +137,13 @@
   }
 </script>
 
+{#snippet checkbox(checked: boolean, label: string, onchange: (checked: boolean) => void)}
+  <Checkbox {checked} class="import-check" disabled={working} onCheckedChange={next => onchange(next === true)}>
+    <span class="checkmark" aria-hidden="true">{#if checked}<Check size={12}/>{/if}</span>
+    {label}
+  </Checkbox>
+{/snippet}
+
 <section class="importer" aria-label={mode === 'cue' ? 'CUE import review' : 'Discogs timing proposals'}>
   <div class="header">
     <h3 tabindex="-1" {@attach focusHeading}>{mode === 'cue' ? 'Review CUE markers' : 'Use a Discogs release'}</h3>
@@ -149,7 +160,7 @@
     {#if cue}
     <p>Master named in sheet: <strong>{cue.sourceName}</strong></p>
     {#if fileMismatch}
-      <label class="check"><input type="checkbox" bind:checked={cueConfirmed}/> Use {leaf(source.path)} as the master for this sheet</label>
+      {@render checkbox(cueConfirmed, `Use ${leaf(source.path)} as the master for this sheet`, checked => { cueConfirmed = checked; })}
     {/if}
     <ol>
       {#each cue.markers as marker, index (index)}
@@ -159,7 +170,7 @@
     {/if}
   {:else if mode === 'discogs'}
     <form class="chooser" onsubmit={lookup}>
-      <label>Release ID or link <input bind:value={release} spellcheck="false" placeholder="Discogs release URL" disabled={working}/></label>
+      <label>Release ID or link <Input class="import-field" bind:value={release} spellcheck="false" placeholder="Discogs release URL" disabled={working}/></label>
       <Button type="submit" size="sm" variant="outline" disabled={working || !release.trim()}>Load tracklist</Button>
     </form>
     {#if proposal}
@@ -176,8 +187,16 @@
         </div>
       {/if}
       <div class="chooser">
-        <label>First track <input type="number" min="1" max={proposal.rows.length} bind:value={from} disabled={working}/></label>
-        <label>Last track <input type="number" min="1" max={proposal.rows.length} bind:value={to} disabled={working}/></label>
+        <label>First track
+          <NumberInput min={1} max={proposal.rows.length} bind:value={from} disabled={working}>
+            <NumberInputControl class="import-field" role="spinbutton" aria-valuemin={1} aria-valuemax={proposal.rows.length} aria-valuenow={from ?? undefined}/>
+          </NumberInput>
+        </label>
+        <label>Last track
+          <NumberInput min={1} max={proposal.rows.length} bind:value={to} disabled={working}>
+            <NumberInputControl class="import-field" role="spinbutton" aria-valuemin={1} aria-valuemax={proposal.rows.length} aria-valuenow={to ?? undefined}/>
+          </NumberInput>
+        </label>
         <Button type="button" size="sm" variant="secondary" onclick={anchor} disabled={working}>Anchor at {timeLabel(playhead, source.sampleRate, 1)}</Button>
       </div>
       {#if anchors.length}
@@ -203,7 +222,7 @@
   {/if}
   {#each warnings as warning, index (index)}<p class="warning">{warning}</p>{/each}
   <div class="chooser">
-    <label class="check"><input type="checkbox" bind:checked={overwrite} disabled={working}/> Replace existing cuts with these markers</label>
+    {@render checkbox(overwrite, 'Replace existing cuts with these markers', checked => { overwrite = checked; })}
     <Button size="sm" type="button" onclick={apply} disabled={working || cueLoading || (mode === 'cue' ? !cue?.markers.length || fileMismatch && !cueConfirmed : !candidates.length)}>Use {mode === 'cue' ? 'CUE markers' : 'proposed cuts'}</Button>
   </div>
 </section>
@@ -216,15 +235,19 @@
   .side-ranges :global(button[data-variant="secondary"]:where(:hover:not(:disabled))), .chooser :global(button[data-variant="secondary"]:hover:not(:disabled)) { background:var(--row-hover); }
   .side-ranges :global(button[aria-pressed="true"]) { background:var(--sel-tint); color:var(--accent-ink); }
   .chooser label { flex:1 1 8rem; }
-  .chooser .check { flex:0 1 auto; }
   h3,p { margin:0; } h3 { font-size:var(--text-sm); font-weight:600; }
   p, label { color:var(--muted); }
   a { justify-self:start; color:var(--accent-ink); text-decoration:underline; }
   label { display:grid; gap:var(--sp-1); }
-  .check { display:flex; align-items:center; gap:var(--sp-2); }
+  .importer :global(.import-check) { display:flex; align-items:center; gap:var(--sp-2); width:fit-content; padding:var(--sp-1) var(--sp-2); border:0; border-radius:var(--r-compact); background:transparent; color:var(--text); text-align:start; }
+  .importer :global(.import-check:hover:enabled) { background:var(--row-hover); }
+  .importer :global(.import-check:focus-visible) { outline:2px solid var(--accent); }
+  .importer :global(.import-check:disabled) { opacity:.5; }
+  .checkmark { flex:0 0 15px; height:15px; display:grid; place-items:center; border:1px solid var(--border); border-radius:4px; background:var(--bg); }
+  :global(.import-check[aria-checked="true"]) .checkmark { border-color:var(--accent); background:var(--accent); color:var(--primary-foreground); }
   .encoding { justify-self:start; }
-  select, input:not([type=checkbox]) { height:32px; min-width:0; color:var(--text); background:var(--bg); border:0; border-radius:var(--r-control); padding:0 var(--sp-2); }
-  select:focus-visible, input:focus-visible { outline:2px solid var(--accent); }
+  select, .importer :global(.import-field) { width:100%; height:32px; min-width:0; color:var(--text); background:var(--bg); border:0; border-radius:var(--r-control); padding:0 var(--sp-2); }
+  select:focus-visible, .importer :global(.import-field:focus-visible) { outline:2px solid var(--accent); }
   ol, ul { display:grid; gap:var(--sp-1); padding:0; margin:0; list-style:none; max-height:170px; overflow:auto; overscroll-behavior:contain; }
   li { display:flex; align-items:center; justify-content:space-between; gap:var(--sp-2); padding:var(--sp-1) var(--sp-2); }
   ol li span:last-child { font-family:var(--font-literal); flex-shrink:0; color:var(--muted); }

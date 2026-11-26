@@ -65,6 +65,7 @@ test.beforeEach(async ({ page }) => {
               return Float32Array.from(args.energy ? [...tile.peaks, ...tile.rms] : tile.peaks).buffer;
             }
             case 'audio_split_treatment':
+              if (window.studioFixture.holdTreatment) await new Promise(resolve => { (window.studioFixture.treatmentWaiters ||= []).push(resolve); });
               return { gainDb: args.treatment.normalize ? 4.2 : 0, loudnessLufs: -22.2, outputChannels: args.treatment.mono === 'off' ? 2 : 1 };
             case 'audio_split_status':
               if (args.audition) return { playing: true, loading: false, sequence: args.sequence };
@@ -173,6 +174,7 @@ test('opening waveform options clears its tooltip while the menu is open', async
   await page.clock.install({ time });
   await page.clock.pauseAt(new Date(time.getTime() + 1000));
   const tip = page.locator('#controller-tooltip-content');
+  await page.mouse.move(0, 0);
   await options.hover();
   await page.clock.runFor(550);
   await expect(tip).toBeVisible();
@@ -435,7 +437,7 @@ test('keyboard and pointer cuts, exact draft reopen and reviewed MP3 export', as
   await expect(opener).toBeFocused();
 
   await opener.click();
-  await studio.getByRole('button', { name: 'Reopen draft' }).click();
+  await studio.getByRole('button', { name: /^(Reopen|Continue) draft$/ }).click();
   await expect(rows(studio)).toHaveCount(3);
   await expect(rows(studio).nth(1)).toContainText('Second track');
   await expect(rows(studio).last()).toHaveAttribute('aria-pressed', 'true');
@@ -916,7 +918,7 @@ test('the recording form shows album fields and keeps existing draft overrides',
     saved.tracks[1].tags.genre = 'Breakbeat';
     localStorage.setItem(key, JSON.stringify(saved));
   }, source);
-  await studio.getByRole('button', { name: 'Reopen draft' }).click();
+  await studio.getByRole('button', { name: /^(Reopen|Continue) draft$/ }).click();
   await defaultGenre.fill('Jungle');
   await defaultGenre.press('Tab');
   await studio.getByRole('button', { name: 'Review & save' }).click();
@@ -969,7 +971,7 @@ test('Track 1 can be trimmed and selecting a row visibly moves the playhead to i
   await studio.getByRole('button', { name: 'Save draft', exact: true }).click();
   await studio.getByRole('button', { name: 'Close audio studio' }).click();
   await opener.click();
-  await studio.getByRole('button', { name: 'Reopen draft' }).click();
+  await studio.getByRole('button', { name: /^(Reopen|Continue) draft$/ }).click();
   await editFromMenu(page, studio.getByRole('button', { name: 'Start of Track 1 at 0:02.000' }), 'Edit start time');
   await expect(time).toHaveValue('0:02.000000');
   await time.press('Escape');
@@ -1275,28 +1277,72 @@ test('stereo waveform uses independent channel data and keeps one shared cut and
   expect((await strongestRows())[1]).toBeLessThanOrEqual(3);
 });
 
-test('treatment plays the processed or original audio on request and always reviews the chosen settings', async ({ page }) => {
-  await page.evaluate(() => { window.studioFixture.stereo = true; window.studioFixture.originalFormat = 'mp3'; });
+test('live treatment uses the same loop before analysis finishes and reviews the chosen settings', async ({ page }) => {
+  await page.evaluate(() => { Object.assign(window.studioFixture, { stereo: true, originalFormat: 'mp3', holdTreatment: true }); });
   await page.getByRole('button', { name: 'Split recording', exact: true }).click();
   const studio = page.getByRole('dialog', { name: 'Split recording' });
   await studio.getByRole('button', { name: 'Audio tools' }).click();
-  await page.getByRole('checkbox', { name: /Normalise/ }).check();
+  await studio.getByRole('button', { name: 'Loop preview', exact: true }).last().click();
+  const initial = (await calls(page, 'transport')).find(({ args }) => args.action === 'audition');
+  expect(initial.args.endFrame - initial.args.frame).toBe(8 * 48000);
+  await studio.getByRole('tab', { name: 'Level' }).click();
+  await studio.getByRole('switch', { name: 'Normalise' }).click();
+  await expect.poll(async () => (await calls(page, 'transport')).at(-1)?.args).toMatchObject({ action: 'retune', sequence: initial.args.sequence, treatment: { normalize: true } });
+  await studio.getByRole('tab', { name: 'Stereo' }).click();
   await page.getByRole('combobox', { name: 'Convert to mono' }).click();
   await page.getByRole('option', { name: 'Right only' }).click();
+  await studio.getByRole('tab', { name: 'Repair' }).click();
   await page.getByRole('combobox', { name: 'Reduce mains hum' }).click();
   await page.getByRole('option', { name: '50 Hz' }).click();
-  await expect(page.getByText('Whole-recording gain +4.2 dB')).toBeVisible();
-  await page.keyboard.press('Escape');
-  await studio.getByRole('button', { name: 'Play audio' }).click();
   const recipe = { normalize: true, mono: 'right', rumble: false, hum: 'hz50' };
-  await expect.poll(async () => (await calls(page, 'transport')).at(-1)?.args.treatment).toEqual(recipe);
-  await studio.getByRole('button', { name: 'Audio tools' }).click();
-  await page.getByRole('button', { name: 'Hear original' }).click();
-  await expect.poll(async () => (await calls(page, 'transport')).at(-1)?.args.treatment).toBeUndefined();
+  await expect.poll(async () => (await calls(page, 'transport')).at(-1)?.args.treatment).toMatchObject(recipe);
+  await studio.getByRole('radio', { name: 'Original', exact: true }).click();
+  await expect.poll(async () => (await calls(page, 'transport')).at(-1)?.args).toMatchObject({ action: 'retune', sequence: initial.args.sequence, treatment: { normalize: false, mono: 'off', hum: 'off' } });
+  await studio.getByRole('radio', { name: 'Treated', exact: true }).click();
+  await expect.poll(async () => (await calls(page, 'transport')).at(-1)?.args).toMatchObject({ action: 'retune', sequence: initial.args.sequence, treatment: recipe });
+  expect((await calls(page, 'transport')).filter(({ args }) => args.action === 'play' || args.action === 'audition')).toHaveLength(1);
+  await page.evaluate(() => {
+    window.studioFixture.holdTreatment = false;
+    window.studioFixture.treatmentWaiters?.forEach(resolve => resolve());
+  });
+  await expect(page.getByText('Whole-recording adjustment +4.2 dB')).toBeVisible();
   await page.keyboard.press('Escape');
   await reviewAndSave(studio);
   await expect.poll(async () => (await calls(page, 'preview')).at(-1)?.args.request).toMatchObject({
     splitMethod: 'exact', treatment: recipe, format: 'mp3',
   });
   await expect(studio.getByText('Exact cuts · Audio treated')).toBeVisible();
+});
+
+test('restoration popups return focus and disable a cutoff above the native limit', async ({ page }) => {
+  await page.evaluate(() => { window.studioFixture.sampleRate = 22050; });
+  await page.getByRole('button', { name: 'Split recording', exact: true }).click();
+  const studio = page.getByRole('dialog', { name: 'Split recording' });
+  await studio.getByRole('button', { name: 'Audio tools' }).click();
+  const presets = studio.getByRole('button', { name: 'Starting points' });
+  await presets.click();
+  await expect(page.getByRole('menuitem', { name: 'Soften hiss' })).toBeDisabled();
+  await page.keyboard.press('Escape');
+  await expect(presets).toBeFocused();
+  const hum = studio.getByRole('combobox', { name: 'Reduce mains hum' });
+  await hum.click();
+  await page.keyboard.press('Escape');
+  await expect(hum).toBeFocused();
+  await studio.getByRole('tab', { name: 'Tone' }).click();
+  const bass = studio.getByRole('slider', { name: 'Bass', exact: true });
+  await bass.press('ArrowRight');
+  await expect(bass).toHaveValue('1');
+  const inUse = studio.getByRole('tab', { name: /^In use/ });
+  await inUse.click();
+  await bass.focus();
+  await page.keyboard.down('ArrowLeft');
+  await expect(bass).toHaveValue('0');
+  await page.keyboard.down('ArrowLeft');
+  await page.keyboard.up('ArrowLeft');
+  await expect(bass).toHaveValue('-1');
+  await bass.press('ArrowRight');
+  await expect(bass).toHaveCount(0);
+  await expect(inUse).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(studio.getByRole('button', { name: 'Audio tools' })).toBeFocused();
 });

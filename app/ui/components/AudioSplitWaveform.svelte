@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
-  import * as ContextMenu from '$lib/components/ui/context-menu/index.js';
+  import { Button } from '@ui-sdk/svelte/button';
+  import { createMenuController, Menu, MenuContent, MenuItem } from '@ui-sdk/svelte/menu';
   import { timeLabel, type FrameRange, type PeakTile, type Track } from '../js/audio-split';
 
   let {
@@ -42,6 +43,7 @@
   let panDrag = $state.raw<(GesturePointer & { start: number; offset: number; span: number; middle: boolean }) | null>(null);
   let edgeFrame = 0;
   let edgeTime = 0;
+  const menuController = createMenuController();
   let menuOpen = $state(false);
   let menuTarget = $state<{ frame: number; marker?: string } | null>(null);
   let menuReturn: HTMLElement | null = null;
@@ -509,9 +511,8 @@
   }
 
   function prepareMenu(event: MouseEvent) {
+    event.preventDefault();
     if (readonly || drag || panDrag) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
       return;
     }
     const marker = (event.target as HTMLElement)?.closest<HTMLElement>('[data-cut-id]');
@@ -520,6 +521,7 @@
     menuTarget = track ? { frame: track.startFrame, marker: track.id } : { frame };
     menuReturn = marker ?? surface.querySelector<HTMLElement>('.scrubber');
     editingFromMenu = false;
+    void menuController.open({ anchor: { x: event.clientX, y: event.clientY }, event });
   }
 
   function openMenuFromKey(event: KeyboardEvent) {
@@ -534,14 +536,21 @@
     return true;
   }
 
-  async function closeMenuFocus(event: Event) {
-    event.preventDefault();
-    if (editingFromMenu) return;
+  async function closeMenuFocus(open: boolean) {
+    if (open || editingFromMenu) return;
     const trigger = menuReturn;
     await tick();
     if (menuOpen || !surface.isConnected) return;
     const target = trigger?.isConnected ? trigger : surface.querySelector<HTMLElement>('.scrubber');
     target?.focus({ preventScroll: true });
+  }
+
+  function menuKeys(event: KeyboardEvent) {
+    if (event.key !== 'Escape') return;
+    // The surrounding dialog has its own Escape listener. Close the menu first.
+    event.preventDefault();
+    event.stopPropagation();
+    menuController.close({ event });
   }
 
   function overviewKeys(event: KeyboardEvent) {
@@ -571,23 +580,20 @@
     <div class="track-headers" aria-label="Timeline tracks" role="group">
       {#each trackHeaders as region (region.track.id)}
         {@const title = trackTitle?.(region.track) || ''}
-        <button type="button" class="track-header" aria-pressed={region.track.id === selected}
+        <Button type="button" class="track-header" aria-pressed={region.track.id === selected}
           aria-label={title ? `Go to track ${region.index + 1}, ${title}` : `Go to track ${region.index + 1}`}
           title={title || `Track ${region.index + 1}`}
-          style:left={`${Math.max(0, percent(region.start))}%`}
-          style:right={`${Math.max(0, 100 - percent(region.end))}%`}
+          style={`left:${Math.max(0, percent(region.start))}%;right:${Math.max(0, 100 - percent(region.end))}%`}
           onclick={() => ontrack?.(region.track)}>
           <span>{String(region.index + 1).padStart(2, '0')}</span>{#if title}<span>{title}</span>{/if}
-        </button>
+        </Button>
       {/each}
     </div>
   {/if}
-  <ContextMenu.Root bind:open={menuOpen}>
-    <ContextMenu.Trigger disabled={readonly}>
-      {#snippet child({ props })}
+  <Menu controller={menuController} bind:open={menuOpen} onOpenChangeComplete={closeMenuFocus}>
         <!-- The waveform owns pointer gestures, including touch scrubbing. -->
-        <div {...props} class={['detail', { panning: panDrag?.middle, 'stereo-detail': stereo }]} {@attach wheelControl}
-          onpointerdown={undefined} onpointerdowncapture={startMiddlePan} oncontextmenucapture={prepareMenu}
+        <div class={['detail', { panning: panDrag?.middle, 'stereo-detail': stereo }]} role="group" aria-label="Waveform detail" {@attach wheelControl}
+          onpointerdowncapture={startMiddlePan} oncontextmenu={prepareMenu}
           onauxclick={event => { if (event.button === 1) event.preventDefault(); }}>
           {#if selectedHeader}
             <div class="selected-region" style:left={`${Math.max(0, percent(selectedHeader.start))}%`}
@@ -613,15 +619,16 @@
           {/if}
           {#each visible as { track, index } (track.id)}
             {@const position = drag?.marker === track.id ? drag.frame : track.startFrame}
-            <button class={['marker', { selected: track.id === selected }]} type="button"
-              style:left={`${percent(position)}%`}
+            <Button class={['marker', { selected: track.id === selected }]} type="button"
+              style={`left:${percent(position)}%`}
               data-cut-id={track.id} data-dragging={drag?.marker === track.id}
               aria-label={`${index === 0 ? 'Start of Track 1' : 'Cut'} at ${timeLabel(track.startFrame, sampleRate)}`} aria-pressed={track.id === selected}
+              aria-haspopup="menu"
               onclick={event => { if (event.detail === 0) onplaymarker?.(track.id, track.startFrame); }}
               onkeydown={event => markerKeys(event, track)}
               onpointerdown={event => begin(event, track)}>
               <span class="marker-line" aria-hidden="true"></span>
-            </button>
+            </Button>
             <span class="marker-time" data-dragging={drag?.marker === track.id}
               style:left={`clamp(45px, ${percent(position)}%, calc(100% - 45px))`} aria-hidden="true">{timeLabel(position, sampleRate)}</span>
           {/each}
@@ -642,36 +649,34 @@
             <div class="playhead" style:transform={`translateX(${Math.min(100, Math.max(0, percent(shownPlayhead))) / 100 * detailWidth}px)`} aria-hidden="true"></div>
           {/if}
         </div>
-      {/snippet}
-    </ContextMenu.Trigger>
-    <ContextMenu.Content class="studio-wave-context" onCloseAutoFocus={closeMenuFocus}>
+    <MenuContent class="app-select-menu studio-wave-context" finalFocus="none" aria-label="Waveform commands" onkeydowncapture={menuKeys}>
       {#if menuTarget}
         {@const target = menuTarget}
         {#if target.marker}
           {@const id = target.marker}
           {#if id === firstTrack?.id}
-            <ContextMenu.Item onSelect={() => { editingFromMenu = true; oneditmarker?.(id); }}>Edit start time</ContextMenu.Item>
-            <ContextMenu.Item disabled={!firstTrack.startFrame} onSelect={() => ontrim?.(0)}>Reset start to beginning</ContextMenu.Item>
+            <MenuItem onSelect={() => { editingFromMenu = true; oneditmarker?.(id); }}>Edit start time</MenuItem>
+            <MenuItem disabled={!firstTrack.startFrame} onSelect={() => ontrim?.(0)}>Reset start to beginning</MenuItem>
           {:else}
-            <ContextMenu.Item onSelect={() => { editingFromMenu = true; oneditmarker?.(id); }}>Edit cut time</ContextMenu.Item>
-            <ContextMenu.Item onSelect={() => onremovemarker?.(id)}>Remove cut</ContextMenu.Item>
+            <MenuItem onSelect={() => { editingFromMenu = true; oneditmarker?.(id); }}>Edit cut time</MenuItem>
+            <MenuItem onSelect={() => onremovemarker?.(id)}>Remove cut</MenuItem>
           {/if}
           {#if tracks.some(track => track.id === id && !track.include)}
-            <ContextMenu.Item onSelect={() => onrestoremarker?.(id)}>Restore track</ContextMenu.Item>
+            <MenuItem onSelect={() => onrestoremarker?.(id)}>Restore track</MenuItem>
           {/if}
           {#if onmovetoplayhead}
-            <ContextMenu.Item disabled={!canmove?.(id)} onSelect={() => onmovetoplayhead(id)}>Move split to playhead</ContextMenu.Item>
+            <MenuItem disabled={!canmove?.(id)} onSelect={() => onmovetoplayhead(id)}>Move split to playhead</MenuItem>
           {/if}
         {:else}
-          <ContextMenu.Item disabled={!firstTrack || target.frame <= firstTrack.startFrame || target.frame >= total || tracks.some(track => track.startFrame === target.frame)}
-            onSelect={() => onadd?.(target.frame)}>Add cut here</ContextMenu.Item>
+          <MenuItem disabled={!firstTrack || target.frame <= firstTrack.startFrame || target.frame >= total || tracks.some(track => track.startFrame === target.frame)}
+            onSelect={() => onadd?.(target.frame)}>Add cut here</MenuItem>
           {#if firstTrack && target.frame < (tracks[1]?.startFrame ?? total)}
-            <ContextMenu.Item disabled={target.frame === firstTrack.startFrame} onSelect={() => ontrim?.(target.frame)}>Start Track 1 here</ContextMenu.Item>
+            <MenuItem disabled={target.frame === firstTrack.startFrame} onSelect={() => ontrim?.(target.frame)}>Start Track 1 here</MenuItem>
           {/if}
         {/if}
       {/if}
-    </ContextMenu.Content>
-  </ContextMenu.Root>
+    </MenuContent>
+  </Menu>
   <div class="ruler" aria-hidden="true">
     {#each [0, 1, 2, 3, 4] as division (division)}
       <span>{timeLabel(start + span * division / 4, sampleRate, span < sampleRate * 12 ? 1 : 0)}</span>
@@ -691,13 +696,13 @@
 <style>
   .audio-split-wave { position:relative; display:grid; gap:var(--sp-1); }
   .track-headers { position:relative; height:28px; overflow:hidden; background:var(--panel); border-radius:var(--r-media) var(--r-media) 0 0; margin-bottom:calc(-1 * var(--sp-1)); }
-  .track-header { position:absolute; inset-block:0; display:flex; align-items:center; gap:var(--sp-1); overflow:hidden; padding:0; border:0; border-radius:0; font-size:var(--text-xs); color:var(--muted); background:transparent; white-space:nowrap; }
-  .track-header span:first-child { margin-inline-start:var(--sp-2); font-family:var(--font-literal); }
-  .track-header span:last-child { overflow:hidden; text-overflow:ellipsis; }
-  .track-header[aria-pressed=true] { color:var(--text); background:var(--sel-tint); }
-  .track-header:hover { color:var(--text); background:var(--row-hover); }
-  .track-header:focus-visible { color:var(--text); outline:2px solid var(--accent); outline-offset:-2px; }
-  .track-headers + :global([data-slot="context-menu-trigger"]) { border-start-start-radius:0; border-start-end-radius:0; }
+  .track-headers :global(.track-header) { position:absolute; inset-block:0; display:flex; align-items:center; gap:var(--sp-1); overflow:hidden; padding:0; border:0; border-radius:0; font-size:var(--text-xs); color:var(--muted); background:transparent; white-space:nowrap; }
+  .track-headers :global(.track-header span:first-child) { margin-inline-start:var(--sp-2); font-family:var(--font-literal); }
+  .track-headers :global(.track-header span:last-child) { overflow:hidden; text-overflow:ellipsis; }
+  .track-headers :global(.track-header[aria-pressed=true]) { color:var(--text); background:var(--sel-tint); }
+  .track-headers :global(.track-header:hover) { color:var(--text); background:var(--row-hover); }
+  .track-headers :global(.track-header:focus-visible) { color:var(--text); outline:2px solid var(--accent); outline-offset:-2px; }
+  .track-headers + .detail { border-start-start-radius:0; border-start-end-radius:0; }
   .selected-region { position:absolute; inset-block:0; background:color-mix(in srgb,var(--accent) 6%,transparent); pointer-events:none; }
   .channel-label { position:absolute; inset-inline-start:var(--sp-2); color:var(--text); font-size:var(--text-xs); pointer-events:none; }
   .channel-label.left { inset-block-start:var(--sp-1); }
@@ -706,7 +711,7 @@
   .overview { height:20px; margin-top:var(--sp-1); background:var(--panel); }
   .overview-pan, .scrubber { position:absolute; inset:0; width:100%; background:transparent; border:0; border-radius:inherit; touch-action:none; }
   .scrubber { cursor:crosshair; }
-  .panning :is(.scrubber, .marker) { cursor:grabbing; }
+  .panning :is(.scrubber, :global(.marker)) { cursor:grabbing; }
   .overview-pan { cursor:grab; }
   .overview-pan:active { cursor:grabbing; }
   .overview-pan:focus-visible, .scrubber:focus-visible { outline:2px solid var(--accent); outline-offset:-3px; }
@@ -726,16 +731,16 @@
   .loop-handle::after { content:''; position:absolute; inset:4px 5px; border:1px solid var(--accent); border-radius:var(--r-compact); background:var(--panel); }
   .loop-handle:is(:hover,:focus-visible)::after { background:var(--accent); }
   .trimmed-opening { position:absolute; inset-block:0; left:0; background:color-mix(in srgb,var(--panel) 68%,transparent); pointer-events:none; }
-  .detail .marker { position:absolute; top:0; height:100%; width:24px; transform:translateX(-50%); background:transparent; border:0; padding:0; cursor:pointer; touch-action:none; }
-  .marker[data-dragging=true] { cursor:ew-resize; }
+  .detail :global(.marker) { position:absolute; top:0; height:100%; width:24px; transform:translateX(-50%); background:transparent; border:0; padding:0; cursor:pointer; touch-action:none; }
+  .detail :global(.marker[data-dragging=true]) { cursor:ew-resize; }
   .marker-line { position:absolute; top:3px; bottom:0; left:50%; width:1px; background:var(--muted); }
   .marker-line::before { content:''; position:absolute; top:-3px; left:-3px; width:7px; height:7px; background:inherit; clip-path:polygon(0 0,100% 0,100% 50%,50% 100%,0 50%); }
-  .marker.selected .marker-line { background:var(--accent); width:2px; }
-  .marker:is(:hover, :focus-visible, [data-dragging=true]) .marker-line { background:color-mix(in srgb, var(--accent) 55%, var(--text)); width:2px; }
+  .detail :global(.marker.selected .marker-line) { background:var(--accent); width:2px; }
+  .detail :global(.marker:is(:hover, :focus-visible, [data-dragging=true]) .marker-line) { background:color-mix(in srgb, var(--accent) 55%, var(--text)); width:2px; }
   .marker-time { position:absolute; bottom:var(--sp-2); z-index:1; translate:-50% 0; border-radius:var(--r-compact); padding:var(--sp-1) var(--sp-2); color:var(--text); background:var(--bg); font:var(--text-xs)/1.4 var(--font-literal); pointer-events:none; visibility:hidden; }
-  .marker:is(:hover, :focus-visible) + .marker-time, .marker-time[data-dragging=true] { visibility:visible; }
-  .marker:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
-  :global(.studio-wave-context[data-slot="context-menu-content"]) { z-index:137; }
+  .detail :global(.marker:is(:hover, :focus-visible) + .marker-time), .marker-time[data-dragging=true] { visibility:visible; }
+  .detail :global(.marker:focus-visible) { outline:2px solid var(--accent); outline-offset:-2px; }
+  :global(.app-select-menu.studio-wave-context [data-slot='menu-item']) { display:flex; align-items:center; min-height:32px; border-radius:var(--r-menu-item); padding:var(--sp-1) var(--sp-3); cursor:default; outline:none; }
   .playhead { position:absolute; inset-block:0; left:0; width:1px; pointer-events:none; background:var(--text); }
   .playhead::before { content:''; position:absolute; top:0; left:-4px; border:4px solid transparent; border-top-color:var(--text); }
   .ruler { display:flex; justify-content:space-between; color:var(--muted); font:var(--text-xs)/1.4 var(--font-literal); }
