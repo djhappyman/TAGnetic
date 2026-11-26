@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "audio-tools",
+  "description": "Event exchange between the splitter and its audio tool windows.",
+  "windows": ["audio-tool-eq", "audio-tool-dynamics", "audio-tool-repair"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:event:allow-emit-to"
+  ]
+}

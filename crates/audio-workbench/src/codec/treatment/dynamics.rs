@@ -63,4 +63,14 @@ impl Dynamics {
         }
         gain
     }
+
+    pub(super) fn compression_gain_db(&self) -> f32 {
+        let Some((threshold, exponent)) = self.compressor else {
+            return 0.0;
+        };
+        if self.envelope <= threshold {
+            return 0.0;
+        }
+        (20.0 * exponent * (threshold / self.envelope).log10()) as f32
+    }
 }

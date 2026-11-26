@@ -5,17 +5,19 @@ import { openTagSource } from './navigation.js';
 
 const root = resolve('.test-dist');
 
+async function serveFixture(route) {
+  const path = resolve(root, '.' + new URL(route.request().url()).pathname);
+  if (!path.startsWith(root + sep)) return route.abort();
+  try {
+    await route.fulfill({
+      body: await readFile(path),
+      contentType: path.endsWith('.js') ? 'text/javascript' : path.endsWith('.css') ? 'text/css' : path.endsWith('.woff2') ? 'font/woff2' : 'text/html',
+    });
+  } catch { await route.fulfill({ status: 404, body: 'Missing fixture' }); }
+}
+
 test.beforeEach(async ({ page }) => {
-  await page.route('http://tagrex.test/**', async route => {
-    const path = resolve(root, '.' + new URL(route.request().url()).pathname);
-    if (!path.startsWith(root + sep)) return route.abort();
-    try {
-      await route.fulfill({
-        body: await readFile(path),
-        contentType: path.endsWith('.js') ? 'text/javascript' : path.endsWith('.css') ? 'text/css' : path.endsWith('.woff2') ? 'font/woff2' : 'text/html',
-      });
-    } catch { await route.fulfill({ status: 404, body: 'Missing fixture' }); }
-  });
+  await page.route('http://tagrex.test/**', serveFixture);
   await page.goto('http://tagrex.test/app/ui/index.html');
   await expect.poll(() => page.evaluate(() => typeof window.tagrex?.openLibrary)).toBe('function');
   await page.evaluate(async () => {
@@ -39,7 +41,23 @@ test.beforeEach(async ({ page }) => {
     let reviewIndex = 0;
     let reviewed = null;
     window.studioFixture = { calls, slow: false, picked: '/exports', slowOpen: false, refreshes: [] };
+    const eventHandlers = new Map();
+    const toolVisibility = new Map();
     window.__TAURI__ = {
+      event: {
+        async listen(name, handler) {
+          eventHandlers.set(name, handler);
+          return () => eventHandlers.delete(name);
+        },
+        async emitTo(target, name, payload) {
+          if (target === 'main') eventHandlers.get(name)?.({ payload });
+          else if (name === 'tagnetic:audio-tools-state') {
+            window.studioFixture.toolSnapshots = { ...window.studioFixture.toolSnapshots, [target]: payload };
+          } else if (name === 'tagnetic:audio-tools-flush') {
+            window.studioFixture.toolFence = payload;
+          }
+        },
+      },
       core: {
         async invoke(command, args) {
           calls.push({ command, args });
@@ -67,6 +85,10 @@ test.beforeEach(async ({ page }) => {
             case 'audio_split_treatment':
               if (window.studioFixture.holdTreatment) await new Promise(resolve => { (window.studioFixture.treatmentWaiters ||= []).push(resolve); });
               return { gainDb: args.treatment.normalize ? 4.2 : 0, loudnessLufs: -22.2, outputChannels: args.treatment.mono === 'off' ? 2 : 1 };
+            case 'audio_split_tool_window':
+              if (args.action === 'hide_all') { toolVisibility.clear(); return false; }
+              toolVisibility.set(args.kind, args.action === 'toggle' && !toolVisibility.get(args.kind));
+              return toolVisibility.get(args.kind);
             case 'audio_split_status':
               if (args.audition) return { playing: true, loading: false, sequence: args.sequence };
               return window.studioFixture.statusProbe?.(args) ?? { frame: 48001, playing: true };
@@ -1127,7 +1149,7 @@ test('choosing a track while playing keeps the editor in place and its controls 
   }
   await expect(rows(studio)).toHaveCount(8);
   await studio.getByRole('button', { name: 'Play audio' }).click();
-  await expect(studio.getByText('Buffering preview…')).toBeHidden();
+  await expect(studio.locator('button[aria-busy="true"]')).toHaveCount(0);
   const stable = await studio.evaluate(node => {
     const controls = [...node.querySelectorAll('.editor button, .editor input, .editor textarea, .audio-split-wave canvas')];
     const selector = '.editor button, .editor input, .editor textarea, .audio-split-wave canvas';
@@ -1154,7 +1176,7 @@ test('choosing a track while playing keeps the editor in place and its controls 
   expect(stable.remainingSpace).toBeLessThanOrEqual(12);
   await page.evaluate(() => { window.studioFixture.holdSeek = true; });
   await rows(studio).nth(1).click();
-  await expect(studio.getByText('Buffering preview…')).toBeVisible();
+  await expect(studio.getByRole('button', { name: 'Pause audio' })).toHaveAttribute('aria-busy', 'true');
   expect(await page.evaluate(() => window.checkSplitSelection())).toEqual({ displacement: 0, sameControls: true });
   await page.mouse.move(0, 0);
   const evenSelection = await rows(studio).nth(1).evaluate(row => getComputedStyle(row).backgroundColor);
@@ -1163,7 +1185,7 @@ test('choosing a track while playing keeps the editor in place and its controls 
   const oddSelection = await rows(studio).first().evaluate(row => getComputedStyle(row).backgroundColor);
   expect(evenSelection).not.toBe(oddSelection);
   await page.evaluate(() => { window.studioFixture.holdSeek = false; });
-  await expect(studio.getByText('Buffering preview…')).toBeHidden();
+  await expect(studio.locator('button[aria-busy="true"]')).toHaveCount(0);
   expect(await page.evaluate(() => window.checkSplitSelection())).toEqual({ displacement: 0, sameControls: true });
 });
 
@@ -1183,10 +1205,10 @@ test('a delayed playback status cannot pull back the playhead during a new seek'
   await playhead.press('ArrowRight');
   await expect.poll(async () => (await calls(page, 'status')).at(-1)?.args.sequence).toBe(2);
   await page.evaluate(() => window.studioFixture.finishOldStatus());
-  await expect(studio.getByText('Buffering preview…')).toBeVisible();
+  await expect(studio.getByRole('button', { name: 'Pause audio' })).toHaveAttribute('aria-busy', 'true');
   await expect(playhead).toHaveAttribute('aria-valuenow', '48000');
   await page.evaluate(() => { window.studioFixture.canPlay = true; });
-  await expect(studio.getByText('Buffering preview…')).toBeHidden();
+  await expect(studio.locator('button[aria-busy="true"]')).toHaveCount(0);
   await expect.poll(async () => Number(await playhead.getAttribute('aria-valuenow'))).toBeGreaterThan(48000);
 });
 
@@ -1281,32 +1303,36 @@ test('live treatment uses the same loop before analysis finishes and reviews the
   await page.evaluate(() => { Object.assign(window.studioFixture, { stereo: true, originalFormat: 'mp3', holdTreatment: true }); });
   await page.getByRole('button', { name: 'Split recording', exact: true }).click();
   const studio = page.getByRole('dialog', { name: 'Split recording' });
-  await studio.getByRole('button', { name: 'Audio tools' }).click();
-  await studio.getByRole('button', { name: 'Loop preview', exact: true }).last().click();
+  const dynamics = studio.getByRole('button', { name: 'Dynamics', exact: true });
+  const repair = studio.getByRole('button', { name: 'Repair', exact: true });
+  const request = payload => page.evaluate(payload => window.__TAURI__.event.emitTo('main', 'tagnetic:audio-tools-command', {
+    sourceId: 'recording', ...payload,
+  }), payload);
+  await dynamics.click();
+  await expect.poll(async () => (await calls(page, 'tool_window')).at(-1)?.args).toEqual({ kind: 'dynamics', action: 'toggle' });
+  await request({ kind: 'dynamics', action: 'loop' });
+  await expect.poll(async () => (await calls(page, 'transport')).some(({ args }) => args.action === 'audition')).toBe(true);
   const initial = (await calls(page, 'transport')).find(({ args }) => args.action === 'audition');
   expect(initial.args.endFrame - initial.args.frame).toBe(8 * 48000);
-  await studio.getByRole('tab', { name: 'Level' }).click();
-  await studio.getByRole('switch', { name: 'Normalise' }).click();
+  await request({ kind: 'dynamics', action: 'edit', revision: '1', patch: { normalize: true } });
   await expect.poll(async () => (await calls(page, 'transport')).at(-1)?.args).toMatchObject({ action: 'retune', sequence: initial.args.sequence, treatment: { normalize: true } });
-  await studio.getByRole('tab', { name: 'Stereo' }).click();
-  await page.getByRole('combobox', { name: 'Convert to mono' }).click();
-  await page.getByRole('option', { name: 'Right only' }).click();
-  await studio.getByRole('tab', { name: 'Repair' }).click();
-  await page.getByRole('combobox', { name: 'Reduce mains hum' }).click();
-  await page.getByRole('option', { name: '50 Hz' }).click();
+  await repair.click();
+  await request({ kind: 'repair', action: 'edit', revision: '2', patch: { mono: 'right', hum: 'hz50', normalize: false } });
   const recipe = { normalize: true, mono: 'right', rumble: false, hum: 'hz50' };
   await expect.poll(async () => (await calls(page, 'transport')).at(-1)?.args.treatment).toMatchObject(recipe);
-  await studio.getByRole('radio', { name: 'Original', exact: true }).click();
+  await expect(dynamics).toHaveAttribute('data-active', 'true');
+  await expect(repair).toHaveAttribute('data-active', 'true');
+  await repair.click();
+  await expect(repair).toHaveAttribute('data-active', 'true');
+  await request({ kind: 'dynamics', action: 'compare', original: true });
   await expect.poll(async () => (await calls(page, 'transport')).at(-1)?.args).toMatchObject({ action: 'retune', sequence: initial.args.sequence, treatment: { normalize: false, mono: 'off', hum: 'off' } });
-  await studio.getByRole('radio', { name: 'Treated', exact: true }).click();
+  await request({ kind: 'dynamics', action: 'compare', original: false });
   await expect.poll(async () => (await calls(page, 'transport')).at(-1)?.args).toMatchObject({ action: 'retune', sequence: initial.args.sequence, treatment: recipe });
   expect((await calls(page, 'transport')).filter(({ args }) => args.action === 'play' || args.action === 'audition')).toHaveLength(1);
   await page.evaluate(() => {
     window.studioFixture.holdTreatment = false;
     window.studioFixture.treatmentWaiters?.forEach(resolve => resolve());
   });
-  await expect(page.getByText('Whole-recording adjustment +4.2 dB')).toBeVisible();
-  await page.keyboard.press('Escape');
   await reviewAndSave(studio);
   await expect.poll(async () => (await calls(page, 'preview')).at(-1)?.args.request).toMatchObject({
     splitMethod: 'exact', treatment: recipe, format: 'mp3',
@@ -1314,35 +1340,99 @@ test('live treatment uses the same loop before analysis finishes and reviews the
   await expect(studio.getByText('Exact cuts · Audio treated')).toBeVisible();
 });
 
-test('restoration popups return focus and disable a cutoff above the native limit', async ({ page }) => {
-  await page.evaluate(() => { window.studioFixture.sampleRate = 22050; });
+test('effect gestures undo as one change and stale tool windows cannot change a new source', async ({ page }) => {
   await page.getByRole('button', { name: 'Split recording', exact: true }).click();
   const studio = page.getByRole('dialog', { name: 'Split recording' });
-  await studio.getByRole('button', { name: 'Audio tools' }).click();
-  const presets = studio.getByRole('button', { name: 'Starting points' });
-  await presets.click();
-  await expect(page.getByRole('menuitem', { name: 'Soften hiss' })).toBeDisabled();
-  await page.keyboard.press('Escape');
-  await expect(presets).toBeFocused();
-  const hum = studio.getByRole('combobox', { name: 'Reduce mains hum' });
-  await hum.click();
-  await page.keyboard.press('Escape');
-  await expect(hum).toBeFocused();
-  await studio.getByRole('tab', { name: 'Tone' }).click();
-  const bass = studio.getByRole('slider', { name: 'Bass', exact: true });
-  await bass.press('ArrowRight');
-  await expect(bass).toHaveValue('1');
-  const inUse = studio.getByRole('tab', { name: /^In use/ });
-  await inUse.click();
-  await bass.focus();
-  await page.keyboard.down('ArrowLeft');
-  await expect(bass).toHaveValue('0');
-  await page.keyboard.down('ArrowLeft');
-  await page.keyboard.up('ArrowLeft');
-  await expect(bass).toHaveValue('-1');
-  await bass.press('ArrowRight');
-  await expect(bass).toHaveCount(0);
-  await expect(inUse).toBeFocused();
-  await page.keyboard.press('Escape');
-  await expect(studio.getByRole('button', { name: 'Audio tools' })).toBeFocused();
+  const eq = studio.getByRole('button', { name: 'EQ', exact: true });
+  await eq.click();
+  await expect.poll(() => page.evaluate(() => window.studioFixture.toolSnapshots?.['audio-tool-eq']?.sourceId)).toBe('recording');
+  await page.evaluate(async () => {
+    const edit = payload => window.__TAURI__.event.emitTo('main', 'tagnetic:audio-tools-command', {
+      kind: 'eq', action: 'edit', gesture: 'drag', ...payload,
+    });
+    await edit({ sourceId: 'old-recording', revision: '1', patch: { rumble: true } });
+  });
+  await expect(eq).toHaveAttribute('data-active', 'false');
+  await page.evaluate(async () => {
+    for (const bassDb of [1, 2, 3]) {
+      await window.__TAURI__.event.emitTo('main', 'tagnetic:audio-tools-command', {
+        kind: 'eq', action: 'edit', sourceId: 'recording', gesture: 'drag', revision: String(bassDb), patch: { bassDb },
+      });
+    }
+  });
+  await expect(eq).toHaveAttribute('data-active', 'true');
+  await studio.getByRole('button', { name: 'Undo draft change' }).click();
+  await expect(eq).toHaveAttribute('data-active', 'false');
+  await studio.getByRole('button', { name: 'Redo draft change' }).click();
+  await expect(eq).toHaveAttribute('data-active', 'true');
+});
+
+test('an open audio tool repaints when the main palette, accent and interface font change', async ({ page, context }) => {
+  await page.getByRole('button', { name: 'Split recording', exact: true }).click();
+  const studio = page.getByRole('dialog', { name: 'Split recording' });
+  await studio.getByRole('button', { name: 'EQ', exact: true }).click();
+  const target = 'audio-tool-eq';
+  await expect.poll(() => page.evaluate(target => window.studioFixture.toolSnapshots?.[target]?.sourceId, target)).toBe('recording');
+
+  const tool = await context.newPage();
+  await tool.route('http://tagrex.test/**', serveFixture);
+  await tool.addInitScript(() => {
+    const handlers = new Map();
+    window.__TAURI__ = {
+      event: {
+        async listen(name, callback) { handlers.set(name, callback); return () => handlers.delete(name); },
+        async emitTo() {},
+      },
+    };
+    window.receiveSnapshot = payload => handlers.get('tagnetic:audio-tools-state')?.({ payload });
+  });
+  await tool.goto('http://tagrex.test/app/ui/audio-tools.html?tool=eq');
+  await expect(tool.getByRole('button', { name: 'Play', exact: true })).toBeDisabled();
+  const publish = async () => {
+    const snapshot = await page.evaluate(target => window.studioFixture.toolSnapshots[target], target);
+    await tool.evaluate(state => window.receiveSnapshot(state), snapshot);
+  };
+  await expect(async () => {
+    await publish();
+    await expect(tool.getByRole('button', { name: 'Play', exact: true })).toBeEnabled({ timeout: 350 });
+  }).toPass();
+  const before = await tool.locator('canvas').evaluate(canvas => canvas.toDataURL());
+  await page.evaluate(() => {
+    Object.assign(document.documentElement.dataset, { theme: 'light', palette: 'plum', uiFont: 'mono' });
+    document.documentElement.style.setProperty('--accent', '#864c28');
+    document.dispatchEvent(new CustomEvent('tagrex:appearance'));
+  });
+  await expect.poll(() => page.evaluate(target => window.studioFixture.toolSnapshots[target].theme.palette, target)).toBe('plum');
+  await publish();
+
+  const appearance = page => page.evaluate(() => {
+    const root = document.documentElement;
+    const style = getComputedStyle(root);
+    return [root.dataset.theme, root.dataset.palette, root.dataset.uiFont, ...['--bg', '--panel', '--accent', '--text'].map(key => style.getPropertyValue(key).trim())];
+  });
+  expect(await appearance(tool)).toEqual(await appearance(page));
+  await expect.poll(() => tool.locator('canvas').evaluate(canvas => canvas.toDataURL())).not.toBe(before);
+});
+
+test('saving a draft waits for a hidden tool to send its pending edit', async ({ page }) => {
+  await page.getByRole('button', { name: 'Split recording', exact: true }).click();
+  const studio = page.getByRole('dialog', { name: 'Split recording' });
+  const eq = studio.getByRole('button', { name: 'EQ', exact: true });
+  await eq.click();
+  await page.evaluate(() => window.__TAURI__.event.emitTo('main', 'tagnetic:audio-tools-command', { kind: 'eq', action: 'sync' }));
+  await eq.click();
+  const save = studio.getByRole('button', { name: 'Save draft', exact: true });
+  await save.click();
+  await expect(save).toBeDisabled();
+  await expect.poll(() => page.evaluate(() => window.studioFixture.toolFence)).toMatch(/^\d+$/);
+  await page.evaluate(async () => {
+    const send = args => window.__TAURI__.event.emitTo('main', 'tagnetic:audio-tools-command', { kind: 'eq', sourceId: 'recording', ...args });
+    await send({ action: 'edit', revision: '1', patch: { rumble: true } });
+    await send({ action: 'flushed', fence: window.studioFixture.toolFence });
+  });
+  await expect(save).toBeEnabled();
+  await studio.getByRole('button', { name: 'Undo draft change' }).click();
+  await expect(eq).toHaveAttribute('data-active', 'false');
+  await studio.getByRole('button', { name: 'Reopen draft' }).click();
+  await expect(eq).toHaveAttribute('data-active', 'true');
 });

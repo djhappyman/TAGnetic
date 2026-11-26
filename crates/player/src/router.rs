@@ -4,12 +4,19 @@
 use rodio::{queue::SourcesQueueOutput, source::UniformSourceIterator, Source};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc, Mutex, TryLockError,
 };
 use std::time::Duration;
 type Output = UniformSourceIterator<SourcesQueueOutput>;
+type Handoff = Box<dyn FnOnce() -> bool + Send>;
+
+struct Replacement {
+    output: Output,
+    handoff: Option<Handoff>,
+}
+
 struct Shared {
-    pending: Mutex<Option<Output>>,
+    pending: Mutex<Option<Replacement>>,
     changed: AtomicBool,
     channels: rodio::ChannelCount,
     rate: rodio::SampleRate,
@@ -21,13 +28,27 @@ impl Handle {
         (self.0.channels, self.0.rate)
     }
     pub fn replace(&self, output: SourcesQueueOutput) {
+        self.queue(output, None);
+    }
+
+    /// Let a prepared replacement align to the outgoing source's final
+    /// position before installing it. A stale candidate leaves it playing.
+    pub fn replace_if(
+        &self,
+        output: SourcesQueueOutput,
+        handoff: impl FnOnce() -> bool + Send + 'static,
+    ) {
+        self.queue(output, Some(Box::new(handoff)));
+    }
+
+    fn queue(&self, output: SourcesQueueOutput, handoff: Option<Handoff>) {
         let output = UniformSourceIterator::new(output, self.0.channels, self.0.rate);
         let previous = self
             .0
             .pending
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .replace(output);
+            .replace(Replacement { output, handoff });
         self.0.changed.store(true, Ordering::Release);
         // Source/decoder destruction is outside the control lock.
         drop(previous);
@@ -60,20 +81,23 @@ impl Iterator for Router {
     type Item = f32;
     fn next(&mut self) -> Option<f32> {
         // A new sink starts on a complete output frame, preserving channel order.
-        if self.frame_remaining == 0
-            && self.shared.changed.load(Ordering::Acquire)
-            && self.shared.changed.swap(false, Ordering::AcqRel)
-        {
-            let next = {
-                self.shared
-                    .pending
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .take()
+        if self.frame_remaining == 0 && self.shared.changed.load(Ordering::Acquire) {
+            let next = match self.shared.pending.try_lock() {
+                Ok(mut pending) => {
+                    self.shared.changed.store(false, Ordering::Release);
+                    pending.take()
+                }
+                Err(TryLockError::Poisoned(error)) => {
+                    self.shared.changed.store(false, Ordering::Release);
+                    error.into_inner().take()
+                }
+                Err(TryLockError::WouldBlock) => None,
             };
-            if let Some(next) = next {
-                let previous = self.current.replace(next);
-                drop(previous);
+            if let Some(Replacement { output, handoff }) = next {
+                if handoff.is_none_or(|handoff| handoff()) {
+                    let previous = self.current.replace(output);
+                    drop(previous);
+                }
             }
         }
         if self.frame_remaining == 0 {
@@ -133,6 +157,38 @@ mod tests {
             None
         }
     }
+
+    #[test]
+    fn stale_replacement_leaves_the_current_output_at_the_frame_boundary() {
+        let channels = rodio::ChannelCount::new(2).unwrap();
+        let rate = rodio::SampleRate::new(44_100).unwrap();
+        let (handle, mut router) = Router::new(channels, rate);
+        let source = |sample| {
+            let (player, output) = rodio::Player::new();
+            player.append(rodio::buffer::SamplesBuffer::new(
+                channels,
+                rate,
+                vec![sample; 8],
+            ));
+            (player, output)
+        };
+        let (_current, output) = source(0.25);
+        handle.replace(output);
+        assert_eq!(router.next(), Some(0.25));
+
+        let (_stale, output) = source(0.75);
+        let checks = Arc::new(AtomicUsize::new(0));
+        let checks_at_swap = checks.clone();
+        handle.replace_if(output, move || {
+            checks_at_swap.fetch_add(1, Ordering::SeqCst);
+            false
+        });
+        assert_eq!(router.next(), Some(0.25));
+        assert_eq!(checks.load(Ordering::SeqCst), 0);
+        assert_eq!(router.next(), Some(0.25));
+        assert_eq!(checks.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn unconsumed_dependency_mixer_retains_every_fresh_sink_positive_control() {
         let live = Arc::new(AtomicUsize::new(0));

@@ -1,0 +1,179 @@
+<script lang="ts">
+  import { onMount } from 'svelte';
+  import AudioSplitToolWindow from './AudioSplitToolWindow.svelte';
+  import ControllerTooltip from './ControllerTooltip.svelte';
+  import type { FrameRange } from '../js/audio-split';
+  import { readTreatment, sameTreatment, type AudioTreatment } from '../js/audio-treatment';
+  import type { TreatmentPlotMode, TreatmentProbe } from '../js/audio-treatment-plot';
+  import {
+    applyToolTheme, listenToolFlush, listenToolProbe, listenToolState, sendToolRequest, toolPatch,
+    type ToolAction, type ToolProbeUpdate, type ToolRequest, type ToolSnapshot,
+  } from '../js/audio-tools-window';
+
+  let { kind }: { kind: TreatmentPlotMode } = $props();
+  let snapshot = $state.raw<ToolSnapshot | null>(null);
+  let probe = $state.raw<TreatmentProbe | null>(null);
+  let connectionError = $state('');
+  let probeError = $state('');
+  let received: ToolSnapshot | null = null;
+  let earlyProbe: ToolProbeUpdate | undefined;
+  let active = false;
+  let lastTheme = '';
+  const revisionPrefix = Math.random().toString(36).slice(2);
+  let revision = 0;
+  type Mutation = Extract<ToolRequest, { action: 'edit' | 'undo' | 'redo' }>;
+  let sending: Mutation | undefined;
+  const queued: Mutation[] = [];
+  let requestedFence: string | undefined;
+
+  function send(request: ToolRequest) {
+    const promise = sendToolRequest(request);
+    if (!promise) connectionError = 'Open audio tools from TAGnetic.';
+    return promise;
+  }
+
+  function flush() {
+    if (sending) return;
+    const request = queued.shift();
+    if (!request) {
+      if (requestedFence && snapshot) {
+        const fence = requestedFence;
+        requestedFence = undefined;
+        void send({ kind, action: 'flushed', sourceId: snapshot.sourceId, fence })?.catch(reason => { connectionError = String(reason); });
+      }
+      return;
+    }
+    sending = request;
+    void send(request)?.catch(reason => {
+      if (sending === request) {
+        sending = undefined;
+        connectionError = String(reason);
+        flush();
+      }
+    });
+  }
+
+  function edit(patch: Partial<AudioTreatment>, gesture?: string) {
+    if (!snapshot) return;
+    const accepted = toolPatch(kind, patch);
+    const settings = readTreatment({ ...snapshot.settings, ...accepted });
+    if (sameTreatment(snapshot.settings, settings)) return;
+    snapshot = { ...snapshot, settings };
+    const tail = queued.at(-1);
+    if (gesture && tail?.action === 'edit' && tail.gesture === gesture) {
+      Object.assign(tail.patch, accepted);
+    } else {
+      queued.push({
+        kind, action: 'edit', sourceId: snapshot.sourceId, patch: accepted, revision: `${revisionPrefix}-${++revision}`, gesture,
+      });
+    }
+    flush();
+  }
+
+  function action(action: ToolAction, range?: FrameRange) {
+    if (!snapshot) return;
+    const { sourceId } = snapshot;
+    if (action === 'undo' || action === 'redo') {
+      queued.push({ kind, action, sourceId, revision: `${revisionPrefix}-${++revision}` });
+      flush();
+      return;
+    }
+    const message: ToolRequest = action === 'loop' ? { kind, action, sourceId, range }
+      : action === 'original' || action === 'treated' ? { kind, action: 'compare', sourceId, original: action === 'original' }
+      : { kind, action, sourceId };
+    void send(message)?.catch(reason => { connectionError = String(reason); });
+  }
+
+  function viewport(range: FrameRange | null) {
+    if (snapshot) void send({ kind, action: 'viewport', sourceId: snapshot.sourceId, range })?.catch(reason => { connectionError = String(reason); });
+  }
+
+  function acceptProbe(update: ToolProbeUpdate) {
+    if (!active) return;
+    if (update.probe && (kind === 'repair' ? !update.probe.spectrogram?.length : kind === 'eq' && !update.probe.frequencies.length)) return;
+    if (received?.sourceId !== update.sourceId) {
+      earlyProbe = update;
+      return;
+    }
+    probe = update.probe ?? probe;
+    probeError = update.error ?? '';
+  }
+
+  function accept(state: ToolSnapshot | null) {
+    if (!active) return;
+    if (state?.sourceId !== received?.sourceId) {
+      sending = undefined;
+      queued.length = 0;
+      requestedFence = undefined;
+      probe = null;
+      probeError = '';
+    }
+    received = state;
+    if (!state) { snapshot = null; return; }
+    if (earlyProbe?.sourceId === state.sourceId) {
+      acceptProbe(earlyProbe);
+      earlyProbe = undefined;
+    }
+    connectionError = '';
+    const theme = JSON.stringify(state.theme);
+    const appearanceChanged = lastTheme !== theme;
+    if (appearanceChanged) {
+      lastTheme = theme;
+      applyToolTheme(state.theme);
+    }
+    if (sending && state.revision === sending.revision) {
+      sending = undefined;
+      flush();
+    }
+    let settings = state.settings;
+    for (const request of [sending, ...queued]) {
+      if (request?.action === 'edit') settings = { ...settings, ...request.patch };
+    }
+    snapshot = {
+      ...state,
+      settings: snapshot && sameTreatment(snapshot.settings, settings) ? snapshot.settings : settings,
+      theme: appearanceChanged ? state.theme : snapshot?.theme || state.theme,
+    };
+  }
+
+  function sync() {
+    if (active) void send({ kind, action: 'sync' })?.catch(reason => { connectionError = String(reason); });
+  }
+
+  onMount(() => {
+    active = true;
+    const unlisten: (() => void)[] = [];
+    const listeners = [listenToolState(accept), listenToolProbe(acceptProbe), listenToolFlush(fence => {
+      requestedFence = fence;
+      flush();
+    })];
+    if (listeners.every(Boolean)) {
+      void Promise.all(listeners.map(pending => pending?.then(stop => {
+        if (active) unlisten.push(stop);
+        else stop();
+      }))).then(sync).catch(reason => { connectionError = String(reason); });
+    } else connectionError = 'Open audio tools from TAGnetic.';
+    return () => {
+      active = false;
+      unlisten.forEach(stop => stop());
+    };
+  });
+</script>
+
+<svelte:window onfocus={sync}/>
+<svelte:document onvisibilitychange={() => { if (document.visibilityState === 'visible') sync(); }}/>
+<ControllerTooltip/>
+<main class="tool-host">
+  {#if connectionError || probeError}
+    <p class="problem" role="status">{connectionError || probeError}</p>
+  {/if}
+  {#key snapshot?.sourceId}
+    <AudioSplitToolWindow {kind} {snapshot} {probe} onedit={edit} onaction={action} onviewport={viewport}/>
+  {/key}
+</main>
+
+<style>
+  :global(body) { height:auto; min-height:100vh; overflow:auto; margin:0; background:var(--bg); color:var(--text); }
+  .tool-host { min-height:100vh; }
+  .problem { margin:0; padding:var(--sp-2) var(--sp-3); color:var(--muted); font-size:var(--text-xs); }
+</style>

@@ -1,12 +1,13 @@
 //! Decode and resample off the device callback. A superseded seek closes its
 //! voice and leaves only one pending decoder request on the worker.
+use super::StudioAudition;
 use crate::{fixed::Fixed, router, RodioSink};
 use rodio::{ChannelCount, SampleRate, Source};
 use std::{
     fs::File,
     ops::Range,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
         Arc, Condvar, Mutex,
     },
@@ -18,6 +19,15 @@ const CHUNK_FRAMES: usize = 256;
 const BUFFERED_CHUNKS: usize = 12;
 const MAX_PREPARED_CHUNKS: usize = 128;
 const MAX_LOOP_SAMPLES: u64 = 1_048_576;
+const HANDOFF_WAITING: usize = 0;
+const HANDOFF_MISSED: usize = 1;
+const HANDOFF_SAMPLE: usize = 2;
+
+pub(super) enum Handoff {
+    Waiting,
+    Missed,
+    Switched,
+}
 
 pub(super) struct Worker(Arc<Mailbox>);
 
@@ -171,31 +181,106 @@ impl Voice {
     }
 
     pub(super) fn activate(&mut self, router: &router::Handle, position: Duration) {
+        if let Some((source, output)) = self.preload(position) {
+            self.sink.append(source);
+            router.replace(output);
+        }
+    }
+
+    pub(super) fn submit_handoff(
+        &mut self,
+        router: &router::Handle,
+        position: Duration,
+        active: &Voice,
+        audition: Option<StudioAudition>,
+    ) {
+        let Some((mut source, output)) = self.preload(position) else {
+            self.shared
+                .handoff_sample
+                .store(HANDOFF_MISSED, Ordering::Release);
+            return;
+        };
+        let Some((chunk, _)) = &source.chunk else {
+            self.shared
+                .handoff_sample
+                .store(HANDOFF_MISSED, Ordering::Release);
+            return;
+        };
+        // The controller discards earlier queued chunks. The device needs
+        // only one index calculation in the prefetched block at the swap.
+        let origin = chunk.origin_nanos;
+        let first = chunk.first_frame;
+        let channels = usize::from(source.channels.get());
+        let frames = (chunk.range.len() / channels) as u64;
+        let rate = source.rate.get();
+        let active = active.shared.clone();
+        let incoming = self.shared.clone();
+        source.align_handoff = true;
+        self.sink.append(source);
+        router.replace_if(output, move || {
+            let mut position = active.position_ns.load(Ordering::Acquire);
+            if let Some(audition) = audition {
+                if position >= audition.end.as_nanos() as u64 {
+                    position = audition.start.as_nanos() as u64;
+                }
+            }
+            let frame = output_frames(position.saturating_sub(origin), rate);
+            let half_frame = 500_000_000 / u64::from(rate) + 1;
+            if !active.cancelled()
+                && !incoming.cancelled()
+                && origin <= position.saturating_add(half_frame)
+                && (first..first + frames).contains(&frame)
+            {
+                let sample = (frame - first) as usize * channels;
+                incoming.position_ns.store(position, Ordering::Release);
+                incoming
+                    .handoff_sample
+                    .store(HANDOFF_SAMPLE + sample, Ordering::Release);
+                true
+            } else {
+                incoming
+                    .handoff_sample
+                    .store(HANDOFF_MISSED, Ordering::Release);
+                false
+            }
+        });
+    }
+
+    pub(super) fn handoff(&self) -> Handoff {
+        match self.shared.handoff_sample.load(Ordering::Acquire) {
+            HANDOFF_WAITING => Handoff::Waiting,
+            HANDOFF_MISSED => Handoff::Missed,
+            _ => Handoff::Switched,
+        }
+    }
+
+    fn preload(
+        &mut self,
+        position: Duration,
+    ) -> Option<(Speaker, rodio::queue::SourcesQueueOutput)> {
         let position = position.as_nanos() as u64;
         self.shared.position_ns.store(position, Ordering::Release);
         self.shared.catch_up_ns.store(position, Ordering::Release);
-        if let Some(PreparedOutput {
+        let PreparedOutput {
             receiver,
             output,
             channels,
             rate,
-        }) = self.output.take()
-        {
-            let mut source = Speaker {
-                receiver,
-                shared: self.shared.clone(),
-                channels,
-                rate,
-                chunk: None,
-                channel: 0,
-                silent: false,
-                ended: false,
-            };
-            // Catch up before handing the source to the device callback.
-            source.load_chunk(MAX_PREPARED_CHUNKS + 1);
-            self.sink.append(source);
-            router.replace(output);
-        }
+        } = self.output.take()?;
+        let mut source = Speaker {
+            receiver,
+            shared: self.shared.clone(),
+            channels,
+            rate,
+            chunk: None,
+            channel: 0,
+            silent: false,
+            ended: false,
+            align_handoff: false,
+        };
+        // Catch up before handing the source to the device callback.
+        source.load_chunk(MAX_PREPARED_CHUNKS + 1);
+        Some((source, output))
     }
 
     pub(super) fn covers(&self, position: Duration) -> bool {
@@ -251,6 +336,7 @@ struct Shared {
     ended: AtomicBool,
     position_ns: AtomicU64,
     catch_up_ns: AtomicU64,
+    handoff_sample: AtomicUsize,
     buffer_end_ns: AtomicU64,
     buffer_full: AtomicBool,
     gate: Mutex<()>,
@@ -280,6 +366,7 @@ struct Speaker {
     channel: u16,
     silent: bool,
     ended: bool,
+    align_handoff: bool,
 }
 
 impl Iterator for Speaker {
@@ -290,6 +377,11 @@ impl Iterator for Speaker {
             return None;
         }
         if self.channel == 0 {
+            if self.align_handoff {
+                let sample = self.shared.handoff_sample.load(Ordering::Acquire);
+                self.chunk.as_mut().expect("prefetched handoff chunk").1 = sample - HANDOFF_SAMPLE;
+                self.align_handoff = false;
+            }
             self.silent = self.shared.paused.load(Ordering::Acquire);
             if !self.silent && self.chunk.is_none() {
                 self.load_chunk(BUFFERED_CHUNKS + 1);
@@ -353,8 +445,7 @@ impl Speaker {
                 0
             } else {
                 let elapsed = catch_up.saturating_sub(chunk.origin_nanos);
-                let frame = ((u128::from(elapsed) * u128::from(self.rate.get()) + 500_000_000)
-                    / 1_000_000_000) as u64;
+                let frame = output_frames(elapsed, self.rate.get());
                 frame.saturating_sub(chunk.first_frame)
             };
             if skip < (chunk.range.len() / channels) as u64 {
@@ -365,6 +456,10 @@ impl Speaker {
         }
         self.silent = true;
     }
+}
+
+fn output_frames(nanos: u64, rate: u32) -> u64 {
+    ((u128::from(nanos) * u128::from(rate) + 500_000_000) / 1_000_000_000) as u64
 }
 
 impl Source for Speaker {
@@ -439,7 +534,7 @@ impl Job {
         )
         .map_err(|e| e.to_string())?;
         let processor = treatment
-            .processor(decoder.source_info())
+            .processor_at(decoder.source_info(), decode_start)
             .map_err(|e| e.to_string())?;
         let channels = u64::from(processor.output_info().channels);
         let mut remaining = (self.decode.end - start) * channels;

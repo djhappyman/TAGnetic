@@ -20,7 +20,9 @@ use tagrex_audio_workbench::{
     self as audio, Analysis, CopyCodec, FrameCopyIndex, OutputFormat, PreparedTreatment,
     RenderSegment,
 };
-pub use tagrex_audio_workbench::{AudioTreatment, FrameRange};
+pub use tagrex_audio_workbench::{
+    AudioTreatment, FrameRange, TreatmentProbe, TreatmentProbeOptions,
+};
 use tagrex_core::mask::{portable_file_name, Mask};
 use tagrex_core::model::{
     is_writable_value_at, normalize_staged_tag_value, AudioFormat, CoverArt, CoverKind,
@@ -923,6 +925,37 @@ impl Studio {
             }
         }
         Ok(values)
+    }
+
+    pub fn treatment_probe(
+        &self,
+        id: &str,
+        frame: u64,
+        settings: AudioTreatment,
+        options: TreatmentProbeOptions,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<TreatmentProbe> {
+        let source = self.source(id)?;
+        let prepared = if options.dry_spectrogram() {
+            PreparedTreatment::default()
+        } else {
+            source.preview_treatment(settings)?
+        };
+        let probe = audio::probe_treatment_with_options(
+            source.open_current()?,
+            source.info,
+            frame,
+            source
+                .analysis
+                .as_ref()
+                .and_then(|analysis| analysis.seek_index.as_deref()),
+            prepared,
+            options,
+            cancelled,
+        )
+        .map_err(StudioError::new)?;
+        source.open_current()?;
+        Ok(probe)
     }
 
     pub fn cue_geometry(&self, id: &str) -> Result<(u32, u64)> {

@@ -2904,6 +2904,7 @@ fn main() {
         .manage(AppState::default())
         .manage(audio_studio::StudioState::default())
         .manage(audio_studio::Openings::default())
+        .manage(audio_studio::ToolWindows::default())
         .manage(ProviderState::default())
         .manage(ApplyControl::default())
         .manage(BpmControl::default())
@@ -2938,8 +2939,10 @@ fn main() {
             audio_studio::audio_split_loading,
             audio_studio::audio_split_cancel_open,
             audio_studio::audio_split_close,
+            audio_studio::audio_split_tool_window,
             audio_studio::audio_split_peaks,
             audio_studio::audio_split_treatment,
+            audio_studio::audio_split_probe,
             audio_studio::audio_split_transport,
             audio_studio::audio_split_audition_output,
             audio_studio::audio_split_status,
@@ -3088,6 +3091,16 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, _event| {
+            if matches!(
+                &_event,
+                tauri::RunEvent::WindowEvent {
+                    label,
+                    event: tauri::WindowEvent::Destroyed,
+                    ..
+                } if label == "main"
+            ) {
+                audio_studio::destroy_tool_windows(_app);
+            }
             // macOS does not pass an opened folder as an argument. A double
             // click, an "Open With", a folder dropped on the Dock icon and a
             // second `open` of the bundle all arrive here, as one Apple Event

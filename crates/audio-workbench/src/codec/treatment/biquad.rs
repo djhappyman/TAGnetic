@@ -1,7 +1,7 @@
 //! Audio EQ Cookbook filters in transposed direct form II.
 //! https://www.w3.org/TR/audio-eq-cookbook/
 
-use std::f64::consts::{FRAC_1_SQRT_2, TAU};
+use std::f64::consts::{FRAC_1_SQRT_2, PI, TAU};
 
 #[derive(Clone)]
 pub(super) struct Biquad {
@@ -13,14 +13,38 @@ pub(super) struct Biquad {
 impl Biquad {
     pub(super) fn high_pass(rate: f64, frequency: u16) -> Self {
         let (sin, cos) = angle(rate, frequency);
-        let b = (1.0 + cos) * 0.5;
-        Self::symmetric([b, -2.0 * b, b], cos, sin * FRAC_1_SQRT_2)
+        Self::pass(cos, sin * FRAC_1_SQRT_2, true)
     }
 
-    pub(super) fn low_pass(rate: f64, frequency: u16) -> Self {
+    pub(super) fn cut(
+        rate: f64,
+        frequency: u16,
+        slope: u8,
+        high_pass: bool,
+    ) -> impl Iterator<Item = Self> {
         let (sin, cos) = angle(rate, frequency);
-        let b = (1.0 - cos) * 0.5;
-        Self::symmetric([b, 2.0 * b, b], cos, sin * FRAC_1_SQRT_2)
+        let sections = slope.max(12) / 12;
+        (0..sections).map(move |index| {
+            // Butterworth sections use 1/(2Q) = cos((2k+1)π/(2*order)).
+            // Run the lower-Q sections first to limit intermediate peaks.
+            let damping = if sections == 1 {
+                FRAC_1_SQRT_2
+            } else {
+                (PI * f64::from(2 * index + 1) / f64::from(4 * sections)).cos()
+            };
+            Self::pass(cos, sin * damping, high_pass)
+        })
+    }
+
+    fn pass(cos: f64, alpha: f64, high_pass: bool) -> Self {
+        let b = if high_pass {
+            let edge = (1.0 + cos) * 0.5;
+            [edge, -2.0 * edge, edge]
+        } else {
+            let edge = (1.0 - cos) * 0.5;
+            [edge, 2.0 * edge, edge]
+        };
+        Self::symmetric(b, cos, alpha)
     }
 
     pub(super) fn notch(rate: f64, frequency: u16, quality: u8) -> Self {
@@ -32,10 +56,10 @@ impl Biquad {
         )
     }
 
-    pub(super) fn peak(rate: f64, frequency: u16, db: i8) -> Self {
+    pub(super) fn peak(rate: f64, frequency: u16, db: i8, quality: f64) -> Self {
         let (sin, cos) = angle(rate, frequency);
         let amplitude = 10.0_f64.powf(f64::from(db) / 40.0);
-        let alpha = sin / (2.0 * 0.8);
+        let alpha = sin / (2.0 * quality);
         Self::new(
             [1.0 + alpha * amplitude, -2.0 * cos, 1.0 - alpha * amplitude],
             [1.0 + alpha / amplitude, -2.0 * cos, 1.0 - alpha / amplitude],
@@ -81,7 +105,7 @@ impl Biquad {
         Self::new(b, [1.0 + alpha, -2.0 * cos, 1.0 - alpha])
     }
 
-    fn new(b: [f64; 3], [a0, a1, a2]: [f64; 3]) -> Self {
+    pub(super) fn new(b: [f64; 3], [a0, a1, a2]: [f64; 3]) -> Self {
         Self {
             b: b.map(|value| value / a0),
             a: [a1 / a0, a2 / a0],

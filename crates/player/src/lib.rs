@@ -180,7 +180,7 @@ impl Player {
             audition: request.audition,
             sample_rate: request.sample_rate,
             seek_index: request.seek_index,
-            treatment: request.treatment,
+            treatment: Box::new(request.treatment),
         }))
     }
 
@@ -223,7 +223,7 @@ impl Player {
             sequence,
             revision,
             file,
-            treatment,
+            treatment: Box::new(treatment),
         }))
     }
 

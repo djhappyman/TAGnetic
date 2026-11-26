@@ -5229,6 +5229,7 @@ dependencies = [
  "ebur128",
  "encoding_rs",
  "flacenc",
+ "rustfft",
  "rusty_mp3",
  "serde",
  "symphonia",

@@ -10,16 +10,20 @@ mod aiff;
 mod decode;
 mod encode;
 mod peaks;
+mod probe;
 mod seek;
 mod treatment;
 
 use decode::Recording;
 use peaks::PeakBins;
 pub use peaks::{Peak, WaveformIndex, WaveformPeaks};
+pub use probe::{
+    probe_treatment, probe_treatment_with_options, TreatmentProbe, TreatmentProbeOptions,
+};
 pub use seek::SeekIndex;
 pub use treatment::{
     prepare_treatment, AudioTreatment, HumFilter, MonoMode, Polarity, PreparedTreatment,
-    TreatmentProcessor,
+    SpectralRepair, TreatmentProcessor, MAX_SPECTRAL_REPAIRS,
 };
 
 const MAX_SEGMENTS: usize = 1_000;

@@ -1,9 +1,9 @@
 //! Which document each window may display.
 //!
-//! The shell has two windows: `main`, which serves the app itself, and
-//! `beatport-login`, a browser for Beatport's own sign-in pages while the user
-//! authorizes an account. Tauri lets a webview navigate anywhere unless a
-//! plugin hook says otherwise, and the UI renders provider-supplied links, so
+//! The shell serves the main app, audio tools, and a browser for Beatport's
+//! own sign-in pages while the user authorizes an account. Tauri lets a
+//! webview navigate anywhere unless a plugin hook says otherwise. The UI
+//! renders provider-supplied links, so
 //! without a policy a middle-click, the context menu's "Open Link" or a
 //! hyperlink dropped on the window could replace the app with a remote
 //! document: no address bar, no way back, and the Tagnetic chrome wrapped
@@ -16,6 +16,8 @@
 //!   `http://tauri.localhost` on Windows) and, in a development build, the
 //!   exact origin of `build.devUrl`. Paths are free; origins are not. A
 //!   look-alike host, a non-default port or embedded credentials are denied.
+//! - Each `audio-tool-*` window may only show its own audio tools page at
+//!   the same trusted origins as the main window.
 //! - `beatport-login` may only show `https:` documents on the standard port,
 //!   plus the blank document. The authorize page, the redirect that carries
 //!   the code and whatever Beatport's own identity pages redirect through are
@@ -35,6 +37,8 @@
 
 use tauri::plugin::{Builder, TauriPlugin};
 use tauri::{Manager, Runtime, Url, Webview};
+
+use crate::audio_studio::{AudioToolKind, TOOL_DOCUMENT};
 
 /// Label of the window that shows the app itself, matching `tauri.conf.json`.
 const MAIN_WINDOW: &str = "main";
@@ -67,6 +71,15 @@ fn allows(label: &str, url: &Url, development_origin: Option<&Url>) -> bool {
     if label == MAIN_WINDOW {
         return is_app_document(url)
             || development_origin.is_some_and(|origin| same_origin(url, origin));
+    }
+    if let Some(kind) = AudioToolKind::ALL
+        .into_iter()
+        .find(|kind| kind.label() == label)
+    {
+        return url.path().strip_prefix('/') == Some(TOOL_DOCUMENT)
+            && url.query() == Some(kind.query())
+            && (is_app_document(url)
+                || development_origin.is_some_and(|origin| same_origin(url, origin)));
     }
     if label == crate::BEATPORT_LOGIN_WINDOW {
         return is_https_document(url);
@@ -229,6 +242,38 @@ mod tests {
         ];
         for case in denied {
             assert!(!allows(MAIN_WINDOW, &url(case), Some(&origin)), "{case}");
+        }
+    }
+
+    #[test]
+    fn an_audio_tool_shows_only_its_own_page() {
+        let origin = development_origin();
+        for kind in AudioToolKind::ALL {
+            let page = format!("/{TOOL_DOCUMENT}?{}", kind.query());
+            for host in ["tauri://localhost", "http://tauri.localhost"] {
+                assert!(allows(kind.label(), &url(&format!("{host}{page}")), None));
+            }
+            let dev_page = origin.join(&page).unwrap();
+            assert!(allows(kind.label(), &dev_page, Some(&origin)));
+            assert!(!allows(kind.label(), &dev_page, None));
+            for host in ["https://example.com", "http://127.0.0.1:1421"] {
+                assert!(!allows(
+                    kind.label(),
+                    &url(&format!("{host}{page}")),
+                    Some(&origin)
+                ));
+            }
+            assert!(!allows(
+                kind.label(),
+                &url("tauri://localhost/index.html"),
+                None
+            ));
+            for other in AudioToolKind::ALL
+                .into_iter()
+                .filter(|other| other.label() != kind.label())
+            {
+                assert!(!allows(other.label(), &dev_page, Some(&origin)));
+            }
         }
     }
 

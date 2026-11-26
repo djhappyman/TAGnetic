@@ -225,9 +225,23 @@ fn live_treatment_preserves_loop_and_ignores_older_settings_or_owners() {
             swapped,
         )
         .unwrap();
-    crate::test_support::wait_until("retune wraps the handoff to the start", || {
-        f.player.studio_status("editor").position == audition.start
-    });
+    let mut next = 4_100;
+    let mut first_treated = 0;
+    crate::test_support::wait_until(
+        "retune hands off to the same point in the active loop",
+        || {
+            let (left, right) = pcm(&mut f.studio);
+            assert_eq!(left, -right);
+            assert_eq!(left.abs(), next);
+            next = 4_100 + (next - 4_100 + 1) % 8;
+            if left < 0 {
+                first_treated = right;
+                true
+            } else {
+                false
+            }
+        },
+    );
     f.player
         .studio_retune(
             owner.clone(),
@@ -256,16 +270,6 @@ fn live_treatment_preserves_loop_and_ignores_older_settings_or_owners() {
         )
         .unwrap();
 
-    let mut first_treated = 0;
-    crate::test_support::wait_until("loop changes sound in place", || {
-        let (left, right) = pcm(&mut f.studio);
-        if left < 0 && left == -right {
-            first_treated = right;
-            true
-        } else {
-            false
-        }
-    });
     assert!((4_100..4_108).contains(&first_treated));
     for step in 1..=16 {
         let expected = 4_100 + (first_treated - 4_100 + step) % 8;
@@ -348,6 +352,210 @@ fn live_treatment_continues_streaming_and_keeps_current_sound_on_failure() {
     assert!(f.player.studio_status("editor").playing);
     assert!(pcm(&mut f.studio).0 < 0);
     f.drain();
+}
+
+#[test]
+fn retune_handoff_accounts_for_a_frame_rendered_after_the_control_snapshot() {
+    use tagrex_audio_workbench::{AudioTreatment, SourceInfo};
+
+    let recording = Recording::ramp("retune-frame-boundary", 12_000, 4_000);
+    let file = File::open(&recording.0).unwrap();
+    let channels = rodio::ChannelCount::new(2).unwrap();
+    let rate = rodio::SampleRate::new(RATE).unwrap();
+    let (router, mut output) = router::Router::new(channels, rate);
+    let active_worker = Worker::new().unwrap();
+    let pending_worker = Worker::new().unwrap();
+    let geometry = Geometry {
+        sample_rate: RATE,
+        end: point(12_000),
+        audition: None,
+        treatment: PreparedTreatment::default(),
+    };
+    let active = Voice::new(
+        &router,
+        1.0,
+        &active_worker,
+        geometry.request(&file, point(1024), None).unwrap(),
+    );
+    active.pause(false);
+    crate::test_support::wait_until("dry decoder ready", || active.ready());
+    let first = first_audio(&mut output);
+    let snapshot = active.position();
+    let wet = PreparedTreatment::preview(
+        AudioTreatment {
+            swap_channels: true,
+            ..AudioTreatment::default()
+        },
+        SourceInfo {
+            sample_rate: RATE,
+            channels: 2,
+            frames: 12_000,
+            bits_per_sample: Some(16),
+        },
+    )
+    .unwrap();
+    let geometry = Geometry {
+        treatment: wet,
+        ..geometry
+    };
+    let prepare = |position| {
+        let pending = Voice::prepare(
+            &router,
+            1.0,
+            &pending_worker,
+            geometry.request(&file, position, None).unwrap(),
+        );
+        crate::test_support::wait_until("treated decoder ready", || pending.ready());
+        assert!(pending.covers(position));
+        pending.pause(false);
+        pending
+    };
+
+    // A controller stall can overrun the prefetched block. The router keeps
+    // the dry voice attached until a replacement covers the new position.
+    let mut expired = prepare(snapshot);
+    let mut dry = first;
+    for _ in 0..300 {
+        let frame = pcm(&mut output);
+        assert_eq!(frame, (dry.0 + 1, dry.1 - 1));
+        dry = frame;
+    }
+    expired.submit_handoff(&router, snapshot, &active, None);
+    let dry = (dry.0 + 1, dry.1 - 1);
+    assert_eq!(pcm(&mut output), dry);
+    assert!(matches!(expired.handoff(), Handoff::Missed));
+    drop(expired);
+
+    // The device completes a full stereo frame while the controller still
+    // has the earlier position.
+    let snapshot = active.position();
+    let mut pending = prepare(snapshot);
+    let last_dry = pcm(&mut output);
+    assert_eq!(last_dry, (dry.0 + 1, dry.1 - 1));
+    // Publish partway through another stereo frame. The right channel still
+    // belongs to the old frame, and the new voice starts on the next frame.
+    let convert = |sample: f32| (sample * 32_768.0).round() as i32;
+    assert_eq!(convert(output.next().unwrap()), last_dry.0 + 1);
+    pending.submit_handoff(&router, snapshot, &active, None);
+    assert_eq!(convert(output.next().unwrap()), last_dry.1 - 1);
+    assert_eq!(pcm(&mut output), (last_dry.1 - 2, last_dry.0 + 2));
+    assert!(matches!(pending.handoff(), Handoff::Switched));
+}
+
+#[test]
+fn sustained_retunes_hand_off_an_intermediate_voice_and_the_last_edit() {
+    use tagrex_audio_workbench::{AudioTreatment, SourceInfo};
+
+    let recording = Recording::ramp("retune-coalescing", 20_000, 4_000);
+    let channels = rodio::ChannelCount::new(2).unwrap();
+    let rate = rodio::SampleRate::new(RATE).unwrap();
+    let (main, _main_output) = router::Router::new(channels, rate);
+    let (studio, mut output) = router::Router::new(channels, rate);
+    let routed = Routed { main, studio };
+    let mut actor = Actor::new(Shared::default());
+    let info = SourceInfo {
+        sample_rate: RATE,
+        channels: 2,
+        frames: 20_000,
+        bits_per_sample: Some(16),
+    };
+    let dry = PreparedTreatment::default();
+    let first = PreparedTreatment::preview(
+        AudioTreatment {
+            swap_channels: true,
+            ..AudioTreatment::default()
+        },
+        info,
+    )
+    .unwrap();
+    let gain = |gain_db| {
+        PreparedTreatment::preview(
+            AudioTreatment {
+                gain_db,
+                ..AudioTreatment::default()
+            },
+            info,
+        )
+        .unwrap()
+    };
+
+    actor.handle(
+        Command::Play {
+            owner: "editor".into(),
+            sequence: 1,
+            file: File::open(&recording.0).unwrap(),
+            start: point(1_024),
+            end: point(info.frames),
+            audition: None,
+            sample_rate: RATE,
+            seek_index: None,
+            treatment: Box::new(dry),
+        },
+        Some(&routed),
+        1.0,
+    );
+    crate::test_support::wait_until("dry voice is playing", || {
+        actor.tick();
+        actor.state.playing
+    });
+    let dry_sample = first_audio(&mut output).0;
+    let retune = |revision, treatment| Command::Retune {
+        owner: "editor".into(),
+        sequence: 1,
+        revision,
+        file: File::open(&recording.0).unwrap(),
+        treatment: Box::new(treatment),
+    };
+    actor.handle(retune(1, first), Some(&routed), 1.0);
+    for revision in 2..=12 {
+        actor.handle(
+            retune(revision, gain(-(revision as i8))),
+            Some(&routed),
+            1.0,
+        );
+    }
+    let current = |actor: &Actor| actor.lease.as_ref().unwrap().geometry.treatment;
+    crate::test_support::wait_until("the prepared edit hands off despite newer requests", || {
+        actor.tick();
+        if same_treatment(current(&actor), dry) {
+            let _ = pcm(&mut output);
+            false
+        } else {
+            true
+        }
+    });
+    assert!(same_treatment(current(&actor), first));
+    assert!(pcm(&mut output).0 < 0);
+
+    let latest = gain(-12);
+    crate::test_support::wait_until("the latest edit alone follows the handoff", || {
+        actor.tick();
+        if same_treatment(current(&actor), first) {
+            let _ = pcm(&mut output);
+            false
+        } else {
+            true
+        }
+    });
+    assert!(same_treatment(current(&actor), latest));
+    assert!((1..dry_sample / 2).contains(&pcm(&mut output).0));
+
+    actor.handle(retune(13, first), Some(&routed), 1.0);
+    actor.handle(retune(14, dry), Some(&routed), 1.0);
+    crate::test_support::wait_until(
+        "the final bypass request restores the original sound",
+        || {
+            actor.tick();
+            if same_treatment(current(&actor), dry) {
+                true
+            } else {
+                let _ = pcm(&mut output);
+                false
+            }
+        },
+    );
+    assert!(pcm(&mut output).0 >= dry_sample);
+    assert_eq!(actor.state.retune_failed, None);
 }
 
 #[test]

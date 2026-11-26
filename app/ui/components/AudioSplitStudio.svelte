@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { AudioLines, Check, ChevronDown, ChevronLeft, ChevronRight, CircleStop, Disc3, Ellipsis, FilePlus2, FolderOpen, ImagePlus, Pause, Pencil, Play, Redo2, Repeat, RotateCcw, Scissors, Settings2, Undo2, X } from '@lucide/svelte';
-  import { SegmentedControl, SegmentedControlItem } from '@ui-sdk/svelte/segmented-control';
+  import { Activity, AudioLines, Check, ChevronDown, ChevronLeft, ChevronRight, CircleStop, Disc3, Ellipsis, FilePlus2, FolderOpen, ImagePlus, Pause, Pencil, Play, Redo2, Repeat, RotateCcw, Scissors, SlidersHorizontal, Undo2, Wrench, X } from '@lucide/svelte';
   import { Button as SdkButton } from '@ui-sdk/svelte/button';
   import { Input } from '@ui-sdk/svelte/input';
   import { Textarea } from '@ui-sdk/svelte/textarea';
@@ -14,8 +13,12 @@
   import { savedSettings, tracks as libraryTracks } from '../js/state.js';
   import AudioSplitWaveform from './AudioSplitWaveform.svelte';
   import AudioSplitOutput from './AudioSplitOutput.svelte';
-  import AudioSplitTreatment from './AudioSplitTreatment.svelte';
   import AudioSplitImport from './AudioSplitImport.svelte';
+  import {
+    listenToolRequests, listenToolVisibility, requestToolFlush, sendToolProbe, sendToolState,
+    toolIsActive, toolModes, toolNames, toolPatch, toolTheme, type ToolRequest, type ToolSnapshot, type ToolVisibility,
+  } from '../js/audio-tools-window';
+  import type { TreatmentProbe } from '../js/audio-treatment-plot';
   import {
     activeEffectLabels, audioCommand, choosePath, closeAudioSplitSession, defaultSplitFilePattern, frameAtTime, hasDraft, hasTreatment, leaf, noTreatment, peakValues, readDraft, readTreatment, sameTreatment,
     recordingCover, recoverAudioSplitSession, rememberAudioSplitSession, saveDraft, stem, timeLabel,
@@ -62,19 +65,35 @@
   let showHelp = $state(false);
   let waveformMenuOpen = $state(false);
   const studioMenus = { waveform: createMenuController(), imports: createMenuController(), tracks: createMenuController(), cover: createMenuController() };
-  let effectsOpen = $state(false);
+  const audioToolIcons = { eq: SlidersHorizontal, dynamics: Activity, repair: Wrench };
+  type Tool = typeof toolModes[number];
+  const toolRevisions: Partial<Record<Tool, string>> = {};
+  let toolGesture: string | undefined;
+  let usedToolWindows = false;
+  let toolWindowError = $state('');
+  const visibleTools = new Set<Tool>();
+  const connectedTools = new Set<Tool>();
+  const sentToolStates: Partial<Record<Tool, ToolSnapshot | null>> = {};
+  let activeToolTheme: ToolSnapshot['theme'] | undefined;
+  let toolTimer: ReturnType<typeof setInterval> | undefined;
+  type ProbeLane = { pending: boolean; retryAt: number; latest?: { key: string; sourceId: string; probe: TreatmentProbe } };
+  const meterLane: ProbeLane = { pending: false, retryAt: 0 };
+  const repairLane: ProbeLane = { pending: false, retryAt: 0 };
+  let repairViewport: FrameRange | null = null;
+  let toolFence: { id: string; remaining: Set<Tool>; finish: (ready: boolean) => void } | undefined;
+  let fenceSerial = 0;
+  let settlingTools = $state(false);
   let treatment = $state.raw<AudioTreatment>(noTreatment);
   let treatmentAnalysis = $state.raw<TreatmentAnalysis | null>(null);
-  let treatmentBusy = $state(false);
   let treatmentError = $state('');
   let listeningError = $state('');
   let hearOriginal = $state(false);
   let treatmentVersion = 0;
   let retuneVersion = 0;
-  let retuneFrame = 0;
+  let retuneTimer: ReturnType<typeof setTimeout> | undefined;
+  let lastRetune = -Infinity;
   let treatmentTimer: ReturnType<typeof setTimeout>;
-  let treatmentGesture = false;
-  let treatmentGestureCaptured = false;
+  let measuringRevision = 0;
   let selected = $state('');
   let rangeAnchor = '';
   let rangeIds = $state.raw<string[]>([]);
@@ -162,10 +181,9 @@
   const canEdit = $derived(!!source && !working && !loading && phase === 'edit');
   const treated = $derived(hasTreatment(treatment));
   const effects = $derived(activeEffectLabels(treatment));
-  const treatmentReady = $derived(!treated || (!!treatmentAnalysis && !treatmentBusy));
   const canCopy = $derived(split && !treated && source?.originalFormat === format);
   const copying = $derived(canCopy && splitMethod === 'copy');
-  const canEnterReview = $derived(split ? !!source && included > 0 && treatmentReady : launch.paths.length > 0 && launch.paths.length <= maxFiles);
+  const canEnterReview = $derived(split ? !!source && included > 0 : launch.paths.length > 0 && launch.paths.length <= maxFiles);
   const reviewReady = $derived(canEnterReview && (saveMode !== 'folder' || !!destination.trim()) &&
     (!createFolder || !!folderPattern.trim()));
   const reviewingOutput = $derived(previewing || checkingOutput);
@@ -177,6 +195,7 @@
   const draft = (): Draft => ({ tracks, tags, importedTags, artworkPath, treatment });
 
   function capture() {
+    toolGesture = undefined;
     previous = [...previous.slice(-49), draft()];
     next = [];
     dirty = true;
@@ -184,6 +203,7 @@
   }
 
   function restore(nextDraft: Draft) {
+    toolGesture = undefined;
     tracks = nextDraft.tracks;
     rangeIds = [];
     rangeAnchor = '';
@@ -226,11 +246,25 @@
   }
 
   onMount(() => {
+    const unlisten: (() => void)[] = [];
+    for (const listener of [listenToolRequests(handleToolRequest), listenToolVisibility(updateToolVisibility)]) {
+      void listener?.then(stop => {
+        if (active) unlisten.push(stop);
+        else stop();
+      }).catch(reason => { toolWindowError = String(reason); });
+    }
+    document.addEventListener('tagrex:appearance', syncToolAppearance);
+    document.addEventListener('tagrex:interfacefont', syncToolAppearance);
     if (split) namePattern = defaultSplitFilePattern;
     if (split && launch.paths.length === 1) void openRecording(launch.paths[0]);
     if (!split && launch.paths.length && launch.paths.every(path => /\.mp3$/i.test(path))) format = 'flac';
     return () => {
       active = false;
+      unlisten.forEach(stop => stop());
+      document.removeEventListener('tagrex:appearance', syncToolAppearance);
+      document.removeEventListener('tagrex:interfacefont', syncToolAppearance);
+      hideToolWindows();
+      toolFence?.finish(false);
       clearTimeout(outputCheck);
       stopOutputAudition();
       if (review && phase !== 'export') discardReview(review);
@@ -242,7 +276,7 @@
       cancelAnimationFrame(animation);
       cancelAnimationFrame(viewportAnimation);
       cancelAnimationFrame(playheadAnimation);
-      cancelAnimationFrame(retuneFrame);
+      clearTimeout(retuneTimer);
       if (source) void closeAudioSplitSession(source.id).catch(console.error);
     };
   });
@@ -294,16 +328,21 @@
       artworkPath = '';
       treatment = noTreatment;
       treatmentAnalysis = null;
-      treatmentBusy = false;
       treatmentError = '';
       listeningError = '';
       hearOriginal = false;
-      effectsOpen = false;
+      toolGesture = undefined;
+      toolWindowError = '';
+      repairViewport = null;
+      for (const lane of [meterLane, repairLane]) {
+        lane.latest = undefined;
+        lane.retryAt = 0;
+      }
       clearTimeout(treatmentTimer);
-      cancelAnimationFrame(retuneFrame);
-      retuneFrame = 0;
-      treatmentGesture = false;
-      treatmentGestureCaptured = false;
+      clearTimeout(retuneTimer);
+      retuneTimer = undefined;
+      lastRetune = -Infinity;
+      measuringRevision = 0;
       treatmentVersion++;
       hasSaved = hasDraft(opened);
       playhead = 0;
@@ -624,11 +663,13 @@
     }
   }
 
-  function retuneListening() {
-    if (!playing || !source || retuneFrame) return;
-    retuneFrame = requestAnimationFrame(() => {
-      retuneFrame = 0;
+  function retuneListening(immediate = false) {
+    if (!playing || !source || (retuneTimer !== undefined && !immediate)) return;
+    clearTimeout(retuneTimer);
+    retuneTimer = setTimeout(() => {
+      retuneTimer = undefined;
       if (!active || !playing || !source || scrubbing || seekInFlight) return;
+      lastRetune = performance.now();
       const id = source.id;
       const sequence = transportVersion;
       const revision = ++retuneVersion;
@@ -639,13 +680,13 @@
           listeningError = String(reason).replace(/^Error: /, '');
         }
       });
-    });
+    }, immediate ? 0 : Math.max(0, 70 - (performance.now() - lastRetune)));
   }
 
   function compareOriginal(original: boolean) {
     if (original === hearOriginal) return;
     hearOriginal = original;
-    retuneListening();
+    retuneListening(true);
   }
 
   function previewEffects() {
@@ -655,19 +696,189 @@
     setLoop(loopEnabled && loopRegion ? loopRegion : { start: from, end: from + length }, true);
   }
 
-  function hideEffects() {
-    effectsOpen = false;
-    treatmentGesture = false;
-    treatmentGestureCaptured = false;
-    document.getElementById('studio-audio-tools-button')?.focus();
+  function hideToolWindows() {
+    visibleTools.clear();
+    clearInterval(toolTimer);
+    toolTimer = undefined;
+    if (usedToolWindows) void audioCommand('tool_window', { action: 'hide_all' }).catch(console.error);
   }
 
-  function changeTreatment(settings: AudioTreatment) {
-    const nextSettings = readTreatment(settings);
-    if (sameTreatment(nextSettings, treatment)) return;
-    if (!treatmentGesture || !treatmentGestureCaptured) capture();
-    treatmentGestureCaptured = treatmentGesture;
-    replaceTreatment(nextSettings);
+  function updateToolVisibility({ kind, visible }: ToolVisibility) {
+    if (!active || phase !== 'edit' || !toolModes.includes(kind)) return;
+    usedToolWindows = true;
+    if (visible) {
+      if (visibleTools.has(kind)) return;
+      visibleTools.add(kind);
+      if (toolTimer === undefined) toolTimer = setInterval(updateTools, 125);
+      publishToolState(kind, true);
+      publishCachedProbe(kind);
+      void refreshToolProbe(kind === 'repair');
+    } else {
+      visibleTools.delete(kind);
+      if (!visibleTools.size) {
+        clearInterval(toolTimer);
+        toolTimer = undefined;
+      }
+    }
+  }
+
+  async function toggleToolWindow(kind: Tool) {
+    toolWindowError = '';
+    usedToolWindows = true;
+    try {
+      const visible = await audioCommand<boolean>('tool_window', { kind, action: 'toggle' });
+      if (!active || phase !== 'edit') hideToolWindows();
+      else updateToolVisibility({ kind, visible });
+    } catch (reason) {
+      toolWindowError = String(reason);
+    }
+  }
+
+  function publishToolState(kind: Tool, force = false) {
+    const snapshot = source && active && phase === 'edit' ? {
+      sourceId: source.id, frame: playhead, sampleRate, frames: source.frames, settings: treatment, stereo: hasStereo,
+      playing, original: hearOriginal, loop: loopEnabled, revision: toolRevisions[kind], theme: activeToolTheme ??= toolTheme(),
+    } : null;
+    const previous = sentToolStates[kind];
+    if (!force && ((!snapshot && !previous) || (snapshot && previous && snapshot.sourceId === previous.sourceId
+      && (kind !== 'repair' || snapshot.frame === previous.frame) && snapshot.settings === previous.settings
+      && snapshot.playing === previous.playing && snapshot.stereo === previous.stereo && snapshot.original === previous.original
+      && snapshot.loop === previous.loop && snapshot.revision === previous.revision && snapshot.theme === previous.theme))) return;
+    sentToolStates[kind] = snapshot;
+    return sendToolState(kind, snapshot)?.catch(console.error);
+  }
+
+  function syncToolAppearance() {
+    activeToolTheme = toolTheme();
+    for (const kind of toolModes) {
+      if (connectedTools.has(kind) || visibleTools.has(kind)) publishToolState(kind);
+    }
+  }
+
+  function publishCachedProbe(kind: Tool) {
+    const update = (kind === 'repair' ? repairLane : meterLane).latest;
+    if (update && update.sourceId === source?.id) {
+      const { sourceId, probe } = update;
+      void sendToolProbe(kind, { sourceId, probe })?.catch(console.error);
+    }
+  }
+
+  function updateTools() {
+    if (visibleTools.size === 0) return;
+    for (const kind of visibleTools) publishToolState(kind);
+    void refreshToolProbe(false);
+    void refreshToolProbe(true);
+  }
+
+  async function refreshToolProbe(spectrogram: boolean) {
+    const opened = source;
+    const lane = spectrogram ? repairLane : meterLane;
+    const targets = () => [...visibleTools].filter(kind => (kind === 'repair') === spectrogram);
+    const now = performance.now();
+    if (!opened || !active || phase !== 'edit' || lane.pending || now < lane.retryAt || !targets().length) return;
+    const frame = Math.max(0, Math.min(opened.frames - 1, Math.round(playing && !buffering && !scrubbing ? clockFrame(now) : playhead)));
+    const version = transportVersion;
+    const settings = spectrogram ? noTreatment : treatment;
+    const spectrum = !spectrogram && visibleTools.has('eq');
+    const viewport = spectrogram ? repairViewport : null;
+    const key = viewport ? JSON.stringify([opened.id, viewport.start, viewport.end])
+      : JSON.stringify([opened.id, version, Math.floor(frame * (spectrogram ? 3 : 8) / opened.sampleRate),
+        settings, spectrogram ? null : treatmentAnalysis?.gainDb, spectrum]);
+    if (lane.latest?.key === key) return;
+    lane.pending = true;
+    try {
+      const probe = await audioCommand<TreatmentProbe>('probe', { id: opened.id, frame, treatment: settings, spectrogram, spectrum, viewport });
+      const currentViewport = viewport ? repairViewport?.start === viewport.start && repairViewport.end === viewport.end
+        : (!spectrogram || !repairViewport) && version === transportVersion;
+      if (probe && active && source?.id === opened.id && phase === 'edit' && currentViewport) {
+        lane.latest = { key, sourceId: opened.id, probe };
+        targets().forEach(publishCachedProbe);
+      }
+    } catch (reason) {
+      lane.retryAt = performance.now() + 600;
+      if (source?.id === opened.id && !/superseded|cancel/i.test(String(reason))) {
+        for (const kind of targets()) {
+          void sendToolProbe(kind, { sourceId: opened.id, error: 'Could not measure the current audio.' })?.catch(console.error);
+        }
+      }
+    } finally {
+      lane.pending = false;
+    }
+  }
+
+  function settleToolEdits() {
+    const remaining = new Set(connectedTools);
+    if (!remaining.size) return Promise.resolve(true);
+    if (toolFence) return Promise.resolve(false);
+    return new Promise<boolean>(resolve => {
+      const id = String(++fenceSerial);
+      const finish = (ready: boolean) => {
+        if (toolFence?.id !== id) return;
+        clearTimeout(timeout);
+        toolFence = undefined;
+        settlingTools = false;
+        resolve(ready);
+      };
+      const timeout = setTimeout(() => {
+        if (active) toolWindowError = 'The audio tools are still syncing. Try again in a moment.';
+        finish(false);
+      }, 1400);
+      toolFence = { id, remaining, finish };
+      settlingTools = true;
+      for (const kind of remaining) void requestToolFlush(kind, id)?.catch(() => finish(false));
+    });
+  }
+
+  function handleToolRequest(request: ToolRequest) {
+    if (!request || !toolModes.includes(request.kind)) return;
+    if (request.action === 'sync') {
+      connectedTools.add(request.kind);
+      void publishToolState(request.kind, true)?.then(() => publishCachedProbe(request.kind));
+      return;
+    }
+    if (!active || phase !== 'edit' || !source || request.sourceId !== source.id) return;
+    if (request.action === 'flushed') {
+      const fence = toolFence;
+      if (fence && fence.id === request.fence) {
+        fence.remaining.delete(request.kind);
+        if (!fence.remaining.size) fence.finish(true);
+      }
+      return;
+    }
+    if (request.action === 'play') togglePlayback();
+    if (request.action === 'compare' && typeof request.original === 'boolean') compareOriginal(request.original);
+    if (request.action === 'undo' || request.action === 'redo') {
+      toolRevisions[request.kind] = request.revision;
+      history(request.action === 'redo');
+    }
+    if (request.action === 'viewport' && request.kind === 'repair') {
+      const bounds = request.range;
+      if (!bounds || (Number.isSafeInteger(bounds.start) && Number.isSafeInteger(bounds.end)
+        && bounds.start >= 0 && bounds.end <= source.frames && bounds.end > bounds.start
+        && bounds.end - bounds.start <= source.sampleRate * 12)) {
+        repairViewport = bounds;
+        void refreshToolProbe(true);
+      }
+      return;
+    }
+    if (request.action === 'loop') {
+      if (request.range) {
+        const { start, end } = request.range;
+        if (Number.isSafeInteger(start) && Number.isSafeInteger(end)) setLoop({ start, end }, true);
+      } else if (loopEnabled) toggleLoop();
+      else previewEffects();
+    }
+    if (request.action === 'edit' && request.patch) {
+      toolRevisions[request.kind] = request.revision;
+      const settings = readTreatment({ ...treatment, ...toolPatch(request.kind, request.patch) });
+      if (!sameTreatment(settings, treatment)) {
+        const gesture = request.gesture ? `${request.kind}:${request.gesture}` : undefined;
+        if (!gesture || gesture !== toolGesture) capture();
+        toolGesture = gesture;
+        replaceTreatment(settings);
+      }
+    }
+    publishToolState(request.kind);
   }
 
   function replaceTreatment(settings: AudioTreatment) {
@@ -678,31 +889,42 @@
     measureTreatment();
   }
 
-  function measureTreatment(delay = 180) {
+  function stopMeasuringTreatment() {
+    clearTimeout(treatmentTimer);
+    treatmentVersion++;
+    if (!source || !measuringRevision) return;
+    measuringRevision = 0;
+    // A neutral recipe cancels the previous latest-only job without walking the recording.
+    return audioCommand('treatment', { id: source.id, treatment: noTreatment }).catch(() => {});
+  }
+
+  function measureTreatment(delay = 600) {
     const opened = source;
     if (!opened) return;
     const settings = treatment;
-    const revision = ++treatmentVersion;
-    const wasBusy = treatmentBusy;
-    clearTimeout(treatmentTimer);
+    const stopped = stopMeasuringTreatment();
+    const revision = treatmentVersion;
     treatmentAnalysis = null;
     treatmentError = '';
-    treatmentBusy = hasTreatment(settings);
-    if (!treatmentBusy) {
-      if (wasBusy) void audioCommand('treatment', { id: opened.id, treatment: settings }).catch(() => {});
-      return;
-    }
-    treatmentTimer = setTimeout(() => {
-      void audioCommand<TreatmentAnalysis>('treatment', { id: opened.id, treatment: settings }).then(result => {
+    // Exact peak protection is prepared when reviewing output. Optimistic
+    // playback uses the recording overview and a linked peak ceiling.
+    if (!settings.normalize) return;
+    treatmentTimer = setTimeout(async () => {
+      // Avoid spending the quiet period processing a superseded full-file scan.
+      await stopped;
+      if (!active || revision !== treatmentVersion || source?.id !== opened.id || phase !== 'edit') return;
+      measuringRevision = revision;
+      try {
+        const result = await audioCommand<TreatmentAnalysis>('treatment', { id: opened.id, treatment: settings });
         if (!active || revision !== treatmentVersion || source?.id !== opened.id) return;
         treatmentAnalysis = result;
-        treatmentBusy = false;
-        if (!hearOriginal) retuneListening();
-      }).catch(reason => {
+        if (!hearOriginal) retuneListening(true);
+      } catch (reason) {
         if (!active || revision !== treatmentVersion || source?.id !== opened.id) return;
-        treatmentBusy = false;
         treatmentError = String(reason).replace(/^Error: /, '');
-      });
+      } finally {
+        if (measuringRevision === revision) measuringRevision = 0;
+      }
     }, delay);
   }
 
@@ -1094,6 +1316,12 @@
     catch (reason) { fail(String(reason)); }
   }
 
+  async function saveWithToolEdits() {
+    if (!await settleToolEdits() || !active) return false;
+    save();
+    return !dirty;
+  }
+
   function reopen() {
     if (!source) return;
     try {
@@ -1132,7 +1360,7 @@
       else if (document.activeElement instanceof HTMLElement && document.activeElement.id.startsWith('studio-recording-')) {
         document.activeElement.blur();
       }
-      save();
+      void saveWithToolEdits();
     }
   }
 
@@ -1265,12 +1493,15 @@
     return (launch.canReplace ? launch.canReplace() : !launch.pendingPaths?.length);
   }
 
-  function reviewAndSave() {
+  async function reviewAndSave() {
     if (!canEnterReview || loading) return;
+    if (!await settleToolEdits() || !active || phase !== 'edit' || !canEnterReview) return;
     phase = 'review';
+    hideToolWindows();
     notice = '';
     if (playing) void transport('pause');
     void focusOutput('studio-save-heading');
+    await stopMeasuringTreatment();
     void preview();
   }
 
@@ -1488,14 +1719,14 @@
     target?.focus({ preventScroll: true });
   }
 
-  function saveAndClose() {
-    save();
-    if (!dirty) onclose();
-    else closeSaveError = error;
+  async function saveAndClose() {
+    if (await saveWithToolEdits()) onclose();
+    else closeSaveError = error || toolWindowError;
   }
 
-  function requestClose() {
+  async function requestClose() {
     if (closeRequested || phase === 'export' || working) return;
+    if (phase === 'edit' && (!await settleToolEdits() || !active)) return;
     if (!dirty || !split) { onclose(); return; }
     closeTrigger = document.activeElement instanceof HTMLElement && document.activeElement.closest('[data-audio-studio]')
       ? document.activeElement : null;
@@ -1519,7 +1750,6 @@
       else if (importMenuOpen) studioMenus.imports.close();
       else if (importMode) closeImporter();
       else if (waveformMenuOpen) studioMenus.waveform.close();
-      else if (effectsOpen) hideEffects();
       else if (editor) finishEdit(editor, false, true);
       else requestClose();
     }}>
@@ -1569,7 +1799,7 @@
           {#if split && source}
             <div class="timeline-area">
               <div class="toolbar transport">
-                <Button variant="secondary" size="icon-sm" aria-label={playing ? 'Pause audio' : 'Play audio'} title={playing ? 'Pause (Space)' : 'Play (Space)'} onclick={togglePlayback}>
+                <Button variant="secondary" size="icon-sm" aria-label={playing ? 'Pause audio' : 'Play audio'} title={playing ? 'Pause (Space)' : 'Play (Space)'} aria-busy={buffering} onclick={togglePlayback}>
                   {#if playing}<Pause size={16}/>{:else}<Play size={16}/>{/if}
                 </Button>
                 <Button class="loop-toggle" variant="ghost" size="icon-sm" aria-label="Loop preview" aria-pressed={loopEnabled}
@@ -1587,11 +1817,13 @@
                       {stereoView ? 'Left + Right' : 'Combined'}
                     </Button>
                   {/if}
-                  <Button id="studio-audio-tools-button" class="audio-tools-trigger" variant="ghost" size="sm" title="Open audio restoration tools"
-                    aria-controls="studio-audio-tools" aria-expanded={effectsOpen} data-treated={treated}
-                    onclick={() => { if (effectsOpen) hideEffects(); else effectsOpen = true; }}>
-                    <Settings2 size={15}/> Audio tools{effects.length ? ` · ${effects.length}` : ''}
-                  </Button>
+                  {#each toolModes as kind (kind)}
+                    {@const Icon = audioToolIcons[kind]}
+                    <Button class="audio-tool-trigger" variant="ghost" size="icon-sm" title={toolNames[kind]}
+                      aria-label={toolNames[kind]} data-active={toolIsActive(kind, treatment)}
+                      aria-description={toolIsActive(kind, treatment) ? 'Effects active' : undefined}
+                      onclick={() => toggleToolWindow(kind)}><Icon size={16}/></Button>
+                  {/each}
                   <Menu bind:open={waveformMenuOpen} controller={studioMenus.waveform}>
                     <MenuTrigger data-slot="dropdown-menu-trigger" class={buttonVariants({ variant: 'ghost', size: 'icon-sm' })} aria-label="Waveform options" title="Waveform options"><Ellipsis size={18}/></MenuTrigger>
                     <MenuContent class="app-select-menu studio-waveform-options" align="end" onkeydowncapture={event => popupKeys(event, 'waveform')}>
@@ -1629,37 +1861,19 @@
                 oneditmarker={id => beginEdit(id, 'start')} onremovemarker={removeCutAt} ontrim={trimStart}
                 onrestoremarker={id => updateTrack(id, { include: true })}
                 onmovetoplayhead={moveToPlayhead} canmove={id => canMoveToPlayhead(tracks.findIndex(track => track.id === id))}/>
-              {#if effectsOpen || treated}
-                <div class="audio-comparison">
-                  <SegmentedControl class="comparison-segments" aria-label="Audio preview source" value={hearOriginal || !treated ? 'original' : 'treated'}
-                    onValueChange={value => compareOriginal(value === 'original')}>
-                    <SegmentedControlItem class="comparison-choice" value="original">Original</SegmentedControlItem>
-                    <SegmentedControlItem class="comparison-choice" value="treated" disabled={!treated}>Treated</SegmentedControlItem>
-                  </SegmentedControl>
-                  <Button variant="ghost" size="sm" title="Repeat the current loop or eight seconds around the playhead" onclick={previewEffects} disabled={total < 2}>
-                    <Repeat size={14}/> Loop preview
-                  </Button>
-                  <span class="waveform-hint">Source waveform</span>
-                </div>
-              {/if}
               {#if listeningError}
-                <div class="audio-comparison" role="status"><span class="waveform-hint">{listeningError}</span><Button variant="ghost" size="sm" onclick={retuneListening}>Retry preview</Button></div>
+                <div class="audio-tool-error" role="status"><span class="waveform-hint">{listeningError}</span><Button variant="ghost" size="sm" onclick={() => retuneListening(true)}>Retry preview</Button></div>
               {/if}
-              {#if treatmentError && !effectsOpen}
-                <p class="waveform-hint" role="status">{treatmentError} <Button variant="ghost" size="sm" onclick={() => effectsOpen = true}>Open audio tools</Button></p>
+              {#if treatmentError}
+                <div class="audio-tool-error" role="status"><span class="waveform-hint">{treatmentError}</span><Button variant="ghost" size="sm" onclick={() => measureTreatment(0)}>Retry measurement</Button></div>
               {/if}
-              <p class="waveform-hint" aria-live="polite">{buffering ? 'Buffering preview…' : treated && hearOriginal ? 'Listening to the original. Effects still apply on export.' : treatmentBusy ? 'Preview uses an estimated level while measuring the recording…' : ''}</p>
+              {#if toolWindowError}
+                <p class="waveform-hint" role="status">{toolWindowError}</p>
+              {/if}
               {#if showHelp}
                 <p class="help">Scroll to zoom, middle-drag to pan, and Shift-drag to mark a loop. L toggles the loop. Space plays or pauses, Shift+Space loops around the selected cut, and M adds a cut. In the track list, Shift-click or Shift+Up/Down selects a range, F2 edits tags, and Delete removes a split.</p>
               {/if}
             </div>
-            {#if effectsOpen}
-              <AudioSplitTreatment settings={treatment} stereo={hasStereo} {sampleRate} original={hearOriginal} busy={treatmentBusy}
-                analysis={treatmentAnalysis} error={treatmentError} onchange={changeTreatment} onretry={() => measureTreatment(0)}
-                oneditstart={() => { treatmentGesture = true; treatmentGestureCaptured = false; }}
-                oneditend={() => { treatmentGesture = false; treatmentGestureCaptured = false; }}
-                onclose={hideEffects}/>
-            {/if}
             {#if importMode}
               <AudioSplitImport {source} {playhead} mode={importMode} {cue} {cueEncoding} {cueLoading}
                 onencoding={(encoding) => loadCue(cuePath, encoding)} onapply={applyImport} oncancel={closeImporter} onerror={fail}/>
@@ -1733,7 +1947,7 @@
                 <div class="toolbar draft-actions" role="group" aria-label="Draft actions">
                   <Button variant="ghost" size="icon-sm" onclick={() => history(false)} title="Undo draft change" aria-label="Undo draft change" disabled={!previous.length || !canEdit}><Undo2 size={16}/></Button>
                   <Button variant="ghost" size="icon-sm" onclick={() => history(true)} title="Redo draft change" aria-label="Redo draft change" disabled={!next.length || !canEdit}><Redo2 size={16}/></Button>
-                  <Button variant="ghost" size="sm" onclick={save} disabled={!canEdit} aria-keyshortcuts="Control+s Meta+s">Save draft</Button>
+                  <Button variant="ghost" size="sm" onclick={saveWithToolEdits} disabled={!canEdit || settlingTools} aria-keyshortcuts="Control+s Meta+s">Save draft</Button>
                   <Button variant="ghost" size="sm" onclick={reopen} disabled={!hasSaved || !canEdit}>{hasSaved && !dirty && !previous.length ? 'Continue draft' : 'Reopen draft'}</Button>
                 </div>
                 <div class="recording-editor">
@@ -1843,7 +2057,7 @@
             {/if}
           {:else}
             {#if source}<Button variant="secondary" size="sm" onclick={writeCue} disabled={working}>Export CUE…</Button>{/if}
-            <Button size="sm" onclick={reviewAndSave} disabled={loading || !canEnterReview}>Review &amp; save</Button>
+            <Button size="sm" onclick={reviewAndSave} disabled={loading || settlingTools || !canEnterReview}>Review &amp; save</Button>
           {/if}
         </div>
       </footer>
@@ -1915,18 +2129,13 @@
   .timeline-area { display:grid; gap:var(--sp-1); }
   .waveform-hint { margin:0; color:var(--muted); font-size:var(--text-xs); }
   .waveform-hint:empty { display:none; }
-  .audio-comparison { display:flex; align-items:center; gap:var(--sp-2); flex-wrap:wrap; }
-  .audio-comparison > .waveform-hint { margin-inline-start:auto; }
-  .audio-comparison :global(.comparison-segments) { display:inline-flex; align-items:center; gap:2px; padding:2px; border-radius:var(--r-pill); background:var(--panel); }
-  .audio-comparison :global(.comparison-choice) { border:0; background:transparent; color:var(--muted); border-radius:var(--r-pill); min-height:23px; padding-inline:var(--sp-2); font-size:var(--text-xs); }
-  .audio-comparison :global(.comparison-choice[aria-checked="true"]) { background:var(--sel-tint); color:var(--accent-ink); }
-  .audio-comparison :global(.comparison-choice:focus-visible) { outline:2px solid var(--accent); outline-offset:1px; }
-  .audio-comparison :global(.comparison-choice:disabled) { opacity:.55; }
+  .audio-tool-error { display:flex; align-items:center; gap:var(--sp-2); flex-wrap:wrap; }
   .toolbar { display:flex; gap:var(--sp-1); align-items:center; flex-wrap:wrap; }
   .transport .time { font-family:var(--font-literal); font-variant-numeric:tabular-nums; min-width:8ch; }
   .transport :global(button.loop-toggle[aria-pressed="true"]) { color:var(--accent-ink); background:var(--sel-tint); }
   .waveform-options { margin-inline-start:auto; display:flex; align-items:center; gap:var(--sp-1); }
-  .transport :global(button.stereo-toggle[aria-pressed="true"]), .transport :global(button.audio-tools-trigger[data-treated="true"]) {
+  .transport :global(button.audio-tool-trigger[data-active="false"]) { color:var(--muted); }
+  .transport :global(button.stereo-toggle[aria-pressed="true"]), .transport :global(button.audio-tool-trigger[data-active="true"]) {
     color:var(--accent-ink); background:var(--sel-tint);
   }
   .editor { display:grid; gap:var(--sp-2); grid-template-columns:minmax(0,1.12fr) minmax(0,1fr); margin-block-start:calc(-1 * var(--sp-2)); }

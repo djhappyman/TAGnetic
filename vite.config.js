@@ -26,6 +26,10 @@ export default defineConfig({
     emptyOutDir: true,
     target: ['es2022', 'safari15'],
     rolldownOptions: {
+      input: [
+        fileURLToPath(new URL('./app/ui/index.html', import.meta.url)),
+        fileURLToPath(new URL('./app/ui/audio-tools.html', import.meta.url)),
+      ],
       output: {
         codeSplitting: {
           groups: [{ name: 'translations', test: /[/\\]i18n[/\\][^/\\]+\.js$/, maxSize: 200_000 }],

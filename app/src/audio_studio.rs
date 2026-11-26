@@ -9,10 +9,12 @@ use std::sync::{
 use tagrex_commands::audio_studio::{
     AudioTreatment, CueEncoding, DiscogsProposal, DraftSegment, ExportResult, ImportedCue,
     OpenedRecording, Progress, ProviderAnchor, RecordingProgress, RestoreResult, Review,
-    ReviewRequest, Studio, StudioError, TreatmentAnalysis,
+    ReviewRequest, Studio, StudioError, TreatmentAnalysis, TreatmentProbe, TreatmentProbeOptions,
 };
 use tagrex_commands::ErrorDto;
-use tauri::{Manager, State};
+use tauri::{
+    Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+};
 
 use super::AppState;
 use super::{blocking, saved_discogs_token, shell_error, with_providers, ProviderState};
@@ -20,6 +22,161 @@ use super::{blocking, saved_discogs_token, shell_error, with_providers, Provider
 pub(super) type StudioState = Arc<Studio>;
 #[derive(Default)]
 pub(super) struct Openings(Mutex<BTreeMap<String, Arc<Opening>>>);
+
+#[derive(Default)]
+pub(super) struct ToolWindows {
+    commands: tauri::async_runtime::Mutex<()>,
+    visible: [AtomicBool; AudioToolKind::ALL.len()],
+}
+
+#[derive(Clone, Copy, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum AudioToolKind {
+    Eq,
+    Dynamics,
+    Repair,
+}
+
+impl AudioToolKind {
+    pub(super) const ALL: [Self; 3] = [Self::Eq, Self::Dynamics, Self::Repair];
+
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Eq => "audio-tool-eq",
+            Self::Dynamics => "audio-tool-dynamics",
+            Self::Repair => "audio-tool-repair",
+        }
+    }
+
+    pub(super) fn query(self) -> &'static str {
+        match self {
+            Self::Eq => "tool=eq",
+            Self::Dynamics => "tool=dynamics",
+            Self::Repair => "tool=repair",
+        }
+    }
+
+    fn title_and_size(self) -> (&'static str, f64, f64) {
+        match self {
+            Self::Eq => ("Equalizer", 760.0, 490.0),
+            Self::Dynamics => ("Dynamics", 680.0, 510.0),
+            Self::Repair => ("Repair and stereo", 640.0, 510.0),
+        }
+    }
+}
+
+pub(super) const TOOL_DOCUMENT: &str = "audio-tools.html";
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ToolWindowAction {
+    Toggle,
+    Hide,
+    HideAll,
+}
+
+#[derive(Clone, Copy, serde::Serialize)]
+struct ToolVisibility {
+    kind: AudioToolKind,
+    visible: bool,
+}
+
+fn publish_tool_visibility(app: &tauri::AppHandle, kind: AudioToolKind, visible: bool) {
+    let handle = app.clone();
+    // Keep reports from commands ordered with native window callbacks.
+    let _ = app.run_on_main_thread(move || {
+        let state = handle.state::<ToolWindows>();
+        if state.visible[kind as usize].swap(visible, Ordering::AcqRel) == visible {
+            return;
+        }
+        let payload = ToolVisibility { kind, visible };
+        for target in ["main", kind.label()] {
+            let _ = handle.emit_to(target, "tagnetic:audio-tool-visibility", payload);
+        }
+    });
+}
+
+// Use an async command for WebView2 window creation. The lock keeps a quick
+// second click from racing the first window build.
+#[tauri::command]
+pub(super) async fn audio_split_tool_window(
+    window: WebviewWindow,
+    tool_windows: State<'_, ToolWindows>,
+    kind: Option<AudioToolKind>,
+    action: ToolWindowAction,
+) -> Result<bool, ErrorDto> {
+    if window.label() != "main" {
+        return Err(shell_error("Open audio tools from the splitter."));
+    }
+    let _guard = tool_windows.commands.lock().await;
+    let app = window.app_handle();
+    if matches!(action, ToolWindowAction::HideAll) {
+        for kind in AudioToolKind::ALL {
+            if let Some(tool) = app.get_webview_window(kind.label()) {
+                tool.hide().map_err(shell_error)?;
+            }
+            publish_tool_visibility(app, kind, false);
+        }
+        return Ok(false);
+    }
+    let kind = kind.ok_or_else(|| shell_error("Choose an audio tool."))?;
+    if let Some(tool) = app.get_webview_window(kind.label()) {
+        let hide = matches!(action, ToolWindowAction::Hide)
+            || (tool.is_visible().map_err(shell_error)?
+                && !tool.is_minimized().map_err(shell_error)?);
+        if hide {
+            tool.hide().map_err(shell_error)?;
+        } else {
+            tool.show().map_err(shell_error)?;
+            tool.unminimize().map_err(shell_error)?;
+            tool.set_focus().map_err(shell_error)?;
+        }
+        publish_tool_visibility(app, kind, !hide);
+        return Ok(!hide);
+    }
+    if matches!(action, ToolWindowAction::Hide) {
+        publish_tool_visibility(app, kind, false);
+        return Ok(false);
+    }
+    let (title, width, height) = kind.title_and_size();
+    let url = WebviewUrl::App(format!("{TOOL_DOCUMENT}?{}", kind.query()).into());
+    let tool = WebviewWindowBuilder::new(app, kind.label(), url)
+        .title(title)
+        .inner_size(width, height)
+        .min_inner_size(420.0, 320.0)
+        .skip_taskbar(true)
+        .parent(&window)
+        .and_then(WebviewWindowBuilder::build)
+        .map_err(shell_error)?;
+    let handle = tool.clone();
+    tool.on_window_event(move |event| match event {
+        WindowEvent::CloseRequested { api, .. } => {
+            if handle.hide().is_ok() {
+                api.prevent_close();
+                publish_tool_visibility(handle.app_handle(), kind, false);
+            }
+        }
+        WindowEvent::Destroyed => publish_tool_visibility(handle.app_handle(), kind, false),
+        // Windows and GTK send resize events when a window is minimized or
+        // restored. AppKit may only deliver a focus change.
+        WindowEvent::Resized(_) | WindowEvent::Focused(_) => {
+            if let (Ok(visible), Ok(minimized)) = (handle.is_visible(), handle.is_minimized()) {
+                publish_tool_visibility(handle.app_handle(), kind, visible && !minimized);
+            }
+        }
+        _ => {}
+    });
+    publish_tool_visibility(app, kind, true);
+    Ok(true)
+}
+
+pub(super) fn destroy_tool_windows(app: &tauri::AppHandle) {
+    for kind in AudioToolKind::ALL {
+        if let Some(tool) = app.get_webview_window(kind.label()) {
+            let _ = tool.destroy();
+        }
+    }
+}
 
 #[derive(Default)]
 struct Opening {
@@ -31,6 +188,10 @@ static PEAKS: blocking::Queue = blocking::Queue::new();
 static LATEST_PEAKS: blocking::Latest = blocking::Latest::new();
 static TREATMENT: blocking::Queue = blocking::Queue::new();
 static LATEST_TREATMENT: blocking::Latest = blocking::Latest::new();
+static PROBE: blocking::Queue = blocking::Queue::new();
+static LATEST_PROBE: blocking::Latest = blocking::Latest::new();
+static SPECTROGRAM: blocking::Queue = blocking::Queue::new();
+static LATEST_SPECTROGRAM: blocking::Latest = blocking::Latest::new();
 static REVIEW: blocking::Queue = blocking::Queue::new();
 static EXPORT: blocking::Queue = blocking::Queue::new();
 static CUE: blocking::Queue = blocking::Queue::new();
@@ -155,6 +316,36 @@ pub(super) async fn audio_split_treatment(
         .run_latest(&LATEST_TREATMENT, move |cancel| {
             studio
                 .prepare_treatment(&id, treatment, || cancel.cancelled())
+                .map_err(shell_error)
+        })
+        .await
+}
+
+#[tauri::command]
+pub(super) async fn audio_split_probe(
+    studio: State<'_, StudioState>,
+    id: String,
+    frame: u64,
+    treatment: AudioTreatment,
+    spectrogram: Option<bool>,
+    spectrum: Option<bool>,
+    viewport: Option<tagrex_commands::audio_studio::FrameRange>,
+) -> Result<TreatmentProbe, ErrorDto> {
+    let studio = studio.inner().clone();
+    let options = TreatmentProbeOptions {
+        spectrum: spectrum.unwrap_or(true),
+        spectrogram: spectrogram.unwrap_or_default(),
+        viewport,
+    };
+    let (queue, lane) = if options.dry_spectrogram() {
+        (&SPECTROGRAM, &LATEST_SPECTROGRAM)
+    } else {
+        (&PROBE, &LATEST_PROBE)
+    };
+    queue
+        .run_latest(lane, move |cancel| {
+            studio
+                .treatment_probe(&id, frame, treatment, options, || cancel.cancelled())
                 .map_err(shell_error)
         })
         .await

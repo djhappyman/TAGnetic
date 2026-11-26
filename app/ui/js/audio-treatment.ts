@@ -1,18 +1,33 @@
+export type SpectralRepair = {
+  startFrame: number;
+  endFrame: number;
+  lowHz: number;
+  highHz: number;
+  amountDb: number;
+};
+export const maxSpectralRepairs = 8;
+
 export type AudioTreatment = {
   normalize: boolean;
   normalizeTargetDb: number;
   mono: 'off' | 'mix' | 'left' | 'right';
   rumble: boolean;
   rumbleHz: number;
+  rumbleSlope: number;
   hum: 'off' | 'hz50' | 'hz60';
   humHarmonics: number;
   dcHz: number;
   highCutHz: number;
+  highCutSlope: number;
   notchHz: number;
   notchQ: number;
   bassDb: number;
+  bassHz: number;
   presenceDb: number;
+  presenceHz: number;
+  presenceQ: number;
   trebleDb: number;
+  trebleHz: number;
   gainDb: number;
   compressorDb: number;
   compressorRatio: number;
@@ -22,13 +37,14 @@ export type AudioTreatment = {
   stereoWidth: number;
   swapChannels: boolean;
   polarity: 'off' | 'left' | 'right';
+  spectralRepairs: (SpectralRepair | null)[] | null;
 };
 
 export const noTreatment: AudioTreatment = Object.freeze({
-  normalize: false, normalizeTargetDb: 0, mono: 'off', rumble: false, rumbleHz: 0,
-  hum: 'off', humHarmonics: 0, dcHz: 0, highCutHz: 0, notchHz: 0, notchQ: 0,
-  bassDb: 0, presenceDb: 0, trebleDb: 0, gainDb: 0, compressorDb: 0, compressorRatio: 0,
-  gateDb: 0, gateReductionDb: 0, balance: 0, stereoWidth: 0, swapChannels: false, polarity: 'off',
+  normalize: false, normalizeTargetDb: 0, mono: 'off', rumble: false, rumbleHz: 0, rumbleSlope: 0,
+  hum: 'off', humHarmonics: 0, dcHz: 0, highCutHz: 0, highCutSlope: 0, notchHz: 0, notchQ: 0,
+  bassDb: 0, bassHz: 0, presenceDb: 0, presenceHz: 0, presenceQ: 0, trebleDb: 0, trebleHz: 0, gainDb: 0, compressorDb: 0, compressorRatio: 0,
+  gateDb: 0, gateReductionDb: 0, balance: 0, stereoWidth: 0, swapChannels: false, polarity: 'off', spectralRepairs: null,
 });
 
 export type TreatmentNumber = {
@@ -40,6 +56,12 @@ type NumberSpec = { label: string; min: number; max: number; initial: number; un
 export const treatmentNumbers: Record<TreatmentNumber, NumberSpec> = {
   dcHz: { label: 'DC cutoff', min: 2, max: 15, initial: 5, unit: 'Hz' },
   rumbleHz: { label: 'Rumble cutoff', min: 15, max: 100, initial: 35, unit: 'Hz', defaultIsZero: true },
+  rumbleSlope: { label: 'Low-cut slope', min: 12, max: 48, initial: 12, unit: 'dB/oct', defaultIsZero: true },
+  highCutSlope: { label: 'High-cut slope', min: 12, max: 48, initial: 12, unit: 'dB/oct', defaultIsZero: true },
+  bassHz: { label: 'Bass frequency', min: 20, max: 18000, initial: 120, unit: 'Hz', defaultIsZero: true },
+  presenceHz: { label: 'Presence frequency', min: 20, max: 18000, initial: 1500, unit: 'Hz', defaultIsZero: true },
+  presenceQ: { label: 'Bell Q ×100', min: 20, max: 1200, initial: 80, unit: '', defaultIsZero: true },
+  trebleHz: { label: 'Treble frequency', min: 20, max: 18000, initial: 4000, unit: 'Hz', defaultIsZero: true },
   humHarmonics: { label: 'Hum frequencies', min: 1, max: 5, initial: 1, unit: '', defaultIsZero: true },
   highCutHz: { label: 'High cutoff', min: 4000, max: 18000, initial: 10000, unit: 'Hz', step: 100 },
   notchHz: { label: 'Whistle frequency', min: 200, max: 12000, initial: 1000, unit: 'Hz', step: 10 },
@@ -58,7 +80,25 @@ export const treatmentNumbers: Record<TreatmentNumber, NumberSpec> = {
 };
 
 const numberKeys = Object.keys(treatmentNumbers) as TreatmentNumber[];
-const settingKeys = Object.keys(noTreatment) as (keyof AudioTreatment)[];
+const settingKeys = (Object.keys(noTreatment) as (keyof AudioTreatment)[]).filter(key => key !== 'spectralRepairs');
+
+export function sameRepairBounds(left: Omit<SpectralRepair, 'amountDb'>, right: Omit<SpectralRepair, 'amountDb'>) {
+  return left.startFrame === right.startFrame && left.endFrame === right.endFrame
+    && left.lowHz === right.lowHz && left.highHz === right.highHz;
+}
+
+function readRepairs(value: AudioTreatment['spectralRepairs']) {
+  if (!Array.isArray(value)) return null;
+  const repairs = value.slice(0, maxSpectralRepairs).map(edit => {
+    if (!edit) return null;
+    const { startFrame, endFrame, lowHz, highHz, amountDb } = edit;
+    return [startFrame, endFrame, lowHz, highHz, amountDb].every(Number.isSafeInteger)
+      && startFrame >= 0 && startFrame < endFrame && lowHz >= 20 && highHz - lowHz >= 20 && highHz <= 20_000
+      && amountDb >= 1 && amountDb <= 36 ? { startFrame, endFrame, lowHz, highHz, amountDb } : null;
+  });
+  while (repairs.length && !repairs.at(-1)) repairs.pop();
+  return repairs.length ? repairs : null;
+}
 
 export function readTreatment(value?: Partial<AudioTreatment> | null): AudioTreatment {
   if (!value) return noTreatment;
@@ -70,25 +110,35 @@ export function readTreatment(value?: Partial<AudioTreatment> | null): AudioTrea
     hum: value.hum === 'hz50' || value.hum === 'hz60' ? value.hum : 'off',
     swapChannels: value.swapChannels === true,
     polarity: value.polarity === 'left' || value.polarity === 'right' ? value.polarity : 'off',
+    spectralRepairs: readRepairs(value.spectralRepairs ?? null),
   };
   for (const key of numberKeys) {
     const input = value[key];
     const { min, max, initial, defaultIsZero } = treatmentNumbers[key];
     if (input !== undefined && Number.isInteger(input) && input >= min && input <= max
+      && (!(key === 'rumbleSlope' || key === 'highCutSlope') || input % 12 === 0)
       && !(defaultIsZero && input === initial)) settings[key] = input;
   }
   return settings;
 }
 
 export function sameTreatment(left: AudioTreatment, right: AudioTreatment): boolean {
-  return left === right || settingKeys.every(key => left[key] === right[key]);
+  if (left === right) return true;
+  if (!settingKeys.every(key => left[key] === right[key])) return false;
+  const a = left.spectralRepairs;
+  const b = right.spectralRepairs;
+  return a === b || (!!a && !!b && a.length === b.length && a.every((edit, index) => {
+    const other = b[index];
+    return edit === other || (!!edit && !!other && sameRepairBounds(edit, other) && edit.amountDb === other.amountDb);
+  }));
 }
 
 export const effectCategories = ['Repair', 'Tone', 'Level', 'Stereo'] as const;
 export type EffectCategory = typeof effectCategories[number];
 
 type EffectKey = 'dcHz' | 'rumble' | 'hum' | 'highCutHz' | 'notchHz' | 'bassDb' | 'presenceDb' | 'trebleDb'
-  | 'gainDb' | 'normalize' | 'compressorDb' | 'gateDb' | 'mono' | 'swapChannels' | 'polarity' | 'balance' | 'stereoWidth';
+  | 'gainDb' | 'normalize' | 'compressorDb' | 'gateDb' | 'mono' | 'swapChannels' | 'polarity' | 'balance' | 'stereoWidth'
+  | 'spectralRepairs';
 
 type Effect = {
   key: EffectKey;
@@ -100,6 +150,7 @@ type Effect = {
 };
 
 export const audioEffects: readonly Effect[] = [
+  { key: 'spectralRepairs', category: 'Repair', label: 'Selected frequency attenuation', description: 'Turn down selected frequency ranges at specific times.', reset: { spectralRepairs: null } },
   { key: 'dcHz', category: 'Repair', label: 'Remove DC offset', description: 'Recenter a waveform shifted above or below zero.', numbers: ['dcHz'], reset: { dcHz: 0 } },
   { key: 'rumble', category: 'Repair', label: 'Reduce rumble', description: 'Cut low vibration and handling noise.', numbers: ['rumbleHz'], reset: { rumble: false, rumbleHz: 0 } },
   { key: 'hum', category: 'Repair', label: 'Reduce mains hum', description: 'Choose the mains frequency and cut its harmonics.', numbers: ['humHarmonics'], reset: { hum: 'off', humHarmonics: 0 } },
