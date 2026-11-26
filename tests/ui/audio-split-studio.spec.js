@@ -43,6 +43,7 @@ test.beforeEach(async ({ page }) => {
     window.studioFixture = { calls, slow: false, picked: '/exports', slowOpen: false, refreshes: [] };
     const eventHandlers = new Map();
     const toolVisibility = new Map();
+    const toolPins = new Map();
     window.__TAURI__ = {
       event: {
         async listen(name, handler) {
@@ -85,8 +86,12 @@ test.beforeEach(async ({ page }) => {
             case 'audio_split_treatment':
               if (window.studioFixture.holdTreatment) await new Promise(resolve => { (window.studioFixture.treatmentWaiters ||= []).push(resolve); });
               return { gainDb: args.treatment.normalize ? 4.2 : 0, loudnessLufs: -22.2, outputChannels: args.treatment.mono === 'off' ? 2 : 1 };
+            case 'audio_split_probe':
+              return { input: -30, output: -30, ...window.studioFixture.treatmentProbe?.(args) };
             case 'audio_split_tool_window':
               if (args.action === 'hide_all') { toolVisibility.clear(); return false; }
+              if (args.action === 'pin' || args.action === 'unpin') toolPins.set(args.kind, args.action === 'pin');
+              if (['pin', 'unpin', 'is_pinned'].includes(args.action)) return toolPins.get(args.kind) ?? false;
               toolVisibility.set(args.kind, args.action === 'toggle' && !toolVisibility.get(args.kind));
               return toolVisibility.get(args.kind);
             case 'audio_split_status':
@@ -1309,7 +1314,7 @@ test('live treatment uses the same loop before analysis finishes and reviews the
     sourceId: 'recording', ...payload,
   }), payload);
   await dynamics.click();
-  await expect.poll(async () => (await calls(page, 'tool_window')).at(-1)?.args).toEqual({ kind: 'dynamics', action: 'toggle' });
+  await expect.poll(async () => (await calls(page, 'tool_window')).findLast(({ args }) => args.action === 'toggle')?.args).toEqual({ kind: 'dynamics', action: 'toggle' });
   await request({ kind: 'dynamics', action: 'loop' });
   await expect.poll(async () => (await calls(page, 'transport')).some(({ args }) => args.action === 'audition')).toBe(true);
   const initial = (await calls(page, 'transport')).find(({ args }) => args.action === 'audition');
@@ -1435,4 +1440,66 @@ test('saving a draft waits for a hidden tool to send its pending edit', async ({
   await expect(eq).toHaveAttribute('data-active', 'false');
   await studio.getByRole('button', { name: 'Reopen draft' }).click();
   await expect(eq).toHaveAttribute('data-active', 'true');
+});
+
+test('treatment recipes restore reusable settings and preserve the current repair areas', async ({ page }) => {
+  await page.getByRole('button', { name: 'Split recording', exact: true }).click();
+  const studio = page.getByRole('dialog', { name: 'Split recording' });
+  const waveformOptions = studio.getByRole('button', { name: 'Waveform options' });
+  const eq = studio.getByRole('button', { name: 'EQ', exact: true });
+  const repair = studio.getByRole('button', { name: 'Repair', exact: true });
+  await eq.click();
+  const edit = (kind, patch) => page.evaluate(({ kind, patch }) => window.__TAURI__.event.emitTo('main',
+    'tagnetic:audio-tools-command', { kind, patch, action: 'edit', sourceId: 'recording' }), { kind, patch });
+  const area = { startFrame: 48000, endFrame: 96000, lowHz: 500, highHz: 1000, amountDb: 12 };
+  await edit('eq', { rumble: true });
+  await edit('repair', { spectralRepairs: [area] });
+  await expect(eq).toHaveAttribute('data-active', 'true');
+  await waveformOptions.click();
+  await page.getByRole('menuitem', { name: 'Treatment recipes…' }).click();
+  const recipes = page.getByRole('dialog', { name: 'Treatment recipes' });
+  await recipes.getByRole('textbox', { name: 'Recipe name' }).fill('Tape cleanup');
+  await recipes.getByRole('button', { name: 'Save current settings' }).click();
+  await expect(recipes.getByRole('button', { name: 'Tape cleanup', exact: true })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(recipes).toBeHidden();
+  await expect(waveformOptions).toBeFocused();
+  await edit('eq', { rumble: false });
+  await edit('repair', { spectralRepairs: [{ ...area, startFrame: 72000 }] });
+  await repair.click();
+  await expect(eq).toHaveAttribute('data-active', 'false');
+  await waveformOptions.click();
+  await page.getByRole('menuitem', { name: 'Treatment recipes…' }).click();
+  await recipes.getByRole('button', { name: 'Tape cleanup', exact: true }).click();
+  await expect(eq).toHaveAttribute('data-active', 'true');
+  await expect.poll(() => page.evaluate(() => window.studioFixture.toolSnapshots?.['audio-tool-repair']?.settings.spectralRepairs?.[0]?.startFrame)).toBe(72000);
+  await expect(studio).toBeVisible();
+});
+
+test('level matching and single-channel audition stay confined to preview', async ({ page }) => {
+  await page.evaluate(() => {
+    window.studioFixture.stereo = true;
+    window.studioFixture.treatmentProbe = ({ treatment }) => treatment.gainDb === 8
+      ? { input: -30, output: -22 } : { input: -92, output: -92 };
+  });
+  await page.getByRole('button', { name: 'Split recording', exact: true }).click();
+  const studio = page.getByRole('dialog', { name: 'Split recording' });
+  await studio.getByRole('button', { name: 'Dynamics', exact: true }).click();
+  const request = (action, data = {}, kind = 'dynamics') => page.evaluate(payload =>
+    window.__TAURI__.event.emitTo('main', 'tagnetic:audio-tools-command', { sourceId: 'recording', ...payload }), { action, kind, ...data });
+  const lastTransport = async () => (await calls(page, 'transport')).at(-1)?.args;
+  await request('edit', { patch: { gainDb: 8 } });
+  await request('play');
+  await request('level-match');
+  await expect.poll(lastTransport).toMatchObject({ action: 'retune', previewGainDb: -8, treatment: { gainDb: 8 } });
+  await request('edit', { patch: { gainDb: 4 } });
+  await expect.poll(lastTransport).toMatchObject({ action: 'retune', treatment: { gainDb: 4 } });
+  expect(await lastTransport()).not.toHaveProperty('previewGainDb');
+  await request('audition-band', { range: { start: 48000, end: 96000 }, band: { lowHz: 500, highHz: 1000, channel: 'right' } }, 'repair');
+  await expect.poll(lastTransport).toMatchObject({ action: 'audition', monitor: { kind: 'band', lowHz: 500, highHz: 1000 }, treatment: { mono: 'right', gainDb: 0 } });
+  await request('stop-audition', {}, 'repair');
+  await expect.poll(lastTransport).toMatchObject({ action: 'retune', treatment: { mono: 'off', gainDb: 4 } });
+  expect(await lastTransport()).not.toHaveProperty('monitor');
+  await reviewAndSave(studio);
+  await expect.poll(async () => (await calls(page, 'preview')).at(-1)?.args.request.treatment).toMatchObject({ gainDb: 4, mono: 'off' });
 });

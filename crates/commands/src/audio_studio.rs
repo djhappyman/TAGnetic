@@ -21,7 +21,8 @@ use tagrex_audio_workbench::{
     RenderSegment,
 };
 pub use tagrex_audio_workbench::{
-    AudioTreatment, FrameRange, TreatmentProbe, TreatmentProbeOptions,
+    AudioTreatment, FrameRange, PreviewMonitor, SpectrogramChannel, TreatmentProbe,
+    TreatmentProbeOptions,
 };
 use tagrex_core::mask::{portable_file_name, Mask};
 use tagrex_core::model::{

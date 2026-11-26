@@ -16,9 +16,12 @@
   import AudioSplitImport from './AudioSplitImport.svelte';
   import {
     listenToolRequests, listenToolVisibility, requestToolFlush, sendToolProbe, sendToolState,
-    toolIsActive, toolModes, toolNames, toolPatch, toolTheme, type ToolRequest, type ToolSnapshot, type ToolVisibility,
+    toolEffectCount, toolModes, toolNames, toolPatch, toolTheme,
+    type PreviewBand, type SpectrogramViewOptions, type ToolRequest, type ToolSnapshot, type ToolVisibility,
   } from '../js/audio-tools-window';
   import type { TreatmentProbe } from '../js/audio-treatment-plot';
+  import { copyTreatmentSettings, portableTreatment, readCopiedTreatment, readTreatmentRecipes,
+    saveTreatmentRecipes, treatmentForRecording, type TreatmentRecipe } from '../js/audio-treatment-recipes';
   import {
     activeEffectLabels, audioCommand, choosePath, closeAudioSplitSession, defaultSplitFilePattern, frameAtTime, hasDraft, hasTreatment, leaf, noTreatment, peakValues, readDraft, readTreatment, sameTreatment,
     recordingCover, recoverAudioSplitSession, rememberAudioSplitSession, saveDraft, stem, timeLabel,
@@ -38,9 +41,11 @@
   let trackMenuId = $state('');
   let source = $state.raw<Source | null>(null);
   let tracks = $state.raw<Track[]>([]);
+  const toolCuts = $derived(tracks.map(track => track.startFrame));
   const editingTrack = $derived(tracks.find(track => track.id === editor?.id));
-  let previous = $state.raw<Draft[]>([]);
-  let next = $state.raw<Draft[]>([]);
+  type HistoryStep = { draft: Draft; label: string };
+  let previous = $state.raw<HistoryStep[]>([]);
+  let next = $state.raw<HistoryStep[]>([]);
   let tags = $state.raw<Tags>({});
   let importedTags = $state.raw<Tags>({});
   let artworkPath = $state('');
@@ -63,23 +68,31 @@
   let notice = $state('');
   let draftAnnouncement = $state('');
   let showHelp = $state(false);
+  let recipesOpen = $state(false);
+  let recipes = $state.raw<TreatmentRecipe[]>([]);
+  let recipeName = $state('');
+  let recipeError = $state('');
+  let copiedTreatment = $state.raw<AudioTreatment | null>(null);
   let waveformMenuOpen = $state(false);
   const studioMenus = { waveform: createMenuController(), imports: createMenuController(), tracks: createMenuController(), cover: createMenuController() };
   const audioToolIcons = { eq: SlidersHorizontal, dynamics: Activity, repair: Wrench };
   type Tool = typeof toolModes[number];
   const toolRevisions: Partial<Record<Tool, string>> = {};
   let toolGesture: string | undefined;
+  let gestureCheckpoint: { undo: HistoryStep[]; redo: HistoryStep[]; dirty: boolean } | undefined;
   let usedToolWindows = false;
   let toolWindowError = $state('');
   const visibleTools = new Set<Tool>();
   const connectedTools = new Set<Tool>();
   const sentToolStates: Partial<Record<Tool, ToolSnapshot | null>> = {};
+  const toolPins: Partial<Record<Tool, boolean>> = {};
   let activeToolTheme: ToolSnapshot['theme'] | undefined;
   let toolTimer: ReturnType<typeof setInterval> | undefined;
   type ProbeLane = { pending: boolean; retryAt: number; latest?: { key: string; sourceId: string; probe: TreatmentProbe } };
   const meterLane: ProbeLane = { pending: false, retryAt: 0 };
   const repairLane: ProbeLane = { pending: false, retryAt: 0 };
   let repairViewport: FrameRange | null = null;
+  let repairView: Required<SpectrogramViewOptions> = { treated: false, channel: 'combined' };
   let toolFence: { id: string; remaining: Set<Tool>; finish: (ready: boolean) => void } | undefined;
   let fenceSerial = 0;
   let settlingTools = $state(false);
@@ -88,6 +101,14 @@
   let treatmentError = $state('');
   let listeningError = $state('');
   let hearOriginal = $state(false);
+  type Monitor = { owner: Tool; kind: NonNullable<ToolSnapshot['monitor']>; band?: PreviewBand; started?: number };
+  let monitor: Monitor | undefined;
+  let levelMatch = readLevelMatch();
+  let comparisonGainDb = 0;
+  let compareRevision = 0;
+  let comparisonReady = false;
+  let comparisonInFlight = 0;
+  let comparisonTimer: ReturnType<typeof setTimeout> | undefined;
   let treatmentVersion = 0;
   let retuneVersion = 0;
   let retuneTimer: ReturnType<typeof setTimeout> | undefined;
@@ -194,9 +215,10 @@
 
   const draft = (): Draft => ({ tracks, tags, importedTags, artworkPath, treatment });
 
-  function capture() {
+  function capture(label = 'draft change') {
     toolGesture = undefined;
-    previous = [...previous.slice(-49), draft()];
+    gestureCheckpoint = undefined;
+    previous = [...previous.slice(-49), { draft: draft(), label }];
     next = [];
     dirty = true;
     invalidate();
@@ -204,6 +226,7 @@
 
   function restore(nextDraft: Draft) {
     toolGesture = undefined;
+    gestureCheckpoint = undefined;
     tracks = nextDraft.tracks;
     rangeIds = [];
     rangeAnchor = '';
@@ -222,14 +245,14 @@
     if (!change || !canEdit) return;
     if (redo) {
       next = next.slice(0, -1);
-      previous = [...previous, draft()];
+      previous = [...previous, { draft: draft(), label: change.label }];
     } else {
       previous = previous.slice(0, -1);
-      next = [...next, draft()];
+      next = [...next, { draft: draft(), label: change.label }];
     }
-    restore(change);
+    restore(change.draft);
     dirty = true;
-    draftAnnouncement = redo ? 'Draft change restored' : 'Draft change undone';
+    draftAnnouncement = (redo ? 'Restored ' : 'Undid ') + change.label;
   }
 
   function discardReview(plan: Review) {
@@ -272,6 +295,7 @@
       clearTimeout(peaksTimer);
       clearTimeout(openingPoll);
       clearTimeout(treatmentTimer);
+      clearTimeout(comparisonTimer);
       if (openingRequest) void audioCommand('cancel_open', { requestId: openingRequest }).catch(() => {});
       cancelAnimationFrame(animation);
       cancelAnimationFrame(viewportAnimation);
@@ -334,6 +358,9 @@
       toolGesture = undefined;
       toolWindowError = '';
       repairViewport = null;
+      repairView = { treated: false, channel: 'combined' };
+      monitor = undefined;
+      queueComparison();
       for (const lane of [meterLane, repairLane]) {
         lane.latest = undefined;
         lane.retryAt = 0;
@@ -544,6 +571,7 @@
     stopPlayheadTravel();
     scrubbing = false;
     playhead = Math.max(0, Math.min(frame, total - 1));
+    queueComparison();
     if (reveal && (playhead < start || playhead >= end)) viewport(playhead - (end - start) / 2, end - start);
     if (leavingLoop && playing) { void transport('play', playhead); return; }
     clearTimeout(pollTimer);
@@ -647,12 +675,15 @@
     buffering = playing;
     if (playing) animation = requestAnimationFrame(paintPlayback);
     try {
-      const requestedTreatment = action !== 'pause' && !hearOriginal ? treatment : noTreatment;
+      const request = playbackTreatment();
+      const audition = monitor;
+      const matchGain = comparisonGainDb;
       const measured = treatmentAnalysis;
-      await audioCommand('transport', { id, action, frame, endFrame, sequence, ...(hasTreatment(requestedTreatment) ? { treatment: requestedTreatment } : {}) });
+      await audioCommand('transport', { id, action, frame, endFrame, sequence, ...(action === 'pause' ? {} : request) });
       if (active && source?.id === id && playing && sequence === transportVersion) {
         scheduleStatus(id, sequence, 20);
-        if (!sameTreatment(requestedTreatment, hearOriginal ? noTreatment : treatment) || measured !== treatmentAnalysis) retuneListening();
+        if (!sameTreatment(request.treatment, playbackTreatment().treatment) || measured !== treatmentAnalysis
+          || audition !== monitor || matchGain !== comparisonGainDb) retuneListening();
       }
     } catch (reason) {
       if (active && sequence === transportVersion) {
@@ -673,9 +704,8 @@
       const id = source.id;
       const sequence = transportVersion;
       const revision = ++retuneVersion;
-      const settings = hearOriginal ? noTreatment : treatment;
       listeningError = '';
-      void audioCommand('transport', { id, action: 'retune', sequence, revision, treatment: settings }).catch(reason => {
+      void audioCommand('transport', { id, action: 'retune', sequence, revision, ...playbackTreatment() }).catch(reason => {
         if (active && source?.id === id && sequence === transportVersion && revision === retuneVersion) {
           listeningError = String(reason).replace(/^Error: /, '');
         }
@@ -683,20 +713,102 @@
     }, immediate ? 0 : Math.max(0, 70 - (performance.now() - lastRetune)));
   }
 
-  function compareOriginal(original: boolean) {
-    if (original === hearOriginal) return;
-    hearOriginal = original;
+  function playbackTreatment() {
+    if (monitor?.kind === 'band' && monitor.band) {
+      const { lowHz, highHz, channel } = monitor.band;
+      const mono = hasStereo && (channel === 'left' || channel === 'right') ? channel : 'off';
+      return { treatment: { ...noTreatment, mono } satisfies AudioTreatment, monitor: { kind: 'band', lowHz, highHz } };
+    }
+    if (monitor?.kind === 'difference-compressor') {
+      return { treatment, monitor: { kind: 'compressor-difference' } };
+    }
+    if (monitor?.kind === 'bypass-compressor') return { treatment: { ...treatment, compressorDb: 0 } };
+    const previewGainDb = hearOriginal ? Math.min(0, comparisonGainDb) : Math.min(0, -comparisonGainDb);
+    return { treatment: hearOriginal ? noTreatment : treatment, ...(levelMatch && previewGainDb ? { previewGainDb } : {}) };
+  }
+
+  function readLevelMatch() {
+    try { return localStorage.getItem('tagnetic.audioToolLevelMatch') === 'true'; }
+    catch { return false; }
+  }
+
+  function setLevelMatch() {
+    levelMatch = !levelMatch;
+    try { localStorage.setItem('tagnetic.audioToolLevelMatch', String(levelMatch)); } catch { /* Use the session preference. */ }
+    queueComparison(0);
     retuneListening(true);
+  }
+
+  function queueComparison(delay = 250) {
+    clearTimeout(comparisonTimer);
+    const revision = ++compareRevision;
+    comparisonReady = false;
+    comparisonGainDb = 0;
+    const opened = source;
+    if (!opened || !levelMatch || !hasTreatment(treatment) || phase !== 'edit') return;
+    const frame = Math.max(0, Math.min(opened.frames - 1, Math.round(playhead)));
+    const settings = treatment;
+    comparisonTimer = setTimeout(async () => {
+      if (!active || source?.id !== opened.id || revision !== compareRevision || phase !== 'edit') return;
+      comparisonInFlight = revision;
+      try {
+        const probe = await audioCommand<TreatmentProbe>('probe', { id: opened.id, frame, treatment: settings, spectrum: false });
+        if (!active || source?.id !== opened.id || revision !== compareRevision || phase !== 'edit') return;
+        comparisonReady = true;
+        // Use the same measurement for both choices. Attenuate the louder signal.
+        if (probe?.input > -72 && probe?.output > -72) {
+          comparisonGainDb = Math.max(-48, Math.min(48, probe.output - probe.input));
+          retuneListening(true);
+        }
+      } catch { /* Keep the preview at its actual level if measurement fails. */ }
+      finally { if (comparisonInFlight === revision) comparisonInFlight = 0; }
+    }, delay);
+  }
+
+  function stopMonitor(restoreTransport = true) {
+    if (!monitor) return;
+    const started = monitor.started;
+    monitor = undefined;
+    if (!restoreTransport) return;
+    if (started !== undefined && playing) void transport('pause', started);
+    else retuneListening(true);
+  }
+
+  function startMonitor(owner: Tool, kind: Monitor['kind'], band?: PreviewBand, range?: FrameRange) {
+    if (kind === 'band' && (!band || !Number.isInteger(band.lowHz) || !Number.isInteger(band.highHz)
+      || band.lowHz < 20 || band.highHz - band.lowHz < 20 || band.highHz > Math.min(20_000, sampleRate * .45))) return;
+    if (kind !== 'band' && !treatment.compressorDb) return;
+    if (range && (!Number.isSafeInteger(range.start) || !Number.isSafeInteger(range.end)
+      || range.start < 0 || range.end > total || range.end <= range.start)) return;
+    monitor = { owner, kind, band, started: range ? undefined : monitor?.started ?? (playing ? undefined : playhead) };
+    if (range) setLoop(range, true);
+    else if (!playing) togglePlayback();
+    else retuneListening(true);
+  }
+
+  function compareOriginal(original: boolean) {
+    if (original === hearOriginal && !monitor) return;
+    hearOriginal = original;
+    if (monitor) stopMonitor();
+    else retuneListening(true);
+    if (levelMatch && !comparisonReady && !comparisonInFlight) queueComparison(0);
   }
 
   function previewEffects() {
     if (!source || total < 2) return;
+    const selection = loopRegion ?? previewRange();
+    if (selection) { setLoop(selection, true); return; }
     const length = Math.min(total, sampleRate * 8);
     const from = Math.max(0, Math.min(playhead, total - length));
-    setLoop(loopEnabled && loopRegion ? loopRegion : { start: from, end: from + length }, true);
+    setLoop({ start: from, end: from + length }, true);
+  }
+
+  function previewRange() {
+    return loopEnabled && loopRegion ? loopRegion : tracks.length > 1 ? trackRange(selected) : null;
   }
 
   function hideToolWindows() {
+    stopMonitor(false);
     visibleTools.clear();
     clearInterval(toolTimer);
     toolTimer = undefined;
@@ -714,7 +826,9 @@
       publishCachedProbe(kind);
       void refreshToolProbe(kind === 'repair');
     } else {
-      visibleTools.delete(kind);
+      const wasVisible = visibleTools.delete(kind);
+      if (monitor?.owner === kind) stopMonitor();
+      if (wasVisible) void tick().then(() => document.getElementById('studio-tool-' + kind)?.focus({ preventScroll: true }));
       if (!visibleTools.size) {
         clearInterval(toolTimer);
         toolTimer = undefined;
@@ -728,24 +842,46 @@
     try {
       const visible = await audioCommand<boolean>('tool_window', { kind, action: 'toggle' });
       if (!active || phase !== 'edit') hideToolWindows();
-      else updateToolVisibility({ kind, visible });
+      else {
+        const range = previewRange();
+        if (visible && !playing && range && (playhead < range.start || playhead >= range.end)) seek(range.start, false);
+        updateToolVisibility({ kind, visible });
+        if (visible) {
+          void audioCommand<boolean>('tool_window', { kind, action: 'is_pinned' }).then(pinned => {
+            if (typeof pinned === 'boolean') { toolPins[kind] = pinned; publishToolState(kind); }
+          }).catch(console.error);
+        }
+      }
     } catch (reason) {
       toolWindowError = String(reason);
     }
   }
 
   function publishToolState(kind: Tool, force = false) {
-    const snapshot = source && active && phase === 'edit' ? {
+    const snapshot: ToolSnapshot | null = source && active && phase === 'edit' ? {
       sourceId: source.id, frame: playhead, sampleRate, frames: source.frames, settings: treatment, stereo: hasStereo,
       playing, original: hearOriginal, loop: loopEnabled, revision: toolRevisions[kind], theme: activeToolTheme ??= toolTheme(),
+      loopRange: previewRange() ?? undefined, pinned: toolPins[kind] ?? false, levelMatch,
+      monitor: monitor?.owner === kind ? monitor.kind : undefined,
+      undoLabel: previous.length ? 'Undo ' + previous.at(-1)?.label : undefined,
+      redoLabel: next.length ? 'Redo ' + next.at(-1)?.label : undefined,
+      normalisation: kind === 'dynamics' ? treatmentAnalysis ?? undefined : undefined,
+      ...(kind === 'repair' ? { overview: source.overview, stereoOverview: source.stereoOverview, cuts: toolCuts } : {}),
     } : null;
-    const previous = sentToolStates[kind];
-    if (!force && ((!snapshot && !previous) || (snapshot && previous && snapshot.sourceId === previous.sourceId
-      && (kind !== 'repair' || snapshot.frame === previous.frame) && snapshot.settings === previous.settings
-      && snapshot.playing === previous.playing && snapshot.stereo === previous.stereo && snapshot.original === previous.original
-      && snapshot.loop === previous.loop && snapshot.revision === previous.revision && snapshot.theme === previous.theme))) return;
+    const sent = sentToolStates[kind];
+    if (!force && ((!snapshot && !sent) || (snapshot && sent && snapshot.sourceId === sent.sourceId
+      && (kind !== 'repair' || snapshot.frame === sent.frame) && snapshot.settings === sent.settings
+      && snapshot.playing === sent.playing && snapshot.stereo === sent.stereo && snapshot.original === sent.original
+      && snapshot.loop === sent.loop && snapshot.revision === sent.revision && snapshot.theme === sent.theme
+      && snapshot.loopRange?.start === sent.loopRange?.start && snapshot.loopRange?.end === sent.loopRange?.end
+      && snapshot.pinned === sent.pinned && snapshot.levelMatch === sent.levelMatch && snapshot.monitor === sent.monitor
+      && snapshot.undoLabel === sent.undoLabel && snapshot.redoLabel === sent.redoLabel
+      && snapshot.normalisation === sent.normalisation && snapshot.cuts === sent.cuts))) return;
     sentToolStates[kind] = snapshot;
-    return sendToolState(kind, snapshot)?.catch(console.error);
+    const sameSource = !force && snapshot?.sourceId === sent?.sourceId;
+    const message = snapshot && sameSource ? { ...snapshot, overview: undefined, stereoOverview: undefined,
+      cuts: snapshot.cuts === sent?.cuts ? undefined : snapshot.cuts } : snapshot;
+    return sendToolState(kind, message)?.catch(console.error);
   }
 
   function syncToolAppearance() {
@@ -775,22 +911,26 @@
     const lane = spectrogram ? repairLane : meterLane;
     const targets = () => [...visibleTools].filter(kind => (kind === 'repair') === spectrogram);
     const now = performance.now();
-    if (!opened || !active || phase !== 'edit' || lane.pending || now < lane.retryAt || !targets().length) return;
+    if (!opened || !active || phase !== 'edit' || lane.pending || (!spectrogram && comparisonInFlight) || now < lane.retryAt || !targets().length) return;
     const frame = Math.max(0, Math.min(opened.frames - 1, Math.round(playing && !buffering && !scrubbing ? clockFrame(now) : playhead)));
     const version = transportVersion;
-    const settings = spectrogram ? noTreatment : treatment;
+    const view = repairView;
+    const settings = spectrogram && !view.treated ? noTreatment : treatment;
     const spectrum = !spectrogram && visibleTools.has('eq');
     const viewport = spectrogram ? repairViewport : null;
-    const key = viewport ? JSON.stringify([opened.id, viewport.start, viewport.end])
+    const viewKey = spectrogram ? view : null;
+    const gain = !spectrogram || view.treated ? treatmentAnalysis?.gainDb : null;
+    const key = viewport ? JSON.stringify([opened.id, viewport.start, viewport.end, viewKey, settings, gain])
       : JSON.stringify([opened.id, version, Math.floor(frame * (spectrogram ? 3 : 8) / opened.sampleRate),
-        settings, spectrogram ? null : treatmentAnalysis?.gainDb, spectrum]);
+        settings, gain, spectrum, viewKey]);
     if (lane.latest?.key === key) return;
     lane.pending = true;
     try {
-      const probe = await audioCommand<TreatmentProbe>('probe', { id: opened.id, frame, treatment: settings, spectrogram, spectrum, viewport });
+      const probe = await audioCommand<TreatmentProbe>('probe', { id: opened.id, frame, treatment: settings, spectrogram, spectrum, viewport,
+        ...(spectrogram ? { spectrogramChannel: view.channel, spectrogramTreated: view.treated } : {}) });
       const currentViewport = viewport ? repairViewport?.start === viewport.start && repairViewport.end === viewport.end
         : (!spectrogram || !repairViewport) && version === transportVersion;
-      if (probe && active && source?.id === opened.id && phase === 'edit' && currentViewport) {
+      if (probe && active && source?.id === opened.id && phase === 'edit' && currentViewport && (!spectrogram || view === repairView)) {
         lane.latest = { key, sourceId: opened.id, probe };
         targets().forEach(publishCachedProbe);
       }
@@ -846,6 +986,24 @@
       return;
     }
     if (request.action === 'play') togglePlayback();
+    if (request.action === 'hide') {
+      void audioCommand('tool_window', { kind: request.kind, action: 'hide' }).then(() =>
+        updateToolVisibility({ kind: request.kind, visible: false })).catch(reason => { toolWindowError = String(reason); });
+    }
+    if (request.action === 'pin') {
+      const action = toolPins[request.kind] ? 'unpin' : 'pin';
+      void audioCommand<boolean>('tool_window', { kind: request.kind, action }).then(pinned => {
+        if (typeof pinned === 'boolean') { toolPins[request.kind] = pinned; publishToolState(request.kind); }
+      }).catch(reason => { toolWindowError = String(reason); });
+    }
+    if (request.action === 'level-match') setLevelMatch();
+    if (request.action === 'seek' && Number.isSafeInteger(request.range?.start)) seek(request.range!.start);
+    if (request.action === 'solo-band' && request.kind === 'eq') startMonitor(request.kind, 'band', request.band);
+    if (request.action === 'audition-band' && request.kind === 'repair' && request.range) startMonitor(request.kind, 'band', request.band, request.range);
+    if (request.kind === 'dynamics' && (request.action === 'bypass-compressor' || request.action === 'difference-compressor')) {
+      startMonitor(request.kind, request.action);
+    }
+    if (request.action === 'stop-audition' && monitor?.owner === request.kind) stopMonitor();
     if (request.action === 'compare' && typeof request.original === 'boolean') compareOriginal(request.original);
     if (request.action === 'undo' || request.action === 'redo') {
       toolRevisions[request.kind] = request.revision;
@@ -857,11 +1015,17 @@
         && bounds.start >= 0 && bounds.end <= source.frames && bounds.end > bounds.start
         && bounds.end - bounds.start <= source.sampleRate * 12)) {
         repairViewport = bounds;
+        const requested = request.options?.channel;
+        const treated = request.options?.treated === true;
+        const stereo = hasStereo && (!treated || treatment.mono === 'off');
+        const channel = stereo && (requested === 'left' || requested === 'right') ? requested : 'combined';
+        if (channel !== repairView.channel || treated !== repairView.treated) repairView = { channel, treated };
         void refreshToolProbe(true);
       }
       return;
     }
     if (request.action === 'loop') {
+      stopMonitor(false);
       if (request.range) {
         const { start, end } = request.range;
         if (Number.isSafeInteger(start) && Number.isSafeInteger(end)) setLoop({ start, end }, true);
@@ -873,18 +1037,120 @@
       const settings = readTreatment({ ...treatment, ...toolPatch(request.kind, request.patch) });
       if (!sameTreatment(settings, treatment)) {
         const gesture = request.gesture ? `${request.kind}:${request.gesture}` : undefined;
-        if (!gesture || gesture !== toolGesture) capture();
+        if (!gesture || gesture !== toolGesture) {
+          const before = { undo: previous, redo: next, dirty };
+          capture(treatmentChangeLabel(request.kind, settings));
+          if (gesture) gestureCheckpoint = before;
+        }
         toolGesture = gesture;
         replaceTreatment(settings);
+        const initial = previous.at(-1)?.draft.treatment;
+        if (gesture && gestureCheckpoint && initial && sameTreatment(readTreatment(initial), settings)) {
+          previous = gestureCheckpoint.undo;
+          next = gestureCheckpoint.redo;
+          dirty = gestureCheckpoint.dirty;
+          toolGesture = undefined;
+          gestureCheckpoint = undefined;
+        }
       }
     }
     publishToolState(request.kind);
+  }
+
+  function treatmentChangeLabel(kind: Tool, settings: AudioTreatment) {
+    if (kind === 'repair') {
+      const before = treatment.spectralRepairs;
+      const after = settings.spectralRepairs;
+      const edited = Array.from({ length: Math.max(before?.length ?? 0, after?.length ?? 0) }, (_, index) => {
+        const old = before?.[index];
+        const fresh = after?.[index];
+        return JSON.stringify(old) !== JSON.stringify(fresh) ? fresh || old : null;
+      }).find(Boolean);
+      return edited ? 'repair at ' + timeLabel(edited.startFrame, sampleRate, 0) : 'repair settings';
+    }
+    if (kind === 'dynamics') {
+      if (settings.compressorInputDb !== treatment.compressorInputDb) return 'compressor input gain change';
+      if (settings.compressorDb !== treatment.compressorDb) return 'compressor threshold change';
+      if (settings.compressorRatio !== treatment.compressorRatio) return 'compression ratio change';
+      if (settings.gateDb !== treatment.gateDb) return 'quiet-gap threshold change';
+      if (settings.gainDb !== treatment.gainDb) return 'gain change';
+      if (settings.normalize !== treatment.normalize || settings.normalizeTargetDb !== treatment.normalizeTargetDb) return 'loudness change';
+      return 'dynamics settings';
+    }
+    return 'EQ change';
+  }
+
+  function toolHint(kind: Tool) {
+    const count = toolEffectCount(kind, treatment);
+    if (!count) return toolNames[kind];
+    const item = kind === 'eq' ? 'active band'
+      : kind === 'repair' && count === (treatment.spectralRepairs?.filter(Boolean).length ?? 0) ? 'area' : 'active effect';
+    return `${toolNames[kind]} · ${count} ${item}${count === 1 ? '' : 's'}`;
+  }
+
+  function openRecipes() {
+    recipes = readTreatmentRecipes();
+    recipeName = '';
+    recipeError = '';
+    recipesOpen = true;
+  }
+
+  async function copyRecipe() {
+    const opened = source;
+    if (!opened || !await settleToolEdits() || !active || source !== opened) return;
+    try {
+      copyTreatmentSettings(treatment);
+      copiedTreatment = readCopiedTreatment();
+      note('Treatment settings copied');
+    } catch (reason) { fail(String(reason)); }
+  }
+
+  async function applyRecipe(settings: AudioTreatment, name: string) {
+    const opened = source;
+    if (!opened || !canEdit || !await settleToolEdits() || !active || source !== opened || phase !== 'edit') return;
+    const adapted = treatmentForRecording(settings, treatment, sampleRate, hasStereo);
+    if (!sameTreatment(adapted, treatment)) {
+      capture('treatment settings');
+      replaceTreatment(adapted);
+    }
+    recipesOpen = false;
+    note(name + ' applied');
+  }
+
+  async function saveRecipe(event: SubmitEvent) {
+    event.preventDefault();
+    const name = recipeName.trim();
+    const opened = source;
+    if (!name || !opened || !await settleToolEdits() || !active || source !== opened || !recipesOpen) return;
+    if (recipes.some(recipe => recipe.name.toLowerCase() === name.toLowerCase())) {
+      recipeError = 'A recipe with that name already exists.';
+      return;
+    }
+    try {
+      const updated = [...recipes, { name, settings: portableTreatment(treatment) }];
+      saveTreatmentRecipes(updated);
+      recipes = updated;
+      recipeName = '';
+      recipeError = '';
+      draftAnnouncement = 'Recipe saved';
+    } catch (reason) { recipeError = String(reason); }
+  }
+
+  function removeRecipe(name: string) {
+    try {
+      const updated = recipes.filter(recipe => recipe.name !== name);
+      saveTreatmentRecipes(updated);
+      recipes = updated;
+      recipeError = '';
+      draftAnnouncement = 'Recipe removed';
+    } catch (reason) { recipeError = String(reason); }
   }
 
   function replaceTreatment(settings: AudioTreatment) {
     if (!source || sameTreatment(settings, treatment)) return;
     treatment = settings;
     if (!hasTreatment(settings)) hearOriginal = false;
+    if (levelMatch) queueComparison();
     retuneListening();
     measureTreatment();
   }
@@ -918,6 +1184,7 @@
         const result = await audioCommand<TreatmentAnalysis>('treatment', { id: opened.id, treatment: settings });
         if (!active || revision !== treatmentVersion || source?.id !== opened.id) return;
         treatmentAnalysis = result;
+        if (levelMatch) queueComparison();
         if (!hearOriginal) retuneListening(true);
       } catch (reason) {
         if (!active || revision !== treatmentVersion || source?.id !== opened.id) return;
@@ -945,7 +1212,7 @@
   }
 
   function togglePlayback() {
-    if (playing) void transport('pause');
+    if (playing) { stopMonitor(false); void transport('pause'); }
     else if (loopEnabled && loopRegion) void transport('audition', loopRegion.start, loopRegion.end);
     else void transport('play');
   }
@@ -1163,6 +1430,9 @@
       else if (key === '+' || key === '=') { event.preventDefault(); zoom(1); }
       else if (key === '-') { event.preventDefault(); zoom(-1); }
       else if (key === 'z' && current) { event.preventDefault(); zoomToCut(); }
+      else if (key === 'f') { event.preventDefault(); if (loopEnabled && loopRegion) zoomToLoop(); else zoomToCut(); }
+      else if (key === 'b') { event.preventDefault(); if (!event.repeat) compareOriginal(!hearOriginal); }
+      else if (key === '?') { event.preventDefault(); if (!event.repeat) showHelp = !showHelp; }
       else if (key === '0') { event.preventDefault(); animateViewport(0, total); }
     }
   }
@@ -1747,6 +2017,7 @@
       event.preventDefault();
       event.stopPropagation();
       if (closeRequested) keepEditing();
+      else if (recipesOpen) recipesOpen = false;
       else if (importMenuOpen) studioMenus.imports.close();
       else if (importMode) closeImporter();
       else if (waveformMenuOpen) studioMenus.waveform.close();
@@ -1819,13 +2090,14 @@
                   {/if}
                   {#each toolModes as kind (kind)}
                     {@const Icon = audioToolIcons[kind]}
-                    <Button class="audio-tool-trigger" variant="ghost" size="icon-sm" title={toolNames[kind]}
-                      aria-label={toolNames[kind]} data-active={toolIsActive(kind, treatment)}
-                      aria-description={toolIsActive(kind, treatment) ? 'Effects active' : undefined}
+                    <Button id={'studio-tool-' + kind} class="audio-tool-trigger" variant="ghost" size="icon-sm" title={toolHint(kind)}
+                      aria-label={toolNames[kind]} data-active={toolEffectCount(kind, treatment) > 0}
+                      aria-description={toolEffectCount(kind, treatment) ? toolHint(kind) : undefined}
                       onclick={() => toggleToolWindow(kind)}><Icon size={16}/></Button>
                   {/each}
-                  <Menu bind:open={waveformMenuOpen} controller={studioMenus.waveform}>
-                    <MenuTrigger data-slot="dropdown-menu-trigger" class={buttonVariants({ variant: 'ghost', size: 'icon-sm' })} aria-label="Waveform options" title="Waveform options"><Ellipsis size={18}/></MenuTrigger>
+                  <Menu bind:open={waveformMenuOpen} controller={studioMenus.waveform}
+                    onOpenChange={open => { if (open) copiedTreatment = readCopiedTreatment(); }}>
+                    <MenuTrigger id="studio-waveform-options" data-slot="dropdown-menu-trigger" class={buttonVariants({ variant: 'ghost', size: 'icon-sm' })} aria-label="Waveform options" title="Waveform options"><Ellipsis size={18}/></MenuTrigger>
                     <MenuContent class="app-select-menu studio-waveform-options" align="end" onkeydowncapture={event => popupKeys(event, 'waveform')}>
                       <MenuItem onSelect={() => jump(-1)}><ChevronLeft size={15}/> Previous cut <MenuShortcut>[</MenuShortcut></MenuItem>
                       <MenuItem onSelect={() => jump(1)}><ChevronRight size={15}/> Next cut <MenuShortcut>]</MenuShortcut></MenuItem>
@@ -1836,6 +2108,11 @@
                       <MenuItem onSelect={zoomToLoop} disabled={!loopRegion}>Zoom to loop</MenuItem>
                       {#if loopRegion}<MenuItem onSelect={clearLoop}>Clear loop</MenuItem>{/if}
                       <MenuItem onSelect={() => animateViewport(0, total)}>Fit recording <MenuShortcut>0</MenuShortcut></MenuItem>
+                      <MenuItem onSelect={() => compareOriginal(!hearOriginal)}>{hearOriginal ? 'Listen to treated' : 'Listen to original'} <MenuShortcut>B</MenuShortcut></MenuItem>
+                      <MenuSeparator/>
+                      <MenuItem onSelect={() => void copyRecipe()}>Copy treatment settings</MenuItem>
+                      <MenuItem disabled={!copiedTreatment} onSelect={() => { if (copiedTreatment) void applyRecipe(copiedTreatment, 'Copied treatment'); }}>Paste treatment settings</MenuItem>
+                      <MenuItem onSelect={openRecipes}>Treatment recipes…</MenuItem>
                       <MenuSeparator/>
                       <MenuCheckboxItem value="follow" bind:checked={follow} closeOnSelect>
                         <span class="follow-check" aria-hidden="true"><MenuItemIndicator><Check size={14}/></MenuItemIndicator></span> Follow playhead
@@ -1871,7 +2148,7 @@
                 <p class="waveform-hint" role="status">{toolWindowError}</p>
               {/if}
               {#if showHelp}
-                <p class="help">Scroll to zoom, middle-drag to pan, and Shift-drag to mark a loop. L toggles the loop. Space plays or pauses, Shift+Space loops around the selected cut, and M adds a cut. In the track list, Shift-click or Shift+Up/Down selects a range, F2 edits tags, and Delete removes a split.</p>
+                <p class="help">Scroll to zoom, middle-drag to pan, and Shift-drag to mark a loop. Space plays or pauses. L toggles the loop, B compares Original and Treated, F fits the cut or loop, and 0 fits the recording. Shift+Space auditions the cut and M adds a cut. In the track list, Shift-click or Shift+Up/Down selects a range, F2 edits tags, and Delete removes a split.</p>
               {/if}
             </div>
             {#if importMode}
@@ -1945,8 +2222,8 @@
               </section>
               <section class="tag-panel" aria-label="Recording tags">
                 <div class="toolbar draft-actions" role="group" aria-label="Draft actions">
-                  <Button variant="ghost" size="icon-sm" onclick={() => history(false)} title="Undo draft change" aria-label="Undo draft change" disabled={!previous.length || !canEdit}><Undo2 size={16}/></Button>
-                  <Button variant="ghost" size="icon-sm" onclick={() => history(true)} title="Redo draft change" aria-label="Redo draft change" disabled={!next.length || !canEdit}><Redo2 size={16}/></Button>
+                  <Button variant="ghost" size="icon-sm" onclick={() => history(false)} title={'Undo ' + (previous.at(-1)?.label ?? 'draft change')} aria-label="Undo draft change" disabled={!previous.length || !canEdit}><Undo2 size={16}/></Button>
+                  <Button variant="ghost" size="icon-sm" onclick={() => history(true)} title={'Redo ' + (next.at(-1)?.label ?? 'draft change')} aria-label="Redo draft change" disabled={!next.length || !canEdit}><Redo2 size={16}/></Button>
                   <Button variant="ghost" size="sm" onclick={saveWithToolEdits} disabled={!canEdit || settlingTools} aria-keyshortcuts="Control+s Meta+s">Save draft</Button>
                   <Button variant="ghost" size="sm" onclick={reopen} disabled={!hasSaved || !canEdit}>{hasSaved && !dirty && !previous.length ? 'Continue draft' : 'Reopen draft'}</Button>
                 </div>
@@ -2062,6 +2339,29 @@
         </div>
       </footer>
     </div>
+    <Dialog.Root bind:open={recipesOpen}>
+      <Dialog.Content class="split-close-dialog" overlayProps={{ class: 'split-close-overlay' }}
+        onCloseAutoFocus={event => { event.preventDefault(); document.getElementById('studio-waveform-options')?.focus(); }}
+        onEscapeKeydown={event => { event.preventDefault(); event.stopPropagation(); recipesOpen = false; }}>
+        <Dialog.Title>Treatment recipes</Dialog.Title>
+        <Dialog.Description>Save EQ, dynamics and repair settings for other recordings. Selected repair areas stay with this recording.</Dialog.Description>
+        <form class="recipe-save" onsubmit={saveRecipe}>
+          <Input aria-label="Recipe name" placeholder="Recipe name" bind:value={recipeName} oninput={() => recipeError = ''}/>
+          <Button type="submit" size="sm" disabled={!recipeName.trim() || settlingTools}>Save current settings</Button>
+        </form>
+        {#if recipeError}<p class="error" role="alert">{recipeError}</p>{/if}
+        {#if recipes.length}
+          <ul class="recipe-list" aria-label="Saved recipes">
+            {#each recipes as recipe (recipe.name)}
+              <li>
+                <Button variant="ghost" size="sm" disabled={settlingTools} onclick={() => void applyRecipe(recipe.settings, recipe.name)} title={'Apply ' + recipe.name}>{recipe.name}</Button>
+                <Button variant="ghost" size="icon-sm" onclick={() => removeRecipe(recipe.name)} aria-label={'Remove ' + recipe.name} title={'Remove ' + recipe.name}><X size={15}/></Button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </Dialog.Content>
+    </Dialog.Root>
     <Dialog.Root open={closeRequested} onOpenChange={open => { if (!open) keepEditing(); }}>
       <Dialog.Content class="split-close-dialog" role="alertdialog" showCloseButton={false}
         overlayProps={{ class: 'split-close-overlay' }}
@@ -2083,6 +2383,10 @@
 </Dialog.Root>
 
 <style>
+  .recipe-save, .recipe-list li { display:flex; align-items:center; gap:var(--sp-2); }
+  .recipe-save :global(input) { min-width:0; flex:1; }
+  .recipe-list { list-style:none; margin:0; padding:0; max-height:min(260px,35dvh); overflow:auto; }
+  .recipe-list li { justify-content:space-between; }
   :global(.audio-split-dialog[data-slot="dialog-content"]) { width:min(1040px,calc(100vw - 24px)); max-width:none; max-height:calc(100dvh - 24px); padding:0; z-index:133; border:1px solid var(--ui-muted-border); border-radius:var(--r-dialog); background:var(--panel); color:var(--text); display:flex; flex-direction:column; box-shadow:0 16px 48px rgb(0 0 0 / .32); }
   :global(.audio-split-overlay[data-slot="dialog-overlay"]) { z-index:132; }
   :global(.split-close-overlay[data-slot="dialog-overlay"]) { z-index:134; }

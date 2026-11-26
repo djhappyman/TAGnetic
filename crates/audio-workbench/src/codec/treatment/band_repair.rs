@@ -1,15 +1,20 @@
 //! Temporal band attenuation with four minimum-phase second-order sections.
 
-use super::Biquad;
+use super::{deserialize_slots, Biquad};
 use rustfft::num_complex::Complex64;
-use serde::de::{Error, IgnoredAny, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::f64::consts::PI;
-use std::fmt;
 use std::ops::Range;
 
 pub const MAX_SPECTRAL_REPAIRS: usize = 8;
 const SECTIONS: usize = 4;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepairChannel {
+    Left,
+    Right,
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -19,6 +24,8 @@ pub struct SpectralRepair {
     pub low_hz: u16,
     pub high_hz: u16,
     pub amount_db: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<RepairChannel>,
 }
 
 type RepairSlots = [Option<SpectralRepair>; MAX_SPECTRAL_REPAIRS];
@@ -26,42 +33,7 @@ type RepairSlots = [Option<SpectralRepair>; MAX_SPECTRAL_REPAIRS];
 pub(super) fn deserialize<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<RepairSlots>, D::Error> {
-    struct Repairs;
-
-    impl<'de> Visitor<'de> for Repairs {
-        type Value = Option<RepairSlots>;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(formatter, "at most {MAX_SPECTRAL_REPAIRS} spectral repairs")
-        }
-
-        fn visit_none<E: Error>(self) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-
-        fn visit_some<D: Deserializer<'de>>(
-            self,
-            deserializer: D,
-        ) -> Result<Self::Value, D::Error> {
-            deserializer.deserialize_seq(self)
-        }
-
-        fn visit_seq<S: SeqAccess<'de>>(self, mut values: S) -> Result<Self::Value, S::Error> {
-            let mut repairs = [None; MAX_SPECTRAL_REPAIRS];
-            for slot in &mut repairs {
-                let Some(repair) = values.next_element::<Option<SpectralRepair>>()? else {
-                    return Ok(Some(repairs));
-                };
-                *slot = repair;
-            }
-            if values.next_element::<IgnoredAny>()?.is_some() {
-                return Err(S::Error::invalid_length(MAX_SPECTRAL_REPAIRS + 1, &self));
-            }
-            Ok(Some(repairs))
-        }
-    }
-
-    deserializer.deserialize_option(Repairs)
+    deserialize_slots(deserializer)
 }
 
 pub(super) struct BandRepair {
@@ -69,6 +41,7 @@ pub(super) struct BandRepair {
     warmup: u64,
     fade_frames: u64,
     channels: Vec<[Biquad; SECTIONS]>,
+    channel: Option<usize>,
 }
 
 impl BandRepair {
@@ -82,6 +55,9 @@ impl BandRepair {
                 .saturating_sub(settle_frames(rate, &design)),
             fade_frames: (u64::from(rate) * 8 / 1000).clamp(1, (length / 2).max(1)),
             channels: vec![design.map(|(pole, zero)| section(pole, zero)); channels],
+            channel: repair
+                .channel
+                .map(|channel| usize::from(channel == RepairChannel::Right)),
         }
     }
 
@@ -96,7 +72,10 @@ impl BandRepair {
             .min(self.fade_frames);
         let ramp = edge as f64 / self.fade_frames as f64;
         let mix = ramp * ramp * (3.0 - 2.0 * ramp);
-        for (dry, sections) in frame.iter_mut().zip(&mut self.channels) {
+        for (channel, (dry, sections)) in frame.iter_mut().zip(&mut self.channels).enumerate() {
+            if self.channel.is_some_and(|target| target != channel) {
+                continue;
+            }
             let wet = sections
                 .iter_mut()
                 .fold(*dry, |sample, section| section.filter(sample));

@@ -439,7 +439,7 @@ struct RetuneTarget {
 }
 
 fn same_treatment(a: PreparedTreatment, b: PreparedTreatment) -> bool {
-    a.settings() == b.settings() && a.gain_db() == b.gain_db()
+    a.same_preview(b)
 }
 
 #[derive(Clone, Copy)]

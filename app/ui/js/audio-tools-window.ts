@@ -1,6 +1,6 @@
 import type { FrameRange } from './audio-split';
 import type { TreatmentPlotMode, TreatmentProbe } from './audio-treatment-plot';
-import type { AudioTreatment } from './audio-treatment';
+import { effectIsActive, type AudioTreatment } from './audio-treatment';
 
 export const toolModes = ['eq', 'dynamics', 'repair'] as const satisfies readonly TreatmentPlotMode[];
 export const toolNames = { eq: 'EQ', dynamics: 'Dynamics', repair: 'Repair' } as const;
@@ -13,18 +13,22 @@ const visibilityEvent = 'tagnetic:audio-tool-visibility';
 
 const toolKeys = {
   eq: ['rumble', 'rumbleHz', 'rumbleSlope', 'highCutHz', 'highCutSlope', 'bassDb', 'bassHz', 'presenceDb',
-    'presenceHz', 'presenceQ', 'trebleDb', 'trebleHz', 'notchHz', 'notchQ'],
-  dynamics: ['compressorDb', 'compressorRatio', 'gateDb', 'gateReductionDb', 'gainDb', 'normalize', 'normalizeTargetDb'],
+    'presenceHz', 'presenceQ', 'trebleDb', 'trebleHz', 'notchHz', 'notchQ', 'eqBands', 'eqBypassed'],
+  dynamics: ['compressorInputDb', 'compressorDb', 'compressorRatio', 'compressorAttackMs', 'compressorReleaseMs', 'compressorKneeDb',
+    'gateDb', 'gateReductionDb', 'gainDb', 'normalize', 'normalizeTargetDb'],
   repair: ['hum', 'humHarmonics', 'dcHz', 'mono', 'swapChannels', 'polarity', 'balance', 'stereoWidth', 'spectralRepairs'],
 } as const satisfies Record<TreatmentPlotMode, readonly (keyof AudioTreatment)[]>;
 
-const inactiveSettings: readonly (keyof AudioTreatment)[] = [
-  'rumbleHz', 'rumbleSlope', 'highCutSlope', 'bassHz', 'presenceHz', 'presenceQ', 'trebleHz', 'notchQ',
-  'compressorRatio', 'gateReductionDb', 'normalizeTargetDb', 'humHarmonics',
-];
+const toolEffects = {
+  eq: ['rumble', 'bassDb', 'presenceDb', 'notchHz', 'trebleDb', 'highCutHz'],
+  dynamics: ['compressorDb', 'gateDb', 'gainDb', 'normalize'],
+  repair: ['hum', 'dcHz', 'mono', 'swapChannels', 'polarity', 'balance', 'stereoWidth'],
+} as const;
 
-export function toolIsActive(kind: TreatmentPlotMode, settings: AudioTreatment) {
-  return toolKeys[kind].some(key => !inactiveSettings.includes(key) && !!settings[key] && settings[key] !== 'off');
+export function toolEffectCount(kind: TreatmentPlotMode, settings: AudioTreatment) {
+  const preset = toolEffects[kind].filter(key => effectIsActive(settings, key)).length;
+  if (kind === 'eq') return preset + (settings.eqBands?.filter(band => !band.bypassed && (band.kind === 'notch' || band.gainDb !== 0)).length ?? 0);
+  return kind === 'repair' ? preset + (settings.spectralRepairs?.filter(Boolean).length ?? 0) : preset;
 }
 
 export function toolPatch(kind: TreatmentPlotMode, patch: Partial<AudioTreatment>) {
@@ -62,22 +66,36 @@ export type ToolSnapshot = {
   playing: boolean;
   original: boolean;
   loop: boolean;
+  loopRange?: FrameRange;
+  overview?: number[];
+  stereoOverview?: number[];
+  cuts?: number[];
+  pinned?: boolean;
+  levelMatch?: boolean;
+  monitor?: 'band' | 'bypass-compressor' | 'difference-compressor';
+  undoLabel?: string;
+  redoLabel?: string;
+  normalisation?: { gainDb: number; loudnessLufs: number | null };
   revision?: string;
   theme: ToolTheme;
 };
 
+export type SpectrogramViewOptions = { treated?: boolean; channel?: 'combined' | 'left' | 'right' };
+export type PreviewBand = { lowHz: number; highHz: number; channel?: 'left' | 'right' };
+type DirectToolAction = 'play' | 'hide' | 'pin' | 'level-match' | 'seek' | 'solo-band' | 'audition-band'
+  | 'bypass-compressor' | 'difference-compressor' | 'stop-audition';
 export type ToolRequest = { kind: TreatmentPlotMode } & (
   | { action: 'sync' }
-  | { action: 'play'; sourceId: string }
+  | { action: DirectToolAction; sourceId: string; range?: FrameRange; band?: PreviewBand }
   | { action: 'undo' | 'redo'; sourceId: string; revision: string }
   | { action: 'compare'; sourceId: string; original: boolean }
   | { action: 'loop'; sourceId: string; range?: FrameRange }
-  | { action: 'viewport'; sourceId: string; range: FrameRange | null }
+  | { action: 'viewport'; sourceId: string; range: FrameRange | null; options?: SpectrogramViewOptions }
   | { action: 'edit'; sourceId: string; patch: Partial<AudioTreatment>; revision: string; gesture?: string }
   | { action: 'flushed'; sourceId: string; fence: string }
 );
 
-export type ToolAction = 'play' | 'original' | 'treated' | 'loop' | 'undo' | 'redo';
+export type ToolAction = DirectToolAction | 'original' | 'treated' | 'loop' | 'undo' | 'redo';
 export type ToolProbeUpdate = { sourceId: string; probe?: TreatmentProbe; error?: string };
 export type ToolVisibility = { kind: TreatmentPlotMode; visible: boolean };
 

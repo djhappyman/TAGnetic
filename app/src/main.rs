@@ -3091,6 +3091,18 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, _event| {
+            if matches!(&_event, tauri::RunEvent::ExitRequested { .. })
+                || matches!(
+                    &_event,
+                    tauri::RunEvent::WindowEvent {
+                        label,
+                        event: tauri::WindowEvent::CloseRequested { .. },
+                        ..
+                    } if label == "main"
+                )
+            {
+                audio_studio::save_tool_window_preferences(_app);
+            }
             if matches!(
                 &_event,
                 tauri::RunEvent::WindowEvent {

@@ -47,13 +47,9 @@ impl Biquad {
         Self::symmetric(b, cos, alpha)
     }
 
-    pub(super) fn notch(rate: f64, frequency: u16, quality: u8) -> Self {
+    pub(super) fn notch(rate: f64, frequency: u16, quality: impl Into<f64>) -> Self {
         let (sin, cos) = angle(rate, frequency);
-        Self::symmetric(
-            [1.0, -2.0 * cos, 1.0],
-            cos,
-            sin / (2.0 * f64::from(quality)),
-        )
+        Self::symmetric([1.0, -2.0 * cos, 1.0], cos, sin / (2.0 * quality.into()))
     }
 
     pub(super) fn peak(rate: f64, frequency: u16, db: i8, quality: f64) -> Self {
@@ -63,6 +59,24 @@ impl Biquad {
         Self::new(
             [1.0 + alpha * amplitude, -2.0 * cos, 1.0 - alpha * amplitude],
             [1.0 + alpha / amplitude, -2.0 * cos, 1.0 - alpha / amplitude],
+        )
+    }
+
+    pub(super) fn band_pass(rate: f64, low_hz: u16, high_hz: u16) -> Self {
+        // Prewarp both edges. This also keeps narrow audition bands centred
+        // when they are close to the top of the editable frequency range.
+        let edge = |hz| (PI * f64::from(hz) / rate).tan();
+        let (low, high) = (edge(low_hz), edge(high_hz));
+        let centre = (low * high).sqrt();
+        let width = high - low;
+        let centre_sq = centre * centre;
+        Self::new(
+            [width, 0.0, -width],
+            [
+                1.0 + width + centre_sq,
+                2.0 * (centre_sq - 1.0),
+                1.0 - width + centre_sq,
+            ],
         )
     }
 

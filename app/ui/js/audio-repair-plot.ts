@@ -4,6 +4,9 @@ import { plotBounds, type PlotBounds, type TreatmentProbe } from './audio-treatm
 export type FrequencyRange = { lowHz: number; highHz: number };
 export type RepairViewport = { time: FrameRange; frequency: FrequencyRange };
 export type RepairTexture = { bitmap: HTMLCanvasElement; time: FrameRange; frequency: FrequencyRange };
+export type RepairChannel = 'combined' | 'left' | 'right';
+export type RepairContrast = 'balanced' | 'detail' | 'strong';
+export type RepairWaveform = { values: readonly number[]; time: FrameRange; stereo?: boolean; channel?: RepairChannel };
 const frequencyLabel = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
 
 export function clampRepair(value: number, minimum: number, maximum: number): number {
@@ -55,7 +58,7 @@ function hertzLabel(hz: number): string {
   return hz >= 1000 ? frequencyLabel.format(hz / 1000) + 'k' : String(Math.round(hz));
 }
 
-export function buildRepairTexture(probe: TreatmentProbe, rate: number, accent: string): RepairTexture | null {
+export function buildRepairTexture(probe: TreatmentProbe, rate: number, accent: string, contrast: RepairContrast = 'balanced'): RepairTexture | null {
   const time = spectrogramRange(probe);
   const columns = probe.spectrogram;
   const frequencies = probe.frequencies;
@@ -72,9 +75,11 @@ export function buildRepairTexture(probe: TreatmentProbe, rate: number, accent: 
     const upper = index + 1 === frequencies.length ? frequency.highHz : Math.sqrt(hz * frequencies[index + 1]);
     return frequencyY(clampRepair(upper, frequency.lowHz, frequency.highHz), bounds, frequency);
   });
+  const floor = contrast === 'detail' ? -112 : contrast === 'strong' ? -72 : -94;
+  const ceiling = contrast === 'detail' ? -28 : -22;
   for (const [x, levels] of columns.entries()) {
     for (let bin = 0; bin < Math.min(levels.length, rows.length); bin++) {
-      const strength = clampRepair((levels[bin] + 94) / 72, 0, 1);
+      const strength = clampRepair((levels[bin] - floor) / (ceiling - floor), 0, 1);
       if (strength <= 0) continue;
       const top = rows[bin];
       const bottom = rows[bin - 1] ?? bitmap.height;
@@ -91,6 +96,7 @@ export function drawRepairViewport(
   canvas: HTMLCanvasElement, width: number, height: number, viewport: RepairViewport,
   textures: readonly RepairTexture[], rate: number, palette: RepairPalette,
   guides: readonly number[], scale = 1,
+  waveform?: RepairWaveform,
 ): void {
   if (width <= 0 || height <= 0) return;
   const ctx = canvas.getContext('2d');
@@ -127,6 +133,7 @@ export function drawRepairViewport(
     ctx.clearRect(x, y, w, h);
     ctx.drawImage(texture.bitmap, tx, ty, tw, th, x, y, w, h);
   }
+  if (waveform) drawWaveform(ctx, waveform, bounds, time, palette.ink, .52);
 
   ctx.strokeStyle = palette.guide;
   ctx.globalAlpha = .56;
@@ -167,6 +174,67 @@ export function drawRepairViewport(
     ctx.fillText(repairTimeLabel(frame, rate, time.end - time.start < rate), x, bounds.bottom + 13);
   }
   ctx.globalAlpha = 1;
+}
+
+export function drawRepairOverview(
+  canvas: HTMLCanvasElement, width: number, height: number, scale: number,
+  waveform: RepairWaveform, ink: string,
+) {
+  if (width <= 0 || height <= 0) return;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const pixelsWide = Math.round(width * scale);
+  const pixelsHigh = Math.round(height * scale);
+  if (canvas.width !== pixelsWide) canvas.width = pixelsWide;
+  if (canvas.height !== pixelsHigh) canvas.height = pixelsHigh;
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  drawWaveform(ctx, waveform, { left: 0, top: 3, right: width, bottom: height - 3 }, waveform.time, ink, .72);
+}
+
+function drawWaveform(
+  ctx: CanvasRenderingContext2D, waveform: RepairWaveform, bounds: PlotBounds,
+  time: FrameRange, ink: string, opacity: number,
+) {
+  const stride = waveform.stereo ? 4 : 2;
+  const offset = waveform.stereo && waveform.channel === 'right' ? 2 : 0;
+  const count = Math.floor(waveform.values.length / stride);
+  const span = waveform.time.end - waveform.time.start;
+  const first = Math.max(time.start, waveform.time.start);
+  const last = Math.min(time.end, waveform.time.end);
+  if (!count || span <= 0 || first >= last) return;
+  const left = frameX(first, bounds, time);
+  const right = frameX(last, bounds, time);
+  const points = Math.max(1, Math.min(Math.ceil(right - left), Math.ceil((last - first) * count / span)));
+  const center = (bounds.top + bounds.bottom) / 2;
+  const height = (bounds.bottom - bounds.top) * .47;
+  function peak(index: number, side: number) {
+    let value = 0;
+    const from = first + index * (last - first) / points;
+    const to = first + (index + 1) * (last - first) / points;
+    const start = clampRepair(Math.floor((from - waveform.time.start) * count / span), 0, count - 1);
+    const end = clampRepair(Math.ceil((to - waveform.time.start) * count / span), start + 1, count);
+    const compare = side ? Math.max : Math.min;
+    for (let bin = start; bin < end; bin++) value = compare(value, waveform.values[bin * stride + offset + side] ?? 0);
+    return center - clampRepair(value, -1, 1) * height;
+  }
+  ctx.save();
+  ctx.fillStyle = ink;
+  ctx.globalAlpha = opacity;
+  ctx.beginPath();
+  for (let index = 0; index < points; index++) {
+    const y = peak(index, 1);
+    ctx.lineTo(left + index * (right - left) / points, y);
+    ctx.lineTo(left + (index + 1) * (right - left) / points, y);
+  }
+  for (let index = points - 1; index >= 0; index--) {
+    const y = peak(index, 0);
+    ctx.lineTo(left + (index + 1) * (right - left) / points, y);
+    ctx.lineTo(left + index * (right - left) / points, y);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
 }
 
 function strokeLine(ctx: CanvasRenderingContext2D, x1: number, y1: number, x2: number, y2: number) {

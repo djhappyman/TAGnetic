@@ -18,12 +18,14 @@ use decode::Recording;
 use peaks::PeakBins;
 pub use peaks::{Peak, WaveformIndex, WaveformPeaks};
 pub use probe::{
-    probe_treatment, probe_treatment_with_options, TreatmentProbe, TreatmentProbeOptions,
+    probe_treatment, probe_treatment_with_options, SpectrogramChannel, TreatmentProbe,
+    TreatmentProbeOptions,
 };
 pub use seek::SeekIndex;
 pub use treatment::{
-    prepare_treatment, AudioTreatment, HumFilter, MonoMode, Polarity, PreparedTreatment,
-    SpectralRepair, TreatmentProcessor, MAX_SPECTRAL_REPAIRS,
+    prepare_treatment, AudioTreatment, EqBand, EqBandKind, HumFilter, MonoMode, Polarity,
+    PreparedTreatment, PreviewMonitor, RepairChannel, SpectralRepair, TreatmentProcessor,
+    MAX_EQ_BANDS, MAX_SPECTRAL_REPAIRS,
 };
 
 const MAX_SEGMENTS: usize = 1_000;

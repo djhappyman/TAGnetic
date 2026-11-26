@@ -50,6 +50,23 @@ test('EQ plots bell tuning, shelf pivot points, and exact notch centers', () => 
   assert.ok(eqResponse({ ...noTreatment, notchHz: 999, notchQ: 30 }, rate)(999) < -80);
 });
 
+test('EQ response includes additional bands and skips separately bypassed bands', () => {
+  const settings = readTreatment({
+    presenceHz: 2200, presenceDb: 6, eqBypassed: 4,
+    eqBands: [
+      { id: 1, kind: 'bell', hz: 180, gainDb: 4, q: 550 },
+      { id: 2, kind: 'notch', hz: 970, gainDb: 0, q: 1000 },
+      { id: 3, kind: 'notch', hz: 3000, gainDb: 0, q: 2000, bypassed: true },
+    ],
+  });
+  const response = eqResponse(settings, rate);
+  closeTo(response(180), 4, 0.003);
+  assert.ok(response(970) < -80);
+  assert.ok(Math.abs(response(2200)) < 0.02);
+  assert.ok(Math.abs(response(3000)) < 0.02);
+  assert.equal(settings.presenceDb, 6);
+});
+
 test('pointer transforms match the rendered scales on desktop and compact plots', () => {
   for (const [width, height] of [[1000, 240], [375, 190]]) {
     const bounds = plotBounds(width, height);

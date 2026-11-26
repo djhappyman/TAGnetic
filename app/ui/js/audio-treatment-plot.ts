@@ -1,4 +1,5 @@
 import type { AudioTreatment } from './audio-treatment';
+import type { DynamicsMode, DynamicsPlotOptions } from './audio-dynamics';
 
 export type TreatmentPlotMode = 'eq' | 'dynamics' | 'repair';
 export type PlotBounds = { left: number; right: number; top: number; bottom: number };
@@ -9,9 +10,16 @@ export type TreatmentProbe = {
   reduction: readonly number[];
   input: number;
   output: number;
+  inputPeak?: number;
+  outputPeak?: number;
+  detector?: number;
+  gateReduction?: readonly number[];
   spectrogram?: readonly (readonly number[])[];
   spectrogramStart?: number;
   spectrogramEnd?: number;
+  spectrogramChannel?: 'combined' | 'left' | 'right';
+  spectrogramTreated?: boolean;
+  spectrogramWaveform?: readonly number[];
 };
 
 type ProbeTween = (progress: number) => TreatmentProbe;
@@ -60,17 +68,29 @@ const blendLevel = (from: number, to: number, weight: number) => from + (to - fr
 
 export function createMeterMotion() {
   return createProbeMotion(110, (from, to) => {
-    if (from.input === to.input && from.output === to.output &&
+    if (from.input === to.input && from.output === to.output && from.detector === to.detector &&
         from.reduction.length === to.reduction.length &&
-        to.reduction.every((db, index) => db === from.reduction[index])) return;
+        to.reduction.every((db, index) => db === from.reduction[index]) &&
+        from.gateReduction?.length === to.gateReduction?.length &&
+        (to.gateReduction?.every((db, index) => db === from.gateReduction?.[index]) ?? true)) return;
     const reduction = new Array<number>(to.reduction.length);
-    const view = { ...to, reduction };
+    const gateReduction = to.gateReduction ? new Array<number>(to.gateReduction.length) : undefined;
+    const view = { ...to, reduction, gateReduction };
     return progress => {
       const weight = softly(progress);
       view.input = blendLevel(from.input, to.input, weight);
       view.output = blendLevel(from.output, to.output, weight);
+      if (from.detector !== undefined && to.detector !== undefined) {
+        view.detector = blendLevel(from.detector, to.detector, weight);
+      }
       for (let index = 0; index < reduction.length; index++) {
         reduction[index] = blendLevel(from.reduction[index] ?? to.reduction[index], to.reduction[index], weight);
+      }
+      if (gateReduction && to.gateReduction) {
+        for (let index = 0; index < gateReduction.length; index++) {
+          const gain = to.gateReduction[index];
+          gateReduction[index] = blendLevel(from.gateReduction?.[index] ?? gain, gain, weight);
+        }
       }
       return view;
     };
@@ -141,22 +161,48 @@ function dynamicsBounds(bounds: PlotBounds): PlotBounds {
   return { ...bounds, bottom: Math.max(bounds.top + 1, bounds.bottom - strip) };
 }
 
-export function levelX(db: number, bounds: PlotBounds): number {
-  return bounds.left + dbFraction(db, levelMin, 0) * widthOf(bounds);
+export function dynamicsLevelFloor(mode: DynamicsMode): number {
+  return mode === 'gate' ? -84 : levelMin;
 }
 
-export function xLevel(x: number, bounds: PlotBounds): number {
-  return levelMin * (1 - clamp((x - bounds.left) / widthOf(bounds), 0, 1));
+function compressorExcess(input: number, threshold: number, knee: number): number {
+  const over = input - threshold;
+  if (knee > 0 && Math.abs(over) < knee / 2) return (over + knee / 2) ** 2 / (2 * knee);
+  return Math.max(0, over);
 }
 
-export function levelY(db: number, bounds: PlotBounds): number {
+/** Transfer function matching the native compressor for settled input. */
+export function compressorOutput(input: number, threshold: number, ratio: number, knee: number): number {
+  return input - (1 - 1 / ratio) * compressorExcess(input, threshold, knee);
+}
+
+export function compressionRatioAt(input: number, output: number, threshold: number, knee: number): number {
+  const excess = compressorExcess(input, threshold, knee);
+  if (!excess) return 1;
+  return 1 / (1 - clamp((input - output) / excess, 0, 0.99));
+}
+
+/** The expander turns down signals below threshold up to its configured maximum. */
+export function gateOutput(input: number, threshold: number, depth: number): number {
+  return input - Math.min(depth, Math.max(0, threshold - input));
+}
+
+export function levelX(db: number, bounds: PlotBounds, floor = levelMin): number {
+  return bounds.left + dbFraction(db, floor, 0) * widthOf(bounds);
+}
+
+export function xLevel(x: number, bounds: PlotBounds, floor = levelMin): number {
+  return floor * (1 - clamp((x - bounds.left) / widthOf(bounds), 0, 1));
+}
+
+export function levelY(db: number, bounds: PlotBounds, floor = levelMin): number {
   const chart = dynamicsBounds(bounds);
-  return chart.bottom - dbFraction(db, levelMin, 0) * heightOf(chart);
+  return chart.bottom - dbFraction(db, floor, 0) * heightOf(chart);
 }
 
-export function yLevel(y: number, bounds: PlotBounds): number {
+export function yLevel(y: number, bounds: PlotBounds, floor = levelMin): number {
   const chart = dynamicsBounds(bounds);
-  return levelMin + clamp((chart.bottom - y) / heightOf(chart), 0, 1) * -levelMin;
+  return floor + clamp((chart.bottom - y) / heightOf(chart), 0, 1) * -floor;
 }
 
 // Mirror the Rust Audio EQ Cookbook sections. The graph moves during the
@@ -203,27 +249,34 @@ function eqFilters(settings: AudioTreatment, rate: number): Coefficients[] {
       });
     }
   }
-  symmetric(settings.dcHz, Math.SQRT1_2, 'low-cut');
-  if (settings.rumble) cutoff(settings.rumbleHz || 35, settings.rumbleSlope || 12, 'low-cut');
-  const hum = settings.hum === 'hz50' ? 50 : settings.hum === 'hz60' ? 60 : 0;
-  if (hum) for (let harmonic = 1; harmonic <= Math.max(settings.humHarmonics, 1); harmonic++) {
-    symmetric(hum * harmonic, 10, 'notch');
-  }
-  symmetric(settings.notchHz, settings.notchQ || 15, 'notch');
-  if (settings.highCutHz) cutoff(settings.highCutHz, settings.highCutSlope || 12, 'high-cut');
-  shelf(settings.bassHz || 120, settings.bassDb, false);
-  const presenceHz = settings.presenceHz || 1500;
-  if (settings.presenceDb && presenceHz < rate / 2) {
-    const omega = angle(presenceHz);
-    const amplitude = 10 ** (settings.presenceDb / 40);
-    const alpha = Math.sin(omega) / (2 * ((settings.presenceQ || 80) / 100));
+  function bell(hz: number, db: number, quality: number) {
+    if (!db || hz <= 0 || hz >= rate / 2) return;
+    const omega = angle(hz);
+    const amplitude = 10 ** (db / 40);
+    const alpha = Math.sin(omega) / (2 * quality);
     const middle = -2 * Math.cos(omega);
     filters.push({
       numerator: [1 + alpha * amplitude, middle, 1 - alpha * amplitude],
       denominator: [1 + alpha / amplitude, middle, 1 - alpha / amplitude],
     });
   }
-  shelf(settings.trebleHz || 4000, settings.trebleDb, true);
+  const bypassed = settings.eqBypassed ?? 0;
+  symmetric(settings.dcHz, Math.SQRT1_2, 'low-cut');
+  if (settings.rumble && !(bypassed & 1)) cutoff(settings.rumbleHz || 35, settings.rumbleSlope || 12, 'low-cut');
+  const hum = settings.hum === 'hz50' ? 50 : settings.hum === 'hz60' ? 60 : 0;
+  if (hum) for (let harmonic = 1; harmonic <= Math.max(settings.humHarmonics, 1); harmonic++) {
+    symmetric(hum * harmonic, 10, 'notch');
+  }
+  if (!(bypassed & 8)) symmetric(settings.notchHz, settings.notchQ || 15, 'notch');
+  if (settings.highCutHz && !(bypassed & 32)) cutoff(settings.highCutHz, settings.highCutSlope || 12, 'high-cut');
+  if (!(bypassed & 2)) shelf(settings.bassHz || 120, settings.bassDb, false);
+  if (!(bypassed & 4)) bell(settings.presenceHz || 1500, settings.presenceDb, (settings.presenceQ || 80) / 100);
+  if (!(bypassed & 16)) shelf(settings.trebleHz || 4000, settings.trebleDb, true);
+  for (const band of settings.eqBands ?? []) {
+    if (band.bypassed) continue;
+    if (band.kind === 'bell') bell(band.hz, band.gainDb, band.q / 100);
+    else symmetric(band.hz, band.q / 100, 'notch');
+  }
   return filters;
 }
 
@@ -355,7 +408,15 @@ const eqPaths = new WeakMap<CanvasRenderingContext2D, EqPaths>();
 
 function cachedEqPaths(ctx: CanvasRenderingContext2D, bounds: PlotBounds, settings: AudioTreatment, rate: number) {
   // FFT frames share the last response path until the controls or bounds move.
-  const key = [bounds.left, bounds.top, bounds.right, bounds.bottom, rate, ...Object.values(settings)].join(',');
+  const key = [
+    bounds.left, bounds.top, bounds.right, bounds.bottom, rate, settings.gainDb, settings.dcHz,
+    settings.rumble, settings.rumbleHz, settings.rumbleSlope, settings.hum, settings.humHarmonics,
+    settings.notchHz, settings.notchQ, settings.highCutHz, settings.highCutSlope, settings.bassHz,
+    settings.bassDb, settings.presenceHz, settings.presenceDb, settings.presenceQ, settings.trebleHz,
+    settings.trebleDb, settings.eqBypassed, ...(settings.eqBands ?? []).flatMap(band => [
+      band.kind, band.hz, band.gainDb, band.q, Boolean(band.bypassed),
+    ]),
+  ].join(',');
   const cached = eqPaths.get(ctx);
   if (cached?.key === key) return cached;
 
@@ -367,7 +428,10 @@ function cachedEqPaths(ctx: CanvasRenderingContext2D, bounds: PlotBounds, settin
   if (hum) for (let harmonic = 1; harmonic <= Math.max(settings.humHarmonics, 1); harmonic++) {
     xs.push(frequencyX(hum * harmonic, bounds, rate));
   }
-  if (settings.notchHz) xs.push(frequencyX(settings.notchHz, bounds, rate));
+  if (settings.notchHz && !((settings.eqBypassed ?? 0) & 8)) xs.push(frequencyX(settings.notchHz, bounds, rate));
+  for (const band of settings.eqBands ?? []) {
+    if (!band.bypassed) xs.push(frequencyX(band.hz, bounds, rate));
+  }
   xs.sort((a, b) => a - b);
   const curve = new Path2D();
   xs.forEach((x, index) => {
@@ -407,19 +471,20 @@ function drawEq(ctx: CanvasRenderingContext2D, bounds: PlotBounds, settings: Aud
   ctx.restore();
 }
 
-function meterText(db: number | undefined, unit: 'dBFS' | 'dB', precision = 0) {
+function meterText(db: number | undefined, unit: 'dBFS' | 'dB' | 'LUFS', precision = 0) {
   if (db === undefined || !Number.isFinite(db)) return '—';
   const floor = unit === 'dBFS' && db <= fftFloor ? '≤ ' : '';
   const sign = db < 0 && Math.abs(db) >= 0.5 * 10 ** -precision ? '−' : '';
   return floor + sign + Math.abs(db).toFixed(precision) + ' ' + unit;
 }
 
-export function describeDynamicsMeters(probe?: TreatmentProbe | null) {
+export function describeDynamicsMeters(probe?: TreatmentProbe | null, mode: DynamicsPlotOptions['mode'] = 'compressor') {
   if (!probe || !Number.isFinite(probe.input) || !Number.isFinite(probe.output)) return undefined;
   const level = (db: number) => db <= fftFloor ? 'at or below −96 dBFS' : meterText(db, 'dBFS', 1);
-  const reduction = probe.reduction.at(-1);
+  const reduction = mode === 'gate' ? probe.gateReduction?.at(-1) : probe.reduction.at(-1);
   const levels = 'Input ' + level(probe.input) + ', output ' + level(probe.output) + '.';
-  return Number.isFinite(reduction) ? levels + ' Compressor gain reduction ' + meterText(reduction, 'dB', 1) + '.' : levels;
+  if (mode !== 'compressor' && mode !== 'gate') return levels;
+  return Number.isFinite(reduction) ? levels + ' Gain reduction ' + meterText(reduction, 'dB', 1) + '.' : levels;
 }
 
 function drawMeterLabel(ctx: CanvasRenderingContext2D, left: number, right: number, y: number, label: string, readout: string, palette: CanvasPalette) {
@@ -431,15 +496,16 @@ function drawMeterLabel(ctx: CanvasRenderingContext2D, left: number, right: numb
   ctx.fillText(readout, right, y);
 }
 
-function drawLevelMeter(ctx: CanvasRenderingContext2D, left: number, right: number, y: number, label: string, db: number | undefined, color: string, palette: CanvasPalette) {
-  drawMeterLabel(ctx, left, right, y, label, meterText(db, 'dBFS'), palette);
+function drawLevelMeter(ctx: CanvasRenderingContext2D, left: number, right: number, y: number, label: string, db: number | undefined, color: string, palette: CanvasPalette, peak?: number, unit: 'dBFS' | 'LUFS' = 'dBFS') {
+  drawMeterLabel(ctx, left, right, y, label, meterText(db, unit, 1), palette);
   const bar = y + 13;
+  const floor = unit === 'LUFS' ? -42 : levelMin;
   ctx.lineWidth = 6;
   ctx.strokeStyle = palette.grid;
   ctx.globalAlpha = 0.6;
   stroke(ctx, left + 3, bar, right - 3, bar);
   if (db !== undefined && Number.isFinite(db)) {
-    const end = left + 3 + (right - left - 6) * dbFraction(db, levelMin, 0);
+    const end = left + 3 + (right - left - 6) * dbFraction(db, floor, 0);
     if (end > left + 3) {
       const gradient = ctx.createLinearGradient(left, 0, right, 0);
       gradient.addColorStop(0, 'transparent');
@@ -452,24 +518,28 @@ function drawLevelMeter(ctx: CanvasRenderingContext2D, left: number, right: numb
   }
   ctx.globalAlpha = 1;
   ctx.lineWidth = 1;
+  if (peak !== undefined && Number.isFinite(peak)) {
+    const position = left + 3 + (right - left - 6) * dbFraction(peak, floor, 0);
+    ctx.strokeStyle = palette.ink;
+    stroke(ctx, position, bar - 5, position, bar + 5);
+  }
 }
 
-function drawDynamicsMeters(ctx: CanvasRenderingContext2D, bounds: PlotBounds, chart: PlotBounds, probe: TreatmentProbe | null | undefined, palette: CanvasPalette) {
+function drawDynamicsMeters(ctx: CanvasRenderingContext2D, bounds: PlotBounds, chart: PlotBounds, probe: TreatmentProbe | null | undefined, palette: CanvasPalette, options: DynamicsPlotOptions) {
   const top = chart.bottom + 29;
   const split = bounds.left + widthOf(bounds) * 0.46;
   const meterEnd = split - 12;
   const historyStart = split + 12;
-  const last = probe?.reduction.at(-1);
-  drawLevelMeter(ctx, bounds.left, meterEnd, top, 'Input', probe?.input, palette.muted, palette);
-  drawLevelMeter(ctx, bounds.left, meterEnd, top + 27, 'Output', probe?.output, palette.ink, palette);
-  drawMeterLabel(ctx, historyStart, bounds.right, top, 'Gain reduction', meterText(last, 'dB'), palette);
+  const reduction = (options.mode === 'gate' ? probe?.gateReduction : probe?.reduction) ?? [];
+  drawLevelMeter(ctx, bounds.left, meterEnd, top, 'Input', probe?.input, palette.muted, palette, options.inputPeakHold);
+  drawLevelMeter(ctx, bounds.left, meterEnd, top + 27, 'Output', probe?.output, palette.ink, palette, options.outputPeakHold);
+  drawMeterLabel(ctx, historyStart, bounds.right, top, 'Gain reduction', meterText(reduction.at(-1), 'dB'), palette);
 
   const traceTop = top + 10;
   const traceBottom = Math.max(traceTop + 1, bounds.bottom + 2);
   ctx.strokeStyle = palette.grid;
   ctx.globalAlpha = 0.65;
   stroke(ctx, historyStart, traceTop, bounds.right, traceTop);
-  const reduction = probe?.reduction ?? [];
   if (reduction.length > 1) {
     const trace = new Path2D();
     reduction.forEach((db, index) => {
@@ -497,18 +567,47 @@ function drawDynamicsMeters(ctx: CanvasRenderingContext2D, bounds: PlotBounds, c
   ctx.lineWidth = 1;
 }
 
-function drawDynamics(ctx: CanvasRenderingContext2D, bounds: PlotBounds, settings: AudioTreatment, probe: TreatmentProbe | null | undefined, palette: CanvasPalette) {
+function drawDynamicsLevels(ctx: CanvasRenderingContext2D, bounds: PlotBounds, settings: AudioTreatment, probe: TreatmentProbe | null | undefined, palette: CanvasPalette, options: DynamicsPlotOptions) {
+  const start = bounds.top + Math.max(17, (heightOf(bounds) - 126) / 2);
+  const gap = Math.min(52, heightOf(bounds) / 4);
+  const { left, right } = bounds;
+  if (options.mode === 'normalise') {
+    const measured = options.normalisation?.loudnessLufs ?? undefined;
+    const target = settings.normalizeTargetDb || -18;
+    const projected = measured !== undefined && options.normalisation ? measured + options.normalisation.gainDb : undefined;
+    drawLevelMeter(ctx, left, right, start, 'Whole-set loudness', measured, palette.muted, palette, undefined, 'LUFS');
+    drawLevelMeter(ctx, left, right, start + gap, 'Target', target, palette.accent, palette, undefined, 'LUFS');
+    drawLevelMeter(ctx, left, right, start + 2 * gap, 'Estimated output loudness', projected, palette.ink, palette, undefined, 'LUFS');
+    return;
+  }
+  const outputPeak = probe?.outputPeak;
+  drawLevelMeter(ctx, left, right, start, 'Input', probe?.input, palette.muted, palette, options.inputPeakHold);
+  drawLevelMeter(ctx, left, right, start + gap, 'Output', probe?.output, palette.ink, palette, options.outputPeakHold);
+  drawMeterLabel(ctx, left, right, start + 2 * gap, 'Output headroom', meterText(outputPeak === undefined ? undefined : Math.max(0, -outputPeak), 'dB', 1), palette);
+}
+
+function drawDynamics(ctx: CanvasRenderingContext2D, bounds: PlotBounds, settings: AudioTreatment, probe: TreatmentProbe | null | undefined, palette: CanvasPalette, options: DynamicsPlotOptions) {
+  if (options.mode === 'gain' || options.mode === 'normalise') {
+    drawDynamicsLevels(ctx, bounds, settings, probe, palette, options);
+    return;
+  }
   const chart = dynamicsBounds(bounds);
-  const active = Boolean(settings.compressorDb);
-  const threshold = settings.compressorDb || -18;
-  const ratio = active ? settings.compressorRatio || 2 : 1;
+  const gate = options.mode === 'gate';
+  const floor = dynamicsLevelFloor(options.mode);
+  const active = gate ? Boolean(settings.gateDb) : Boolean(settings.compressorDb);
+  const threshold = gate ? settings.gateDb || -48 : settings.compressorDb || -18;
+  const ratio = settings.compressorRatio || 2;
+  const knee = settings.compressorKneeDb || 0;
+  const depth = settings.gateReductionDb || 12;
+  const output = (input: number) => !active ? input : gate
+    ? gateOutput(input, threshold, depth) : compressorOutput(input, threshold, ratio, knee);
   ctx.strokeStyle = palette.grid;
   ctx.fillStyle = palette.muted;
   ctx.textBaseline = 'middle';
-  const ticks = heightOf(chart) < 150 ? [-60, -40, -20, 0] : [-60, -48, -36, -24, -12, 0];
+  const ticks = heightOf(chart) < 150 ? [floor, floor * 2 / 3, floor / 3, 0] : [floor, -48, -36, -24, -12, 0];
   for (const level of ticks) {
-    const x = levelX(level, bounds);
-    const y = levelY(level, bounds);
+    const x = levelX(level, bounds, floor);
+    const y = levelY(level, bounds, floor);
     ctx.globalAlpha = 0.49;
     stroke(ctx, x, chart.top, x, chart.bottom);
     stroke(ctx, chart.left, y, chart.right, y);
@@ -521,40 +620,47 @@ function drawDynamics(ctx: CanvasRenderingContext2D, bounds: PlotBounds, setting
   ctx.textAlign = 'right';
   ctx.fillText('dBFS', bounds.right + 30, chart.bottom + 12);
 
-  const unity = chart.top;
-  ctx.globalAlpha = 0.55;
+  const thresholdX = levelX(threshold, bounds, floor);
+  const detector = gate ? undefined : probe?.detector;
+  const triggered = gate ? (probe?.gateReduction?.at(-1) ?? 0) < 0 : (detector ?? floor) >= threshold;
+  ctx.globalAlpha = 0.52;
   ctx.setLineDash([4, 4]);
   ctx.strokeStyle = palette.muted;
-  stroke(ctx, chart.left, chart.bottom, chart.right, unity);
+  stroke(ctx, chart.left, chart.bottom, chart.right, chart.top);
+  ctx.strokeStyle = active && triggered ? palette.ink : palette.muted;
+  stroke(ctx, thresholdX, chart.top, thresholdX, chart.bottom);
   ctx.setLineDash([]);
-  const pivotX = levelX(threshold, bounds);
-  const pivotY = levelY(threshold, bounds);
-  const maximumY = levelY(threshold - threshold / ratio, bounds);
+  const curve = new Path2D();
+  const transition = gate ? [threshold - depth, threshold] : [threshold - knee / 2, threshold, threshold + knee / 2];
+  const columns = 30;
+  const inputs = [...Array.from({ length: columns + 1 }, (_, index) => floor * (1 - index / columns)),
+    ...transition.filter(level => level > floor && level < 0)].sort((a, b) => a - b);
+  for (const [index, input] of inputs.entries()) {
+    const x = levelX(input, bounds, floor);
+    const y = levelY(output(input), bounds, floor);
+    if (index) curve.lineTo(x, y);
+    else curve.moveTo(x, y);
+  }
   if (active) {
-    const gradient = ctx.createLinearGradient(0, unity, 0, pivotY);
+    const gradient = ctx.createLinearGradient(0, chart.top, 0, chart.bottom);
     gradient.addColorStop(0, palette.accent);
     gradient.addColorStop(1, 'transparent');
     ctx.globalAlpha = 0.28;
     ctx.fillStyle = gradient;
-    ctx.beginPath();
-    ctx.moveTo(pivotX, pivotY);
-    ctx.lineTo(chart.right, unity);
-    ctx.lineTo(chart.right, maximumY);
-    ctx.closePath();
-    ctx.fill();
+    const fill = new Path2D(curve);
+    fill.lineTo(chart.right, chart.top);
+    fill.lineTo(chart.left, chart.bottom);
+    fill.closePath();
+    ctx.fill(fill);
   }
   ctx.globalAlpha = 1;
   ctx.lineWidth = 2;
   ctx.strokeStyle = palette.ink;
-  ctx.beginPath();
-  ctx.moveTo(chart.left, chart.bottom);
-  ctx.lineTo(pivotX, pivotY);
-  ctx.lineTo(chart.right, maximumY);
-  ctx.stroke();
+  ctx.stroke(curve);
   ctx.lineWidth = 1;
-  if (probe && Number.isFinite(probe.input) && Number.isFinite(probe.output) && probe.input > levelMin) {
-    const x = levelX(probe.input, bounds);
-    const y = levelY(probe.output, bounds);
+  if (detector !== undefined && Number.isFinite(detector) && detector > floor) {
+    const x = levelX(detector, bounds, floor);
+    const y = levelY(output(detector), bounds, floor);
     ctx.globalAlpha = 0.47;
     ctx.strokeStyle = palette.ink;
     stroke(ctx, x, chart.bottom, x, y);
@@ -566,7 +672,7 @@ function drawDynamics(ctx: CanvasRenderingContext2D, bounds: PlotBounds, setting
     ctx.fill();
   }
 
-  drawDynamicsMeters(ctx, bounds, chart, probe, palette);
+  drawDynamicsMeters(ctx, bounds, chart, probe, palette, options);
 }
 
 export function drawTreatmentPlot(
@@ -577,6 +683,7 @@ export function drawTreatmentPlot(
   settings: AudioTreatment,
   sampleRate: number,
   probe?: TreatmentProbe | null,
+  dynamics: DynamicsPlotOptions = { mode: 'compressor' },
 ): void {
   if (width <= 0 || height <= 0 || sampleRate <= 0) return;
   const ctx = canvas.getContext('2d');
@@ -602,5 +709,5 @@ export function drawTreatmentPlot(
   ctx.font = `10px ${color('--font-literal', 'monospace')}`;
   const bounds = plotBounds(width, height);
   if (mode === 'eq') drawEq(ctx, bounds, settings, sampleRate, probe, palette);
-  else drawDynamics(ctx, bounds, settings, probe, palette);
+  else drawDynamics(ctx, bounds, settings, probe, palette, dynamics);
 }

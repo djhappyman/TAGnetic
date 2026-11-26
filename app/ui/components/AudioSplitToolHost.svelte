@@ -7,7 +7,7 @@
   import type { TreatmentPlotMode, TreatmentProbe } from '../js/audio-treatment-plot';
   import {
     applyToolTheme, listenToolFlush, listenToolProbe, listenToolState, sendToolRequest, toolPatch,
-    type ToolAction, type ToolProbeUpdate, type ToolRequest, type ToolSnapshot,
+    type PreviewBand, type SpectrogramViewOptions, type ToolAction, type ToolProbeUpdate, type ToolRequest, type ToolSnapshot,
   } from '../js/audio-tools-window';
 
   let { kind }: { kind: TreatmentPlotMode } = $props();
@@ -70,7 +70,7 @@
     flush();
   }
 
-  function action(action: ToolAction, range?: FrameRange) {
+  function action(action: ToolAction, range?: FrameRange, band?: PreviewBand) {
     if (!snapshot) return;
     const { sourceId } = snapshot;
     if (action === 'undo' || action === 'redo') {
@@ -80,12 +80,12 @@
     }
     const message: ToolRequest = action === 'loop' ? { kind, action, sourceId, range }
       : action === 'original' || action === 'treated' ? { kind, action: 'compare', sourceId, original: action === 'original' }
-      : { kind, action, sourceId };
+      : { kind, action, sourceId, range, band };
     void send(message)?.catch(reason => { connectionError = String(reason); });
   }
 
-  function viewport(range: FrameRange | null) {
-    if (snapshot) void send({ kind, action: 'viewport', sourceId: snapshot.sourceId, range })?.catch(reason => { connectionError = String(reason); });
+  function viewport(range: FrameRange | null, options?: SpectrogramViewOptions) {
+    if (snapshot) void send({ kind, action: 'viewport', sourceId: snapshot.sourceId, range, options })?.catch(reason => { connectionError = String(reason); });
   }
 
   function acceptProbe(update: ToolProbeUpdate) {
@@ -131,6 +131,9 @@
     }
     snapshot = {
       ...state,
+      overview: state.overview ?? (snapshot?.sourceId === state.sourceId ? snapshot.overview : undefined),
+      stereoOverview: state.stereoOverview ?? (snapshot?.sourceId === state.sourceId ? snapshot.stereoOverview : undefined),
+      cuts: state.cuts ?? (snapshot?.sourceId === state.sourceId ? snapshot.cuts : undefined),
       settings: snapshot && sameTreatment(snapshot.settings, settings) ? snapshot.settings : settings,
       theme: appearanceChanged ? state.theme : snapshot?.theme || state.theme,
     };

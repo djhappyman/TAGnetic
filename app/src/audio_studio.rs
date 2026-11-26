@@ -8,8 +8,9 @@ use std::sync::{
 };
 use tagrex_commands::audio_studio::{
     AudioTreatment, CueEncoding, DiscogsProposal, DraftSegment, ExportResult, ImportedCue,
-    OpenedRecording, Progress, ProviderAnchor, RecordingProgress, RestoreResult, Review,
-    ReviewRequest, Studio, StudioError, TreatmentAnalysis, TreatmentProbe, TreatmentProbeOptions,
+    OpenedRecording, PreviewMonitor, Progress, ProviderAnchor, RecordingProgress, RestoreResult,
+    Review, ReviewRequest, SpectrogramChannel, Studio, StudioError, TreatmentAnalysis,
+    TreatmentProbe, TreatmentProbeOptions,
 };
 use tagrex_commands::ErrorDto;
 use tauri::{
@@ -19,6 +20,9 @@ use tauri::{
 use super::AppState;
 use super::{blocking, saved_discogs_token, shell_error, with_providers, ProviderState};
 
+mod window_preferences;
+use window_preferences::{WindowPreferences, MIN_HEIGHT, MIN_WIDTH};
+
 pub(super) type StudioState = Arc<Studio>;
 #[derive(Default)]
 pub(super) struct Openings(Mutex<BTreeMap<String, Arc<Opening>>>);
@@ -27,6 +31,7 @@ pub(super) struct Openings(Mutex<BTreeMap<String, Arc<Opening>>>);
 pub(super) struct ToolWindows {
     commands: tauri::async_runtime::Mutex<()>,
     visible: [AtomicBool; AudioToolKind::ALL.len()],
+    preferences: WindowPreferences,
 }
 
 #[derive(Clone, Copy, serde::Deserialize, serde::Serialize)]
@@ -73,6 +78,9 @@ pub(super) enum ToolWindowAction {
     Toggle,
     Hide,
     HideAll,
+    Pin,
+    Unpin,
+    IsPinned,
 }
 
 #[derive(Clone, Copy, serde::Serialize)]
@@ -96,6 +104,12 @@ fn publish_tool_visibility(app: &tauri::AppHandle, kind: AudioToolKind, visible:
     });
 }
 
+fn focus_splitter(app: &tauri::AppHandle) {
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.set_focus();
+    }
+}
+
 // Use an async command for WebView2 window creation. The lock keeps a quick
 // second click from racing the first window build.
 #[tauri::command]
@@ -110,25 +124,50 @@ pub(super) async fn audio_split_tool_window(
     }
     let _guard = tool_windows.commands.lock().await;
     let app = window.app_handle();
+    let preferences = &tool_windows.preferences;
     if matches!(action, ToolWindowAction::HideAll) {
-        for kind in AudioToolKind::ALL {
-            if let Some(tool) = app.get_webview_window(kind.label()) {
+        let windows = AudioToolKind::ALL.map(|kind| (kind, app.get_webview_window(kind.label())));
+        preferences.save(app, windows.clone(), None);
+        let mut hid_visible_tool = false;
+        for (kind, tool) in windows {
+            if let Some(tool) = tool {
+                hid_visible_tool |= tool.is_visible().unwrap_or(false);
                 tool.hide().map_err(shell_error)?;
             }
             publish_tool_visibility(app, kind, false);
         }
+        if hid_visible_tool {
+            focus_splitter(app);
+        }
         return Ok(false);
     }
     let kind = kind.ok_or_else(|| shell_error("Choose an audio tool."))?;
-    if let Some(tool) = app.get_webview_window(kind.label()) {
+    let native = app.get_webview_window(kind.label());
+    if matches!(action, ToolWindowAction::IsPinned) {
+        return Ok(preferences.get(app, kind).pinned);
+    }
+    if matches!(action, ToolWindowAction::Pin | ToolWindowAction::Unpin) {
+        let pinned = matches!(action, ToolWindowAction::Pin);
+        if let Some(tool) = &native {
+            tool.set_always_on_top(pinned).map_err(shell_error)?;
+        }
+        preferences.save(app, [(kind, native)], Some(pinned));
+        return Ok(pinned);
+    }
+    if let Some(tool) = native {
         let hide = matches!(action, ToolWindowAction::Hide)
             || (tool.is_visible().map_err(shell_error)?
                 && !tool.is_minimized().map_err(shell_error)?);
         if hide {
+            preferences.save(app, [(kind, Some(tool.clone()))], None);
             tool.hide().map_err(shell_error)?;
+            focus_splitter(app);
         } else {
-            tool.show().map_err(shell_error)?;
             tool.unminimize().map_err(shell_error)?;
+            preferences
+                .get(app, kind)
+                .recover_if_offscreen(&tool, &window);
+            tool.show().map_err(shell_error)?;
             tool.set_focus().map_err(shell_error)?;
         }
         publish_tool_visibility(app, kind, !hide);
@@ -139,21 +178,30 @@ pub(super) async fn audio_split_tool_window(
         return Ok(false);
     }
     let (title, width, height) = kind.title_and_size();
+    let preference = preferences.get(app, kind);
     let url = WebviewUrl::App(format!("{TOOL_DOCUMENT}?{}", kind.query()).into());
     let tool = WebviewWindowBuilder::new(app, kind.label(), url)
         .title(title)
         .inner_size(width, height)
-        .min_inner_size(420.0, 320.0)
+        .min_inner_size(MIN_WIDTH, MIN_HEIGHT)
+        .visible(false)
+        .always_on_top(preference.pinned)
         .skip_taskbar(true)
         .parent(&window)
         .and_then(WebviewWindowBuilder::build)
         .map_err(shell_error)?;
+    preference.restore(&tool, &window);
     let handle = tool.clone();
     tool.on_window_event(move |event| match event {
         WindowEvent::CloseRequested { api, .. } => {
+            let app = handle.app_handle();
+            app.state::<ToolWindows>()
+                .preferences
+                .save(app, [(kind, Some(handle.clone()))], None);
             if handle.hide().is_ok() {
                 api.prevent_close();
-                publish_tool_visibility(handle.app_handle(), kind, false);
+                focus_splitter(app);
+                publish_tool_visibility(app, kind, false);
             }
         }
         WindowEvent::Destroyed => publish_tool_visibility(handle.app_handle(), kind, false),
@@ -166,8 +214,18 @@ pub(super) async fn audio_split_tool_window(
         }
         _ => {}
     });
+    tool.show().map_err(shell_error)?;
+    tool.set_focus().map_err(shell_error)?;
     publish_tool_visibility(app, kind, true);
     Ok(true)
+}
+
+pub(super) fn save_tool_window_preferences(app: &tauri::AppHandle) {
+    app.state::<ToolWindows>().preferences.save(
+        app,
+        AudioToolKind::ALL.map(|kind| (kind, app.get_webview_window(kind.label()))),
+        None,
+    );
 }
 
 pub(super) fn destroy_tool_windows(app: &tauri::AppHandle) {
@@ -330,14 +388,18 @@ pub(super) async fn audio_split_probe(
     spectrogram: Option<bool>,
     spectrum: Option<bool>,
     viewport: Option<tagrex_commands::audio_studio::FrameRange>,
+    spectrogram_channel: Option<SpectrogramChannel>,
+    spectrogram_treated: Option<bool>,
 ) -> Result<TreatmentProbe, ErrorDto> {
     let studio = studio.inner().clone();
     let options = TreatmentProbeOptions {
         spectrum: spectrum.unwrap_or(true),
         spectrogram: spectrogram.unwrap_or_default(),
         viewport,
+        spectrogram_channel: spectrogram_channel.unwrap_or_default(),
+        spectrogram_treated: spectrogram_treated.unwrap_or_default(),
     };
-    let (queue, lane) = if options.dry_spectrogram() {
+    let (queue, lane) = if options.spectrogram_only() {
         (&SPECTROGRAM, &LATEST_SPECTROGRAM)
     } else {
         (&PROBE, &LATEST_PROBE)
@@ -600,6 +662,8 @@ pub(super) async fn audio_split_transport(
     sequence: Option<u64>,
     treatment: Option<AudioTreatment>,
     revision: Option<u64>,
+    monitor: Option<PreviewMonitor>,
+    preview_gain_db: Option<f32>,
 ) -> Result<(), ErrorDto> {
     if matches!(action, TransportAction::Retune) {
         let (file, prepared) = studio
@@ -611,7 +675,7 @@ pub(super) async fn audio_split_transport(
                 sequence.unwrap_or_default(),
                 revision.unwrap_or_default(),
                 file,
-                prepared,
+                prepared.with_preview_monitor(monitor, preview_gain_db),
             )
             .map_err(shell_error);
     }
@@ -645,7 +709,7 @@ pub(super) async fn audio_split_transport(
                             audition,
                             sample_rate: rate,
                             seek_index,
-                            treatment,
+                            treatment: treatment.with_preview_monitor(monitor, preview_gain_db),
                         },
                     )
                 };
