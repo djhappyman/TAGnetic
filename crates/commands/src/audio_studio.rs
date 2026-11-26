@@ -21,8 +21,8 @@ use tagrex_audio_workbench::{
     RenderSegment,
 };
 pub use tagrex_audio_workbench::{
-    AudioTreatment, EqBand, FrameRange, PreviewMonitor, SpectrogramChannel, TreatmentProbe,
-    TreatmentProbeOptions,
+    AudioTreatment, EqBand, FrameRange, PreviewComparison, PreviewMonitor, SpectrogramChannel,
+    SpectrumView, TreatmentProbe, TreatmentProbeOptions,
 };
 use tagrex_core::mask::{portable_file_name, Mask};
 use tagrex_core::model::{
@@ -964,6 +964,60 @@ impl Studio {
         .map_err(StudioError::new)?;
         source.open_current()?;
         Ok(probe)
+    }
+
+    pub fn compare_preview_levels(
+        &self,
+        id: &str,
+        frame: u64,
+        settings: [AudioTreatment; 2],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PreviewComparison> {
+        let source = self.source(id)?;
+        let prepared = [
+            source.preview_treatment(settings[0])?,
+            source.preview_treatment(settings[1])?,
+        ];
+        let levels = audio::compare_preview_levels(
+            source.open_current()?,
+            source.info,
+            frame,
+            source
+                .analysis
+                .as_ref()
+                .and_then(|analysis| analysis.seek_index.as_deref()),
+            prepared,
+            cancelled,
+        )
+        .map_err(StudioError::new)?;
+        source.open_current()?;
+        Ok(levels)
+    }
+
+    pub fn learn_eq_threshold(
+        &self,
+        id: &str,
+        range: FrameRange,
+        settings: AudioTreatment,
+        band_index: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<f32> {
+        let source = self.source(id)?;
+        let threshold = audio::learn_eq_threshold(
+            source.open_current()?,
+            source.info,
+            range,
+            source
+                .analysis
+                .as_ref()
+                .and_then(|analysis| analysis.seek_index.as_deref()),
+            source.preview_treatment(settings)?,
+            band_index,
+            cancelled,
+        )
+        .map_err(StudioError::new)?;
+        source.open_current()?;
+        Ok(threshold)
     }
 
     pub fn match_reference(

@@ -1,4 +1,4 @@
-import { bellQuality, eqFrequencyLimit, eqGainLimit, roundEqDb } from './audio-eq-range.js';
+import { bellQuality, eqFrequencyLimit, eqGainLimit, eqSpectralShape, roundEqDb } from './audio-eq-range.js';
 import { eqBandBypassBits, maxEqBands, noTreatment, treatmentNumbers, type AudioTreatment, type EqBand, type EqShape, type TreatmentNumber } from './audio-treatment';
 
 export const legacyEqBands = {
@@ -115,6 +115,26 @@ export function eqWidthRange(shape: EqShape): [number, number] {
   return shape === 'notch' ? [500, 3000] : [20, 1200];
 }
 
+export function spectrumPeakQ(levels: readonly number[], frequencies: readonly number[], start: number, end: number) {
+  const target = levels[start] - 3;
+  const hz = Math.sqrt(frequencies[start] * frequencies[end]);
+  const count = Math.min(levels.length, frequencies.length);
+  function crossing(edge: number, step: -1 | 1) {
+    for (let index = edge + step; index >= 0 && index < count; index += step) {
+      const inner = index - step;
+      if (levels[index] > levels[inner]) return;
+      if (levels[index] <= target) {
+        const fraction = (levels[inner] - target) / (levels[inner] - levels[index]);
+        return frequencies[inner] * (frequencies[index] / frequencies[inner]) ** fraction;
+      }
+    }
+  }
+  const low = crossing(start, -1);
+  const high = crossing(end, 1);
+  if (low === undefined || high === undefined || !(high > low && low > 0)) return 400;
+  return clamp(hz / (high - low) * 100, ...eqWidthRange('bell'));
+}
+
 const clamp = (value: number, min: number, max: number) => Math.round(Math.min(max, Math.max(min, value)));
 
 export function eqBandPatch(settings: AudioTreatment, node: EqNode, rate: number): Partial<AudioTreatment> {
@@ -138,7 +158,7 @@ export function eqBandPatch(settings: AudioTreatment, node: EqNode, rate: number
       channel: node.channel,
       slope: 'slope' in legacyEqBands[node.shape] ? clamp(node.slope / 12, 1, 4) * 12 : undefined,
       adaptiveQ: node.shape === 'bell' && node.adaptiveQ === true ? true : undefined,
-      dynamic: node.dynamic,
+      dynamic: node.dynamic && { ...node.dynamic, spectral: eqSpectralShape(node.shape) && node.dynamic.spectral || undefined },
     };
     if (found === -1) bands.push(band);
     else bands[found] = band;
@@ -199,7 +219,8 @@ export function eqSoloRange(node: EqNode, sampleRate: number): { lowHz: number; 
   if (node.shape === 'low' || node.shape === 'bass') return { lowHz: 20, highHz: clamp(node.hz, 40, max) };
   if (node.shape === 'high' || node.shape === 'treble') return { lowHz: clamp(node.hz, 20, max - 20), highHz: max };
   const quality = node.shape === 'bell' ? bellQuality(node.q, node.gainDb, node.adaptiveQ) : node.q / 100;
-  const width = Math.max(10, node.hz / (2 * Math.max(0.01, quality)));
-  const lowHz = clamp(node.hz - width, 20, max - 20);
-  return { lowHz, highHz: clamp(node.hz + width, lowHz + 20, max) };
+  // Equal distances on the logarithmic axis preserve the band's centre.
+  const ratio = Math.exp(Math.asinh(Math.max(10 / node.hz, 1 / (2 * Math.max(.01, quality)))));
+  const lowHz = clamp(Math.floor(node.hz / ratio), 20, max - 20);
+  return { lowHz, highHz: clamp(Math.ceil(node.hz * ratio), lowHz + 20, max) };
 }

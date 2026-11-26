@@ -4,7 +4,7 @@
   import { NumberInput, NumberInputControl } from '@ui-sdk/svelte/number-input';
 
   let { label, value, min, max, step, unit, color, disabled = false, logarithmic = false,
-    variant = 'regular', activity = 0, onvalue }: {
+    variant = 'regular', activity = 0, detector, detected = false, resetValue, ondragchange, onvalue }: {
     label: string;
     value: number;
     min: number;
@@ -16,6 +16,10 @@
     logarithmic?: boolean;
     variant?: 'regular' | 'gain' | 'range';
     activity?: number;
+    detector?: number;
+    detected?: boolean;
+    resetValue?: number;
+    ondragchange?: (dragging: boolean) => void;
     onvalue: (value: number, gesture?: string) => void;
   } = $props();
 
@@ -43,6 +47,7 @@
   const fraction = $derived(clamp(max <= min ? 0 : logarithmic
     ? Math.log(Math.max(min, value) / min) / Math.log(max / min) : (value - min) / (max - min)));
   const angle = $derived(fraction * 270);
+  const detectorAngle = $derived(detector === undefined ? 0 : clamp((detector - min) / (max - min)) * 270);
   const rangeAngle = $derived(variant === 'range' ? clamp(Math.abs(value) / Math.max(Math.abs(min), Math.abs(max))) * Math.sign(value) * 135 : 0);
   const decimals = $derived(String(step).split('.')[1]?.length ?? 0);
   const display = $derived(value.toLocaleString(undefined, { maximumFractionDigits: decimals }));
@@ -54,6 +59,7 @@
     drag = { pointer: event.pointerId, button, y: event.clientY, fraction, value, sent: value, moved: false,
       gesture: id + '-' + ++serial, commit: onvalue };
     dragging = true;
+    ondragchange?.(true);
     button.setPointerCapture(event.pointerId);
   }
 
@@ -93,6 +99,7 @@
     frame = 0;
     drag = undefined;
     dragging = false;
+    ondragchange?.(false);
     if (current.button.hasPointerCapture(current.pointer)) current.button.releasePointerCapture(current.pointer);
   }
 
@@ -111,6 +118,12 @@
     const input = element.querySelector<HTMLInputElement>('.dial-input');
     input?.focus({ preventScroll: true });
     input?.select();
+  }
+
+  function doubleClick() {
+    if (didDrag) return;
+    if (resetValue === undefined) void openEdit();
+    else onvalue(resetValue);
   }
 
   function closeEdit(returnFocus = false) {
@@ -141,18 +154,25 @@
   style:--live-end={135 + Math.max(0, rangeAngle) * clamp(activity) + 'deg'} onkeydowncapture={editKeys}>
   <Button type="button" class="dial-ring" disabled={disabled || max <= min}
     data-dragging={dragging} aria-label={label + ', ' + display + (unit ? ' ' + unit : '')}
-    aria-description="Drag to adjust. Double-click or press Enter to type a value."
-    title={variant === 'range' ? display + ' dB dynamic range · Drag or double-click to type'
+    aria-description={resetValue === undefined ? 'Drag to adjust. Double-click or press Enter to type a value.'
+      : 'Drag to adjust. Double-click to reset. Press Enter to type a value.'}
+    title={resetValue !== undefined ? 'Drag to adjust · Double-click to reset · Enter to type'
+      : variant === 'range' ? display + ' dB dynamic range · Drag or double-click to type'
       : 'Drag to adjust · Shift for finer changes · Double-click to type'}
     onpointerdown={start} onpointermove={move} onpointerup={finish}
     onpointercancel={finish} onlostpointercapture={finish}
     onclick={event => { if (event.detail === 0) void openEdit(); }}
-    ondblclick={() => { if (!didDrag) void openEdit(); }}>
+    ondblclick={doubleClick}>
     {#if variant === 'range'}
       <span class="range-face" aria-hidden="true"></span>
     {:else}
       <span class="label">{label}</span>
-      <span class="dial-face" aria-hidden="true"><span class="dial-needle"></span></span>
+      <span class="dial-face" aria-hidden="true">
+        <span class="dial-needle"></span>
+        {#if detector !== undefined}
+          <span class="detector-mark" class:detected style:--detector-angle={detectorAngle + 'deg'}></span>
+        {/if}
+      </span>
       <span class="readout">{display}{#if unit}<small>{unit}</small>{/if}</span>
     {/if}
   </Button>
@@ -189,6 +209,13 @@
     content:''; position:absolute; inset:1px auto auto 50%; transform:translateX(-50%);
     inline-size:2px; block-size:6px; border-radius:var(--r-pill); background:var(--dial-color);
   }
+  .detector-mark { position:absolute; inset:-4px; transform:rotate(calc(var(--detector-angle) - 135deg)); }
+  .detector-mark::before {
+    content:''; position:absolute; inset:0 auto auto 50%; transform:translateX(-50%);
+    width:4px; height:4px; border-radius:50%; background:var(--muted);
+  }
+  .detector-mark.detected::before { background:var(--dial-color); }
+  @media (prefers-reduced-motion:no-preference) { .detector-mark { transition:transform 100ms ease-out; } }
   .eq-dial :global(.dial-ring:hover .dial-face) { filter:brightness(1.13); }
   .eq-dial :global(.dial-ring[data-dragging=true]) { cursor:grabbing; }
   .eq-dial :global(.dial-ring:disabled) { opacity:.55; cursor:default; }

@@ -1,6 +1,6 @@
 import type { FrameRange } from './audio-split';
-import type { TreatmentPlotMode, TreatmentProbe } from './audio-treatment-plot';
-import { effectIsActive, eqBandIsActive, type AudioTreatment } from './audio-treatment';
+import type { AnalyzerView, TreatmentPlotMode, TreatmentProbe } from './audio-treatment-plot';
+import { effectIsActive, eqBandIsActive, type AudioTreatment, type EqChannel } from './audio-treatment';
 
 export const toolModes = ['eq', 'dynamics', 'repair'] as const satisfies readonly TreatmentPlotMode[];
 export const toolNames = { eq: 'EQ', dynamics: 'Dynamics', repair: 'Repair' } as const;
@@ -13,21 +13,21 @@ const visibilityEvent = 'tagnetic:audio-tool-visibility';
 
 const toolKeys = {
   eq: ['rumble', 'rumbleHz', 'rumbleSlope', 'highCutHz', 'highCutSlope', 'bassDb', 'bassHz', 'presenceDb',
-    'presenceHz', 'presenceQ', 'trebleDb', 'trebleHz', 'notchHz', 'notchQ', 'eqBands', 'eqBypassed'],
+    'presenceHz', 'presenceQ', 'trebleDb', 'trebleHz', 'notchHz', 'notchQ', 'eqBands', 'eqBypassed', 'eqStrength', 'eqInputDb', 'eqOutputDb'],
   dynamics: ['compressorInputDb', 'compressorDb', 'compressorRatio', 'compressorAttackMs', 'compressorReleaseMs', 'compressorKneeDb',
     'gateDb', 'gateReductionDb', 'gainDb', 'normalize', 'normalizeTargetDb'],
   repair: ['hum', 'humHarmonics', 'dcHz', 'mono', 'swapChannels', 'polarity', 'balance', 'stereoWidth', 'spectralRepairs'],
 } as const satisfies Record<TreatmentPlotMode, readonly (keyof AudioTreatment)[]>;
 
 const toolEffects = {
-  eq: ['rumble', 'bassDb', 'presenceDb', 'notchHz', 'trebleDb', 'highCutHz'],
+  eq: ['rumble', 'bassDb', 'presenceDb', 'notchHz', 'trebleDb', 'highCutHz', 'eqInputDb', 'eqOutputDb'],
   dynamics: ['compressorDb', 'gateDb', 'gainDb', 'normalize'],
   repair: ['hum', 'dcHz', 'mono', 'swapChannels', 'polarity', 'balance', 'stereoWidth'],
 } as const;
 
 export function toolEffectCount(kind: TreatmentPlotMode, settings: AudioTreatment) {
   const preset = toolEffects[kind].filter(key => effectIsActive(settings, key)).length;
-  if (kind === 'eq') return preset + (settings.eqBands?.filter(eqBandIsActive).length ?? 0);
+  if (kind === 'eq') return preset + (settings.eqBands?.filter(band => eqBandIsActive(band, settings.eqStrength)).length ?? 0);
   return kind === 'repair' ? preset + (settings.spectralRepairs?.filter(Boolean).length ?? 0) : preset;
 }
 
@@ -75,6 +75,7 @@ export type ToolSnapshot = {
   pinned?: boolean;
   levelMatch?: boolean;
   eqLevelComparison?: boolean;
+  eqLearning?: { index: number; status: 'learning' | 'error'; message?: string };
   monitor?: 'band' | 'bypass-compressor' | 'difference-compressor';
   undoLabel?: string;
   redoLabel?: string;
@@ -85,13 +86,14 @@ export type ToolSnapshot = {
 };
 
 export type SpectrogramViewOptions = { treated?: boolean; channel?: 'combined' | 'left' | 'right' };
-export type PreviewBand = { lowHz: number; highHz: number; channel?: 'left' | 'right' };
+export type PreviewBand = { lowHz: number; highHz: number; channel?: Exclude<EqChannel, 'stereo'> };
 type DirectToolAction = 'play' | 'hide' | 'pin' | 'level-match' | 'seek' | 'solo-band' | 'retune-solo-band' | 'audition-band'
   | 'bypass-compressor' | 'difference-compressor' | 'stop-audition'
   | 'reference-start' | 'reference-preview' | 'reference-keep' | 'reference-cancel';
 export type ToolRequest = { kind: TreatmentPlotMode } & (
   | { action: 'sync' }
-  | { action: 'analyzer'; sourceId: string; enabled: boolean }
+  | { action: 'learn-threshold'; sourceId: string; index: number }
+  | { action: 'analyzer'; sourceId: string; enabled: boolean; view?: AnalyzerView }
   | { action: DirectToolAction; sourceId: string; range?: FrameRange; band?: PreviewBand }
   | { action: 'undo' | 'redo'; sourceId: string; revision: string; trial?: number }
   | { action: 'compare'; sourceId: string; original: boolean }

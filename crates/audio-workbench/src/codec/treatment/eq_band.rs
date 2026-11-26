@@ -24,12 +24,14 @@ pub enum EqChannel {
     Stereo,
     Left,
     Right,
+    Mid,
+    Side,
 }
 
 impl EqChannel {
-    pub(super) fn index(self) -> Option<usize> {
+    pub(super) fn source_index(self) -> Option<usize> {
         match self {
-            Self::Stereo => None,
+            Self::Stereo | Self::Mid | Self::Side => None,
             Self::Left => Some(0),
             Self::Right => Some(1),
         }
@@ -44,6 +46,8 @@ pub struct DynamicEq {
     pub amount_db: f32,
     #[serde(default = "default_dynamic_ratio")]
     pub ratio: f32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub spectral: bool,
 }
 
 fn default_dynamic_ratio() -> f32 {
@@ -72,16 +76,16 @@ pub struct EqBand {
 }
 
 impl EqBand {
-    pub(super) fn active(self) -> bool {
+    pub(super) fn active(self, strength: f32) -> bool {
         !self.bypassed
             && (matches!(
                 self.kind,
                 EqBandKind::Low | EqBandKind::High | EqBandKind::Notch
-            ) || self.gain_db != 0.0
+            ) || self.gain_db * strength != 0.0
                 || self.dynamic.is_some())
     }
 
-    pub(super) fn validate(self, sample_rate: u32) -> Result<(), MediaError> {
+    pub(super) fn validate(self, sample_rate: u32, strength: f32) -> Result<(), MediaError> {
         let quality = if self.kind == EqBandKind::Notch {
             500..=3000
         } else {
@@ -91,11 +95,16 @@ impl EqBand {
             || !(-MAX_EQ_GAIN_DB..=MAX_EQ_GAIN_DB).contains(&self.gain_db)
             || !quality.contains(&self.q)
             || !matches!(self.slope, 0 | 12 | 24 | 36 | 48)
-            || (self.active() && f64::from(self.hz) > f64::from(sample_rate) * 0.45)
+            || (self.active(strength) && f64::from(self.hz) > f64::from(sample_rate) * 0.45)
             || self.dynamic.is_some_and(|dynamic| {
                 !(-72.0..=-6.0).contains(&dynamic.threshold_db)
                     || !(1.0..=12.0).contains(&dynamic.amount_db.abs())
                     || !(1.0..=20.0).contains(&dynamic.ratio)
+                    || dynamic.spectral
+                        && !matches!(
+                            self.kind,
+                            EqBandKind::Bell | EqBandKind::Bass | EqBandKind::Treble
+                        )
             })
         {
             return Err(MediaError::Unsupported(
@@ -105,11 +114,17 @@ impl EqBand {
         Ok(())
     }
 
-    pub(super) fn filters(self, rate: f64) -> Vec<Biquad> {
+    pub(super) fn filters(mut self, rate: f64, strength: f32) -> Vec<Biquad> {
+        self.gain_db *= strength;
         let q = self.effective_quality();
         match self.kind {
             EqBandKind::Low | EqBandKind::High => {
                 Biquad::cut(rate, self.hz, self.slope, self.kind == EqBandKind::Low).collect()
+            }
+            EqBandKind::Bell | EqBandKind::Bass | EqBandKind::Treble
+                if self.gain_db == 0.0 && self.dynamic.is_none() =>
+            {
+                Vec::new()
             }
             EqBandKind::Bass | EqBandKind::Treble => {
                 vec![Biquad::shelf(
@@ -119,7 +134,6 @@ impl EqBand {
                     self.kind == EqBandKind::Treble,
                 )]
             }
-            EqBandKind::Bell if self.gain_db == 0.0 => Vec::new(),
             EqBandKind::Bell => vec![Biquad::peak(rate, self.hz, self.gain_db, q)],
             EqBandKind::Notch => vec![Biquad::notch(rate, self.hz, q)],
         }
@@ -152,7 +166,7 @@ pub(super) struct DynamicBand {
 
 impl DynamicBand {
     pub(super) fn new(index: usize, band: EqBand, rate: f64, channels: usize) -> Option<Self> {
-        let dynamic = band.dynamic?;
+        let dynamic = band.dynamic.filter(|dynamic| !dynamic.spectral)?;
         let q = band.effective_quality();
         let (detector, filter) = match band.kind {
             EqBandKind::Low | EqBandKind::Bass => (
@@ -189,6 +203,26 @@ impl DynamicBand {
 
     pub(super) fn mix(&self) -> f64 {
         self.blend
+    }
+
+    pub(super) fn carry_state(&mut self, previous: &Self) {
+        if self.index != previous.index {
+            return;
+        }
+        let mut same_detectors = self.channels.len() == previous.channels.len();
+        for ((next, _), (old, _)) in self.channels.iter_mut().zip(&previous.channels) {
+            for (next, old) in next.iter_mut().zip(old) {
+                same_detectors &= next.carry_delay(old);
+            }
+        }
+        if same_detectors {
+            self.envelope = previous.envelope;
+            self.blend = self.target_mix();
+        }
+    }
+
+    pub(super) fn detector_db(&self) -> f32 {
+        (20.0 * self.envelope.max(1e-7).log10()).max(-96.0) as f32
     }
 
     fn target_mix(&self) -> f64 {

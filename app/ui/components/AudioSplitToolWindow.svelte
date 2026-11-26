@@ -1,9 +1,11 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { Check, ChevronDown, ChevronLeft, ChevronRight, Ellipsis, Pause, Pin, Play, Power, Repeat2, Scale, X } from '@lucide/svelte';
-  import { createMenuController, Menu, MenuContent, MenuGroupLabel, MenuItem, MenuItemIndicator, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuTrigger } from '@ui-sdk/svelte/menu';
+  import { createMenuController, Menu, MenuContent, MenuGroup, MenuGroupLabel, MenuItem, MenuItemIndicator, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuShortcut, MenuSub, MenuSubContent, MenuSubTrigger, MenuTrigger } from '@ui-sdk/svelte/menu';
   import { createSelectController, Select, SelectContent, SelectItem, SelectTrigger } from '@ui-sdk/svelte/select';
   import { NumberInput, NumberInputControl } from '@ui-sdk/svelte/number-input';
+  import { Input } from '@ui-sdk/svelte/input';
+  import * as Dialog from '$lib/components/ui/dialog/index.js';
   import AudioSplitDynamicsPanel from './AudioSplitDynamicsPanel.svelte';
   import AudioSplitEqPanel from './AudioSplitEqPanel.svelte';
   import AudioSplitRepairPlot from './AudioSplitRepairPlot.svelte';
@@ -12,15 +14,17 @@
   import { findEqNode, legacyEqBands, visibleEqNodes } from '../js/audio-eq';
   import { dynamicsMode, dynamicsPresets } from '../js/audio-dynamics';
   import type { FrameRange } from '../js/audio-split';
-  import { noTreatment, treatmentNumbers, type AudioTreatment, type TreatmentNumber } from '../js/audio-treatment';
-  import type { TreatmentPlotMode, TreatmentProbe } from '../js/audio-treatment-plot';
+  import { noTreatment, readTreatment, sameTreatment, treatmentNumbers, type AudioTreatment, type TreatmentNumber } from '../js/audio-treatment';
+  import type { AnalyzerView, TreatmentPlotMode, TreatmentProbe } from '../js/audio-treatment-plot';
+  import { readEqPresets, saveEqPresets, treatmentForRecording, type SavedEqPreset } from '../js/audio-treatment-recipes';
   import { toolPatch, type PreviewBand, type SpectrogramViewOptions, type ToolAction, type ToolSnapshot } from '../js/audio-tools-window';
 
-  let { kind, snapshot, probe, onedit, onaction, onviewport, onanalyzer }: {
+  let { kind, snapshot, probe, onedit, onaction, onviewport, onanalyzer, onlearn }: {
     kind: TreatmentPlotMode;
     snapshot: ToolSnapshot | null;
     probe: TreatmentProbe | null;
-    onanalyzer: (enabled: boolean) => void;
+    onanalyzer: (view: AnalyzerView) => void;
+    onlearn: (index: number) => void;
     onedit: (patch: Partial<AudioTreatment>, gesture?: string, compareEq?: Partial<AudioTreatment> | null) => void;
     onaction: (action: ToolAction, range?: FrameRange, band?: PreviewBand) => void;
     onviewport: (range: FrameRange | null, options?: SpectrogramViewOptions) => void;
@@ -53,6 +57,13 @@
   // Each native tool document keeps one kind for its lifetime.
   let mode = $state<string | null>(readMode());
   let help = $state(false);
+  let savedPresets = $state.raw(untrack(() => kind === 'eq' ? readEqPresets() : []));
+  let presetDialog = $state<'save' | 'manage' | null>(null);
+  let renamePreset = $state<string>();
+  let removePreset = $state<string>();
+  let presetName = $state('');
+  let presetError = $state('');
+  let presetToSave: Partial<AudioTreatment> = {};
   let eqComparison = $state.raw<{ sourceId: string; slot: CompareSlot; A: Partial<AudioTreatment>; B: Partial<AudioTreatment> }>();
   let restoreDc = 0;
   const settings = $derived(snapshot?.settings ?? noTreatment);
@@ -62,20 +73,13 @@
   }
   const sampleRate = $derived(snapshot?.sampleRate || 44100);
   const presets: readonly Preset[] = $derived(
-    kind === 'eq' ? eqPresets.filter(preset => (preset.patch.highCutHz ?? 0) <= Math.floor(sampleRate * .45))
+    kind === 'eq' ? [...eqPresets.filter(preset => (preset.patch.highCutHz ?? 0) <= Math.floor(sampleRate * .45)), ...savedPresets]
       : kind === 'dynamics' ? dynamicsPresets[dynamicsMode(mode ?? '')] : repairPresets,
   );
   const eqPresetIndex = $derived.by(() => {
-    if (kind !== 'eq' || settings.eqBands?.length || settings.eqBypassed) return -1;
-    const current = visibleEqNodes(settings, null);
-    return presets.findIndex(preset => {
-      const expected = visibleEqNodes({ ...noTreatment, ...preset.patch }, null);
-      return current.length === expected.length && current.every((node, index) => {
-        const band = expected[index];
-        return node.shape === band.shape && node.hz === band.hz && node.gainDb === band.gainDb
-          && node.q === band.q && node.slope === band.slope;
-      });
-    });
+    if (kind !== 'eq') return -1;
+    const current = readTreatment(toolPatch('eq', settings));
+    return presets.findIndex(preset => sameTreatment(current, readTreatment(eqPresetPatch(preset))));
   });
   const eqPresetName = $derived(presets[eqPresetIndex]?.label ?? 'Custom EQ');
   const compareSlots = $derived(eqComparison?.sourceId === snapshot?.sourceId ? eqComparison : undefined);
@@ -83,7 +87,7 @@
   const commonKeys = [['Space', 'Play or pause'], ['L', 'Toggle loop'], ['B', 'Compare Original and Treated'],
     [modKey + '+Z', 'Undo'], [modKey + '+Shift+Z', 'Redo'], ['?', 'Show keyboard shortcuts']];
   const details = {
-    eq: [['Enter', 'Add a band or edit its exact values'], ['Arrows', 'Move the focused band'], ['Shift+arrows', 'Move in finer steps'], ['Delete', 'Remove the focused band']],
+    eq: [['Enter', 'Add a band or edit its exact values'], ['Arrows', 'Move the focused band'], ['Shift+arrows', 'Move in finer steps'], [modKey === '⌘' ? 'Option+drag' : 'Alt+drag', 'Lock the drag to one axis'], ['Delete', 'Remove the focused band']],
     dynamics: [['Arrows', 'Adjust the focused handle'], ['Shift+arrows', 'Adjust in finer steps']],
     repair: [['Enter', 'Audition the selection'], [modKey + '+Enter', 'Apply the repair'], ['Delete', 'Remove a selected repair'],
       ['F', 'Fit the selection'], ['0', 'Reset zoom'], ['Shift+scroll', 'Zoom frequencies']],
@@ -108,11 +112,20 @@
     } catch { /* Keep the current in-window selection. */ }
   }
 
+  function eqPresetPatch(preset: Preset) {
+    return toolPatch('eq', treatmentForRecording(readTreatment(preset.patch), noTreatment, sampleRate, snapshot?.stereo ?? false));
+  }
+
+  function applyEqCurve(patch: Partial<AudioTreatment>, alternate?: Partial<AudioTreatment>) {
+    const next = readTreatment({ ...settings, ...patch });
+    if (mode && !findEqNode(next, mode)) setMode(null);
+    onedit(patch, undefined, alternate);
+  }
+
   function applyPreset(preset: Preset) {
-    if (kind === 'eq') {
-      setMode(null);
-      onedit({ ...flatEq, ...preset.patch });
-    } else onedit(preset.patch);
+    if (kind !== 'eq') onedit(preset.patch);
+    else if (compareSlots) auditionPreset(preset);
+    else applyEqCurve(eqPresetPatch(preset));
   }
 
   function stepEqPreset(direction: -1 | 1) {
@@ -129,9 +142,74 @@
     const next = { A: current, B: current, ...previous, sourceId: snapshot.sourceId, slot } satisfies NonNullable<typeof eqComparison>;
     next[previous?.slot ?? 'A'] = current;
     eqComparison = next;
-    setMode(null);
-    onedit(next[slot], undefined, current);
+    applyEqCurve(next[slot], current);
     if (snapshot.original) onaction('treated');
+  }
+
+  function auditionPreset(preset: Preset) {
+    if (!snapshot?.eqLevelComparison || snapshot.reference?.preview) return;
+    const A = compareSlots?.slot === 'B' ? compareSlots.A : toolPatch('eq', settings);
+    const B = eqPresetPatch(preset);
+    eqComparison = { sourceId: snapshot.sourceId, slot: 'B', A, B };
+    applyEqCurve(B, A);
+    if (snapshot.original) onaction('treated');
+  }
+
+  function copyAtoB() {
+    if (!compareSlots || snapshot?.reference?.preview) return;
+    const A = compareSlots.slot === 'A' ? toolPatch('eq', settings) : compareSlots.A;
+    eqComparison = { ...compareSlots, A, B: A };
+    applyEqCurve(A, A);
+  }
+
+  function openPresetDialog(dialog: 'save' | 'manage') {
+    presetDialog = dialog;
+    presetName = '';
+    presetError = '';
+    renamePreset = undefined;
+    removePreset = undefined;
+    if (dialog === 'save') presetToSave = toolPatch('eq', settings);
+  }
+
+  function storePresets(next: SavedEqPreset[]) {
+    try {
+      saveEqPresets(next);
+      savedPresets = next;
+      presetError = '';
+      return true;
+    } catch {
+      presetError = 'Could not save your preset changes.';
+      return false;
+    }
+  }
+
+  function saveNamedPreset(event: SubmitEvent) {
+    event.preventDefault();
+    const label = presetName.trim();
+    if (!label || label.length > 64) return;
+    if ([...eqPresets, ...savedPresets.filter(preset => preset.id !== renamePreset)]
+      .some(preset => preset.label.toLowerCase() === label.toLowerCase())) {
+      presetError = 'A preset already uses that name.';
+      return;
+    }
+    if (presetDialog === 'save') {
+      if (storePresets([...savedPresets, { id: crypto.getRandomValues(new Uint32Array(4)).join('-'), label, patch: presetToSave }])) presetDialog = null;
+    } else if (storePresets(savedPresets.map(preset => preset.id === renamePreset ? { ...preset, label } : preset))) {
+      renamePreset = undefined;
+    }
+  }
+
+  async function startRename(preset: SavedEqPreset) {
+    renamePreset = preset.id;
+    removePreset = undefined;
+    presetError = '';
+    presetName = preset.label;
+    await tick();
+    document.getElementById(id + '-preset-name')?.focus();
+  }
+
+  function deleteNamedPreset() {
+    if (storePresets(savedPresets.filter(preset => preset.id !== removePreset))) removePreset = undefined;
   }
 
   function endEqComparison() {
@@ -146,7 +224,7 @@
   }
 
   function windowKeys(event: KeyboardEvent) {
-    if (event.defaultPrevented || event.isComposing || event.altKey) return;
+    if (event.defaultPrevented || event.isComposing || event.altKey || presetDialog) return;
     const target = event.target;
     if (target instanceof Element && target.closest('input, textarea, select, [contenteditable=true], [role=menu], [role=listbox]')) return;
     const key = event.key.toLowerCase();
@@ -226,10 +304,17 @@
       </Button>
       <Button variant="ghost" size="icon-sm" class="tool-power" disabled={!snapshot} aria-label="Loop preview" title="Loop preview (L)"
         aria-keyshortcuts="L" aria-pressed={snapshot?.loop ?? false} onclick={() => onaction('loop')}><Repeat2 size={16} aria-hidden="true"/></Button>
-      <div class="comparison" role="group" aria-label="Preview sound">
-        <Button variant="ghost" size="sm" disabled={!snapshot} title="Compare Original and Treated (B)" aria-pressed={snapshot?.original ?? false} onclick={() => onaction('original')}>Original</Button>
-        <Button variant="ghost" size="sm" disabled={!snapshot} title="Compare Original and Treated (B)" aria-pressed={!!snapshot && !snapshot.original} onclick={() => onaction('treated')}>Treated</Button>
-      </div>
+      {#if kind === 'eq'}
+        <Button variant="ghost" size="icon-sm" class="treatment-bypass" disabled={!snapshot}
+          aria-label="Bypass treatment" aria-pressed={snapshot?.original ?? false} aria-keyshortcuts="B"
+          title={snapshot?.original ? 'Resume treated playback (B)' : 'Bypass treatment (B)'}
+          onclick={() => onaction(snapshot?.original ? 'treated' : 'original')}><Power size={15} aria-hidden="true"/></Button>
+      {:else}
+        <div class="comparison" role="group" aria-label="Preview sound">
+          <Button variant="ghost" size="sm" disabled={!snapshot} title="Compare Original and Treated (B)" aria-pressed={snapshot?.original ?? false} onclick={() => onaction('original')}>Original</Button>
+          <Button variant="ghost" size="sm" disabled={!snapshot} title="Compare Original and Treated (B)" aria-pressed={!!snapshot && !snapshot.original} onclick={() => onaction('treated')}>Treated</Button>
+        </div>
+      {/if}
       <Button variant="ghost" size="icon-sm" class="tool-power" disabled={!snapshot} aria-label="Match preview levels" title="Match Original and Treated volume"
         aria-pressed={snapshot?.levelMatch ?? false} onclick={() => onaction('level-match')}><Scale size={15} aria-hidden="true"/></Button>
       {#if kind === 'eq'}
@@ -242,7 +327,7 @@
         </Button>
       {/if}
     </div>
-    <div class="transport">
+    <div class="transport preset-controls">
       <Button variant="ghost" size="icon-sm" class="tool-power" disabled={!snapshot} aria-label="Keep tool on top" title="Keep tool on top"
         aria-pressed={snapshot?.pinned ?? false} onclick={() => onaction('pin')}><Pin size={15} aria-hidden="true"/></Button>
       {#if kind === 'eq'}
@@ -254,23 +339,49 @@
           aria-label={kind === 'eq' ? 'EQ preset, ' + eqPresetName : 'Tool presets'} title="Presets and shortcuts">
           {#if kind === 'eq'}<span>{eqPresetName}</span>{:else}<Ellipsis size={17} aria-hidden="true"/>{/if}
         </MenuTrigger>
-        <MenuContent class="app-select-menu audio-tool-popup" align="end" sideOffset={4} collisionPadding={8}>
-          {#each presets as preset (preset.label)}
-            <MenuItem data-slot="select-item" label={preset.label} disabled={!snapshot}
-              onSelect={() => applyPreset(preset)}>{preset.label}
-              {#if kind === 'eq' && eqPresetName === preset.label}<Check size={14} aria-hidden="true"/>{/if}
-            </MenuItem>
-          {/each}
+        <MenuContent class="audio-action-menu" align="end" sideOffset={4} collisionPadding={8}>
+          <MenuGroup>
+            {#if kind === 'eq'}<MenuGroupLabel class="menu-heading">{compareSlots ? 'Audition in B' : 'Presets'}</MenuGroupLabel>{/if}
+            {#each presets as preset (preset.label)}
+              {@const current = kind === 'eq' && eqPresetName === preset.label}
+              <MenuItem aria-current={current ? 'true' : undefined} label={preset.label} disabled={!snapshot}
+                onSelect={() => applyPreset(preset)}>{preset.label}
+                {#if current}<Check class="menu-trailing" size={14} aria-hidden="true"/>{/if}
+              </MenuItem>
+            {/each}
+          </MenuGroup>
           <MenuSeparator/>
           {#if kind === 'eq'}
-            <MenuRadioGroup value={selectedShape} onValueChange={chooseEqShape}>
-              <MenuGroupLabel>Filter shape</MenuGroupLabel>
-              {#each Object.entries(legacyEqBands) as [shape, spec] (shape)}
-                <MenuRadioItem data-slot="select-item" value={shape} disabled={!snapshot || (shape === 'high' && sampleRate * .45 < treatmentNumbers.highCutHz.min)} closeOnSelect>
-                  {spec.name}<MenuItemIndicator aria-hidden="true"><Check size={14}/></MenuItemIndicator>
-                </MenuRadioItem>
-              {/each}
-            </MenuRadioGroup>
+            {#if snapshot?.eqLevelComparison && !snapshot.reference?.preview}
+              {#if compareSlots}
+                <MenuItem onSelect={copyAtoB}>Copy A to B</MenuItem>
+              {:else}
+                <MenuSub>
+                  <MenuSubTrigger>Audition preset in B <ChevronRight class="menu-trailing" size={14} aria-hidden="true"/></MenuSubTrigger>
+                  <MenuSubContent class="audio-action-menu" sideOffset={4} collisionPadding={8}>
+                    {#each presets as preset (preset.label)}
+                      <MenuItem onSelect={() => auditionPreset(preset)}>{preset.label}</MenuItem>
+                    {/each}
+                  </MenuSubContent>
+                </MenuSub>
+              {/if}
+            {/if}
+            <MenuItem disabled={!snapshot || snapshot.reference?.status === 'choosing' || snapshot.reference?.status === 'analysing'}
+              onSelect={() => onaction('reference-start')}>Match to reference…</MenuItem>
+            <MenuItem disabled={!snapshot} onSelect={() => openPresetDialog('save')}>Save as preset…</MenuItem>
+            <MenuItem disabled={!savedPresets.length} onSelect={() => openPresetDialog('manage')}>Manage saved presets…</MenuItem>
+            <MenuSub>
+              <MenuSubTrigger disabled={!snapshot}>Filter shape <ChevronRight class="menu-trailing" size={14} aria-hidden="true"/></MenuSubTrigger>
+              <MenuSubContent class="audio-action-menu" sideOffset={4} collisionPadding={8}>
+                <MenuRadioGroup value={selectedShape} onValueChange={chooseEqShape}>
+                  {#each Object.entries(legacyEqBands) as [shape, spec] (shape)}
+                    <MenuRadioItem value={shape} disabled={shape === 'high' && sampleRate * .45 < treatmentNumbers.highCutHz.min} closeOnSelect>
+                      {spec.name}<MenuItemIndicator class="menu-trailing" aria-hidden="true"><Check size={14}/></MenuItemIndicator>
+                    </MenuRadioItem>
+                  {/each}
+                </MenuRadioGroup>
+              </MenuSubContent>
+            </MenuSub>
             <MenuSeparator/>
           {/if}
           <MenuItem disabled={!snapshot?.undoLabel} onSelect={() => onaction('undo')}>{snapshot?.undoLabel ?? 'Undo'}</MenuItem>
@@ -280,7 +391,7 @@
             <MenuItem onSelect={endEqComparison}>End A/B comparison</MenuItem>
           {/if}
           <MenuSeparator/>
-          <MenuItem onSelect={toggleHelp}>Keyboard shortcuts <kbd>?</kbd></MenuItem>
+          <MenuItem onSelect={toggleHelp}>Keyboard shortcuts <MenuShortcut class="menu-trailing">?</MenuShortcut></MenuItem>
         </MenuContent>
       </Menu>
       {#if kind === 'eq'}
@@ -291,7 +402,7 @@
   </header>
 
   {#if kind === 'eq'}
-    <AudioSplitEqPanel {snapshot} {probe} {mode} onmode={setMode} {onedit} {onaction} {onanalyzer}/>
+    <AudioSplitEqPanel {snapshot} {probe} {mode} onmode={setMode} {onedit} {onaction} {onanalyzer} {onlearn}/>
   {:else if kind === 'dynamics'}
     <AudioSplitDynamicsPanel {snapshot} {probe} mode={mode ?? 'compressor'} {onedit} {onaction}/>
   {:else}
@@ -317,6 +428,45 @@
 
   {#if kind === 'dynamics'}<div class="tool-side">{@render modeRail()}</div>{/if}
 
+  {#if kind === 'eq'}
+    <Dialog.Root open={presetDialog !== null} onOpenChange={open => { if (!open) presetDialog = null; }}>
+      <Dialog.Content class="eq-preset-dialog" overlayProps={{ class: 'controller-dialog-overlay eq-preset-overlay' }}
+        onCloseAutoFocus={event => { event.preventDefault(); document.getElementById(id + '-tools-menu')?.focus(); }}>
+        <Dialog.Title>{presetDialog === 'save' ? 'Save EQ preset' : 'Saved EQ presets'}</Dialog.Title>
+        <Dialog.Description>{presetDialog === 'save' ? 'Reuse this EQ curve on another recording.' : 'Rename or remove your EQ presets.'}</Dialog.Description>
+        {#if presetDialog === 'save' || renamePreset}
+          <form class="preset-form" onsubmit={saveNamedPreset}>
+            <Input id={id + '-preset-name'} aria-label="Preset name" placeholder="Preset name" maxlength={64} bind:value={presetName} oninput={() => presetError = ''}/>
+            <Button size="sm" type="submit" disabled={!presetName.trim()}>{renamePreset ? 'Rename' : 'Save preset'}</Button>
+            {#if renamePreset}
+              <Button size="sm" variant="ghost" onclick={() => { renamePreset = undefined; presetError = ''; }}>Cancel</Button>
+            {/if}
+          </form>
+        {/if}
+        {#if presetDialog === 'manage'}
+          <ul class="preset-list" aria-label="Saved presets">
+            {#each savedPresets as preset (preset.id)}
+              <li>
+                <span>{preset.label}</span>
+                <Button size="sm" variant="ghost" aria-label={'Rename ' + preset.label} onclick={() => startRename(preset)}>Rename</Button>
+                <Button size="sm" variant="ghost" aria-label={'Delete ' + preset.label}
+                  onclick={() => { removePreset = preset.id; renamePreset = undefined; presetError = ''; }}>Delete</Button>
+              </li>
+            {/each}
+          </ul>
+          {#if removePreset}
+            <div class="preset-form">
+              <span>Delete {savedPresets.find(preset => preset.id === removePreset)?.label}?</span>
+              <Button size="sm" variant="destructive" onclick={deleteNamedPreset}>Delete preset</Button>
+              <Button size="sm" variant="ghost" onclick={() => { removePreset = undefined; presetError = ''; }}>Cancel</Button>
+            </div>
+          {/if}
+        {/if}
+        {#if presetError}<p class="preset-error" role="alert">{presetError}</p>{/if}
+      </Dialog.Content>
+    </Dialog.Root>
+  {/if}
+
   {#if help}
     <section class="shortcut-help" aria-labelledby={id + '-shortcuts'}>
       <div><h2 id={id + '-shortcuts'}>Keyboard shortcuts</h2><Button id={id + '-close-help'} variant="ghost" size="icon-sm" aria-label="Close shortcuts" title="Close shortcuts" onclick={toggleHelp}><X size={15}/></Button></div>
@@ -330,6 +480,19 @@
 </section>
 
 <style>
+  :global(.eq-preset-overlay[data-slot=dialog-overlay]) { z-index:144; }
+  :global(.eq-preset-dialog[data-slot=dialog-content]) {
+    z-index:145; width:min(420px, calc(100vw - 32px)); max-width:none; max-height:calc(100dvh - 32px); overflow:auto;
+    padding:var(--sp-4); border:1px solid var(--ui-muted-border); border-radius:var(--r-dialog-compact);
+    background:var(--panel); color:var(--text);
+  }
+  .preset-form { display:flex; align-items:center; flex-wrap:wrap; gap:var(--sp-2); }
+  .preset-form :global(input) { flex:1; min-width:8rem; }
+  .preset-list { display:grid; gap:var(--sp-1); padding:0; max-height:40vh; overflow:auto; }
+  .preset-list li { display:grid; grid-template-columns:minmax(0,1fr) auto auto; align-items:center; gap:var(--sp-1); }
+  .preset-list li > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .preset-error { color:var(--del); }
+
   .tool-window {
     position:relative; min-height:max(100dvh,342px); display:grid;
     grid-template-columns:minmax(0,1fr) auto; grid-template-rows:auto 1fr auto;
@@ -360,7 +523,21 @@
     display:grid; inline-size:104px; padding-inline:4px; font-size:var(--text-xs); color:var(--text);
   }
   :global(.tool-window .compact-presets) span { max-inline-size:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .eq .tool-header { flex-wrap:wrap; }
+  .eq .tool-header { flex-wrap:wrap; gap:var(--sp-1) var(--sp-3); }
+  .eq .tool-header :global(button) {
+    border:0; box-shadow:none; background:transparent; color:var(--muted);
+  }
+  .eq .tool-header :global(button:hover:not(:disabled)) { color:var(--text); background:var(--row-hover); }
+  .eq .tool-header :global(button:is([aria-pressed=true],[aria-expanded=true])) {
+    color:var(--accent-ink); background:var(--sel-tint);
+  }
+  .eq .tool-header :global(button:focus-visible) { outline:2px solid var(--accent); outline-offset:1px; }
+  .eq .tool-header :global(button.treatment-bypass[aria-pressed=true]) {
+    color:color-mix(in srgb,var(--del) 78%,var(--muted));
+    background:color-mix(in srgb,var(--del) 14%,transparent);
+  }
+  .eq .preset-controls { margin-inline-start:auto; }
+  .eq .preset-controls :global(.compact-presets) { color:var(--text); font-weight:var(--fw-medium,500); }
   :global(.tool-window .tool-menu:hover) { color:var(--text); }
   :global(.tool-window .tool-menu:focus-visible) { outline:2px solid var(--accent); }
   .tool-controls { grid-column:1; min-height:38px; padding-inline:var(--sp-1,4px); flex-wrap:wrap; }

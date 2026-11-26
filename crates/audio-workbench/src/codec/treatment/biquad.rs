@@ -11,6 +11,32 @@ pub(in crate::codec) struct Biquad {
 }
 
 impl Biquad {
+    pub(super) fn glide_toward(&mut self, target: &Self, weight: f64) {
+        if weight == 1.0 {
+            self.a = target.a;
+            self.b = target.b;
+            return;
+        }
+        // The stable region for normalized real second-order denominators
+        // is convex. Keep filter history as the coefficients move within it.
+        for (current, target) in self
+            .a
+            .iter_mut()
+            .zip(target.a)
+            .chain(self.b.iter_mut().zip(target.b))
+        {
+            *current += (target - *current) * weight;
+        }
+    }
+
+    pub(super) fn carry_delay(&mut self, previous: &Self) -> bool {
+        if self.a != previous.a || self.b != previous.b {
+            return false;
+        }
+        self.delay = previous.delay;
+        true
+    }
+
     pub(super) fn high_pass(rate: f64, frequency: u16) -> Self {
         let (sin, cos) = angle(rate, frequency);
         Self::pass(cos, sin * FRAC_1_SQRT_2, true)
