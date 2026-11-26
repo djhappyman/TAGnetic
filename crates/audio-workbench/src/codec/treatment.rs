@@ -15,6 +15,9 @@ mod band_repair;
 pub(super) mod biquad;
 mod dynamics;
 mod eq_band;
+mod eq_glide;
+mod preview_ceiling;
+mod spectral_eq;
 
 use band_repair::BandRepair;
 pub use band_repair::{RepairChannel, SpectralRepair, MAX_SPECTRAL_REPAIRS};
@@ -22,6 +25,8 @@ use biquad::Biquad;
 use dynamics::Dynamics;
 use eq_band::{DynamicBand, MAX_EQ_GAIN_DB};
 pub use eq_band::{DynamicEq, EqBand, EqBandKind, EqChannel, MAX_EQ_BANDS};
+use preview_ceiling::PreviewCeiling;
+use spectral_eq::SpectralEq;
 
 const TARGET_LUFS: i8 = -18;
 const CEILING_DBTP: f64 = -1.0;
@@ -141,6 +146,10 @@ pub struct AudioTreatment {
         skip_serializing_if = "Option::is_none"
     )]
     pub eq_bands: Option<[Option<EqBand>; MAX_EQ_BANDS]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eq_strength: Option<f32>,
+    pub eq_input_db: f32,
+    pub eq_output_db: f32,
     pub gain_db: i8,
     pub compressor_input_db: i8,
     pub compressor_db: i8,
@@ -169,6 +178,8 @@ impl AudioTreatment {
             || self.repairs().next().is_some()
             || self.has_dynamics()
             || self.has_stereo_repair()
+            || self.eq_input_db != 0.0
+            || self.eq_output_db != 0.0
             || self.gain_db != 0
             || self.compressor_input_db != 0
     }
@@ -179,10 +190,14 @@ impl AudioTreatment {
             || self.dc_hz != 0
             || self.eq_enabled(self.high_cut_hz != 0, BYPASS_HIGH_CUT)
             || self.eq_enabled(self.notch_hz != 0, BYPASS_NOTCH)
-            || self.eq_enabled(self.bass_db != 0.0, BYPASS_BASS)
-            || self.eq_enabled(self.presence_db != 0.0, BYPASS_BELL)
-            || self.eq_enabled(self.treble_db != 0.0, BYPASS_TREBLE)
-            || self.bands().any(EqBand::active)
+            || self.eq_enabled(self.bass_db * self.eq_weight() != 0.0, BYPASS_BASS)
+            || self.eq_enabled(self.presence_db * self.eq_weight() != 0.0, BYPASS_BELL)
+            || self.eq_enabled(self.treble_db * self.eq_weight() != 0.0, BYPASS_TREBLE)
+            || self.bands().any(|band| band.active(self.eq_weight()))
+    }
+
+    fn eq_weight(self) -> f32 {
+        self.eq_strength.unwrap_or(100.0) / 100.0
     }
 
     fn eq_enabled(self, configured: bool, mask: u8) -> bool {
@@ -191,6 +206,18 @@ impl AudioTreatment {
 
     pub(super) fn bands(&self) -> impl Iterator<Item = EqBand> + '_ {
         self.eq_bands.iter().flatten().copied().flatten()
+    }
+
+    pub(super) fn has_spectral_eq(&self) -> bool {
+        self.bands()
+            .any(|band| !band.bypassed && band.dynamic.is_some_and(|mode| mode.spectral))
+    }
+
+    fn ordinary_eq_dynamics_match(self, other: Self) -> bool {
+        let ordinary = |band: &EqBand| band.dynamic.is_some_and(|mode| !mode.spectral);
+        self.bands()
+            .filter(ordinary)
+            .eq(other.bands().filter(ordinary))
     }
 
     fn repairs(&self) -> impl Iterator<Item = SpectralRepair> + '_ {
@@ -204,7 +231,7 @@ impl AudioTreatment {
     fn level_gain_db(self) -> f64 {
         // Apply the linear gains together. The compressor detector separately
         // receives the input gain, so output gain never drives compression.
-        f64::from(self.compressor_input_db) + f64::from(self.gain_db)
+        f64::from(self.compressor_input_db) + f64::from(self.gain_db) + f64::from(self.eq_output_db)
     }
 
     fn has_stereo_repair(self) -> bool {
@@ -219,6 +246,8 @@ impl AudioTreatment {
         self.normalize
             || self.has_filter()
             || self.has_dynamics()
+            || self.eq_input_db > 0.0
+            || self.eq_output_db > 0.0
             || self.gain_db > 0
             || self.compressor_input_db > 0
             || self.stereo_width > 0
@@ -265,6 +294,21 @@ impl AudioTreatment {
         {
             return Err(MediaError::Unsupported(
                 "Choose an EQ gain between −24 and +24 dB",
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.eq_weight()) {
+            return Err(MediaError::Unsupported(
+                "Choose an EQ strength between 0 and 100%",
+            ));
+        }
+        if !(-24.0..=12.0).contains(&self.eq_input_db) {
+            return Err(MediaError::Unsupported(
+                "Choose an EQ input between −24 and +12 dB",
+            ));
+        }
+        if !(-24.0..=12.0).contains(&self.eq_output_db) {
+            return Err(MediaError::Unsupported(
+                "Choose an EQ output between −24 and +12 dB",
             ));
         }
         for (value, min, max, error) in [
@@ -420,17 +464,17 @@ impl AudioTreatment {
             } else {
                 0
             },
-            if self.eq_enabled(self.bass_db != 0.0, BYPASS_BASS) {
+            if self.eq_enabled(self.bass_db * self.eq_weight() != 0.0, BYPASS_BASS) {
                 bass_hz
             } else {
                 0
             },
-            if self.eq_enabled(self.presence_db != 0.0, BYPASS_BELL) {
+            if self.eq_enabled(self.presence_db * self.eq_weight() != 0.0, BYPASS_BELL) {
                 presence_hz
             } else {
                 0
             },
-            if self.eq_enabled(self.treble_db != 0.0, BYPASS_TREBLE) {
+            if self.eq_enabled(self.treble_db * self.eq_weight() != 0.0, BYPASS_TREBLE) {
                 treble_hz
             } else {
                 0
@@ -446,7 +490,7 @@ impl AudioTreatment {
             ));
         }
         for band in self.bands() {
-            band.validate(sample_rate)?;
+            band.validate(sample_rate, self.eq_weight())?;
         }
         Ok(())
     }
@@ -466,7 +510,7 @@ impl AudioTreatment {
             ));
         }
         self.validate(source.sample_rate)?;
-        if source.channels != 2 && self.bands().any(|band| band.channel.index().is_some()) {
+        if source.channels != 2 && self.bands().any(|band| band.channel != EqChannel::Stereo) {
             return Err(MediaError::Unsupported(
                 "Channel EQ needs a stereo recording",
             ));
@@ -515,6 +559,8 @@ impl AudioTreatment {
             || self.repairs().next().is_some()
             || self.has_dynamics()
             || self.mono == MonoMode::Mix
+            || self.eq_input_db != 0.0
+            || self.eq_output_db != 0.0
             || self.gain_db != 0
             || self.compressor_input_db != 0
             || self.balance != 0
@@ -538,6 +584,8 @@ pub enum PreviewMonitor {
     Band {
         low_hz: u16,
         high_hz: u16,
+        #[serde(default)]
+        channel: EqChannel,
     },
     CompressorDifference,
 }
@@ -546,6 +594,7 @@ pub enum PreviewMonitor {
 pub struct PreparedTreatment {
     settings: AudioTreatment,
     gain: f64,
+    monitor_gain: f64,
     loudness: Option<f64>,
     preview_ceiling: bool,
     monitor: PreviewMonitor,
@@ -556,6 +605,7 @@ impl Default for PreparedTreatment {
         Self {
             settings: AudioTreatment::default(),
             gain: 1.0,
+            monitor_gain: 1.0,
             loudness: None,
             preview_ceiling: false,
             monitor: PreviewMonitor::Normal,
@@ -581,7 +631,14 @@ impl PreparedTreatment {
         if !self.preview_ceiling || !(0.0..=1.0).contains(&peak) {
             return self;
         }
-        let manual_db = self.settings.level_gain_db();
+        let mut manual_db = self.settings.level_gain_db();
+        if self.settings.normalize {
+            manual_db += f64::from(self.settings.eq_input_db);
+        } else {
+            // Preserve manual EQ boosts and let the existing
+            // sample ceiling catch only peaks that actually need protection.
+            manual_db -= f64::from(self.settings.eq_output_db.max(0.0));
+        }
         let width = 1.0 + f64::from(self.settings.stereo_width.max(0)) * 0.01;
         if !self.settings.normalize && manual_db <= 0.0 && width == 1.0 {
             return self;
@@ -621,7 +678,7 @@ impl PreparedTreatment {
         attenuation_db: Option<f32>,
     ) -> Self {
         self.monitor = monitor.unwrap_or_default();
-        self.gain *= db_gain(f64::from(
+        self.monitor_gain = db_gain(f64::from(
             attenuation_db.unwrap_or_default().clamp(-48.0, 0.0),
         ));
         self
@@ -630,8 +687,104 @@ impl PreparedTreatment {
     pub fn same_preview(self, other: Self) -> bool {
         self.settings == other.settings
             && self.gain == other.gain
+            && self.monitor_gain == other.monitor_gain
             && self.monitor == other.monitor
             && self.preview_ceiling == other.preview_ceiling
+    }
+
+    /// Fast preview updates can keep decoding the same source and crossfade
+    /// two EQ processors. Stateful treatments outside EQ keep their normal handoff.
+    pub fn can_retune_eq(self, next: Self, sample_rate: u32) -> bool {
+        if !self.can_stream_eq() || !next.can_stream_eq() {
+            return false;
+        }
+        let a = self.settings;
+        let b = next.settings;
+        let a_strength = a.eq_weight();
+        let b_strength = b.eq_weight();
+        if a.bands().count() != b.bands().count()
+            || !a.bands().zip(b.bands()).all(|(left, right)| {
+                left.id == right.id
+                    && left.kind == right.kind
+                    && left.channel == right.channel
+                    && left.slope == right.slope
+                    && left.bypassed == right.bypassed
+                    && left.dynamic.map(|dynamic| dynamic.spectral)
+                        == right.dynamic.map(|dynamic| dynamic.spectral)
+            })
+        {
+            return false;
+        }
+        if a.has_spectral_eq() {
+            // The producer may update spectral settings in place. Send edits
+            // that require new filter history to the background preview worker.
+            let legacy_gain_filters = |settings: AudioTreatment, strength| {
+                [
+                    settings.eq_enabled(settings.bass_db * strength != 0.0, BYPASS_BASS),
+                    settings.eq_enabled(settings.presence_db * strength != 0.0, BYPASS_BELL),
+                    settings.eq_enabled(settings.treble_db * strength != 0.0, BYPASS_TREBLE),
+                ]
+            };
+            if !a.ordinary_eq_dynamics_match(b)
+                || self.gain != next.gain
+                || self.monitor_gain != next.monitor_gain
+                || legacy_gain_filters(a, a_strength) != legacy_gain_filters(b, b_strength)
+                || a.bands()
+                    .zip(b.bands())
+                    .any(|(left, right)| left.active(a_strength) != right.active(b_strength))
+            {
+                return false;
+            }
+        }
+        // Keep the full preroll handoff for resonant filters whose poles
+        // need more history than the live decoder retains.
+        let settles_quickly = |hz: u16, q: f64| {
+            let edge = u32::from(hz).min((sample_rate / 2).saturating_sub(u32::from(hz)));
+            f64::from(edge) >= q * 24.0
+        };
+        if b.bands().any(|band| {
+            band.active(b_strength)
+                && !(band.gain_db * b_strength == 0.0
+                    && band.dynamic.is_some_and(|mode| mode.spectral))
+                && !settles_quickly(band.hz, band.effective_quality())
+        }) || b.eq_enabled(b.notch_hz != 0, BYPASS_NOTCH)
+            && !settles_quickly(
+                b.notch_hz,
+                f64::from(if b.notch_q == 0 { 15 } else { b.notch_q }),
+            )
+        {
+            return false;
+        }
+        fn without_eq(settings: AudioTreatment) -> AudioTreatment {
+            AudioTreatment {
+                rumble_hz: 0,
+                high_cut_hz: 0,
+                notch_hz: 0,
+                notch_q: 0,
+                bass_db: 0.0,
+                bass_hz: 0,
+                presence_db: 0.0,
+                presence_hz: 0,
+                presence_q: 0,
+                treble_db: 0.0,
+                treble_hz: 0,
+                eq_strength: None,
+                eq_input_db: 0.0,
+                eq_output_db: 0.0,
+                eq_bands: None,
+                ..settings
+            }
+        }
+        (a.high_cut_hz == 0) == (b.high_cut_hz == 0)
+            && (a.notch_hz == 0) == (b.notch_hz == 0)
+            && without_eq(a) == without_eq(b)
+    }
+
+    pub fn can_stream_eq(self) -> bool {
+        self.monitor == PreviewMonitor::Normal
+            && !self.settings.normalize
+            && !self.settings.has_dynamics()
+            && self.settings.repairs().next().is_none()
     }
 
     /// Prime stateful effects before a seek so they approach their settled
@@ -639,6 +792,9 @@ impl PreparedTreatment {
     pub fn preview_start(self, start: u64, rate: u32) -> u64 {
         let settings = self.settings;
         let mut decode_start = start;
+        if self.preview_ceiling {
+            decode_start = start.saturating_sub(PreviewCeiling::history_frames(rate));
+        }
         for repair in settings.repairs().filter(|repair| start < repair.end_frame) {
             let history = band_repair::history_frames(rate, repair);
             let repair_warmup = repair.start_frame.saturating_sub(history);
@@ -667,7 +823,10 @@ impl PreparedTreatment {
             };
             frames = frames.max((rate * u64::from(quality) * 6).div_ceil(edge));
         }
-        for band in settings.bands().filter(|band| band.active()) {
+        for band in settings
+            .bands()
+            .filter(|band| band.active(settings.eq_weight()))
+        {
             let frequency = u64::from(band.hz);
             let edge = frequency.min((rate / 2).saturating_sub(frequency)).max(1);
             let quality = (band.effective_quality() * 100.0).round() as u64;
@@ -738,7 +897,7 @@ pub fn prepare_treatment(
     let mut samples = Vec::new();
     while let Some(block) = recording.next(&mut cancelled)? {
         samples.clear();
-        processor.visit(block, |frame| samples.extend_from_slice(frame));
+        processor.visit::<false>(block, |frame, _| samples.extend_from_slice(frame));
         meter.add_frames_f64(&samples).map_err(measurement_error)?;
     }
     check_cancelled(&mut cancelled)?;
@@ -782,7 +941,12 @@ pub struct TreatmentProcessor {
     output: SourceInfo,
     filters: Vec<Vec<Biquad>>,
     monitor_filters: Vec<[Biquad; 2]>,
-    source_eq: [(Vec<Biquad>, Vec<DynamicBand>); 2],
+    source_eq: [ChannelEq; 2],
+    matrix_eq: [ChannelEq; 2],
+    has_matrix_eq: bool,
+    eq_glide: Option<eq_glide::EqGlide>,
+    preview_guard: Option<PreviewCeiling>,
+    spectral_eq: Option<SpectralEq>,
     dynamic_eq: Vec<DynamicBand>,
     band_repairs: Vec<BandRepair>,
     channel_repairs: Vec<BandRepair>,
@@ -792,6 +956,7 @@ pub struct TreatmentProcessor {
     eq_sidechain: Vec<f64>,
     width: f64,
     balance: [f64; 2],
+    eq_input_gain: f64,
     level_gain: f64,
 }
 
@@ -840,11 +1005,17 @@ impl TreatmentProcessor {
                 false,
             ));
         }
+        let strength = settings.eq_weight();
         let [bass_hz, presence_hz, treble_hz] = settings.tone_frequencies();
-        if settings.eq_enabled(settings.bass_db != 0.0, BYPASS_BASS) {
-            filters.push(Biquad::shelf(rate, bass_hz, settings.bass_db, false));
+        if settings.eq_enabled(settings.bass_db * strength != 0.0, BYPASS_BASS) {
+            filters.push(Biquad::shelf(
+                rate,
+                bass_hz,
+                settings.bass_db * strength,
+                false,
+            ));
         }
-        if settings.eq_enabled(settings.presence_db != 0.0, BYPASS_BELL) {
+        if settings.eq_enabled(settings.presence_db * strength != 0.0, BYPASS_BELL) {
             let quality = if settings.presence_q == 0 {
                 0.8
             } else {
@@ -853,33 +1024,63 @@ impl TreatmentProcessor {
             filters.push(Biquad::peak(
                 rate,
                 presence_hz,
-                settings.presence_db,
+                settings.presence_db * strength,
                 quality,
             ));
         }
-        if settings.eq_enabled(settings.treble_db != 0.0, BYPASS_TREBLE) {
-            filters.push(Biquad::shelf(rate, treble_hz, settings.treble_db, true));
+        if settings.eq_enabled(settings.treble_db * strength != 0.0, BYPASS_TREBLE) {
+            filters.push(Biquad::shelf(
+                rate,
+                treble_hz,
+                settings.treble_db * strength,
+                true,
+            ));
         }
         let balance = f64::from(settings.balance) * 0.01;
         let channels = usize::from(output.channels);
-        let mut source_eq: [(Vec<Biquad>, Vec<DynamicBand>); 2] = Default::default();
+        let mut source_eq: [ChannelEq; 2] = Default::default();
+        let mut matrix_eq: [ChannelEq; 2] = Default::default();
         let mut dynamic_eq = Vec::new();
+        let mut spectral_bands = Vec::new();
         for (index, band) in settings
             .bands()
             .enumerate()
-            .filter(|(_, band)| band.active())
+            .filter(|(_, band)| band.active(strength))
         {
-            if let Some(channel) = band.channel.index() {
-                source_eq[channel].0.extend(band.filters(rate));
-                source_eq[channel]
-                    .1
-                    .extend(DynamicBand::new(index, band, rate, 1));
-            } else {
-                filters.extend(band.filters(rate));
-                dynamic_eq.extend(DynamicBand::new(index, band, rate, channels));
+            let channel = match band.channel {
+                EqChannel::Stereo => {
+                    filters.extend(band.filters(rate, strength));
+                    dynamic_eq.extend(DynamicBand::new(index, band, rate, channels));
+                    if band.dynamic.is_some_and(|dynamic| dynamic.spectral) {
+                        spectral_bands.push((index, band));
+                    }
+                    continue;
+                }
+                EqChannel::Left => &mut source_eq[0],
+                EqChannel::Right => &mut source_eq[1],
+                EqChannel::Mid => &mut matrix_eq[0],
+                EqChannel::Side => &mut matrix_eq[1],
+            };
+            channel.filters.extend(band.filters(rate, strength));
+            channel
+                .dynamic
+                .extend(DynamicBand::new(index, band, rate, 1));
+            if band.dynamic.is_some_and(|dynamic| dynamic.spectral) {
+                channel.spectral_bands.push((index, band));
             }
         }
-        let monitor_filters = if let PreviewMonitor::Band { low_hz, high_hz } = prepared.monitor {
+        for channel in source_eq.iter_mut().chain(&mut matrix_eq) {
+            channel.spectral =
+                SpectralEq::new(&channel.spectral_bands, source.sample_rate, 1, first_frame);
+            channel.spectral_bands = Vec::new();
+        }
+        let has_matrix_eq = matrix_eq.iter().any(ChannelEq::is_active);
+        let spectral_eq =
+            SpectralEq::new(&spectral_bands, source.sample_rate, channels, first_frame);
+        let monitor_filters = if let PreviewMonitor::Band {
+            low_hz, high_hz, ..
+        } = prepared.monitor
+        {
             if low_hz < 20
                 || high_hz.saturating_sub(low_hz) < 20
                 || f64::from(high_hz) > (rate * 0.45).min(20_000.0)
@@ -911,6 +1112,13 @@ impl TreatmentProcessor {
             filters: vec![filters; channels],
             monitor_filters,
             source_eq,
+            matrix_eq,
+            has_matrix_eq,
+            eq_glide: None,
+            preview_guard: prepared
+                .preview_ceiling
+                .then(|| PreviewCeiling::new(source.sample_rate, db_gain(CEILING_DBTP))),
+            spectral_eq,
             dynamic_eq,
             band_repairs,
             channel_repairs,
@@ -920,6 +1128,7 @@ impl TreatmentProcessor {
             eq_sidechain: vec![0.0; channels],
             width: 1.0 + f64::from(settings.stereo_width) * 0.01,
             balance: [1.0 - balance.max(0.0), 1.0 + balance.min(0.0)],
+            eq_input_gain: db_gain(f64::from(settings.eq_input_db)),
             level_gain: db_gain(settings.level_gain_db()),
         })
     }
@@ -945,65 +1154,207 @@ impl TreatmentProcessor {
         self.dynamics.as_ref().map_or(0.0, Dynamics::gate_gain_db)
     }
 
-    pub(super) fn dynamic_eq_mix(&self) -> Vec<f32> {
-        let mut mixes = Vec::new();
-        for band in self
-            .dynamic_eq
+    fn channel_eq(&self) -> impl Iterator<Item = &ChannelEq> {
+        self.source_eq.iter().chain(&self.matrix_eq)
+    }
+
+    fn dynamic_readings(&self) -> impl Iterator<Item = (usize, f32, f32)> + '_ {
+        self.dynamic_eq
             .iter()
-            .chain(self.source_eq.iter().flat_map(|(_, bands)| bands))
-        {
-            if mixes.len() <= band.index {
-                mixes.resize(band.index + 1, 0.0);
+            .chain(self.channel_eq().flat_map(|channel| &channel.dynamic))
+            .map(|band| (band.index, band.mix() as f32, band.detector_db()))
+            .chain(
+                self.spectral_eq
+                    .iter()
+                    .chain(
+                        self.channel_eq()
+                            .filter_map(|channel| channel.spectral.as_ref()),
+                    )
+                    .flat_map(SpectralEq::readings),
+            )
+    }
+
+    pub(super) fn dynamic_eq_readings(&self) -> (Vec<f32>, Vec<Option<f32>>) {
+        let mut mix = Vec::new();
+        let mut detectors = Vec::new();
+        for (index, reduction, detector) in self.dynamic_readings() {
+            if mix.len() <= index {
+                mix.resize(index + 1, 0.0);
+                detectors.resize(index + 1, None);
             }
-            mixes[band.index] = band.mix() as f32;
+            mix[index] = reduction;
+            detectors[index] = Some(detector);
         }
-        mixes
+        (mix, detectors)
+    }
+
+    pub(super) fn spectral_eq_response(&self) -> Vec<super::probe::SpectralEqResponse> {
+        [
+            (EqChannel::Stereo, self.spectral_eq.as_ref()),
+            (EqChannel::Left, self.source_eq[0].spectral.as_ref()),
+            (EqChannel::Right, self.source_eq[1].spectral.as_ref()),
+            (EqChannel::Mid, self.matrix_eq[0].spectral.as_ref()),
+            (EqChannel::Side, self.matrix_eq[1].spectral.as_ref()),
+        ]
+        .into_iter()
+        .filter_map(|(channel, eq)| eq?.response(channel, self.output.sample_rate))
+        .collect()
+    }
+
+    pub(super) fn dynamic_eq_detector(&self, index: usize) -> Option<f32> {
+        self.dynamic_readings()
+            .find(|&(band, _, _)| band == index)
+            .map(|(_, _, detector)| detector)
+    }
+
+    pub fn carry_eq_state(&mut self, previous: &Self) {
+        if let (Some(next), Some(previous)) = (&mut self.preview_guard, &previous.preview_guard) {
+            next.carry_state(previous);
+        }
+        fn carry_bands(next: &mut [DynamicBand], previous: &[DynamicBand]) {
+            for (next, previous) in next.iter_mut().zip(previous) {
+                next.carry_state(previous);
+            }
+        }
+        let channels_unchanged = |mode: fn(EqChannel) -> bool| {
+            self.prepared
+                .settings
+                .bands()
+                .filter(|band| mode(band.channel))
+                .eq(previous
+                    .prepared
+                    .settings
+                    .bands()
+                    .filter(|band| mode(band.channel)))
+                && self.prepared.settings.eq_weight() == previous.prepared.settings.eq_weight()
+        };
+        let same_source = channels_unchanged(|channel| channel.source_index().is_some());
+        let same_matrix =
+            channels_unchanged(|channel| matches!(channel, EqChannel::Mid | EqChannel::Side));
+        if same_source && same_matrix {
+            carry_bands(&mut self.dynamic_eq, &previous.dynamic_eq);
+            if let (Some(next), Some(previous)) = (&mut self.spectral_eq, &previous.spectral_eq) {
+                next.carry_detector(previous);
+            }
+        }
+        if same_source {
+            for (next, previous) in self.matrix_eq.iter_mut().zip(&previous.matrix_eq) {
+                next.carry_detectors(previous);
+            }
+        }
+        for (next, previous) in self.source_eq.iter_mut().zip(&previous.source_eq) {
+            next.carry_detectors(previous);
+        }
+    }
+
+    pub fn process_for_playback(
+        &mut self,
+        input: &[i32],
+        output: &mut Vec<i32>,
+    ) -> super::PlaybackReadings {
+        let (unclipped_peak, eq_input_peak) = self.process_pcm::<true, true>(input, output);
+        let (mix, eq_detectors) = self.dynamic_eq_readings();
+        super::PlaybackReadings {
+            reduction: self.compression_gain_db(),
+            detector: self.dynamics_detector_db(),
+            gate_reduction: self.gate_gain_db(),
+            mix,
+            eq_detectors,
+            overload: unclipped_peak > 1.0,
+            eq_input_peak: Some(super::probe::amplitude_db(eq_input_peak)),
+            spectral_response: self.spectral_eq_response(),
+        }
     }
 
     /// Process complete, interleaved frames, retaining history between blocks.
     /// The output uses the same signed full-scale representation as the decoder.
     pub fn process(&mut self, input: &[i32], output: &mut Vec<i32>) {
+        self.process_pcm::<false, false>(input, output);
+    }
+
+    pub(super) fn process_with_peak(&mut self, input: &[i32], output: &mut Vec<i32>) -> f64 {
+        self.process_pcm::<true, false>(input, output).0
+    }
+
+    fn process_pcm<const MEASURE: bool, const EQ_INPUT: bool>(
+        &mut self,
+        input: &[i32],
+        output: &mut Vec<i32>,
+    ) -> (f64, f64) {
         output.clear();
         if !self.prepared.settings.is_active()
             && self.prepared.monitor == PreviewMonitor::Normal
             && self.prepared.gain == 1.0
+            && self.prepared.monitor_gain == 1.0
+            && self.eq_glide.is_none()
         {
             output.extend_from_slice(input);
-            return;
+            let peak = if MEASURE {
+                input
+                    .iter()
+                    .map(|&sample| f64::from(sample).abs() / PCM_SCALE)
+                    .fold(0.0, f64::max)
+            } else {
+                0.0
+            };
+            return (peak, peak);
         }
         let gain = self.prepared.gain;
-        let preview_ceiling = self.prepared.preview_ceiling.then(|| db_gain(CEILING_DBTP));
-        self.visit(input, |frame| {
-            let gain = preview_ceiling.map_or(gain, |ceiling| {
-                let peak = frame_peak(frame);
-                if peak > 0.0 {
-                    gain.min(ceiling / peak)
-                } else {
-                    gain
-                }
-            });
-            let scale = gain * PCM_SCALE;
+        let monitor_gain = self.prepared.monitor_gain;
+        let mut preview_guard = self.preview_guard.take();
+        let mut output_peak = 0.0_f64;
+        let mut input_peak = 0.0_f64;
+        self.visit::<EQ_INPUT>(input, |frame, eq_input| {
+            if EQ_INPUT {
+                input_peak = input_peak.max(eq_input);
+            }
+            let peak = if MEASURE || preview_guard.is_some() {
+                frame_peak(frame)
+            } else {
+                0.0
+            };
+            if MEASURE {
+                output_peak = output_peak.max(peak * gain);
+            }
+            let protected = preview_guard
+                .as_mut()
+                .map_or(gain, |guard| guard.gain(peak, gain));
+            // Apply level matching to the same protected signal measured for
+            // comparison. Attenuating before the guard changes its response.
+            let scale = protected * monitor_gain * PCM_SCALE;
             output.extend(frame.iter().map(|sample| (sample * scale).round() as i32));
         });
+        self.preview_guard = preview_guard;
+        (output_peak, input_peak)
     }
 
-    fn visit(&mut self, input: &[i32], mut produced: impl FnMut(&[f64])) {
+    fn visit<const EQ_INPUT: bool>(
+        &mut self,
+        input: &[i32],
+        mut produced: impl FnMut(&[f64], f64),
+    ) {
         let settings = self.prepared.settings;
         let pcm = |sample: i32| f64::from(sample) / PCM_SCALE;
         for input_frame in input.chunks_exact(self.source_channels) {
+            self.advance_eq_glide();
+            let mut eq_input = 0.0;
             if let &[left, right] = input_frame {
                 let mut stereo = [pcm(left), pcm(right)];
                 for repair in &mut self.channel_repairs {
                     repair.apply(self.next_frame, &mut stereo);
                 }
-                for (sample, (filters, dynamic)) in stereo.iter_mut().zip(&mut self.source_eq) {
-                    let dry = *sample;
-                    for filter in filters {
-                        *sample = filter.filter(*sample);
+                for (sample, eq) in stereo.iter_mut().zip(&mut self.source_eq) {
+                    *sample *= self.eq_input_gain;
+                    if EQ_INPUT {
+                        eq_input = sample.abs().max(eq_input);
                     }
-                    for band in dynamic {
-                        band.apply(std::slice::from_mut(sample), std::slice::from_ref(&dry));
-                    }
+                    eq.apply(sample);
+                }
+                if self.has_matrix_eq {
+                    let [mut mid, mut side] = mid_side(stereo);
+                    self.matrix_eq[0].apply(&mut mid);
+                    self.matrix_eq[1].apply(&mut side);
+                    stereo = [mid + side, mid - side];
                 }
                 if settings.swap_channels {
                     stereo.swap(0, 1);
@@ -1028,7 +1379,10 @@ impl TreatmentProcessor {
                 }
             } else {
                 for (output, &sample) in self.frame.iter_mut().zip(input_frame) {
-                    *output = pcm(sample);
+                    *output = pcm(sample) * self.eq_input_gain;
+                    if EQ_INPUT {
+                        eq_input = output.abs().max(eq_input);
+                    }
                 }
             }
             for repair in &mut self.band_repairs {
@@ -1037,7 +1391,7 @@ impl TreatmentProcessor {
             if !self.band_repairs.is_empty() || !self.channel_repairs.is_empty() {
                 self.next_frame += 1;
             }
-            if !self.dynamic_eq.is_empty() {
+            if !self.dynamic_eq.is_empty() || self.spectral_eq.is_some() {
                 self.eq_sidechain.copy_from_slice(&self.frame);
             }
             for (sample, filters) in self.frame.iter_mut().zip(&mut self.filters) {
@@ -1047,6 +1401,9 @@ impl TreatmentProcessor {
             }
             for band in &mut self.dynamic_eq {
                 band.apply(&mut self.frame, &self.eq_sidechain);
+            }
+            if let Some(spectral) = &mut self.spectral_eq {
+                spectral.apply(&mut self.frame, &self.eq_sidechain);
             }
             let dynamics_gain = if self.prepared.monitor == PreviewMonitor::CompressorDifference {
                 self.dynamics.as_mut().map_or(0.0, |dynamics| {
@@ -1061,14 +1418,70 @@ impl TreatmentProcessor {
             for sample in &mut self.frame {
                 *sample *= gain;
             }
+            if let (PreviewMonitor::Band { channel, .. }, [left, right]) =
+                (self.prepared.monitor, self.frame.as_mut_slice())
+            {
+                let stereo = [*left, *right];
+                let isolated = match channel {
+                    EqChannel::Stereo => None,
+                    EqChannel::Left => Some(stereo[0]),
+                    EqChannel::Right => Some(stereo[1]),
+                    EqChannel::Mid => Some(mid_side(stereo)[0]),
+                    EqChannel::Side => Some(mid_side(stereo)[1]),
+                };
+                if let Some(isolated) = isolated {
+                    *left = isolated;
+                    *right = isolated;
+                }
+            }
             for (sample, filters) in self.frame.iter_mut().zip(&mut self.monitor_filters) {
                 for filter in filters {
                     *sample = filter.filter(*sample);
                 }
             }
-            produced(&self.frame);
+            produced(&self.frame, eq_input);
         }
     }
+}
+
+#[derive(Default)]
+struct ChannelEq {
+    filters: Vec<Biquad>,
+    dynamic: Vec<DynamicBand>,
+    spectral_bands: Vec<(usize, EqBand)>,
+    spectral: Option<SpectralEq>,
+}
+
+impl ChannelEq {
+    fn is_active(&self) -> bool {
+        !self.filters.is_empty() || !self.dynamic.is_empty() || self.spectral.is_some()
+    }
+
+    fn carry_detectors(&mut self, previous: &Self) {
+        for (next, previous) in self.dynamic.iter_mut().zip(&previous.dynamic) {
+            next.carry_state(previous);
+        }
+        if let (Some(next), Some(previous)) = (&mut self.spectral, &previous.spectral) {
+            next.carry_detector(previous);
+        }
+    }
+
+    fn apply(&mut self, sample: &mut f64) {
+        let dry = *sample;
+        for filter in &mut self.filters {
+            *sample = filter.filter(*sample);
+        }
+        for band in &mut self.dynamic {
+            band.apply(std::slice::from_mut(sample), std::slice::from_ref(&dry));
+        }
+        if let Some(spectral) = &mut self.spectral {
+            spectral.apply(std::slice::from_mut(sample), std::slice::from_ref(&dry));
+        }
+    }
+}
+
+fn mid_side([left, right]: [f64; 2]) -> [f64; 2] {
+    [(left + right) * 0.5, (left - right) * 0.5]
 }
 
 fn frame_peak(frame: &[f64]) -> f64 {
@@ -1076,6 +1489,9 @@ fn frame_peak(frame: &[f64]) -> f64 {
         .iter()
         .fold(0.0, |peak, sample| peak.max(sample.abs()))
 }
+
+#[cfg(test)]
+mod eq_features_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1767,6 +2183,7 @@ mod tests {
             hz: 1_000,
             q: 300,
             dynamic: Some(DynamicEq {
+                spectral: false,
                 threshold_db: -24.0,
                 ratio: 2.0,
                 amount_db: 9.0,
@@ -1798,6 +2215,7 @@ mod tests {
                     hz: 1_000,
                     q: 300,
                     dynamic: Some(DynamicEq {
+                        spectral: false,
                         threshold_db: -24.0,
                         amount_db,
                         ratio,
@@ -1830,6 +2248,7 @@ mod tests {
             hz: 1_000,
             q: 300,
             dynamic: Some(DynamicEq {
+                spectral: false,
                 threshold_db: -24.0,
                 ratio: 2.0,
                 amount_db: -9.0,
@@ -1872,6 +2291,7 @@ mod tests {
                     gain_db,
                     q,
                     dynamic: amount_db.map(|amount_db| DynamicEq {
+                        spectral: false,
                         threshold_db: -24.0,
                         ratio: 2.0,
                         amount_db,
@@ -1948,6 +2368,7 @@ mod tests {
         let prepared = PreparedTreatment::preview(AudioTreatment::default(), source).unwrap();
         let isolated = prepared.with_preview_monitor(
             Some(PreviewMonitor::Band {
+                channel: EqChannel::Stereo,
                 low_hz: 800,
                 high_hz: 1250,
             }),

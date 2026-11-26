@@ -1,9 +1,32 @@
 import { readTreatment, type AudioTreatment } from './audio-treatment';
+import { toolPatch } from './audio-tools-window';
 
 export type TreatmentRecipe = { name: string; settings: AudioTreatment };
 
 const recipeKey = 'tagnetic.audioTreatment.recipes';
+export type SavedEqPreset = { id: string; label: string; patch: Partial<AudioTreatment> };
+const eqPresetKey = 'tagnetic.audioTreatment.eqPresets';
 const copyKey = 'tagnetic.audioTreatment.copied';
+
+export function readEqPresets(): SavedEqPreset[] {
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(eqPresetKey) ?? '[]');
+    if (!Array.isArray(stored)) return [];
+    const ids = new Set<string>();
+    return stored.flatMap(preset => {
+      if (typeof preset?.id !== 'string' || !preset.id || ids.has(preset.id)
+        || typeof preset.label !== 'string' || !preset.label.trim() || !preset.patch || typeof preset.patch !== 'object') return [];
+      ids.add(preset.id);
+      return [{ id: preset.id, label: preset.label.trim(), patch: toolPatch('eq', readTreatment(preset.patch)) }];
+    });
+  } catch {
+    return [];
+  }
+}
+
+export function saveEqPresets(presets: SavedEqPreset[]) {
+  localStorage.setItem(eqPresetKey, JSON.stringify(presets));
+}
 
 export function portableTreatment(settings: Partial<AudioTreatment>): AudioTreatment {
   return readTreatment({ ...settings, spectralRepairs: null });

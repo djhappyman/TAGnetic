@@ -1,6 +1,9 @@
 //! Decode and resample off the device callback. A superseded seek closes its
 //! voice and leaves only one pending decoder request on the worker.
-use super::StudioAudition;
+use super::{
+    retune::{LiveProcessor, RetuneSlot},
+    StudioAudition,
+};
 use crate::{fixed::Fixed, router, RodioSink};
 use rodio::{ChannelCount, SampleRate, Source};
 use std::{
@@ -13,7 +16,7 @@ use std::{
     },
     time::Duration,
 };
-use tagrex_audio_workbench::{PreparedTreatment, PreviewDecoder, SeekIndex, TreatmentProcessor};
+use tagrex_audio_workbench::{PlaybackHistory, PreparedTreatment, PreviewDecoder, SeekIndex};
 
 const CHUNK_FRAMES: usize = 256;
 const BUFFERED_CHUNKS: usize = 12;
@@ -81,8 +84,19 @@ impl Mailbox {
             }
             let job = state.next.take().expect("a requested decoder job");
             drop(state);
+            job.shared
+                .analysis
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .set_producing(true);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run()))
                 .unwrap_or_else(|_| Err("The decoder failed on the recording".into()));
+            job.shared.retune.close();
+            job.shared
+                .analysis
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .set_producing(false);
             if !job.shared.cancelled() {
                 if let Err(error) = result {
                     eprintln!("audio: Studio preview failed: {error}");
@@ -313,6 +327,14 @@ impl Voice {
     pub(super) fn ended(&self) -> bool {
         self.shared.ended.load(Ordering::Acquire)
     }
+    pub(super) fn retune_eq(&self, target: PreparedTreatment) -> bool {
+        self.shared.retune.submit(target)
+    }
+
+    pub(super) fn playback_history(&self) -> Arc<Mutex<PlaybackHistory>> {
+        self.shared.analysis.clone()
+    }
+
     pub(super) fn position(&self) -> Duration {
         Duration::from_nanos(self.shared.position_ns.load(Ordering::Acquire))
     }
@@ -339,6 +361,8 @@ struct Shared {
     handoff_sample: AtomicUsize,
     buffer_end_ns: AtomicU64,
     buffer_full: AtomicBool,
+    analysis: Arc<Mutex<PlaybackHistory>>,
+    retune: RetuneSlot,
     gate: Mutex<()>,
     changed: Condvar,
 }
@@ -498,6 +522,13 @@ impl Job {
                 )
                 .saturating_mul(u64::from(self.channels.get()))
                     <= MAX_LOOP_SAMPLES;
+            if cache_loop {
+                self.shared
+                    .analysis
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .retain_cached_loop(start, self.decode.end);
+            }
             let origin_nanos = native_time(start, self.decode.source_rate);
             let cache = self.decode_window(start, origin_nanos, cache_loop)?;
             let Some(loop_start) = self.decode.loop_start else {
@@ -542,10 +573,16 @@ impl Job {
             return Err("The recording sample rate changed".into());
         }
         let mut failure = None;
+        let retunable = self.decode.loop_start.is_none() && treatment.can_stream_eq();
+        let processor = LiveProcessor::new(processor, treatment, decoder.source_info(), retunable);
+        if retunable {
+            self.shared.retune.enable();
+        }
         let native = Native::new(
             decoder,
             processor,
-            (start - decode_start) * channels,
+            start..self.decode.end,
+            decode_start,
             &self.shared,
             &mut remaining,
             &mut failure,
@@ -621,8 +658,10 @@ impl Job {
 
 struct Native<'a> {
     decoder: PreviewDecoder,
-    processor: TreatmentProcessor,
+    processor: LiveProcessor,
     discard_samples: u64,
+    decoded_frame: u64,
+    end_frame: u64,
     shared: &'a Shared,
     remaining: &'a mut u64,
     failure: &'a mut Option<String>,
@@ -635,8 +674,9 @@ struct Native<'a> {
 impl<'a> Native<'a> {
     fn new(
         decoder: PreviewDecoder,
-        processor: TreatmentProcessor,
-        discard_samples: u64,
+        processor: LiveProcessor,
+        playback: Range<u64>,
+        decode_start: u64,
         shared: &'a Shared,
         remaining: &'a mut u64,
         failure: &'a mut Option<String>,
@@ -647,7 +687,9 @@ impl<'a> Native<'a> {
         Ok(Self {
             decoder,
             processor,
-            discard_samples,
+            discard_samples: (playback.start - decode_start) * u64::from(channels.get()),
+            decoded_frame: decode_start,
+            end_frame: playback.end,
             shared,
             remaining,
             failure,
@@ -667,9 +709,42 @@ impl Iterator for Native<'_> {
             return None;
         }
         while self.index == self.packet.len() {
+            let input = self.decoder.source_info();
             match self.decoder.next_block(|| self.shared.cancelled()) {
                 Ok(Some(block)) => {
-                    self.processor.process(block, &mut self.packet);
+                    let frame = self.decoded_frame;
+                    let channels = usize::from(input.channels);
+                    let frames = block.len() / channels;
+                    self.decoded_frame += frames as u64;
+                    self.processor.retune(
+                        &self.shared.retune,
+                        input,
+                        frame,
+                        self.decoded_frame >= self.end_frame,
+                    );
+                    let wanted = self
+                        .shared
+                        .analysis
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .wanted();
+                    if let Some(readings) = self.processor.process(block, &mut self.packet, wanted)
+                    {
+                        let output = self.processor.output_info();
+                        let inside = frames.min(self.end_frame.saturating_sub(frame) as usize);
+                        self.shared
+                            .analysis
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .push(
+                                frame,
+                                (input, output),
+                                self.processor.prepared().settings(),
+                                &block[..inside * channels],
+                                &self.packet[..inside * usize::from(output.channels)],
+                                readings,
+                            );
+                    }
                     let skip = self.discard_samples.min(self.packet.len() as u64);
                     self.index = skip as usize;
                     self.discard_samples -= skip;

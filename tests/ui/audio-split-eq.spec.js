@@ -32,6 +32,10 @@ test.beforeEach(async ({ page }) => {
     window.eqFixture = {
       requests,
       settings: () => state.settings,
+      setSettings(patch) {
+        state = { ...state, settings: { ...state.settings, ...patch } };
+        publish();
+      },
       setBands(eqBands) {
         state = { ...state, settings: { ...state.settings, eqBands } };
         publish();
@@ -40,10 +44,14 @@ test.beforeEach(async ({ page }) => {
         state = { ...state, playing };
         publish();
       },
+      setOriginal(original) {
+        state = { ...state, original };
+        publish();
+      },
       probe(original, treated, peaks = {}) {
         handlers.get('tagnetic:audio-tools-probe')?.({
           payload: { sourceId: state.sourceId, probe: {
-            frequencies: original.length ? [120, 3000] : [], original, treated, input: -18, output: -18, reduction: [], ...peaks,
+            frequencies: original.length ? [120, 3000] : [], original, treated, input: -18, output: -18, reduction: [], eqInputPeak: peaks.inputPeak, ...peaks,
           } },
         });
       },
@@ -54,6 +62,10 @@ test.beforeEach(async ({ page }) => {
         async emitTo(_target, _name, request) {
           requests.push(request);
           if (request.action === 'sync') publish();
+          if (request.action === 'compare') {
+            state = { ...state, original: request.original };
+            queueMicrotask(publish);
+          }
           if (request.action === 'solo-band') {
             playingBeforeSolo ??= state.playing;
             state = { ...state, playing: true, monitor: 'band' };
@@ -156,8 +168,7 @@ test('EQ graph creates bands, opens exact values and preserves parameters throug
   await page.getByRole('menuitem', { name: 'Enable band', exact: true }).click();
   await expect.poll(async () => (await settingsOf(page)).eqBands?.[0]?.bypassed).toBe(false);
 
-  const add = page.getByRole('button', { name: 'Add EQ band', exact: true });
-  await add.click();
+  await graph.getByRole('button', { name: 'Add EQ band on the graph' }).press('Shift+F10');
   await page.getByRole('menuitem', { name: 'Add bell' }).click();
   const extra = graph.getByRole('button', { name: 'Bell 2', exact: true });
   await expect(extra).toBeVisible();
@@ -249,6 +260,77 @@ test('EQ cancels a captured drag, freezes probes and releases momentary band aud
   await expect.poll(() => page.evaluate(() => window.eqFixture.requests.some(call => call.action === 'stop-audition'))).toBe(true);
 });
 
+test('the EQ curve keeps painting through consecutive frames of a captured node drag', async ({ page }) => {
+  const graph = page.getByRole('group', { name: 'Frequency response and spectrum' });
+  await page.evaluate(() => {
+    window.eqFixture.setBands([{ id: 1, kind: 'bell', hz: 800, gainDb: 6, q: 100 }]);
+    window.eqFixture.setPlaying(true);
+    window.eqFixture.probe([-32, -41], [-30, -41]);
+  });
+  const node = graph.getByRole('button', { name: 'Bell 1', exact: true });
+  await node.click();
+  await node.evaluate(element => {
+    element.addEventListener('pointerdown', event => { element.dataset.testPointer = String(event.pointerId); }, { once: true });
+  });
+  const box = await node.boundingBox();
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height / 2;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  const frames = await node.evaluate((element, { x, y }) => {
+    const canvas = element.closest('.plot').querySelector('canvas');
+    const context = canvas.getContext('2d');
+    const canvasLeft = canvas.getBoundingClientRect().left;
+    const stroke = context.stroke;
+    const lineTo = Path2D.prototype.lineTo;
+    const peaks = new WeakMap();
+    let peakX = -Infinity;
+    let inSync = 0;
+    let moved = 0;
+    const centre = () => {
+      const { left, width } = element.getBoundingClientRect();
+      return left + width / 2 - canvasLeft;
+    };
+    let previousX = centre();
+    Path2D.prototype.lineTo = function (x, y) {
+      if (y < (peaks.get(this)?.y ?? Infinity)) peaks.set(this, { x, y });
+      return lineTo.call(this, x, y);
+    };
+    context.stroke = function (path) {
+      if (this.lineWidth === 2.8) peakX = peaks.get(path)?.x ?? peakX;
+      return path ? stroke.call(this, path) : stroke.call(this);
+    };
+    return new Promise(resolve => {
+      let frame = 0;
+      function move() {
+        const nodeX = centre();
+        if (nodeX !== previousX) {
+          moved++;
+          if (Math.abs(peakX - nodeX) < 2) inSync++;
+        }
+        previousX = nodeX;
+        if (++frame > 18) {
+          context.stroke = stroke;
+          Path2D.prototype.lineTo = lineTo;
+          resolve({ moved, inSync });
+          return;
+        }
+        element.dispatchEvent(new PointerEvent('pointermove', {
+          bubbles: true, pointerId: Number(element.dataset.testPointer), pointerType: 'mouse', buttons: 1,
+          clientX: x + frame * 5, clientY: y - frame,
+        }));
+        requestAnimationFrame(move);
+      }
+      requestAnimationFrame(move);
+    });
+  }, { x, y });
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  expect(frames.moved).toBeGreaterThan(12);
+  expect(frames.inSync).toBeGreaterThanOrEqual(frames.moved - 1);
+  await expect.poll(async () => (await settingsOf(page)).eqBands?.[0].hz).toBe(800);
+});
+
 test('a band can target one channel and use a dynamic cut, then change shape in the same slot', async ({ page }) => {
   const graph = page.getByRole('group', { name: 'Frequency response and spectrum' });
   await graph.getByRole('button', { name: 'Add EQ band on the graph' }).press('Enter');
@@ -272,6 +354,59 @@ test('a band can target one channel and use a dynamic cut, then change shape in 
   await page.getByRole('menuitem', { name: 'High shelf', exact: true }).click();
   await expect.poll(async () => (await settingsOf(page)).eqBands?.[0]).toMatchObject({ id: bandId, kind: 'treble', channel: 'right' });
   await expect(range).toHaveCount(0);
+});
+
+test('Centre and Sides targeting keeps its graph separate from Left and Right and solos the selected channel', async ({ page }) => {
+  const graph = page.getByRole('group', { name: 'Frequency response and spectrum' });
+  const curves = graph.getByRole('group', { name: 'Channel curves' });
+  await page.evaluate(() => window.eqFixture.setBands([
+    { id: 1, kind: 'bell', hz: 550, gainDb: 6, q: 140, channel: 'left' },
+    { id: 2, kind: 'bell', hz: 2050, gainDb: -8, q: 140 },
+  ]));
+  const bell = graph.getByRole('button', { name: 'Bell 2', exact: true });
+  await bell.press('Shift+F10');
+  await page.getByRole('menuitem', { name: 'Change channel' }).hover();
+  await page.getByRole('menuitemradio', { name: 'Centre', exact: true }).click();
+  await expect.poll(async () => (await settingsOf(page)).eqBands?.[1].channel).toBe('mid');
+  await bell.click();
+  const channels = curves.getByRole('combobox', { name: 'EQ response channels' });
+  await expect(channels).toHaveText('Centre / Sides');
+  await expect(curves.locator('span.secondary')).toHaveText('Sides');
+  await channels.click();
+  await page.getByRole('option', { name: 'Left / Right' }).click();
+  await expect(curves.locator('span.secondary')).toHaveText('Right');
+  await bell.press('Shift+F10');
+  await page.getByRole('menuitem', { name: 'Change channel' }).hover();
+  await page.getByRole('menuitemradio', { name: 'Sides', exact: true }).click();
+  await expect.poll(async () => (await settingsOf(page)).eqBands?.[1].channel).toBe('side');
+  await bell.press('Shift+F10');
+  await page.getByRole('menuitem', { name: 'Solo band', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.eqFixture.requests.find(request => request.action === 'solo-band')?.band.channel)).toBe('side');
+});
+
+test('spectral dynamics uses its own toggle on eligible bands when available', async ({ page }) => {
+  const graph = page.getByRole('group', { name: 'Frequency response and spectrum' });
+  await page.evaluate(() => window.eqFixture.setBands([{
+    id: 1, kind: 'bell', hz: 1500, gainDb: 1, q: 200, dynamic: { thresholdDb: -28, amountDb: 4, ratio: 3 },
+  }]));
+  await graph.getByRole('button', { name: 'Bell 1', exact: true }).click();
+  const spectral = graph.getByRole('button', { name: 'Spectral dynamics', exact: true });
+  await expect(spectral).toHaveCount(0);
+  await page.evaluate(() => window.eqFixture.probe([], [], { spectralEq: true }));
+  await spectral.click();
+  await expect(spectral).toHaveAttribute('aria-pressed', 'true');
+  await graph.getByRole('button', { name: /^Dynamic range,/ }).press('Enter');
+  const range = graph.getByRole('textbox', { name: 'Dynamic range in dB' });
+  await range.fill('-6');
+  await range.press('Enter');
+  await expect.poll(async () => (await settingsOf(page)).eqBands?.[0].dynamic).toEqual({
+    thresholdDb: -28, amountDb: 6, ratio: 3, spectral: true,
+  });
+  await spectral.press('Enter');
+  await expect(spectral).toHaveAttribute('aria-pressed', 'false');
+  await expect.poll(async () => (await settingsOf(page)).eqBands?.[0].dynamic).toEqual({
+    thresholdDb: -28, amountDb: 6, ratio: 3,
+  });
 });
 
 test('a marquee moves multiple EQ bands in parallel as one cancellable gesture', async ({ page }) => {
@@ -634,11 +769,21 @@ test('the named preset switcher cycles EQ presets and keeps filter shapes access
   await expect(presetMenu).toHaveText('Reduce rumble');
   expect((await settingsOf(page)).highCutHz).toBe(0);
   await presetMenu.click();
+  const preset = page.getByRole('menuitem', { name: 'Reduce rumble', exact: true });
+  const filterShape = page.getByRole('menuitem', { name: 'Filter shape', exact: true });
+  await expect(preset).toHaveAttribute('aria-current', 'true');
+  expect((await preset.boundingBox()).height).toBeGreaterThanOrEqual(32);
+  await expect(page.getByRole('menuitemradio', { name: 'Bell', exact: true })).toHaveCount(0);
+  await filterShape.press('ArrowRight');
   await page.getByRole('menuitemradio', { name: 'Bell', exact: true }).click();
   await expect(eq.getByRole('button', { name: 'Bell', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await page.setViewportSize({ width: 340, height: 350 });
+  await page.evaluate(() => { document.documentElement.dataset.theme = 'light'; });
   await presetMenu.click();
+  await filterShape.hover();
+  await expect(page.getByRole('menu', { name: 'Filter shape', exact: true })).toBeInViewport({ ratio: 1 });
   await expect(page.getByRole('menuitemradio', { name: 'Bell', exact: true })).toHaveAttribute('aria-checked', 'true');
-  await page.getByRole('menuitem', { name: 'Reduce rumble', exact: true }).click();
+  await preset.click();
   await expect.poll(async () => (await settingsOf(page)).rumble).toBe(true);
 });
 
@@ -694,7 +839,7 @@ test('frozen peaks can be cut by dragging and Escape removes the audition cut', 
   await page.mouse.down();
   await page.mouse.move(x, y + 24, { steps: 4 });
   await expect.poll(async () => (await settingsOf(page)).eqBands?.[0]).toMatchObject({
-    kind: 'bell', hz: 440, q: 800, gainDb: -6,
+    kind: 'bell', hz: 440, q: 1034, gainDb: -6,
   });
   await page.keyboard.press('Escape');
   await page.mouse.up();
@@ -707,6 +852,57 @@ test('frozen peaks can be cut by dragging and Escape removes the audition cut', 
   await expect(graph.getByRole('group', { name: 'Bell 1 settings' })).toBeVisible();
   await page.getByRole('button', { name: 'Resume spectrum', exact: true }).click();
   await expect(peak).toHaveCount(0);
+  await page.evaluate(() => {
+    const levels = [-84, -28, -20, -24, -70];
+    window.eqFixture.probe(levels, levels, { frequencies: [20, 220, 440, 880, 1500] });
+  });
+  await page.getByRole('button', { name: 'Freeze spectrum', exact: true }).click();
+  await peak.press('Enter');
+  await expect.poll(async () => (await settingsOf(page)).eqBands?.[1]).toMatchObject({ hz: 440, q: 110, gainDb: -3 });
+});
+
+test('hovering over the playing spectrum focuses its peaks until the cut is added', async ({ page }) => {
+  const graph = page.getByRole('group', { name: 'Frequency response and spectrum' });
+  const peak = graph.getByRole('button', { name: 'Grab spectrum peak at 440 Hz' });
+  await page.evaluate(() => {
+    const levels = [-84, -63, -20, -63, -70];
+    window.eqFixture.setPlaying(true);
+    window.eqFixture.probe(levels, levels, { frequencies: [20, 220, 440, 880, 1500] });
+  });
+  const box = await graph.boundingBox();
+  const inset = box.width < 460 ? 34 : 43;
+  const x = box.x + inset + Math.log(440 / 20) / Math.log(1000) * (box.width - 2 * inset);
+  const y = box.y + box.height - 25 - (76 / 96) * (box.height - 50);
+  await page.mouse.move(x, y);
+  await expect(graph).toHaveClass(/spectrum-grab/);
+  await expect(peak).toBeVisible();
+  await page.mouse.move(0, 0);
+  await expect(graph).not.toHaveClass(/spectrum-grab/);
+  await page.mouse.move(x, y);
+  await expect(peak).toBeVisible();
+  await page.mouse.down();
+  await page.mouse.move(x, y + 20, { steps: 4 });
+  await page.mouse.up();
+  await expect.poll(async () => (await settingsOf(page)).eqBands?.[0]).toMatchObject({ hz: 440, gainDb: -5 });
+  await expect(graph).not.toHaveClass(/spectrum-grab/);
+  await expect(peak).toHaveCount(0);
+});
+
+test('grabbing an after-only peak works while auditioning Original', async ({ page }) => {
+  const select = page.getByRole('combobox', { name: 'Spectrum display' });
+  const graph = page.getByRole('group', { name: 'Frequency response and spectrum' });
+  await select.click();
+  await page.getByRole('option', { name: 'After', exact: true }).click();
+  await page.evaluate(() => {
+    window.eqFixture.setOriginal(true);
+    window.eqFixture.probe([], [-84, -63, -20, -63, -70], { frequencies: [20, 220, 440, 880, 1500] });
+  });
+  await page.getByRole('button', { name: 'Freeze spectrum' }).click();
+  await expect(graph.getByRole('button', { name: 'Grab spectrum peak at 440 Hz' })).toBeVisible();
+  await select.click();
+  await page.getByRole('option', { name: 'Before', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Freeze spectrum' })).toBeDisabled();
+  await expect.poll(() => page.evaluate(() => window.eqFixture.requests.findLast(request => request.action === 'analyzer')?.view)).toBe('before');
 });
 
 test('the EQ A/B toggle remembers both edited curves and keeps the selected one when ended', async ({ page }) => {
@@ -789,6 +985,35 @@ test('the EQ line reacts to live dynamic reduction with the spectrum off', async
   await expect.poll(curvePixels).toEqual(before);
 });
 
+test('spectral dynamics put separate frequency cuts on the combined curve', async ({ page }) => {
+  const graph = page.getByRole('group', { name: 'Frequency response and spectrum' });
+  const canvas = graph.locator('canvas');
+  const curveAt = (hz, db) => canvas.evaluate((element, { hz, db }) => {
+    const { clientWidth: width, clientHeight: height } = element;
+    const scale = element.width / width;
+    const inset = width < 460 ? 34 : 43;
+    const x = Math.round((inset + Math.log(hz / 20) / Math.log(1000) * (width - 2 * inset)) * scale);
+    const y = Math.round((height - 25 - (db + 24) / 48 * (height - 50)) * scale);
+    const rgba = element.getContext('2d').getImageData(x, y - 2, 1, 5).data;
+    return Math.max(rgba[3], rgba[7], rgba[11], rgba[15], rgba[19]);
+  }, { hz, db });
+  await page.evaluate(() => {
+    window.eqFixture.setBands([{
+      id: 1, kind: 'bell', hz: 1000, gainDb: 0, q: 80,
+      dynamic: { thresholdDb: -30, amountDb: 8, ratio: 4, spectral: true },
+    }]);
+    window.eqFixture.setPlaying(true);
+    window.eqFixture.probe([], [], {
+      dynamicEqMix: [1], spectralResponse: [{
+        channel: 'stereo', firstBin: 8, binHz: 100, gainsDb: [0, -6, 0, -4, 0],
+      }],
+    });
+  });
+  await expect.poll(() => curveAt(900, -6)).toBeGreaterThan(240);
+  await expect.poll(() => curveAt(1000, 0)).toBeGreaterThan(240);
+  await expect.poll(() => curveAt(1100, -4)).toBeGreaterThan(240);
+});
+
 test('the spectrum slopes through repeated bass readings and preserves the peak', async ({ page }) => {
   const canvas = page.getByRole('group', { name: 'Frequency response and spectrum' }).locator('canvas');
   await page.getByRole('combobox', { name: 'Spectrum display' }).click();
@@ -828,6 +1053,180 @@ test('the spectrum slopes through repeated bass readings and preserves the peak'
   }).toBe(true);
 });
 
+test('the graph context menu closes on Escape, an outside click, or window blur', async ({ page }) => {
+  const graph = page.getByRole('group', { name: 'Frequency response and spectrum' });
+  const hit = graph.getByRole('button', { name: 'Add EQ band on the graph' });
+  const context = page.getByRole('menu').filter({ has: page.getByRole('menuitem', { name: 'Add low cut' }) });
+  await hit.click({ button: 'right', position: { x: 200, y: 55 } });
+  await expect(context).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(context).toBeHidden();
+  await expect(hit).toBeFocused();
+  await hit.click({ button: 'right', position: { x: 200, y: 55 } });
+  await expect(context).toBeVisible();
+  await page.mouse.click(62, 42);
+  await expect(context).toBeHidden();
+  await hit.click({ button: 'right', position: { x: 200, y: 55 } });
+  await expect(context).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new FocusEvent('blur')));
+  await expect(context).toBeHidden();
+  await hit.click({ button: 'right', position: { x: 200, y: 55 } });
+  await context.getByRole('menuitem', { name: 'Add bell' }).click();
+  await expect(context).toBeHidden();
+  await expect(graph.getByRole('button', { name: 'Bell 1', exact: true })).toBeVisible();
+});
+
+test('overlapping nodes cycle on click and an axis-locked drag shows its temporary readout', async ({ page }) => {
+  const graph = page.getByRole('group', { name: 'Frequency response and spectrum' });
+  await page.evaluate(() => window.eqFixture.setBands([1, 2].map(id => ({
+    id, kind: 'bell', hz: 1000, gainDb: 5, q: 130,
+  }))));
+  const first = graph.getByRole('button', { name: 'Bell 1', exact: true });
+  const second = graph.getByRole('button', { name: 'Bell 2', exact: true });
+  const box = await first.boundingBox();
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height / 2;
+  const selected = graph.locator('.marker[aria-pressed=true]');
+  await page.mouse.click(x, y);
+  const initial = await selected.getAttribute('aria-label');
+  await page.mouse.click(x, y);
+  const secondClick = await selected.getAttribute('aria-label');
+  expect(secondClick).not.toBe(initial);
+  await page.keyboard.down('Alt');
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x + 55, y + 17, { steps: 4 });
+  await expect(graph.locator('.drag-readout')).toContainText('Hz');
+  await page.mouse.up();
+  await page.keyboard.up('Alt');
+  await expect(graph.locator('.drag-readout')).toHaveCount(0);
+  const bands = (await settingsOf(page)).eqBands;
+  expect(bands.map(band => band.gainDb)).toEqual([5, 5]);
+  expect(bands[secondClick === 'Bell 1' ? 0 : 1].hz).toBeGreaterThan(1000);
+  await expect(first).toBeVisible();
+  await expect(second).toBeVisible();
+});
+
+test('the threshold shows the band detector and the output meter latches clipping and trims independently', async ({ page }) => {
+  const graph = page.getByRole('group', { name: 'Frequency response and spectrum' });
+  await page.evaluate(() => {
+    window.eqFixture.setBands([{ id: 1, kind: 'bell', hz: 1200, gainDb: 8, q: 150, dynamic: { thresholdDb: -24, amountDb: 4 } }]);
+    window.eqFixture.setPlaying(true);
+    window.eqFixture.probe([], [], { outputPeak: -1.1, outputOverload: true, dynamicEqDetectors: [-18] });
+  });
+  await graph.getByRole('button', { name: 'Bell 1', exact: true }).click();
+  await expect(graph.locator('[data-eq-dial=Threshold] .detector-mark.detected')).toBeVisible();
+  const clear = page.getByRole('button', { name: 'Clear output clipping indicator' });
+  await expect(clear).toBeVisible();
+  await page.evaluate(() => window.eqFixture.probe([], [], { inputPeak: -2, eqInputPeak: -17, outputPeak: -8, outputOverload: false, dynamicEqDetectors: [-36] }));
+  await expect(graph.locator('[data-eq-dial=Threshold] .detector-mark.detected')).toHaveCount(0);
+  await expect(page.getByRole('meter', { name: 'Input peak level' })).toHaveAttribute('aria-valuenow', '-17');
+  await expect(page.locator('.peak-hold')).toHaveCount(1);
+  await clear.click();
+  await expect(clear).toHaveCount(0);
+  await page.getByRole('button', { name: 'Gain strength', exact: true }).click();
+  const popup = page.getByRole('dialog', { name: 'Gain strength' });
+  const input = popup.getByRole('button', { name: /^Input,/ });
+  const strength = popup.getByRole('button', { name: /^Strength,/ });
+  const output = popup.getByRole('button', { name: /^Output,/ });
+  const positions = await Promise.all([input, strength, output].map(dial => dial.boundingBox()));
+  expect(positions.map(box => box.y)).toEqual(Array(3).fill(positions[0].y));
+  expect(positions[0].x).toBeLessThan(positions[1].x);
+  expect(positions[1].x).toBeLessThan(positions[2].x);
+  await input.press('Enter');
+  const inputGain = popup.getByRole('textbox', { name: 'Input in dB' });
+  await inputGain.fill('3.2');
+  await inputGain.press('Enter');
+  await expect.poll(() => settingsOf(page)).toMatchObject({ eqInputDb: 3.2, eqOutputDb: 0 });
+  await output.press('Enter');
+  const trim = page.getByRole('textbox', { name: 'Output in dB' });
+  await trim.fill('-6.3');
+  await trim.press('Enter');
+  await expect.poll(() => settingsOf(page)).toMatchObject({ eqInputDb: 3.2, eqOutputDb: -6.3, eqBands: [{ gainDb: 8 }] });
+  await output.dblclick();
+  await expect.poll(() => settingsOf(page)).toMatchObject({ eqOutputDb: 0, eqBands: [{ gainDb: 8 }] });
+});
+
+test('EQ strength scales plotted bells and shelves while preserving their values and output trim', async ({ page }) => {
+  const canvas = page.getByRole('group', { name: 'Frequency response and spectrum' }).locator('canvas');
+  const curveAt = (hz, db) => canvas.evaluate((element, { hz, db }) => {
+    const ctx = element.getContext('2d');
+    const { clientWidth: width, clientHeight: height } = element;
+    const scale = element.width / width;
+    const inset = width < 460 ? 34 : 43;
+    const x = Math.round((inset + Math.log(hz / 20) / Math.log(1000) * (width - 2 * inset)) * scale);
+    const y = Math.round((height - 25 - (db + 24) / 48 * (height - 50)) * scale);
+    const rgba = ctx.getImageData(x, y - 2, 1, 5).data;
+    return Math.max(rgba[3], rgba[7], rgba[11], rgba[15], rgba[19]);
+  }, { hz, db });
+  await page.evaluate(() => window.eqFixture.setSettings({
+    presenceHz: 330, presenceDb: -10, eqOutputDb: -4, rumble: true, rumbleHz: 80, rumbleSlope: 48,
+    eqBands: [{ id: 1, kind: 'treble', hz: 3000, gainDb: 12, q: 140, dynamic: { thresholdDb: -24, amountDb: -4 } }],
+  }));
+  await expect.poll(() => curveAt(330, -10)).toBeGreaterThan(240);
+  await expect.poll(() => curveAt(12000, 12)).toBeGreaterThan(240);
+  await page.getByRole('button', { name: 'Gain strength', exact: true }).click();
+  const strength = page.getByRole('dialog', { name: 'Gain strength' }).getByRole('button', { name: /^Strength,/ });
+  const dial = await strength.boundingBox();
+  const x = dial.x + dial.width / 2;
+  const y = dial.y + dial.height / 2;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x, y + 85, { steps: 5 });
+  await expect.poll(() => settingsOf(page)).toMatchObject({
+    eqStrength: 50, presenceDb: -10, eqOutputDb: -4, rumbleSlope: 48, eqBands: [{ gainDb: 12, dynamic: { amountDb: -4 } }],
+  });
+  await expect.poll(() => curveAt(330, -5)).toBeGreaterThan(240);
+  await expect.poll(() => curveAt(12000, 6)).toBeGreaterThan(240);
+  await page.mouse.up();
+  await strength.dblclick();
+  await expect.poll(() => settingsOf(page)).toMatchObject({ eqStrength: 100, eqOutputDb: -4 });
+  await expect.poll(() => curveAt(330, -10)).toBeGreaterThan(240);
+});
+
+test('the EQ treatment bypass toggles with the button and the B shortcut', async ({ page }) => {
+  const bypass = page.getByRole('button', { name: 'Bypass treatment' });
+  await expect(bypass).toHaveAttribute('aria-pressed', 'false');
+  await bypass.click();
+  await expect(bypass).toHaveAttribute('aria-pressed', 'true');
+  await bypass.press('b');
+  await expect(bypass).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.getByRole('group', { name: 'Preview sound' })).toHaveCount(0);
+});
+
+test('saved EQ presets persist through rename and delete, and A can be copied into B', async ({ page }) => {
+  const presetMenu = settings => page.getByRole('button', { name: 'EQ preset, ' + settings, exact: true });
+  const graph = page.getByRole('group', { name: 'Frequency response and spectrum' });
+  await page.evaluate(() => window.eqFixture.setBands([{ id: 1, kind: 'bell', hz: 1200, gainDb: -5, q: 150 }]));
+  await presetMenu('Custom EQ').click();
+  await page.getByRole('menuitem', { name: 'Save as preset…' }).click();
+  await page.getByRole('textbox', { name: 'Preset name' }).fill('Tape notch');
+  await page.getByRole('button', { name: 'Save preset' }).click();
+  await expect(presetMenu('Tape notch')).toBeVisible();
+  await page.getByRole('button', { name: 'Start EQ A/B comparison' }).click();
+  await presetMenu('Tape notch').click();
+  await page.getByRole('menuitem', { name: 'Reduce rumble', exact: true }).click();
+  await expect.poll(() => settingsOf(page)).toMatchObject({ rumble: true, eqBands: null });
+  await presetMenu('Reduce rumble').click();
+  await page.getByRole('menuitem', { name: 'Copy A to B' }).click();
+  await expect(graph.getByRole('button', { name: 'Bell 1', exact: true })).toBeVisible();
+  await presetMenu('Tape notch').click();
+  await page.getByRole('menuitem', { name: 'Manage saved presets…' }).click();
+  await page.getByRole('button', { name: 'Rename Tape notch' }).click();
+  await page.getByRole('textbox', { name: 'Preset name' }).fill('Tape cleanup');
+  await page.getByRole('button', { name: 'Rename', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Delete Tape cleanup' })).toBeVisible();
+  await page.reload();
+  await presetMenu('Flat').click();
+  await page.getByRole('menuitem', { name: 'Tape cleanup' }).click();
+  await expect(graph.getByRole('button', { name: 'Bell 1', exact: true })).toBeVisible();
+  await presetMenu('Tape cleanup').click();
+  await page.getByRole('menuitem', { name: 'Manage saved presets…' }).click();
+  await page.getByRole('button', { name: 'Delete Tape cleanup' }).click();
+  await page.getByRole('button', { name: 'Delete preset', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Delete Tape cleanup' })).toHaveCount(0);
+});
+
 test('the node’s solo handle retunes the audition while held and releases on pointer up', async ({ page }) => {
   const graph = page.getByRole('group', { name: 'Frequency response and spectrum' });
   await page.evaluate(() => window.eqFixture.setBands([{ id: 1, kind: 'bell', hz: 1000, gainDb: 0, q: 80 }]));
@@ -849,6 +1248,10 @@ test('the node’s solo handle retunes the audition while held and releases on p
   const graphBox = await graph.boundingBox();
   expect(shadeBox.y).toBe(graphBox.y);
   expect(shadeBox.height).toBe(graphBox.height);
+  const edges = await shade.locator('span').boundingBox();
+  const nodeBox = await node.boundingBox();
+  expect(Math.abs(edges.x + edges.width / 2 - (nodeBox.x + nodeBox.width / 2))).toBeLessThan(1);
+  await expect(shade.locator('span')).toHaveCSS('border-inline-start-width', '1px');
   const spot = () => shade.evaluate(element => Number.parseFloat(element.style.getPropertyValue('--solo-start')));
   const left = await spot();
   await expect.poll(async () => (await auditions()).length).toBe(1);

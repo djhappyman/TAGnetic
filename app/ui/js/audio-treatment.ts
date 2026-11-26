@@ -1,4 +1,4 @@
-import { eqFrequencyLimit, eqGainLimit, eqGainStep, roundEqDb } from './audio-eq-range.js';
+import { eqFrequencyLimit, eqGainLimit, eqGainStep, eqSpectralShape, roundEqDb } from './audio-eq-range.js';
 
 export type SpectralRepair = {
   startFrame: number;
@@ -12,9 +12,9 @@ export const maxSpectralRepairs = 8;
 
 export const eqShapes = ['low', 'bass', 'bell', 'notch', 'treble', 'high'] as const;
 export type EqShape = typeof eqShapes[number];
-export type EqChannel = 'stereo' | 'left' | 'right';
+export type EqChannel = 'stereo' | 'left' | 'right' | 'mid' | 'side';
 /** A positive amount reduces loud input. A negative amount lifts quiet input. */
-export type DynamicEq = { thresholdDb: number; amountDb: number; ratio?: number };
+export type DynamicEq = { thresholdDb: number; amountDb: number; ratio?: number; spectral?: boolean };
 
 export type EqBand = {
   id?: number;
@@ -30,8 +30,9 @@ export type EqBand = {
 };
 export const maxEqBands = 14;
 
-export function eqBandIsActive(band: EqBand) {
-  return !band.bypassed && (band.kind === 'low' || band.kind === 'high' || band.kind === 'notch' || band.gainDb !== 0 || !!band.dynamic);
+export function eqBandIsActive(band: EqBand, strength = 100) {
+  return !band.bypassed && (band.kind === 'low' || band.kind === 'high' || band.kind === 'notch'
+    || (strength > 0 && band.gainDb !== 0) || !!band.dynamic);
 }
 export const eqBandBypassBits = { rumble: 1, bassDb: 2, presenceDb: 4, notchHz: 8, trebleDb: 16, highCutHz: 32 } as const;
 
@@ -58,6 +59,9 @@ export type AudioTreatment = {
   trebleHz: number;
   eqBypassed: number;
   eqBands: EqBand[] | null;
+  eqStrength: number;
+  eqInputDb: number;
+  eqOutputDb: number;
   gainDb: number;
   compressorInputDb: number;
   compressorDb: number;
@@ -78,7 +82,7 @@ export const noTreatment: AudioTreatment = Object.freeze({
   normalize: false, normalizeTargetDb: 0, mono: 'off', rumble: false, rumbleHz: 0, rumbleSlope: 0,
   hum: 'off', humHarmonics: 0, dcHz: 0, highCutHz: 0, highCutSlope: 0, notchHz: 0, notchQ: 0,
   bassDb: 0, bassHz: 0, presenceDb: 0, presenceHz: 0, presenceQ: 0, trebleDb: 0, trebleHz: 0, eqBypassed: 0, eqBands: null,
-  gainDb: 0, compressorInputDb: 0, compressorDb: 0, compressorRatio: 0, compressorAttackMs: 0, compressorReleaseMs: 0, compressorKneeDb: 0,
+  eqStrength: 100, eqInputDb: 0, eqOutputDb: 0, gainDb: 0, compressorInputDb: 0, compressorDb: 0, compressorRatio: 0, compressorAttackMs: 0, compressorReleaseMs: 0, compressorKneeDb: 0,
   gateDb: 0, gateReductionDb: 0, balance: 0, stereoWidth: 0, swapChannels: false, polarity: 'off', spectralRepairs: null,
 });
 
@@ -104,6 +108,9 @@ export const treatmentNumbers: Record<TreatmentNumber, NumberSpec> = {
   bassDb: { label: 'Bass', min: -eqGainLimit, max: eqGainLimit, initial: 0, unit: 'dB', step: eqGainStep },
   presenceDb: { label: 'Presence', min: -eqGainLimit, max: eqGainLimit, initial: 0, unit: 'dB', step: eqGainStep },
   trebleDb: { label: 'Treble', min: -eqGainLimit, max: eqGainLimit, initial: 0, unit: 'dB', step: eqGainStep },
+  eqStrength: { label: 'EQ strength', min: 0, max: 100, initial: 100, unit: '%', step: 0.1 },
+  eqInputDb: { label: 'EQ input', min: -24, max: 12, initial: 0, unit: 'dB', step: eqGainStep },
+  eqOutputDb: { label: 'EQ output', min: -24, max: 12, initial: 0, unit: 'dB', step: eqGainStep },
   gainDb: { label: 'Gain', min: -18, max: 12, initial: 0, unit: 'dB' },
   compressorInputDb: { label: 'Input gain', min: -24, max: 24, initial: 0, unit: 'dB' },
   normalizeTargetDb: { label: 'Target loudness', min: -30, max: -8, initial: -18, unit: 'LUFS', defaultIsZero: true },
@@ -158,14 +165,15 @@ function readBands(value: AudioTreatment['eqBands']) {
     const validRatio = typeof ratio === 'number' && Number.isFinite(ratio) && ratio >= 1 && ratio <= 20;
     const validDynamic = dynamic && Number.isFinite(dynamic.thresholdDb) && Number.isFinite(dynamic.amountDb)
       && dynamic.thresholdDb >= -72 && dynamic.thresholdDb <= -6 && Math.abs(dynamic.amountDb) >= 1 && Math.abs(dynamic.amountDb) <= 12;
-    if (band.channel && !['stereo', 'left', 'right'].includes(band.channel)) return [];
+    if (channel && !['stereo', 'left', 'right', 'mid', 'side'].includes(channel)) return [];
     return [{ kind, hz, gainDb: cut || notch ? 0 : roundEqDb(gainDb), q, ...(validId ? { id } : {}),
       ...(band.bypassed === true ? { bypassed: true } : {}),
-      ...(channel === 'left' || channel === 'right' ? { channel } : {}),
+      ...(channel && channel !== 'stereo' ? { channel } : {}),
       ...(cut && slope && [12, 24, 36, 48].includes(slope) ? { slope } : {}),
       ...(kind === 'bell' && band.adaptiveQ === true ? { adaptiveQ: true } : {}),
       ...(validDynamic ? { dynamic: { thresholdDb: roundEqDb(dynamic.thresholdDb), amountDb: roundEqDb(dynamic.amountDb),
-        ...(validRatio ? { ratio: Math.round(ratio * 10) / 10 } : {}) } } : {}) }];
+        ...(validRatio ? { ratio: Math.round(ratio * 10) / 10 } : {}),
+        ...(eqSpectralShape(kind) && dynamic.spectral === true ? { spectral: true } : {}) } } : {}) }];
   });
   return bands.length ? bands : null;
 }
@@ -187,10 +195,10 @@ export function readTreatment(value?: Partial<AudioTreatment> | null): AudioTrea
   for (const key of numberKeys) {
     const input = value[key];
     const { min, max, initial, defaultIsZero, step } = treatmentNumbers[key];
-    const fractional = step === eqGainStep;
+    const fractional = key === 'eqStrength' || step === eqGainStep;
     if (input !== undefined && (fractional ? Number.isFinite(input) : Number.isInteger(input)) && input >= min && input <= max
       && (!(key === 'rumbleSlope' || key === 'highCutSlope') || input % 12 === 0)
-      && !(defaultIsZero && input === initial)) settings[key] = fractional ? roundEqDb(input) : input;
+      && !(defaultIsZero && input === initial)) settings[key] = fractional && key !== 'eqStrength' ? roundEqDb(input) : input;
   }
   return settings;
 }
@@ -207,7 +215,8 @@ export function sameTreatment(left: AudioTreatment, right: AudioTreatment): bool
       && !!band.adaptiveQ === !!other.adaptiveQ
       && (band.channel ?? 'stereo') === (other.channel ?? 'stereo') && (band.slope || 12) === (other.slope || 12)
       && band.dynamic?.thresholdDb === other.dynamic?.thresholdDb && band.dynamic?.amountDb === other.dynamic?.amountDb
-      && (band.dynamic?.ratio ?? 2) === (other.dynamic?.ratio ?? 2);
+      && (band.dynamic?.ratio ?? 2) === (other.dynamic?.ratio ?? 2)
+      && !!band.dynamic?.spectral === !!other.dynamic?.spectral;
   }))) return false;
   const a = left.spectralRepairs;
   const b = right.spectralRepairs;
@@ -221,7 +230,7 @@ export const effectCategories = ['Repair', 'Tone', 'Level', 'Stereo'] as const;
 export type EffectCategory = typeof effectCategories[number];
 
 type EffectKey = 'dcHz' | 'rumble' | 'hum' | 'highCutHz' | 'notchHz' | 'bassDb' | 'presenceDb' | 'trebleDb'
-  | 'gainDb' | 'normalize' | 'compressorDb' | 'gateDb' | 'mono' | 'swapChannels' | 'polarity' | 'balance' | 'stereoWidth'
+  | 'eqInputDb' | 'eqOutputDb' | 'gainDb' | 'normalize' | 'compressorDb' | 'gateDb' | 'mono' | 'swapChannels' | 'polarity' | 'balance' | 'stereoWidth'
   | 'spectralRepairs' | 'eqBands';
 
 type Effect = {
@@ -245,6 +254,8 @@ export const audioEffects: readonly Effect[] = [
   { key: 'presenceDb', category: 'Tone', label: 'Presence', description: 'Cut or boost the midrange for clarity.', numbers: ['presenceDb'], reset: { presenceDb: 0 } },
   { key: 'trebleDb', category: 'Tone', label: 'Treble', description: 'Cut or boost brightness.', numbers: ['trebleDb'], reset: { trebleDb: 0 } },
   { key: 'normalize', category: 'Level', label: 'Normalise', description: 'Set one loudness target for the whole recording.', numbers: ['normalizeTargetDb'], reset: { normalize: false, normalizeTargetDb: 0 } },
+  { key: 'eqInputDb', category: 'Level', label: 'EQ input', description: 'Adjust the level feeding the equaliser and its dynamic bands.', numbers: ['eqInputDb'], reset: { eqInputDb: 0 } },
+  { key: 'eqOutputDb', category: 'Level', label: 'EQ output', description: 'Adjust the output without moving the EQ curve.', numbers: ['eqOutputDb'], reset: { eqOutputDb: 0 } },
   { key: 'gainDb', category: 'Level', label: 'Gain', description: 'Turn the full recording up or down.', numbers: ['gainDb'], reset: { gainDb: 0 } },
   { key: 'compressorDb', category: 'Level', label: 'Compressor', description: 'Bring louder sounds closer to the rest.', numbers: ['compressorInputDb', 'compressorDb', 'compressorRatio'], reset: { compressorInputDb: 0, compressorDb: 0, compressorRatio: 0 } },
   { key: 'gateDb', category: 'Level', label: 'Quiet-gap reduction', description: 'Turn down noise in the quiet parts.', numbers: ['gateDb', 'gateReductionDb'], reset: { gateDb: 0, gateReductionDb: 0 } },
@@ -258,7 +269,8 @@ export const audioEffects: readonly Effect[] = [
 export function effectIsActive(settings: AudioTreatment, key: EffectKey): boolean {
   if (Object.prototype.hasOwnProperty.call(eqBandBypassBits, key)
     && (settings.eqBypassed & eqBandBypassBits[key as keyof typeof eqBandBypassBits])) return false;
-  if (key === 'eqBands') return !!settings.eqBands?.some(eqBandIsActive);
+  if (key === 'eqBands') return !!settings.eqBands?.some(band => eqBandIsActive(band, settings.eqStrength));
+  if (settings.eqStrength === 0 && (key === 'bassDb' || key === 'presenceDb' || key === 'trebleDb')) return false;
   if (key === 'compressorDb') return !!(settings.compressorDb || settings.compressorInputDb);
   const value = settings[key];
   return typeof value === 'string' ? value !== 'off' : !!value;

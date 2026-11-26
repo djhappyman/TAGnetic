@@ -89,8 +89,10 @@
   const toolPins: Partial<Record<Tool, boolean>> = {};
   let activeToolTheme: ToolSnapshot['theme'] | undefined;
   let toolTimer: ReturnType<typeof setInterval> | undefined;
+  let meterTimer: ReturnType<typeof setInterval> | undefined;
+  const liveMeterRate = 30;
   type ProbeLane = { pending: boolean; retryAt: number; latest?: { key: string; sourceId: string; probe: TreatmentProbe } };
-  let eqAnalyzerEnabled = true;
+  let eqAnalyzerView: 'before' | 'after' | 'both' | 'off' = 'both';
   let reference: EqReference | undefined;
   let referenceCandidate: AudioTreatment | undefined;
   let referenceGeneration = 0;
@@ -123,6 +125,7 @@
   let compareRevision = 0;
   let comparisonReady = false;
   let comparisonInFlight = 0;
+  let comparisonUsesProbe = false;
   let comparisonTimer: ReturnType<typeof setTimeout> | undefined;
   let treatmentVersion = 0;
   let retuneVersion = 0;
@@ -371,6 +374,8 @@
       importedTags = {};
       artworkPath = '';
       treatment = noTreatment;
+      eqLearning = undefined;
+      eqLearnGeneration++;
       treatmentAnalysis = null;
       treatmentError = '';
       listeningError = '';
@@ -736,8 +741,7 @@
   function playbackTreatment() {
     if (monitor?.kind === 'band' && monitor.band) {
       const { lowHz, highHz, channel } = monitor.band;
-      const mono = hasStereo && (channel === 'left' || channel === 'right') ? channel : 'off';
-      return { treatment: { ...noTreatment, mono } satisfies AudioTreatment, monitor: { kind: 'band', lowHz, highHz } };
+      return { treatment: noTreatment, monitor: { kind: 'band', lowHz, highHz, channel: hasStereo ? channel : undefined } };
     }
     if (monitor?.kind === 'difference-compressor') {
       return { treatment, monitor: { kind: 'compressor-difference' } };
@@ -794,19 +798,27 @@
     comparisonTimer = setTimeout(async () => {
       if (!stillCurrent()) return;
       comparisonInFlight = revision;
+      comparisonUsesProbe = !compareBoth;
       try {
-        const current = await audioCommand<ComparisonLevels>('probe', { id: opened.id, frame, treatment: settings, spectrum: false });
-        if (!stillCurrent() || !current) return;
         if (compareBoth) {
-          const other = await audioCommand<ComparisonLevels>('probe', { id: opened.id, frame, treatment: alternate, spectrum: false });
-          if (!stillCurrent() || !other) return;
+          const current = await audioCommand<ComparisonLevels & { alternateOutput: number }>('compare_levels', {
+            id: opened.id, frame, treatment: settings, alternate,
+          });
+          if (!stillCurrent() || !current) return;
+          const other = { input: current.input, output: current.alternateOutput };
           comparisonCache = { sourceId: opened.id, frame, readings: [{ settings, levels: current }, { settings: alternate, levels: other }] };
           match(current, other);
         } else {
-          match(current);
+          const current = await audioCommand<ComparisonLevels>('probe', { id: opened.id, frame, treatment: settings, spectrum: false });
+          if (stillCurrent() && current) match(current);
         }
       } catch { /* Keep the preview at its actual level if measurement fails. */ }
-      finally { if (comparisonInFlight === revision) comparisonInFlight = 0; }
+      finally {
+        if (comparisonInFlight === revision) {
+          comparisonInFlight = 0;
+          comparisonUsesProbe = false;
+        }
+      }
     }, delay);
   }
 
@@ -857,11 +869,14 @@
   }
 
   function hideToolWindows() {
+    eqLearnGeneration++;
+    eqLearning = undefined;
     clearReference(false);
     stopMonitor(false);
     visibleTools.clear();
     clearInterval(toolTimer);
-    toolTimer = undefined;
+    clearInterval(meterTimer);
+    toolTimer = meterTimer = undefined;
     if (usedToolWindows) void audioCommand('tool_window', { action: 'hide_all' }).catch(console.error);
   }
 
@@ -872,6 +887,9 @@
       if (visibleTools.has(kind)) return;
       visibleTools.add(kind);
       if (toolTimer === undefined) toolTimer = setInterval(updateTools, 125);
+      if (kind !== 'repair' && meterTimer === undefined) {
+        meterTimer = setInterval(() => { if (playing) void refreshToolProbe(false); }, 1000 / liveMeterRate);
+      }
       publishToolState(kind, true);
       publishCachedProbe(kind);
       void refreshToolProbe(kind === 'repair');
@@ -880,6 +898,10 @@
       if (kind === 'eq') clearReference();
       if (monitor?.owner === kind) stopMonitor();
       if (wasVisible) void tick().then(() => document.getElementById('studio-tool-' + kind)?.focus({ preventScroll: true }));
+      if (!visibleTools.has('eq') && !visibleTools.has('dynamics')) {
+        clearInterval(meterTimer);
+        meterTimer = undefined;
+      }
       if (!visibleTools.size) {
         clearInterval(toolTimer);
         toolTimer = undefined;
@@ -908,6 +930,45 @@
     }
   }
 
+  let eqLearning = $state.raw<ToolSnapshot['eqLearning']>();
+  let eqLearnGeneration = 0;
+
+  async function learnEqThreshold(index: number) {
+    const opened = source;
+    const before = treatment;
+    const bands = before.eqBands;
+    const band = bands?.[index];
+    const range = loopEnabled ? previewRange() : null;
+    if (!opened || !bands || !band?.dynamic || band.bypassed || !range || reference?.preview) return;
+
+    const generation = ++eqLearnGeneration;
+    const current = () => active && phase === 'edit' && source?.id === opened.id && generation === eqLearnGeneration;
+    eqLearning = { index, status: 'learning' };
+    publishToolState('eq');
+    try {
+      const thresholdDb = await audioCommand<number>('eq_learn_threshold', {
+        id: opened.id, range, treatment: before, bandIndex: index,
+      });
+      if (!current()) return;
+      const loop = loopEnabled ? previewRange() : null;
+      if (treatment !== before || loop?.start !== range.start || loop.end !== range.end || reference?.preview) {
+        eqLearning = { index, status: 'error', message: 'The EQ or loop changed. Try learning again.' };
+      } else {
+        eqLearning = undefined;
+        if (Number.isFinite(thresholdDb) && thresholdDb !== band.dynamic.thresholdDb) {
+          const eqBands = bands.map((item, position) => position === index
+            ? { ...band, dynamic: { ...band.dynamic!, thresholdDb } } : item);
+          capture('EQ threshold');
+          replaceTreatment(readTreatment({ ...before, eqBands }));
+        }
+      }
+    } catch (reason) {
+      if (current()) eqLearning = { index, status: 'error', message: String(reason).replace(/^Error: /, '') };
+    } finally {
+      if (current()) publishToolState('eq');
+    }
+  }
+
   function publishToolState(kind: Tool, force = false) {
     const selectedSettings = kind === 'eq' ? listeningSettings() : treatment;
     const snapshot: ToolSnapshot | null = source && active && phase === 'edit' ? {
@@ -915,6 +976,7 @@
       playing, original: hearOriginal, loop: loopEnabled, revision: toolRevisions[kind], theme: activeToolTheme ??= toolTheme(),
       loopRange: previewRange() ?? undefined, pinned: toolPins[kind] ?? false, levelMatch,
       eqLevelComparison: kind === 'eq',
+      eqLearning: kind === 'eq' ? eqLearning : undefined,
       monitor: monitor?.owner === kind ? monitor.kind : undefined,
       undoLabel: kind === 'eq' && reference?.preview
         ? (referenceUndo.length ? 'Undo match adjustment' : undefined)
@@ -934,7 +996,7 @@
       && snapshot.loopRange?.start === sent.loopRange?.start && snapshot.loopRange?.end === sent.loopRange?.end
       && snapshot.pinned === sent.pinned && snapshot.levelMatch === sent.levelMatch && snapshot.monitor === sent.monitor
       && snapshot.undoLabel === sent.undoLabel && snapshot.redoLabel === sent.redoLabel
-      && snapshot.normalisation === sent.normalisation && snapshot.reference === sent.reference && snapshot.cuts === sent.cuts))) return;
+      && snapshot.eqLearning === sent.eqLearning && snapshot.normalisation === sent.normalisation && snapshot.reference === sent.reference && snapshot.cuts === sent.cuts))) return;
     sentToolStates[kind] = snapshot;
     const sameSource = !force && snapshot?.sourceId === sent?.sourceId;
     const message = snapshot && sameSource ? { ...snapshot, overview: undefined, stereoOverview: undefined,
@@ -970,27 +1032,44 @@
     const targets = () => [...visibleTools].filter(kind => spectrogram ? kind === 'repair'
       : kind === 'dynamics' || kind === 'eq');
     const now = performance.now();
-    if (!opened || !active || phase !== 'edit' || lane.pending || (!spectrogram && comparisonInFlight) || now < lane.retryAt || !targets().length) return;
+    if (!opened || !active || phase !== 'edit' || lane.pending || (!spectrogram && comparisonUsesProbe) || now < lane.retryAt || !targets().length) return;
     const frame = Math.max(0, Math.min(opened.frames - 1, Math.round(playing && !buffering && !scrubbing ? clockFrame(now) : playhead)));
     const version = transportVersion;
     const view = repairView;
     const settings = spectrogram && !view.treated ? noTreatment : listeningSettings();
-    const spectrum = !spectrogram && eqAnalyzerEnabled && visibleTools.has('eq');
+    const spectrum = !spectrogram && eqAnalyzerView !== 'off' && visibleTools.has('eq');
+    const spectrumView = spectrum ? eqAnalyzerView : undefined;
+    const audioIsAudible = () => playing && !buffering && !scrubbing;
+    const playback = !spectrogram && audioIsAudible();
+    const audibleMode = [hearOriginal, monitor?.kind].join(':');
+    const probeRate = spectrogram ? 3 : playback ? liveMeterRate : 8;
     const viewport = spectrogram ? repairViewport : null;
     const viewKey = spectrogram ? view : null;
     const gain = !spectrogram || view.treated ? treatmentAnalysis?.gainDb : null;
     const key = viewport ? JSON.stringify([opened.id, viewport.start, viewport.end, viewKey, settings, gain])
-      : JSON.stringify([opened.id, version, Math.floor(frame * (spectrogram ? 3 : 8) / opened.sampleRate),
-        settings, gain, spectrum, viewKey]);
+      : JSON.stringify([opened.id, version, Math.floor(frame * probeRate / opened.sampleRate),
+        playback ? null : settings, gain, spectrumView, viewKey, audibleMode]);
     if (lane.latest?.key === key) return;
     lane.pending = true;
     try {
-      const probe = await audioCommand<TreatmentProbe>('probe', { id: opened.id, frame, treatment: settings, spectrogram, spectrum, viewport,
+      const probe = await audioCommand<TreatmentProbe | null>('probe', { id: opened.id, frame, treatment: settings, spectrogram, spectrum, spectrumView, viewport,
+        playback,
         ...(spectrogram ? { spectrogramChannel: view.channel, spectrogramTreated: view.treated } : {}) });
       const currentViewport = viewport ? repairViewport?.start === viewport.start && repairViewport.end === viewport.end
         : (!spectrogram || !repairViewport) && version === transportVersion;
-      if (probe && active && source?.id === opened.id && phase === 'edit' && currentViewport && (!spectrogram || view === repairView)) {
-        lane.latest = { key, sourceId: opened.id, probe };
+      const currentSettings = settings === listeningSettings();
+      const liveAudio = playback && probe?.fromPlayback && audioIsAudible()
+        && audibleMode === [hearOriginal, monitor?.kind].join(':');
+      // Cached loops may use the offline decoder. Keep that work at the
+      // slower cadence while allowing live PCM probes to follow the fast timer.
+      if (playback && probe && !probe.fromPlayback) lane.retryAt = performance.now() + 90;
+      if (probe && active && source?.id === opened.id && phase === 'edit' && currentViewport
+        && (spectrogram ? view === repairView && (!view.treated || settings === listeningSettings())
+          : (probe.fromPlayback ? liveAudio : currentSettings) && (!spectrum || eqAnalyzerView === spectrumView))) {
+        const reading = liveAudio && !currentSettings
+          ? { ...probe, dynamicEqMix: undefined, dynamicEqDetectors: undefined, spectralResponse: undefined }
+          : probe;
+        lane.latest = { key, sourceId: opened.id, probe: reading };
         targets().forEach(publishCachedProbe);
       }
     } catch (reason) {
@@ -1045,11 +1124,12 @@
       return;
     }
     if (request.action === 'analyzer' && request.kind === 'eq') {
-      eqAnalyzerEnabled = request.enabled === true;
+      eqAnalyzerView = request.enabled && request.view !== 'off' ? (request.view ?? 'both') : 'off';
       void refreshToolProbe(false);
       return;
     }
     if (request.kind === 'eq') {
+      if (request.action === 'learn-threshold' && Number.isSafeInteger(request.index) && request.index >= 0) { void learnEqThreshold(request.index); return; }
       if (request.action === 'reference-start') { void matchReference(); return; }
       if (request.action === 'reference-preview') { previewReference(); return; }
       if (request.action === 'reference-keep') { void keepReference(); return; }

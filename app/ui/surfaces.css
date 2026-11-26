@@ -147,17 +147,43 @@ body button.ph-row { height: auto; min-height: var(--ctl-h-sm); white-space: nor
 
 /* One compact action-menu rhythm, shared by framework and controller menus.
    Selects use the same shell but keep option/checkmark semantics. */
-body :is([data-slot='dropdown-menu-content'], [data-slot='context-menu-content']):not(.controller-context-content) {
+body :is([data-slot='dropdown-menu-content'], [data-slot='context-menu-content'], .audio-action-menu):not(.controller-context-content) {
   padding:var(--menu-inset); border:1px solid var(--border);
   border-radius:var(--r-menu); background:var(--bg); color:var(--text);
   min-width:160px; max-width:calc(100dvw - 16px);
   font-family:var(--font-ui); font-size:var(--type-body-size);
   box-shadow:0 12px 32px rgb(0 0 0 / .25); --tw-ring-shadow:0 0 transparent;
 }
-body :is([data-slot='dropdown-menu-item'], [data-slot='context-menu-item'], [data-slot='context-menu-checkbox-item'], [data-slot='context-menu-radio-item']) {
+body :is([data-slot='dropdown-menu-item'], [data-slot='context-menu-item'], [data-slot='context-menu-checkbox-item'], [data-slot='context-menu-radio-item'], :where(.audio-action-menu) [role^='menuitem']) {
   min-height:32px; border-radius:var(--r-menu-item); padding:var(--sp-1) var(--sp-2);
   gap:var(--sp-2); justify-content:flex-start; text-align:start;
   font-size:var(--type-body-size); line-height:1.5;
+}
+.audio-action-menu {
+  z-index:140; box-sizing:border-box; width:max-content;
+  max-height:var(--available-height, calc(100dvh - 16px)); overflow:auto; overscroll-behavior:contain;
+  outline:none;
+}
+body .audio-action-menu[data-nested] {
+  min-width:min(160px, var(--available-width, 160px));
+  max-width:min(calc(100dvw - 16px), var(--available-width, 100dvw));
+  overflow-wrap:anywhere;
+}
+.audio-action-menu [role^='menuitem'] { display:flex; align-items:center; cursor:default; outline:none; }
+.audio-action-menu [role^='menuitem']:is([data-highlighted], :focus-visible, [aria-expanded='true']):not([aria-disabled='true']) { background:var(--row-hover); }
+.audio-action-menu [role^='menuitem']:is([aria-current='true'], [aria-checked='true']) { color:var(--accent-ink); }
+.audio-action-menu [role^='menuitem'][data-destructive] { color:var(--del); }
+.audio-action-menu [role^='menuitem'][aria-disabled='true'] { color:var(--muted); opacity:.65; }
+.audio-action-menu .menu-trailing {
+  flex:none; display:inline-flex; align-items:center; margin-inline-start:auto; color:var(--muted);
+  font-size:var(--type-help-size);
+}
+.audio-action-menu [aria-checked='true'] > .menu-trailing,
+.audio-action-menu [aria-current='true'] > .menu-trailing { color:inherit; }
+.audio-action-menu [role='separator'] { height:1px; margin:var(--sp-1); background:var(--border); }
+.audio-action-menu .menu-heading {
+  padding:var(--sp-1) var(--sp-2); color:var(--muted);
+  font-size:var(--type-help-size); font-weight:var(--fw-medium,500);
 }
 .controller-context-content { max-height:var(--controller-available-height, calc(100dvh - 16px)); overflow-y:auto; overscroll-behavior:contain; }
 

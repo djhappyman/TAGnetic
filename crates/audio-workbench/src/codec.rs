@@ -18,8 +18,10 @@ use decode::Recording;
 use peaks::PeakBins;
 pub use peaks::{Peak, WaveformIndex, WaveformPeaks};
 pub use probe::{
-    match_reference, probe_treatment, probe_treatment_with_options, SpectrogramChannel,
-    TreatmentProbe, TreatmentProbeOptions,
+    compare_preview_levels, learn_eq_threshold, match_reference, probe_treatment,
+    probe_treatment_with_options, PlaybackHistory, PlaybackProbeWindow, PlaybackReadings,
+    PreviewComparison, SpectralEqResponse, SpectrogramChannel, SpectrumView, TreatmentProbe,
+    TreatmentProbeOptions,
 };
 pub use seek::SeekIndex;
 pub use treatment::{

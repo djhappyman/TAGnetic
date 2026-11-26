@@ -231,6 +231,15 @@ impl Player {
         self.tx.send(Cmd::Studio(studio::Command::Close { owner }))
     }
 
+    pub fn studio_playback_window(
+        &self,
+        owner: &str,
+        frame: u64,
+        settings: tagrex_audio_workbench::AudioTreatment,
+    ) -> (bool, Option<tagrex_audio_workbench::PlaybackProbeWindow>) {
+        self.studio_status.playback_window(owner, frame, settings)
+    }
+
     pub fn studio_status(&self, owner: &str) -> StudioStatus {
         self.studio_status.for_owner(owner)
     }

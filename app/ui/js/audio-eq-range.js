@@ -2,6 +2,11 @@ export const eqFrequencyLimit = 20_000;
 export const eqGainLimit = 24;
 export const eqGainStep = 0.1;
 
+/** @param {string} shape */
+export function eqSpectralShape(shape) {
+  return shape === 'bell' || shape === 'bass' || shape === 'treble';
+}
+
 /** @param {number} db */
 export function roundEqDb(db) {
   return Math.round(db * 10) / 10;

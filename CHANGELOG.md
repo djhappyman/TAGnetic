@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-26
+
+**Milestone 1.5 brings live audio restoration to Split Studio.** You can clean
+up a recording, hear your changes as you work, and export treated tracks or
+convert the whole recording. The equaliser is the centrepiece
+of this milestone, with an editing workflow inspired by FabFilter Pro-Q.
+
+### Added
+
+- **Interactive equaliser.** Add, drag, select and edit multiple bands directly
+  on the frequency graph. Use bells, shelves, cuts and notches, with adaptive Q
+  and Stereo, Left, Right, Centre and Sides targeting. Hold a band to isolate
+  it, or hover over the live spectrum and drag a peak down to create a cut.
+- **Dynamic and spectral EQ.** Set a threshold, ratio and gain range for each
+  dynamic band. Ordinary dynamics react across the band. Spectral dynamics
+  react to individual frequencies, with the active cuts and boosts drawn
+  directly on the combined EQ curve. Learn a threshold from a loop.
+- **Audition and reuse settings.** Switch between EQ settings with level-matched
+  A/B, bypass the treatment, match the tone of a reference recording, and save
+  EQ presets or reuse a full treatment recipe on another recording.
+- **Spectral repair and cleanup.** Select a time and frequency range in a
+  zoomable spectrogram and turn it down. Clean up DC offset, rumble, mains hum,
+  whistles and hiss. Adjust balance, stereo width, channel order or polarity
+  when the two channels need different treatment.
+- **Dynamics and level.** Control peaks with a compressor, reduce noise in
+  quiet gaps, and set gain or a loudness target while monitoring the result.
+
+### Changed
+
+- The EQ has a live before-and-after spectrum, separate input and output meters,
+  and dials for input gain, EQ strength and output gain. The solo highlight
+  follows the selected band, with markers showing its range.
+- EQ edits follow playback without interrupting ordinary adjustments. The
+  spectrum and peak meters refresh more frequently during playback, with
+  smoother movement between readings.
+- Audio tools use dedicated windows that follow the app theme. They can stay
+  open while you adjust cuts, audition loops and review your work.
+
+### Fixed
+
+- The EQ input meter measures the signal after the input gain dial, so it
+  reflects the level actually feeding the EQ. Output peaks and clipping
+  indicators report separately.
+- The analyser continues updating during live EQ edits and reads short cached
+  loops from the audio being played.
+- The solo highlight stays centred on bell and notch bands on the logarithmic
+  frequency axis, including when you adjust the width.
+
+### Next
+
+1.5 is ready for everyday audio editing. Spectral repair and compression are
+the next areas of focus, with more precise controls and more powerful
+restoration workflows planned on the way to 2.0.
+
 ## [1.4.14] - 2026-11-25
 
 Tagnetic can now turn a long recording into a set of named, tagged tracks.

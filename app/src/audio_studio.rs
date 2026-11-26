@@ -8,9 +8,9 @@ use std::sync::{
 };
 use tagrex_commands::audio_studio::{
     AudioTreatment, CueEncoding, DiscogsProposal, DraftSegment, EqBand, ExportResult, ImportedCue,
-    OpenedRecording, PreviewMonitor, Progress, ProviderAnchor, RecordingProgress, RestoreResult,
-    Review, ReviewRequest, SpectrogramChannel, Studio, StudioError, TreatmentAnalysis,
-    TreatmentProbe, TreatmentProbeOptions,
+    OpenedRecording, PreviewComparison, PreviewMonitor, Progress, ProviderAnchor,
+    RecordingProgress, RestoreResult, Review, ReviewRequest, SpectrogramChannel, SpectrumView,
+    Studio, StudioError, TreatmentAnalysis, TreatmentProbe, TreatmentProbeOptions,
 };
 use tagrex_commands::ErrorDto;
 use tauri::{
@@ -248,10 +248,14 @@ static TREATMENT: blocking::Queue = blocking::Queue::new();
 static LATEST_TREATMENT: blocking::Latest = blocking::Latest::new();
 static PROBE: blocking::Queue = blocking::Queue::new();
 static LATEST_PROBE: blocking::Latest = blocking::Latest::new();
+static COMPARE: blocking::Queue = blocking::Queue::new();
+static LATEST_COMPARE: blocking::Latest = blocking::Latest::new();
 static SPECTROGRAM: blocking::Queue = blocking::Queue::new();
 static LATEST_SPECTROGRAM: blocking::Latest = blocking::Latest::new();
 static EQ_MATCH: blocking::Queue = blocking::Queue::new();
 static LATEST_EQ_MATCH: blocking::Latest = blocking::Latest::new();
+static EQ_LEARN: blocking::Queue = blocking::Queue::new();
+static LATEST_EQ_LEARN: blocking::Latest = blocking::Latest::new();
 static REVIEW: blocking::Queue = blocking::Queue::new();
 static EXPORT: blocking::Queue = blocking::Queue::new();
 static CUE: blocking::Queue = blocking::Queue::new();
@@ -382,24 +386,34 @@ pub(super) async fn audio_split_treatment(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Keep the existing flat Tauri probe arguments.
 pub(super) async fn audio_split_probe(
     studio: State<'_, StudioState>,
+    player: State<'_, Player>,
     id: String,
     frame: u64,
     treatment: AudioTreatment,
     spectrogram: Option<bool>,
     spectrum: Option<bool>,
+    spectrum_view: Option<SpectrumView>,
+    playback: Option<bool>,
     viewport: Option<tagrex_commands::audio_studio::FrameRange>,
     spectrogram_channel: Option<SpectrogramChannel>,
     spectrogram_treated: Option<bool>,
-) -> Result<TreatmentProbe, ErrorDto> {
+) -> Result<Option<TreatmentProbe>, ErrorDto> {
     let studio = studio.inner().clone();
     let options = TreatmentProbeOptions {
         spectrum: spectrum.unwrap_or(true),
+        spectrum_view: spectrum_view.unwrap_or_default(),
         spectrogram: spectrogram.unwrap_or_default(),
         viewport,
         spectrogram_channel: spectrogram_channel.unwrap_or_default(),
         spectrogram_treated: spectrogram_treated.unwrap_or_default(),
+    };
+    let (producing, window) = if playback.unwrap_or_default() && !options.spectrogram {
+        player.studio_playback_window(&id, frame, treatment)
+    } else {
+        (false, None)
     };
     let (queue, lane) = if options.spectrogram_only() {
         (&SPECTROGRAM, &LATEST_SPECTROGRAM)
@@ -408,8 +422,58 @@ pub(super) async fn audio_split_probe(
     };
     queue
         .run_latest(lane, move |cancel| {
+            if let Some(window) = window {
+                return window
+                    .analyze(options, || cancel.cancelled())
+                    .map(Some)
+                    .map_err(shell_error);
+            }
+            if producing {
+                return Ok(None);
+            }
             studio
                 .treatment_probe(&id, frame, treatment, options, || cancel.cancelled())
+                .map(Some)
+                .map_err(shell_error)
+        })
+        .await
+}
+
+#[tauri::command]
+pub(super) async fn audio_split_compare_levels(
+    studio: State<'_, StudioState>,
+    id: String,
+    frame: u64,
+    treatment: AudioTreatment,
+    alternate: AudioTreatment,
+) -> Result<PreviewComparison, ErrorDto> {
+    let studio = studio.inner().clone();
+    COMPARE
+        .run_latest(&LATEST_COMPARE, move |cancel| {
+            studio
+                .compare_preview_levels(&id, frame, [treatment, alternate], || cancel.cancelled())
+                .map_err(shell_error)
+        })
+        .await
+}
+
+#[tauri::command]
+pub(super) async fn audio_split_eq_learn_threshold(
+    window: WebviewWindow,
+    studio: State<'_, StudioState>,
+    id: String,
+    range: tagrex_commands::audio_studio::FrameRange,
+    treatment: AudioTreatment,
+    band_index: usize,
+) -> Result<f32, ErrorDto> {
+    if window.label() != "main" {
+        return Err(shell_error("Choose the loop from Split Studio."));
+    }
+    let studio = studio.inner().clone();
+    EQ_LEARN
+        .run_latest(&LATEST_EQ_LEARN, move |cancel| {
+            studio
+                .learn_eq_threshold(&id, range, treatment, band_index, || cancel.cancelled())
                 .map_err(shell_error)
         })
         .await

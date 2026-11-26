@@ -4,7 +4,7 @@
   import ControllerTooltip from './ControllerTooltip.svelte';
   import type { FrameRange } from '../js/audio-split';
   import { readTreatment, sameTreatment, type AudioTreatment } from '../js/audio-treatment';
-  import type { TreatmentPlotMode, TreatmentProbe } from '../js/audio-treatment-plot';
+  import type { AnalyzerView, TreatmentPlotMode, TreatmentProbe } from '../js/audio-treatment-plot';
   import {
     applyToolTheme, listenToolFlush, listenToolProbe, listenToolState, sendToolRequest, toolPatch,
     type PreviewBand, type SpectrogramViewOptions, type ToolAction, type ToolProbeUpdate, type ToolRequest, type ToolSnapshot,
@@ -22,8 +22,9 @@
   const revisionPrefix = Math.random().toString(36).slice(2);
   let revision = 0;
   type Mutation = Extract<ToolRequest, { action: 'edit' | 'undo' | 'redo' }>;
+  type QueuedRequest = Mutation | Extract<ToolRequest, { action: 'learn-threshold' }>;
   let sending: Mutation | undefined;
-  const queued: Mutation[] = [];
+  const queued: QueuedRequest[] = [];
   let requestedFence: string | undefined;
 
   function send(request: ToolRequest) {
@@ -41,6 +42,11 @@
         requestedFence = undefined;
         void send({ kind, action: 'flushed', sourceId: snapshot.sourceId, fence })?.catch(reason => { connectionError = String(reason); });
       }
+      return;
+    }
+    if (request.action === 'learn-threshold') {
+      void send(request)?.catch(reason => { connectionError = String(reason); });
+      flush();
       return;
     }
     sending = request;
@@ -86,8 +92,14 @@
     void send(message)?.catch(reason => { connectionError = String(reason); });
   }
 
-  function analyzer(enabled: boolean) {
-    if (snapshot) void send({ kind, action: 'analyzer', sourceId: snapshot.sourceId, enabled })?.catch(reason => { connectionError = String(reason); });
+  function learnThreshold(index: number) {
+    if (!snapshot || kind !== 'eq') return;
+    queued.push({ kind, sourceId: snapshot.sourceId, action: 'learn-threshold', index });
+    flush();
+  }
+
+  function analyzer(view: AnalyzerView) {
+    if (snapshot) void send({ kind, action: 'analyzer', sourceId: snapshot.sourceId, enabled: view !== 'off', view })?.catch(reason => { connectionError = String(reason); });
   }
 
   function viewport(range: FrameRange | null, options?: SpectrogramViewOptions) {
@@ -178,7 +190,7 @@
     <p class="problem" role="status">{connectionError || probeError}</p>
   {/if}
   {#key snapshot?.sourceId}
-    <AudioSplitToolWindow {kind} {snapshot} {probe} onedit={edit} onaction={action} onviewport={viewport} onanalyzer={analyzer}/>
+    <AudioSplitToolWindow {kind} {snapshot} {probe} onedit={edit} onaction={action} onviewport={viewport} onanalyzer={analyzer} onlearn={learnThreshold}/>
   {/key}
 </main>
 

@@ -1,4 +1,5 @@
 //! Split Studio borrows output, never the library sink or its decoder queue.
+mod retune;
 mod stream;
 
 use super::{router, Output};
@@ -8,7 +9,9 @@ use std::{
     time::Duration,
 };
 use stream::{DecodeRequest, Handoff, Voice, Worker};
-use tagrex_audio_workbench::{PreparedTreatment, SeekIndex};
+use tagrex_audio_workbench::{
+    AudioTreatment, PlaybackHistory, PlaybackProbeWindow, PreparedTreatment, SeekIndex,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub struct StudioAudition {
@@ -124,6 +127,7 @@ struct Snapshot {
     owner: Option<Arc<str>>,
     owns_output: bool,
     value: StudioStatus,
+    analysis: Option<Arc<Mutex<PlaybackHistory>>>,
 }
 
 impl Shared {
@@ -141,6 +145,26 @@ impl Shared {
                 ..StudioStatus::default()
             }
         }
+    }
+
+    pub(super) fn playback_window(
+        &self,
+        owner: &str,
+        frame: u64,
+        settings: AudioTreatment,
+    ) -> (bool, Option<PlaybackProbeWindow>) {
+        let history = {
+            let state = self.0.lock().unwrap_or_else(|p| p.into_inner());
+            if state.owner.as_deref() != Some(owner) || !state.value.playing {
+                return (false, None);
+            }
+            state.analysis.clone()
+        };
+        let Some(history) = history else {
+            return (false, None);
+        };
+        let mut history = history.lock().unwrap_or_else(|p| p.into_inner());
+        (history.producing(), history.take(frame, settings))
     }
 }
 
@@ -403,6 +427,10 @@ impl Actor {
     fn publish(&mut self) {
         let owns_output = self.owns_output();
         let mut state = self.shared.0.lock().unwrap_or_else(|p| p.into_inner());
+        state.analysis = self
+            .lease
+            .as_ref()
+            .map(|lease| lease.voice.playback_history());
         if state.value != self.state
             || state.owns_output != owns_output
             || state.owner != self.owner
@@ -516,6 +544,16 @@ impl Lease {
         let Some(target) = self.queued.take() else {
             return Ok(());
         };
+        if self
+            .geometry
+            .treatment
+            .can_retune_eq(target.treatment, self.geometry.sample_rate)
+            && self.voice.retune_eq(target.treatment)
+        {
+            self.file = target.file;
+            self.geometry.treatment = target.treatment;
+            return Ok(());
+        }
         if worker.is_none() {
             *worker = Worker::new().ok();
         }
