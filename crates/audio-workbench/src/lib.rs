@@ -9,9 +9,9 @@ pub use codec::{
     prepare_treatment, probe_file, render, render_file, render_file_with_outputs,
     render_treated_file, waveform, waveform_channels_file_indexed, waveform_file,
     waveform_file_indexed, Analysis, AnalysisProgress, AudioTreatment, FrameCount, HumFilter,
-    MediaError, MonoMode, OutputFormat, Peak, PreparedTreatment, PreviewDecoder, ProbedSource,
-    RenderProgress, RenderSegment, SeekIndex, SourceInfo, TreatmentProcessor, WaveformIndex,
-    WaveformPeaks,
+    MediaError, MonoMode, OutputFormat, Peak, Polarity, PreparedTreatment, PreviewDecoder,
+    ProbedSource, RenderProgress, RenderSegment, SeekIndex, SourceInfo, TreatmentProcessor,
+    WaveformIndex, WaveformPeaks,
 };
 pub use frame_copy::{CopyCodec, FrameCopyIndex};
 pub use markers::FrameRange;

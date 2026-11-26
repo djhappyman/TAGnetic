@@ -16,6 +16,7 @@ use tagrex_audio_workbench::{PreparedTreatment, PreviewDecoder, SeekIndex, Treat
 
 const CHUNK_FRAMES: usize = 256;
 const BUFFERED_CHUNKS: usize = 12;
+const MAX_PREPARED_CHUNKS: usize = 128;
 const MAX_LOOP_SAMPLES: u64 = 1_048_576;
 
 pub(super) struct Worker(Arc<Mailbox>);
@@ -97,6 +98,14 @@ pub(super) struct DecodeRequest {
 pub(super) struct Voice {
     sink: RodioSink,
     shared: Arc<Shared>,
+    output: Option<PreparedOutput>,
+}
+
+struct PreparedOutput {
+    receiver: Receiver<Chunk>,
+    output: rodio::queue::SourcesQueueOutput,
+    channels: ChannelCount,
+    rate: SampleRate,
 }
 
 impl Voice {
@@ -106,28 +115,41 @@ impl Voice {
         worker: &Worker,
         decode: DecodeRequest,
     ) -> Self {
+        let mut voice = Self::buffer(router, volume, worker, decode, BUFFERED_CHUNKS);
+        voice.activate(router, voice.position());
+        voice
+    }
+
+    pub(super) fn prepare(
+        router: &router::Handle,
+        volume: f32,
+        worker: &Worker,
+        decode: DecodeRequest,
+    ) -> Self {
+        let (_, rate) = router.format();
+        let chunks = (rate.get() as usize / 4)
+            .div_ceil(CHUNK_FRAMES)
+            .clamp(BUFFERED_CHUNKS, MAX_PREPARED_CHUNKS);
+        Self::buffer(router, volume, worker, decode, chunks)
+    }
+
+    fn buffer(
+        router: &router::Handle,
+        volume: f32,
+        worker: &Worker,
+        decode: DecodeRequest,
+        chunks: usize,
+    ) -> Self {
         let (channels, rate) = router.format();
-        let (sender, receiver) = mpsc::sync_channel(BUFFERED_CHUNKS);
+        let (sender, receiver) = mpsc::sync_channel(chunks);
         let shared = Arc::new(Shared::default());
         shared.paused.store(true, Ordering::Relaxed);
         shared.position_ns.store(
             native_time(decode.start, decode.source_rate),
             Ordering::Relaxed,
         );
-        let source = Speaker {
-            receiver,
-            shared: shared.clone(),
-            channels,
-            rate,
-            chunk: None,
-            channel: 0,
-            silent: false,
-            ended: false,
-        };
         let (sink, output) = RodioSink::new();
         sink.set_volume(volume);
-        sink.append(source);
-        router.replace(output);
         worker.schedule(Job {
             decode,
             sender,
@@ -136,11 +158,63 @@ impl Voice {
             rate,
             sent: std::cell::Cell::new(0),
         });
-        Self { sink, shared }
+        Self {
+            sink,
+            shared,
+            output: Some(PreparedOutput {
+                receiver,
+                output,
+                channels,
+                rate,
+            }),
+        }
+    }
+
+    pub(super) fn activate(&mut self, router: &router::Handle, position: Duration) {
+        let position = position.as_nanos() as u64;
+        self.shared.position_ns.store(position, Ordering::Release);
+        self.shared.catch_up_ns.store(position, Ordering::Release);
+        if let Some(PreparedOutput {
+            receiver,
+            output,
+            channels,
+            rate,
+        }) = self.output.take()
+        {
+            let mut source = Speaker {
+                receiver,
+                shared: self.shared.clone(),
+                channels,
+                rate,
+                chunk: None,
+                channel: 0,
+                silent: false,
+                ended: false,
+            };
+            // Catch up before handing the source to the device callback.
+            source.load_chunk(MAX_PREPARED_CHUNKS + 1);
+            self.sink.append(source);
+            router.replace(output);
+        }
+    }
+
+    pub(super) fn covers(&self, position: Duration) -> bool {
+        self.output.as_ref().is_some_and(|output| {
+            let half_frame = 500_000_000 / u64::from(output.rate.get()) + 1;
+            let end = self.shared.buffer_end_ns.load(Ordering::Acquire);
+            position.as_nanos() < u128::from(end.saturating_sub(half_frame))
+        })
+    }
+
+    pub(super) fn full(&self) -> bool {
+        self.shared.buffer_full.load(Ordering::Acquire)
     }
 
     pub(super) fn set_volume(&self, volume: f32) {
         self.sink.set_volume(volume);
+    }
+    pub(super) fn volume(&self) -> f32 {
+        self.sink.volume()
     }
     pub(super) fn pause(&self, paused: bool) {
         self.shared.paused.store(paused, Ordering::Release);
@@ -176,6 +250,9 @@ struct Shared {
     failed: AtomicBool,
     ended: AtomicBool,
     position_ns: AtomicU64,
+    catch_up_ns: AtomicU64,
+    buffer_end_ns: AtomicU64,
+    buffer_full: AtomicBool,
     gate: Mutex<()>,
     changed: Condvar,
 }
@@ -215,17 +292,9 @@ impl Iterator for Speaker {
         if self.channel == 0 {
             self.silent = self.shared.paused.load(Ordering::Acquire);
             if !self.silent && self.chunk.is_none() {
-                match self.receiver.try_recv() {
-                    Ok(chunk) => {
-                        self.chunk = Some((chunk, 0));
-                        self.shared.changed.notify_one();
-                    }
-                    Err(TryRecvError::Empty) => self.silent = true,
-                    Err(TryRecvError::Disconnected) => {
-                        self.ended = true;
-                        self.shared.ended.store(true, Ordering::Release);
-                        return None;
-                    }
+                self.load_chunk(BUFFERED_CHUNKS + 1);
+                if self.ended {
+                    return None;
                 }
             }
         }
@@ -258,6 +327,43 @@ impl Iterator for Speaker {
             }
         }
         Some(sample)
+    }
+}
+
+impl Speaker {
+    fn load_chunk(&mut self, limit: usize) {
+        let catch_up = self.shared.catch_up_ns.load(Ordering::Acquire);
+        let channels = usize::from(self.channels.get());
+        for _ in 0..limit {
+            let chunk = match self.receiver.try_recv() {
+                Ok(chunk) => chunk,
+                Err(TryRecvError::Empty) => {
+                    self.silent = true;
+                    return;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.ended = true;
+                    self.shared.ended.store(true, Ordering::Release);
+                    return;
+                }
+            };
+            self.shared.changed.notify_one();
+            // Device-rate frame indices are relative to the decode window.
+            let skip = if catch_up == 0 {
+                0
+            } else {
+                let elapsed = catch_up.saturating_sub(chunk.origin_nanos);
+                let frame = ((u128::from(elapsed) * u128::from(self.rate.get()) + 500_000_000)
+                    / 1_000_000_000) as u64;
+                frame.saturating_sub(chunk.first_frame)
+            };
+            if skip < (chunk.range.len() / channels) as u64 {
+                self.shared.catch_up_ns.store(0, Ordering::Release);
+                self.chunk = Some((chunk, skip as usize * channels));
+                return;
+            }
+        }
+        self.silent = true;
     }
 }
 
@@ -388,8 +494,13 @@ impl Job {
 
     fn send(&self, mut chunk: Chunk) -> bool {
         while !self.shared.cancelled() {
+            let frames = (chunk.range.len() / usize::from(self.channels.get())) as u64;
+            let end = chunk
+                .origin_nanos
+                .saturating_add(native_time(chunk.first_frame + frames, self.rate.get()));
             match self.sender.try_send(chunk) {
                 Ok(()) => {
+                    self.shared.buffer_end_ns.fetch_max(end, Ordering::Release);
                     let sent = self.sent.get().saturating_add(1);
                     self.sent.set(sent);
                     if sent == 4 {
@@ -400,6 +511,7 @@ impl Job {
                 Err(TrySendError::Disconnected(_)) => return false,
                 Err(TrySendError::Full(returned)) => {
                     chunk = returned;
+                    self.shared.buffer_full.store(true, Ordering::Release);
                     let gate = self.shared.gate.lock().unwrap_or_else(|p| p.into_inner());
                     let _idle = self
                         .shared

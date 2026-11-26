@@ -682,6 +682,7 @@ fn treated_mp3_splits_reencode_as_mono_and_leave_the_source_untouched() {
             mono: audio::MonoMode::Right,
             rumble: true,
             hum: audio::HumFilter::Hz50,
+            ..AudioTreatment::default()
         };
         draft.split_method = split_method;
         draft
@@ -716,4 +717,52 @@ fn treated_mp3_splits_reencode_as_mono_and_leave_the_source_untouched() {
         );
     }
     assert_eq!(fs::read(mp3).unwrap(), witness);
+}
+
+#[test]
+fn adjustable_treatments_preview_before_analysis_and_bound_cached_recipes() {
+    let root = fixtures();
+    let wav = root.path().join("master.wav");
+    recording(&wav);
+    let studio = Studio::default();
+    let opened = studio.open(&wav, || false).unwrap();
+    let treatment = AudioTreatment {
+        high_cut_hz: 8_000,
+        ..AudioTreatment::default()
+    };
+    studio
+        .with_playback_source(&opened.id, treatment, |_, rate, _, _, prepared| {
+            assert_eq!(rate, 44_100);
+            assert_eq!(prepared.settings(), treatment);
+            assert_eq!(prepared.loudness_lufs(), None);
+            Ok(())
+        })
+        .unwrap();
+
+    for offset in 0..=MAX_TREATMENT_RECIPES {
+        studio
+            .prepare_treatment(
+                &opened.id,
+                AudioTreatment {
+                    high_cut_hz: 8_000 + offset as u16,
+                    ..treatment
+                },
+                || false,
+            )
+            .unwrap();
+    }
+    let source = studio.source(&opened.id).unwrap();
+    assert_eq!(
+        source.treatments.lock().unwrap().len(),
+        MAX_TREATMENT_RECIPES
+    );
+    assert!(source.cached_treatment(treatment).unwrap().is_none());
+    assert_eq!(
+        studio
+            .playback_treatment(&opened.id, treatment)
+            .unwrap()
+            .1
+            .settings(),
+        treatment
+    );
 }

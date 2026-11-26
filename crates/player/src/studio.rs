@@ -32,6 +32,7 @@ pub struct StudioStatus {
     pub playing: bool,
     pub state: StudioPreviewState,
     pub sequence: u64,
+    pub retune_failed: Option<u64>,
 }
 
 pub(super) enum Command {
@@ -55,6 +56,13 @@ pub(super) enum Command {
         owner: String,
         sequence: u64,
     },
+    Retune {
+        owner: String,
+        sequence: u64,
+        revision: u64,
+        file: File,
+        treatment: PreparedTreatment,
+    },
     Close {
         owner: String,
     },
@@ -66,6 +74,7 @@ impl Command {
             Self::Play { owner, .. }
             | Self::Seek { owner, .. }
             | Self::Pause { owner, .. }
+            | Self::Retune { owner, .. }
             | Self::Close { owner } => owner,
         }
     }
@@ -75,7 +84,7 @@ impl Command {
             Self::Play { sequence, .. }
             | Self::Seek { sequence, .. }
             | Self::Pause { sequence, .. } => Some(*sequence),
-            Self::Close { .. } => None,
+            Self::Close { .. } | Self::Retune { .. } => None,
         }
     }
 
@@ -102,7 +111,7 @@ impl Command {
                     && audition.is_none_or(|a| a.start <= *start && *start < a.end && a.end <= *end)
             }
             Self::Seek { position, .. } => *position <= MAX_POSITION,
-            Self::Pause { .. } | Self::Close { .. } => true,
+            Self::Pause { .. } | Self::Retune { .. } | Self::Close { .. } => true,
         }
     }
 }
@@ -141,6 +150,7 @@ pub(super) struct Actor {
     state: StudioStatus,
     lease: Option<Lease>,
     worker: Option<Worker>,
+    alternate: Option<Worker>,
 }
 
 impl Actor {
@@ -151,11 +161,15 @@ impl Actor {
             state: StudioStatus::default(),
             lease: None,
             worker: None,
+            alternate: None,
         }
     }
 
     pub(super) fn accepts(&self, command: &Command) -> bool {
         let same_owner = self.owner.as_deref() == Some(command.owner());
+        if let Command::Retune { sequence, .. } = command {
+            return same_owner && *sequence == self.state.sequence && self.lease.is_some();
+        }
         if same_owner {
             return command
                 .sequence()
@@ -169,14 +183,19 @@ impl Actor {
     }
 
     pub(super) fn needs_tick(&self) -> bool {
-        self.lease
-            .as_ref()
-            .is_some_and(|lease| lease.playing || self.state.state == StudioPreviewState::Loading)
+        self.lease.as_ref().is_some_and(|lease| {
+            lease.pending.is_some()
+                || lease.playing
+                || self.state.state == StudioPreviewState::Loading
+        })
     }
 
     pub(super) fn set_volume(&self, volume: f32) {
         if let Some(lease) = self.lease.as_ref() {
             lease.voice.set_volume(volume);
+            if let Some(pending) = &lease.pending {
+                pending.voice.set_volume(volume);
+            }
         }
     }
 
@@ -216,6 +235,7 @@ impl Actor {
                     playing: false,
                     state: StudioPreviewState::Loading,
                     sequence: 0,
+                    retune_failed: None,
                 };
                 if let Some(router) = output.and_then(Output::studio_router) {
                     if self.worker.is_none() {
@@ -255,6 +275,7 @@ impl Actor {
                             playing: false,
                             state: StudioPreviewState::Ready,
                             sequence: 0,
+                            retune_failed: None,
                         };
                     } else {
                         let worker = self
@@ -281,6 +302,7 @@ impl Actor {
                         playing: false,
                         state: StudioPreviewState::Idle,
                         sequence: 0,
+                        retune_failed: None,
                     };
                 }
             }
@@ -293,6 +315,42 @@ impl Actor {
                     }
                 }
             }
+            Command::Retune {
+                revision,
+                file,
+                treatment,
+                ..
+            } => {
+                let lease = self.lease.as_mut().expect("accepted preview owns a lease");
+                if revision <= lease.revision {
+                    return;
+                }
+                lease.revision = revision;
+                self.state.retune_failed = None;
+                if let Some(pending) = &lease.pending {
+                    if same_treatment(pending.treatment, treatment) {
+                        return;
+                    }
+                }
+                lease.pending = None;
+                if same_treatment(lease.geometry.treatment, treatment) {
+                    return;
+                }
+                if self.alternate.is_none() {
+                    self.alternate = Worker::new().ok();
+                }
+                let result = self
+                    .alternate
+                    .as_ref()
+                    .ok_or("preview worker unavailable".to_owned())
+                    .and_then(|worker| {
+                        lease.retune(worker, volume, lease.retune_start(), file, treatment)
+                    });
+                if let Err(error) = result {
+                    eprintln!("audio: Studio could not change preview treatment: {error}");
+                    self.state.retune_failed = Some(revision);
+                }
+            }
             Command::Close { owner } => {
                 if self.owner.as_deref() == Some(&owner) {
                     self.lease = None;
@@ -303,6 +361,7 @@ impl Actor {
         }
         if let Some(sequence) = sequence {
             self.state.sequence = sequence;
+            self.state.retune_failed = None;
         }
         self.publish();
     }
@@ -311,6 +370,18 @@ impl Actor {
         let Some(lease) = self.lease.as_mut() else {
             return;
         };
+        if let Some(worker) = &self.alternate {
+            match lease.advance_retune(worker) {
+                Ok(false) => {}
+                Ok(true) => {
+                    std::mem::swap(&mut self.worker, &mut self.alternate);
+                }
+                Err(error) => {
+                    eprintln!("audio: Studio kept the previous preview: {error}");
+                    self.state.retune_failed = Some(lease.revision);
+                }
+            }
+        }
         let ready = lease.voice.ready();
         let ended = lease.voice.ended();
         let refused = lease.voice.failed();
@@ -355,6 +426,19 @@ struct Lease {
     geometry: Geometry,
     playing: bool,
     seek_index: Option<Arc<SeekIndex>>,
+    pending: Option<Retune>,
+    revision: u64,
+}
+
+struct Retune {
+    voice: Voice,
+    file: File,
+    treatment: PreparedTreatment,
+    retries: u8,
+}
+
+fn same_treatment(a: PreparedTreatment, b: PreparedTreatment) -> bool {
+    a.settings() == b.settings() && a.gain_db() == b.gain_db()
 }
 
 #[derive(Clone, Copy)]
@@ -384,16 +468,115 @@ impl Lease {
             geometry,
             playing: true,
             seek_index,
+            pending: None,
+            revision: 0,
         })
     }
 
     fn seek(&mut self, worker: &Worker, volume: f32, position: Duration) -> Result<(), String> {
+        if let Some(pending) = self.pending.take() {
+            self.geometry.treatment = pending.treatment;
+        }
         let request = self
             .geometry
             .request(&self.file, position, self.seek_index.clone())?;
         self.voice.pause(true);
         self.voice = Voice::new(&self.router, volume, worker, request);
         Ok(())
+    }
+
+    fn retune(
+        &mut self,
+        worker: &Worker,
+        volume: f32,
+        position: Duration,
+        file: File,
+        treatment: PreparedTreatment,
+    ) -> Result<(), String> {
+        let geometry = Geometry {
+            treatment,
+            ..self.geometry
+        };
+        let request = geometry.request(&file, position, self.seek_index.clone())?;
+        self.pending = Some(Retune {
+            voice: Voice::prepare(&self.router, volume, worker, request),
+            file,
+            treatment,
+            retries: 0,
+        });
+        Ok(())
+    }
+
+    fn advance_retune(&mut self, worker: &Worker) -> Result<bool, String> {
+        let Some(pending) = &self.pending else {
+            return Ok(false);
+        };
+        if pending.voice.failed() {
+            self.pending = None;
+            return Err("The updated audio could not be decoded".into());
+        }
+        if !pending.voice.ready() {
+            return Ok(false);
+        }
+        let position = self.play_position();
+        let start = pending.voice.position();
+        // The new voice's position is rounded to its source frame. The
+        // outgoing device clock may sit just before that frame without
+        // having wrapped to an earlier pass of the loop.
+        let wrapped = start.saturating_sub(position) > frame_time(1, self.geometry.sample_rate);
+        if !wrapped && pending.voice.covers(position) {
+            let mut pending = self.pending.take().expect("a prepared preview");
+            pending.voice.pause(!self.playing);
+            pending.voice.activate(&self.router, position);
+            self.geometry.treatment = pending.treatment;
+            self.file = pending.file;
+            self.voice = pending.voice;
+            return Ok(true);
+        }
+        let wait_for_loop = self.geometry.audition.is_some_and(|range| {
+            let rate = self.geometry.sample_rate;
+            frame(start, rate) == frame(range.start, rate)
+                && range.end.saturating_sub(position) <= Duration::from_millis(40)
+        });
+        if !wrapped && (!pending.voice.full() || wait_for_loop) {
+            return Ok(false);
+        }
+        let Retune {
+            voice,
+            file,
+            treatment,
+            retries,
+        } = self.pending.take().expect("a prepared preview");
+        drop(voice);
+        if retries >= 2 {
+            return Err(format!(
+                "The updated preview could not catch the playhead ({start:?} to {position:?})"
+            ));
+        }
+        let start = self
+            .geometry
+            .audition
+            .filter(|_| wrapped)
+            .map_or(position, |range| range.start);
+        self.retune(worker, self.voice.volume(), start, file, treatment)?;
+        self.pending.as_mut().expect("an updated preview").retries = retries + 1;
+        Ok(false)
+    }
+
+    fn play_position(&self) -> Duration {
+        let position = self.position();
+        self.geometry
+            .audition
+            .filter(|range| position >= range.end)
+            .map_or(position, |range| range.start)
+    }
+
+    fn retune_start(&self) -> Duration {
+        let position = self.play_position();
+        self.geometry
+            .audition
+            .filter(|range| range.end.saturating_sub(position) <= Duration::from_millis(40))
+            .map_or(position, |range| range.start)
     }
 
     fn position(&self) -> Duration {

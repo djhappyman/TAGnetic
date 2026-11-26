@@ -18,7 +18,8 @@ use peaks::PeakBins;
 pub use peaks::{Peak, WaveformIndex, WaveformPeaks};
 pub use seek::SeekIndex;
 pub use treatment::{
-    prepare_treatment, AudioTreatment, HumFilter, MonoMode, PreparedTreatment, TreatmentProcessor,
+    prepare_treatment, AudioTreatment, HumFilter, MonoMode, Polarity, PreparedTreatment,
+    TreatmentProcessor,
 };
 
 const MAX_SEGMENTS: usize = 1_000;

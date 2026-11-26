@@ -378,6 +378,7 @@ pub(super) enum TransportAction {
     Pause,
     Seek,
     Audition,
+    Retune,
 }
 
 #[derive(serde::Serialize)]
@@ -386,6 +387,8 @@ pub(super) struct TransportStatus {
     playing: bool,
     loading: bool,
     sequence: u64,
+    #[serde(rename = "retuneFailed", skip_serializing_if = "Option::is_none")]
+    retune_failed: Option<u64>,
 }
 
 fn frame_time(frame: u64, rate: u32) -> Duration {
@@ -405,10 +408,25 @@ pub(super) async fn audio_split_transport(
     end_frame: Option<u64>,
     sequence: Option<u64>,
     treatment: Option<AudioTreatment>,
+    revision: Option<u64>,
 ) -> Result<(), ErrorDto> {
+    if matches!(action, TransportAction::Retune) {
+        let (file, prepared) = studio
+            .playback_treatment(&id, treatment.unwrap_or_default())
+            .map_err(shell_error)?;
+        return player
+            .studio_retune(
+                id,
+                sequence.unwrap_or_default(),
+                revision.unwrap_or_default(),
+                file,
+                prepared,
+            )
+            .map_err(shell_error);
+    }
     let treatment = match action {
         TransportAction::Play | TransportAction::Audition => treatment.unwrap_or_default(),
-        TransportAction::Seek | TransportAction::Pause => AudioTreatment::default(),
+        _ => AudioTreatment::default(),
     };
     studio
         .with_playback_source(
@@ -444,6 +462,7 @@ pub(super) async fn audio_split_transport(
                     TransportAction::Seek => player.studio_seek_sequenced(owner, sequence, start),
                     TransportAction::Play => play(None),
                     TransportAction::Pause => player.studio_pause_sequenced(owner, sequence),
+                    TransportAction::Retune => unreachable!("retune has no source transport"),
                     TransportAction::Audition => {
                         let cut_end = end_frame
                             .filter(|end| *end > frame && *end <= total)
@@ -524,6 +543,7 @@ pub(super) fn audio_split_status(
         playing: status.playing,
         loading: status.state == StudioPreviewState::Loading,
         sequence: status.sequence,
+        retune_failed: status.retune_failed,
     };
     if sequence.is_some_and(|expected| expected != status.sequence)
         && !(status.sequence == 0 && status.state == StudioPreviewState::Refused)

@@ -47,6 +47,7 @@ fn lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>> {
 }
 
 const MAX_SESSIONS: usize = 4;
+const MAX_TREATMENT_RECIPES: usize = 8;
 const MAX_TRACKS: usize = 200;
 const MAX_TAG_VALUE: usize = 32 * 1024;
 const OVERVIEW_BINS: usize = 1024;
@@ -88,9 +89,10 @@ struct Source {
     stamp: Stamp,
     info: audio::SourceInfo,
     analysis: Option<Analysis>,
+    overview_level: (f64, f64),
     format: AudioFormat,
     frame_index: OnceLock<Arc<FrameCopyIndex>>,
-    treatments: Mutex<Vec<PreparedTreatment>>,
+    treatments: Mutex<VecDeque<PreparedTreatment>>,
     tags: TagMap,
     tag_policy: u64,
     replaceable: bool,
@@ -121,15 +123,27 @@ impl Source {
         }
         .map_err(StudioError::new)?;
         let tagged = TagEngine::read(&canonical).map_err(StudioError::new)?;
+        let mean_square = analysis
+            .rms
+            .iter()
+            .map(|&sample| f64::from(sample).powi(2))
+            .sum::<f64>()
+            / analysis.rms.len().max(1) as f64;
+        let peak = analysis
+            .peaks
+            .iter()
+            .map(|bin| f64::from(bin.max.abs().max(bin.min.abs())))
+            .fold(0.0, f64::max);
         let source = Self {
             path: canonical,
             identity: Mutex::new(Some(identity)),
             stamp,
             info: analysis.source,
             analysis: (bins > 1).then_some(analysis),
+            overview_level: (mean_square, peak),
             format: tagged.format,
             frame_index: OnceLock::new(),
-            treatments: Mutex::new(Vec::new()),
+            treatments: Mutex::new(VecDeque::new()),
             tags: tagged.tags,
             tag_policy: tagrex_core::model::read_policy_revision(),
             replaceable,
@@ -168,13 +182,27 @@ impl Source {
     }
 
     fn cached_treatment(&self, settings: AudioTreatment) -> Result<Option<PreparedTreatment>> {
-        if !settings.is_active() {
-            return Ok(Some(PreparedTreatment::default()));
-        }
-        Ok(lock(&self.treatments)?
+        let mut treatments = lock(&self.treatments)?;
+        if let Some(index) = treatments
             .iter()
-            .find(|prepared| prepared.settings() == settings)
-            .copied())
+            .position(|item| item.settings() == settings)
+        {
+            let prepared = treatments.remove(index).expect("cached treatment at index");
+            treatments.push_back(prepared);
+            return Ok(Some(prepared));
+        }
+        Ok(None)
+    }
+
+    fn preview_treatment(&self, settings: AudioTreatment) -> Result<PreparedTreatment> {
+        match self.cached_treatment(settings)? {
+            Some(prepared) => Ok(prepared),
+            None => PreparedTreatment::preview(settings, self.info)
+                .map(|prepared| {
+                    prepared.with_preview_level(self.overview_level.0, self.overview_level.1)
+                })
+                .map_err(StudioError::new),
+        }
     }
 
     fn prepare_treatment(
@@ -186,16 +214,22 @@ impl Source {
         if let Some(prepared) = self.cached_treatment(settings)? {
             return Ok(prepared);
         }
+        if !settings.needs_measurement() {
+            return PreparedTreatment::preview(settings, self.info).map_err(StudioError::new);
+        }
         let prepared =
             audio::prepare_treatment(file, settings, cancelled).map_err(StudioError::new)?;
         self.open_current()?;
-        // Settings are a finite set. Only store one measurement per recipe so
-        // concurrent or superseded review work cannot evict the preview's recipe.
+        // Preview can build a provisional recipe even after eviction. Reviewed
+        // exports own their measured recipe independently of this cache.
         let mut treatments = lock(&self.treatments)?;
         if let Some(existing) = treatments.iter().find(|item| item.settings() == settings) {
             return Ok(*existing);
         }
-        treatments.push(prepared);
+        if treatments.len() >= MAX_TREATMENT_RECIPES {
+            treatments.pop_front();
+        }
+        treatments.push_back(prepared);
         Ok(prepared)
     }
 
@@ -793,10 +827,17 @@ impl Studio {
                 .analysis
                 .as_ref()
                 .and_then(|analysis| analysis.seek_index.clone()),
-            source.cached_treatment(settings)?.ok_or_else(|| {
-                StudioError::new("Wait for audio treatment analysis before playing")
-            })?,
+            source.preview_treatment(settings)?,
         )
+    }
+
+    pub fn playback_treatment(
+        &self,
+        id: &str,
+        settings: AudioTreatment,
+    ) -> Result<(File, PreparedTreatment)> {
+        let source = self.source(id)?;
+        Ok((source.open_current()?, source.preview_treatment(settings)?))
     }
 
     pub fn with_review_playback<T>(
@@ -1059,6 +1100,7 @@ impl Studio {
             .filter(|_| copying)
             .map_or(0, |source| source.stamp.bytes);
         let mut add = |source: &Arc<Source>,
+                       treatment: PreparedTreatment,
                        range: FrameRange,
                        requested: FrameRange,
                        values: &Values,
@@ -1246,11 +1288,7 @@ impl Studio {
                 .saturating_add(audio + (tags.values().map(String::len).sum::<usize>() as u64) * 4);
             files.push(PlannedFile {
                 source: source.clone(),
-                treatment: if request.treatment.is_active() {
-                    source.prepare_treatment(request.treatment, || false)?
-                } else {
-                    PreparedTreatment::default()
-                },
+                treatment,
                 range,
                 requested,
                 name,
@@ -1260,7 +1298,7 @@ impl Studio {
             Ok(())
         };
         if let (Some(source), Some(ranges)) = (split_source, split_ranges) {
-            source.open_current()?;
+            let treatment = source.prepare_treatment(request.treatment, || false)?;
             let mut number = 0;
             for (requested, segment) in ranges {
                 let range = frame_index.as_ref().map_or(requested, |index| FrameRange {
@@ -1274,7 +1312,14 @@ impl Studio {
                 }
                 if segment.include {
                     number += 1;
-                    add(&source, range, requested, &segment.tags, Some(number))?;
+                    add(
+                        &source,
+                        treatment,
+                        range,
+                        requested,
+                        &segment.tags,
+                        Some(number),
+                    )?;
                 }
             }
         } else {
@@ -1307,7 +1352,8 @@ impl Studio {
                     start: 0,
                     end: source.info.frames,
                 };
-                add(&source, range, range, &Values::new(), None)?;
+                let treatment = source.prepare_treatment(request.treatment, || false)?;
+                add(&source, treatment, range, range, &Values::new(), None)?;
                 sources.push(source);
             }
         }

@@ -210,6 +210,23 @@ impl Player {
             .send(Cmd::Studio(studio::Command::Pause { owner, sequence }))
     }
 
+    pub fn studio_retune(
+        &self,
+        owner: String,
+        sequence: u64,
+        revision: u64,
+        file: std::fs::File,
+        treatment: tagrex_audio_workbench::PreparedTreatment,
+    ) -> Result<(), PlayerError> {
+        self.tx.send(Cmd::Studio(studio::Command::Retune {
+            owner,
+            sequence,
+            revision,
+            file,
+            treatment,
+        }))
+    }
+
     pub fn studio_close(&self, owner: String) -> Result<(), PlayerError> {
         self.tx.send(Cmd::Studio(studio::Command::Close { owner }))
     }

@@ -169,6 +169,188 @@ fn point(frame: u64) -> Duration {
 }
 
 #[test]
+fn live_treatment_preserves_loop_and_ignores_older_settings_or_owners() {
+    use tagrex_audio_workbench::{AudioTreatment, SourceInfo};
+
+    let preview = Recording::ramp("retune", 2_048, 4_000);
+    let mut f = Fixture::new(true);
+    let audition = StudioAudition {
+        start: point(100),
+        end: point(108),
+    };
+    let owner = "editor".to_owned();
+    f.player
+        .studio_play_request(
+            owner.clone(),
+            3,
+            crate::StudioPlayback {
+                file: File::open(&preview.0).unwrap(),
+                start: audition.start,
+                end: point(2_048),
+                audition: Some(audition),
+                sample_rate: RATE,
+                seek_index: None,
+                treatment: PreparedTreatment::default(),
+            },
+        )
+        .unwrap();
+    f.wait("dry loop playing", |p| p.studio_status("editor").playing);
+    let first = first_audio(&mut f.studio).0;
+    for _ in first..4_107 {
+        pcm(&mut f.studio);
+    }
+    crate::test_support::wait_until("old output at the exact loop end", || {
+        f.player.studio_status("editor").position == audition.end
+    });
+
+    let swapped = PreparedTreatment::preview(
+        AudioTreatment {
+            swap_channels: true,
+            ..AudioTreatment::default()
+        },
+        SourceInfo {
+            sample_rate: RATE,
+            channels: 2,
+            frames: 2_048,
+            bits_per_sample: Some(16),
+        },
+    )
+    .unwrap();
+    f.player
+        .studio_retune(
+            owner.clone(),
+            3,
+            2,
+            File::open(&preview.0).unwrap(),
+            swapped,
+        )
+        .unwrap();
+    crate::test_support::wait_until("retune wraps the handoff to the start", || {
+        f.player.studio_status("editor").position == audition.start
+    });
+    f.player
+        .studio_retune(
+            owner.clone(),
+            3,
+            1,
+            File::open(&preview.0).unwrap(),
+            PreparedTreatment::default(),
+        )
+        .unwrap();
+    f.player
+        .studio_retune(
+            "stale".into(),
+            3,
+            6,
+            File::open(&preview.0).unwrap(),
+            PreparedTreatment::default(),
+        )
+        .unwrap();
+    f.player
+        .studio_retune(
+            owner,
+            2,
+            6,
+            File::open(&preview.0).unwrap(),
+            PreparedTreatment::default(),
+        )
+        .unwrap();
+
+    let mut first_treated = 0;
+    crate::test_support::wait_until("loop changes sound in place", || {
+        let (left, right) = pcm(&mut f.studio);
+        if left < 0 && left == -right {
+            first_treated = right;
+            true
+        } else {
+            false
+        }
+    });
+    assert!((4_100..4_108).contains(&first_treated));
+    for step in 1..=16 {
+        let expected = 4_100 + (first_treated - 4_100 + step) % 8;
+        assert_eq!(pcm(&mut f.studio), (-expected, expected));
+    }
+    assert_eq!(f.player.studio_status("editor").sequence, 3);
+    f.drain();
+}
+
+#[test]
+fn live_treatment_continues_streaming_and_keeps_current_sound_on_failure() {
+    use tagrex_audio_workbench::{AudioTreatment, SourceInfo};
+
+    let recording = Recording::ramp("retune-streaming", 20_000, 4_000);
+    let mut f = Fixture::new(true);
+    let source = SourceInfo {
+        sample_rate: RATE,
+        channels: 2,
+        frames: 20_000,
+        bits_per_sample: Some(16),
+    };
+    let swapped = PreparedTreatment::preview(
+        AudioTreatment {
+            swap_channels: true,
+            ..AudioTreatment::default()
+        },
+        source,
+    )
+    .unwrap();
+    f.player
+        .studio_play_request(
+            "editor".into(),
+            9,
+            crate::StudioPlayback {
+                file: File::open(&recording.0).unwrap(),
+                start: point(1_024),
+                end: point(source.frames),
+                audition: None,
+                sample_rate: RATE,
+                seek_index: None,
+                treatment: PreparedTreatment::default(),
+            },
+        )
+        .unwrap();
+    f.wait("streaming dry output", |p| {
+        p.studio_status("editor").playing
+    });
+    let mut previous = first_audio(&mut f.studio).0;
+    f.player
+        .studio_retune(
+            "editor".into(),
+            9,
+            1,
+            File::open(&recording.0).unwrap(),
+            swapped,
+        )
+        .unwrap();
+    crate::test_support::wait_until("separate decoder catches the live playhead", || {
+        let (left, right) = pcm(&mut f.studio);
+        assert_eq!(left, -right);
+        assert_eq!(left.abs(), previous + 1);
+        previous = left.abs();
+        left < 0
+    });
+    let broken = Recording::ramp("retune-broken", 1, 4_000);
+    std::fs::write(&broken.0, b"invalid recording").unwrap();
+    f.player
+        .studio_retune(
+            "editor".into(),
+            9,
+            2,
+            File::open(&broken.0).unwrap(),
+            PreparedTreatment::default(),
+        )
+        .unwrap();
+    f.wait(
+        "failed change reported without dropping the active voice",
+        |p| p.studio_status("editor").retune_failed == Some(2),
+    );
+    assert!(f.player.studio_status("editor").playing);
+    assert!(pcm(&mut f.studio).0 < 0);
+    f.drain();
+}
+
+#[test]
 fn studio_freezes_exact_main_samples_and_keeps_queued_next_track() {
     let recording = Recording::ramp("library", 2_048, 4_000);
     let upcoming = Recording::ramp("library-next", 64, 8_000);
@@ -272,6 +454,7 @@ fn audition_repeats_selected_frames_and_latest_paused_seek_is_owner_bound() {
                     playing: false,
                     state: StudioPreviewState::Ready,
                     sequence: 0,
+                    retune_failed: None,
                 }
         },
     );
@@ -422,6 +605,7 @@ fn paused_seek_cancels_a_full_decoder_queue_and_keeps_exact_native_time() {
                 playing: false,
                 state: StudioPreviewState::Ready,
                 sequence: 0,
+                retune_failed: None,
             }
     });
     for position in 100..255 {
@@ -436,6 +620,7 @@ fn paused_seek_cancels_a_full_decoder_queue_and_keeps_exact_native_time() {
                 playing: false,
                 state: StudioPreviewState::Ready,
                 sequence: 0,
+                retune_failed: None,
             }
     });
     f.player.studio_seek("editor".into(), point(255)).unwrap();
@@ -446,6 +631,7 @@ fn paused_seek_cancels_a_full_decoder_queue_and_keeps_exact_native_time() {
                 playing: false,
                 state: StudioPreviewState::Ready,
                 sequence: 0,
+                retune_failed: None,
             }
     });
     f.player.studio_close("editor".into()).unwrap();

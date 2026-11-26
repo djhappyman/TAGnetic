@@ -109,6 +109,27 @@ impl Sender {
                     _ => break,
                 }
             }
+        } else if let Cmd::Studio(studio::Command::Retune {
+            owner,
+            sequence,
+            revision,
+            ..
+        }) = &cmd
+        {
+            if let Some(Cmd::Studio(studio::Command::Retune {
+                owner: previous_owner,
+                sequence: previous_sequence,
+                revision: previous_revision,
+                ..
+            })) = state.queue.back()
+            {
+                if previous_owner == owner && previous_sequence == sequence {
+                    if previous_revision >= revision {
+                        return Ok(());
+                    }
+                    replace = Some(state.queue.len() - 1);
+                }
+            }
         } else if let Cmd::Studio(studio::Command::Close { owner }) = &cmd {
             if matches!(state.queue.back(), Some(Cmd::Studio(studio::Command::Close { owner: previous })) if previous == owner)
             {
