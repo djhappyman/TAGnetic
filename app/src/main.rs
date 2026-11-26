@@ -2943,6 +2943,7 @@ fn main() {
             audio_studio::audio_split_peaks,
             audio_studio::audio_split_treatment,
             audio_studio::audio_split_probe,
+            audio_studio::audio_split_eq_match,
             audio_studio::audio_split_transport,
             audio_studio::audio_split_audition_output,
             audio_studio::audio_split_status,

@@ -1,18 +1,11 @@
 <script module lang="ts">
-  import { Activity, ArrowDownToLine, ArrowUpToLine, AudioLines, ChartSpline, Crosshair, Equal, Headphones, ScanLine, TrendingDown, TrendingUp, Volume2, VolumeX, Zap } from '@lucide/svelte';
+  import { Activity, AudioLines, Crosshair, Equal, Headphones, Volume2, VolumeX, Zap } from '@lucide/svelte';
   import Button from './AudioSplitButton.svelte';
-  import { eqBandBypassBits, type AudioTreatment } from '../js/audio-treatment';
+  import { isLegacyEqBand } from '../js/audio-eq';
+  import type { AudioTreatment } from '../js/audio-treatment';
   import type { TreatmentPlotMode } from '../js/audio-treatment-plot';
 
   const modes = {
-    eq: [
-      { key: 'low', name: 'Low cut', icon: ArrowUpToLine, effect: 'rumble' },
-      { key: 'bass', name: 'Low shelf', icon: TrendingUp, effect: 'bassDb' },
-      { key: 'bell', name: 'Bell', icon: ChartSpline, effect: 'presenceDb' },
-      { key: 'notch', name: 'Notch', icon: ScanLine, effect: 'notchHz' },
-      { key: 'treble', name: 'High shelf', icon: TrendingDown, effect: 'trebleDb' },
-      { key: 'high', name: 'High cut', icon: ArrowDownToLine, effect: 'highCutHz' },
-    ],
     dynamics: [
       { key: 'compressor', name: 'Compressor', icon: Activity, effect: 'compressorDb' },
       { key: 'gate', name: 'Quiet-gap reduction', icon: VolumeX, effect: 'gateDb' },
@@ -28,23 +21,21 @@
   } as const;
 
   export function isToolMode(kind: TreatmentPlotMode, value: string) {
-    return modes[kind].some(mode => mode.key === value);
+    return kind === 'eq' ? isLegacyEqBand(value) : modes[kind].some(mode => mode.key === value);
   }
 </script>
 
 <script lang="ts">
-  let { kind, selected, settings, enabled, stereo, highCut, onchoose }: {
-    kind: TreatmentPlotMode;
+  let { kind, selected, settings, enabled, stereo, onchoose }: {
+    kind: keyof typeof modes;
     selected: string | null;
     settings: AudioTreatment;
     enabled: boolean;
     stereo: boolean;
-    highCut: boolean;
     onchoose: (mode: string) => void;
   } = $props();
 
-  const available = $derived(modes[kind].filter(mode => enabled
-    && (mode.key !== 'stereo' || stereo) && (mode.key !== 'high' || highCut)));
+  const available = $derived(modes[kind].filter(mode => enabled && (mode.key !== 'stereo' || stereo)));
   const tabStop = $derived(available.find(mode => mode.key === selected)?.key ?? available[0]?.key);
 
   function effectEnabled(effect: keyof AudioTreatment) {
@@ -55,11 +46,6 @@
     }
     const value = settings[effect];
     return !!value && value !== 'off';
-  }
-
-  function bypassed(effect: keyof AudioTreatment) {
-    return kind === 'eq' && Object.prototype.hasOwnProperty.call(eqBandBypassBits, effect)
-      && !!(settings.eqBypassed & eqBandBypassBits[effect as keyof typeof eqBandBypassBits]);
   }
 
   function move(event: KeyboardEvent, key: string) {
@@ -79,12 +65,10 @@
   {#each modes[kind] as mode (mode.key)}
     {@const Icon = mode.icon}
     {@const active = effectEnabled(mode.effect)}
-    {@const bypass = active && bypassed(mode.effect)}
     <Button variant="ghost" size="icon-sm" class="mode-button" aria-label={mode.name + ' controls'}
-      title={bypass ? mode.name + ' · Bypassed' : mode.name} aria-pressed={selected === mode.key}
-      aria-description={bypass ? 'Effect bypassed' : active ? 'Effect active' : undefined}
-      data-effect={active && !bypass} data-bypass={bypass} data-tool-mode={mode.key} tabindex={tabStop === mode.key ? 0 : -1}
-      disabled={!enabled || (mode.key === 'stereo' && !stereo) || (mode.key === 'high' && !highCut)}
+      title={mode.name} aria-pressed={selected === mode.key} aria-description={active ? 'Effect active' : undefined}
+      data-effect={active} data-tool-mode={mode.key} tabindex={tabStop === mode.key ? 0 : -1}
+      disabled={!enabled || (mode.key === 'stereo' && !stereo)}
       onkeydown={(event: KeyboardEvent) => move(event, mode.key)} onclick={() => onchoose(mode.key)}>
       <Icon size={16} aria-hidden="true"/>
     </Button>
@@ -98,6 +82,5 @@
   .mode-rail :global(.mode-button:hover:not(:disabled)) { color:var(--text); }
   .mode-rail :global(.mode-button[aria-pressed="true"]) { background:var(--sel-tint); color:var(--text); }
   .mode-rail :global(.mode-button[aria-pressed="true"][data-effect="true"]) { color:var(--accent-ink); }
-  .mode-rail :global(.mode-button[data-bypass="true"])::after { content:''; position:absolute; height:1px; width:15px; background:currentColor; transform:rotate(-35deg); }
   .mode-rail :global(.mode-button:focus-visible) { outline:2px solid var(--accent); outline-offset:1px; }
 </style>

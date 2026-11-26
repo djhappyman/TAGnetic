@@ -45,7 +45,7 @@ export function treatmentForRecording(
   const settings = {
     ...recipe,
     spectralRepairs: current.spectralRepairs,
-    eqBands: recipe.eqBands?.filter(band => band.hz <= limit) ?? null,
+    eqBands: recipe.eqBands?.filter(band => band.hz <= limit).map(band => stereo ? band : { ...band, channel: 'stereo' as const }) ?? null,
   };
   if (limit < (settings.rumbleHz || 35)) settings.rumble = false;
   if (limit < settings.dcHz) settings.dcHz = 0;

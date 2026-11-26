@@ -17,8 +17,9 @@
   import {
     listenToolRequests, listenToolVisibility, requestToolFlush, sendToolProbe, sendToolState,
     toolEffectCount, toolModes, toolNames, toolPatch, toolTheme,
-    type PreviewBand, type SpectrogramViewOptions, type ToolRequest, type ToolSnapshot, type ToolVisibility,
+    type EqReference, type PreviewBand, type SpectrogramViewOptions, type ToolRequest, type ToolSnapshot, type ToolVisibility,
   } from '../js/audio-tools-window';
+  import type { EqBand } from '../js/audio-treatment';
   import type { TreatmentProbe } from '../js/audio-treatment-plot';
   import { copyTreatmentSettings, portableTreatment, readCopiedTreatment, readTreatmentRecipes,
     saveTreatmentRecipes, treatmentForRecording, type TreatmentRecipe } from '../js/audio-treatment-recipes';
@@ -89,6 +90,15 @@
   let activeToolTheme: ToolSnapshot['theme'] | undefined;
   let toolTimer: ReturnType<typeof setInterval> | undefined;
   type ProbeLane = { pending: boolean; retryAt: number; latest?: { key: string; sourceId: string; probe: TreatmentProbe } };
+  let eqAnalyzerEnabled = true;
+  let reference: EqReference | undefined;
+  let referenceCandidate: AudioTreatment | undefined;
+  let referenceGeneration = 0;
+  let referenceStarted: number | undefined;
+  let referenceUndo: AudioTreatment[] = [];
+  let referenceRedo: AudioTreatment[] = [];
+  let referenceGesture: string | undefined;
+  let referenceRedoBeforeGesture: AudioTreatment[] = [];
   const meterLane: ProbeLane = { pending: false, retryAt: 0 };
   const repairLane: ProbeLane = { pending: false, retryAt: 0 };
   let repairViewport: FrameRange | null = null;
@@ -104,7 +114,12 @@
   type Monitor = { owner: Tool; kind: NonNullable<ToolSnapshot['monitor']>; band?: PreviewBand; started?: number };
   let monitor: Monitor | undefined;
   let levelMatch = readLevelMatch();
-  let comparisonGainDb = 0;
+  type ComparisonLevels = Pick<TreatmentProbe, 'input' | 'output'>;
+  const noComparisonGain = { input: 0, output: 0 };
+  let comparisonGain = noComparisonGain;
+  let comparisonAlternate: Partial<AudioTreatment> | undefined;
+  let comparisonCache: { sourceId: string; frame: number;
+    readings: { settings: AudioTreatment; levels: ComparisonLevels }[] } | undefined;
   let compareRevision = 0;
   let comparisonReady = false;
   let comparisonInFlight = 0;
@@ -334,6 +349,11 @@
         throw new Error('This recording has no readable timeline.');
       }
       if (source) await closeAudioSplitSession(source.id);
+      clearReference(false);
+      comparisonAlternate = undefined;
+      comparisonCache = undefined;
+      comparisonGain = noComparisonGain;
+      comparisonReady = false;
       source = opened;
       rememberAudioSplitSession(opened.id);
       format = opened.originalFormat || 'mp3';
@@ -677,13 +697,13 @@
     try {
       const request = playbackTreatment();
       const audition = monitor;
-      const matchGain = comparisonGainDb;
+      const matchGain = comparisonGain;
       const measured = treatmentAnalysis;
       await audioCommand('transport', { id, action, frame, endFrame, sequence, ...(action === 'pause' ? {} : request) });
       if (active && source?.id === id && playing && sequence === transportVersion) {
         scheduleStatus(id, sequence, 20);
         if (!sameTreatment(request.treatment, playbackTreatment().treatment) || measured !== treatmentAnalysis
-          || audition !== monitor || matchGain !== comparisonGainDb) retuneListening();
+          || audition !== monitor || matchGain !== comparisonGain) retuneListening();
       }
     } catch (reason) {
       if (active && sequence === transportVersion) {
@@ -723,8 +743,8 @@
       return { treatment, monitor: { kind: 'compressor-difference' } };
     }
     if (monitor?.kind === 'bypass-compressor') return { treatment: { ...treatment, compressorDb: 0 } };
-    const previewGainDb = hearOriginal ? Math.min(0, comparisonGainDb) : Math.min(0, -comparisonGainDb);
-    return { treatment: hearOriginal ? noTreatment : treatment, ...(levelMatch && previewGainDb ? { previewGainDb } : {}) };
+    const previewGainDb = hearOriginal ? comparisonGain.input : comparisonGain.output;
+    return { treatment: hearOriginal ? noTreatment : listeningSettings(), ...(previewGainDb ? { previewGainDb } : {}) };
   }
 
   function readLevelMatch() {
@@ -743,22 +763,47 @@
     clearTimeout(comparisonTimer);
     const revision = ++compareRevision;
     comparisonReady = false;
-    comparisonGainDb = 0;
+    comparisonGain = noComparisonGain;
     const opened = source;
-    if (!opened || !levelMatch || !hasTreatment(treatment) || phase !== 'edit') return;
+    const settings = listeningSettings();
+    if (!opened || phase !== 'edit') return;
+    const alternate = comparisonAlternate && !reference?.preview
+      ? readTreatment({ ...settings, ...comparisonAlternate }) : undefined;
+    const compareBoth = alternate && !sameTreatment(settings, alternate);
+    if (!compareBoth && (!levelMatch || !hasTreatment(settings))) return;
     const frame = Math.max(0, Math.min(opened.frames - 1, Math.round(playhead)));
-    const settings = treatment;
+    function match(current: ComparisonLevels, other?: ComparisonLevels) {
+      comparisonReady = true;
+      if (!Number.isFinite(current.output) || current.output <= -72) return;
+      const matchOriginal = levelMatch && Number.isFinite(current.input) && current.input > -72;
+      let target = matchOriginal ? Math.min(current.input, current.output) : current.output;
+      if (other && Number.isFinite(other.output) && other.output > -72) target = Math.min(target, other.output);
+      comparisonGain = {
+        input: matchOriginal ? Math.max(-48, target - current.input) : 0,
+        output: Math.max(-48, target - current.output),
+      };
+      retuneListening(true);
+    }
+    const cached = comparisonCache;
+    if (compareBoth && cached?.sourceId === opened.id && Math.abs(cached.frame - frame) < opened.sampleRate * 4) {
+      const current = cached.readings.find(reading => sameTreatment(reading.settings, settings));
+      const other = cached.readings.find(reading => sameTreatment(reading.settings, alternate));
+      if (current && other) { match(current.levels, other.levels); return; }
+    }
+    const stillCurrent = () => active && source?.id === opened.id && revision === compareRevision && phase === 'edit';
     comparisonTimer = setTimeout(async () => {
-      if (!active || source?.id !== opened.id || revision !== compareRevision || phase !== 'edit') return;
+      if (!stillCurrent()) return;
       comparisonInFlight = revision;
       try {
-        const probe = await audioCommand<TreatmentProbe>('probe', { id: opened.id, frame, treatment: settings, spectrum: false });
-        if (!active || source?.id !== opened.id || revision !== compareRevision || phase !== 'edit') return;
-        comparisonReady = true;
-        // Use the same measurement for both choices. Attenuate the louder signal.
-        if (probe?.input > -72 && probe?.output > -72) {
-          comparisonGainDb = Math.max(-48, Math.min(48, probe.output - probe.input));
-          retuneListening(true);
+        const current = await audioCommand<ComparisonLevels>('probe', { id: opened.id, frame, treatment: settings, spectrum: false });
+        if (!stillCurrent() || !current) return;
+        if (compareBoth) {
+          const other = await audioCommand<ComparisonLevels>('probe', { id: opened.id, frame, treatment: alternate, spectrum: false });
+          if (!stillCurrent() || !other) return;
+          comparisonCache = { sourceId: opened.id, frame, readings: [{ settings, levels: current }, { settings: alternate, levels: other }] };
+          match(current, other);
+        } else {
+          match(current);
         }
       } catch { /* Keep the preview at its actual level if measurement fails. */ }
       finally { if (comparisonInFlight === revision) comparisonInFlight = 0; }
@@ -774,9 +819,13 @@
     else retuneListening(true);
   }
 
+  function validMonitorBand(band: PreviewBand | undefined): band is PreviewBand {
+    return !!band && Number.isInteger(band.lowHz) && Number.isInteger(band.highHz)
+      && band.lowHz >= 20 && band.highHz - band.lowHz >= 20 && band.highHz <= Math.min(20_000, sampleRate * .45);
+  }
+
   function startMonitor(owner: Tool, kind: Monitor['kind'], band?: PreviewBand, range?: FrameRange) {
-    if (kind === 'band' && (!band || !Number.isInteger(band.lowHz) || !Number.isInteger(band.highHz)
-      || band.lowHz < 20 || band.highHz - band.lowHz < 20 || band.highHz > Math.min(20_000, sampleRate * .45))) return;
+    if (kind === 'band' && !validMonitorBand(band)) return;
     if (kind !== 'band' && !treatment.compressorDb) return;
     if (range && (!Number.isSafeInteger(range.start) || !Number.isSafeInteger(range.end)
       || range.start < 0 || range.end > total || range.end <= range.start)) return;
@@ -808,6 +857,7 @@
   }
 
   function hideToolWindows() {
+    clearReference(false);
     stopMonitor(false);
     visibleTools.clear();
     clearInterval(toolTimer);
@@ -827,6 +877,7 @@
       void refreshToolProbe(kind === 'repair');
     } else {
       const wasVisible = visibleTools.delete(kind);
+      if (kind === 'eq') clearReference();
       if (monitor?.owner === kind) stopMonitor();
       if (wasVisible) void tick().then(() => document.getElementById('studio-tool-' + kind)?.focus({ preventScroll: true }));
       if (!visibleTools.size) {
@@ -858,13 +909,20 @@
   }
 
   function publishToolState(kind: Tool, force = false) {
+    const selectedSettings = kind === 'eq' ? listeningSettings() : treatment;
     const snapshot: ToolSnapshot | null = source && active && phase === 'edit' ? {
-      sourceId: source.id, frame: playhead, sampleRate, frames: source.frames, settings: treatment, stereo: hasStereo,
+      sourceId: source.id, frame: playhead, sampleRate, frames: source.frames, settings: selectedSettings, stereo: hasStereo,
       playing, original: hearOriginal, loop: loopEnabled, revision: toolRevisions[kind], theme: activeToolTheme ??= toolTheme(),
       loopRange: previewRange() ?? undefined, pinned: toolPins[kind] ?? false, levelMatch,
+      eqLevelComparison: kind === 'eq',
       monitor: monitor?.owner === kind ? monitor.kind : undefined,
-      undoLabel: previous.length ? 'Undo ' + previous.at(-1)?.label : undefined,
-      redoLabel: next.length ? 'Redo ' + next.at(-1)?.label : undefined,
+      undoLabel: kind === 'eq' && reference?.preview
+        ? (referenceUndo.length ? 'Undo match adjustment' : undefined)
+        : previous.length ? 'Undo ' + previous.at(-1)?.label : undefined,
+      redoLabel: kind === 'eq' && reference?.preview
+        ? (referenceRedo.length ? 'Redo match adjustment' : undefined)
+        : next.length ? 'Redo ' + next.at(-1)?.label : undefined,
+      reference: kind === 'eq' ? reference : undefined,
       normalisation: kind === 'dynamics' ? treatmentAnalysis ?? undefined : undefined,
       ...(kind === 'repair' ? { overview: source.overview, stereoOverview: source.stereoOverview, cuts: toolCuts } : {}),
     } : null;
@@ -876,7 +934,7 @@
       && snapshot.loopRange?.start === sent.loopRange?.start && snapshot.loopRange?.end === sent.loopRange?.end
       && snapshot.pinned === sent.pinned && snapshot.levelMatch === sent.levelMatch && snapshot.monitor === sent.monitor
       && snapshot.undoLabel === sent.undoLabel && snapshot.redoLabel === sent.redoLabel
-      && snapshot.normalisation === sent.normalisation && snapshot.cuts === sent.cuts))) return;
+      && snapshot.normalisation === sent.normalisation && snapshot.reference === sent.reference && snapshot.cuts === sent.cuts))) return;
     sentToolStates[kind] = snapshot;
     const sameSource = !force && snapshot?.sourceId === sent?.sourceId;
     const message = snapshot && sameSource ? { ...snapshot, overview: undefined, stereoOverview: undefined,
@@ -909,14 +967,15 @@
   async function refreshToolProbe(spectrogram: boolean) {
     const opened = source;
     const lane = spectrogram ? repairLane : meterLane;
-    const targets = () => [...visibleTools].filter(kind => (kind === 'repair') === spectrogram);
+    const targets = () => [...visibleTools].filter(kind => spectrogram ? kind === 'repair'
+      : kind === 'dynamics' || kind === 'eq');
     const now = performance.now();
     if (!opened || !active || phase !== 'edit' || lane.pending || (!spectrogram && comparisonInFlight) || now < lane.retryAt || !targets().length) return;
     const frame = Math.max(0, Math.min(opened.frames - 1, Math.round(playing && !buffering && !scrubbing ? clockFrame(now) : playhead)));
     const version = transportVersion;
     const view = repairView;
-    const settings = spectrogram && !view.treated ? noTreatment : treatment;
-    const spectrum = !spectrogram && visibleTools.has('eq');
+    const settings = spectrogram && !view.treated ? noTreatment : listeningSettings();
+    const spectrum = !spectrogram && eqAnalyzerEnabled && visibleTools.has('eq');
     const viewport = spectrogram ? repairViewport : null;
     const viewKey = spectrogram ? view : null;
     const gain = !spectrogram || view.treated ? treatmentAnalysis?.gainDb : null;
@@ -985,6 +1044,17 @@
       }
       return;
     }
+    if (request.action === 'analyzer' && request.kind === 'eq') {
+      eqAnalyzerEnabled = request.enabled === true;
+      void refreshToolProbe(false);
+      return;
+    }
+    if (request.kind === 'eq') {
+      if (request.action === 'reference-start') { void matchReference(); return; }
+      if (request.action === 'reference-preview') { previewReference(); return; }
+      if (request.action === 'reference-keep') { void keepReference(); return; }
+      if (request.action === 'reference-cancel') { clearReference(); return; }
+    }
     if (request.action === 'play') togglePlayback();
     if (request.action === 'hide') {
       void audioCommand('tool_window', { kind: request.kind, action: 'hide' }).then(() =>
@@ -999,6 +1069,13 @@
     if (request.action === 'level-match') setLevelMatch();
     if (request.action === 'seek' && Number.isSafeInteger(request.range?.start)) seek(request.range!.start);
     if (request.action === 'solo-band' && request.kind === 'eq') startMonitor(request.kind, 'band', request.band);
+    if (request.action === 'retune-solo-band') {
+      if (request.kind === 'eq' && monitor?.owner === 'eq' && monitor.kind === 'band' && validMonitorBand(request.band)) {
+        monitor = { ...monitor, band: request.band };
+        retuneListening();
+      }
+      return;
+    }
     if (request.action === 'audition-band' && request.kind === 'repair' && request.range) startMonitor(request.kind, 'band', request.band, request.range);
     if (request.kind === 'dynamics' && (request.action === 'bypass-compressor' || request.action === 'difference-compressor')) {
       startMonitor(request.kind, request.action);
@@ -1007,7 +1084,8 @@
     if (request.action === 'compare' && typeof request.original === 'boolean') compareOriginal(request.original);
     if (request.action === 'undo' || request.action === 'redo') {
       toolRevisions[request.kind] = request.revision;
-      history(request.action === 'redo');
+      if (request.trial === undefined) history(request.action === 'redo');
+      else if (request.kind === 'eq' && reference?.generation === request.trial) referenceHistory(request.action === 'redo');
     }
     if (request.action === 'viewport' && request.kind === 'repair') {
       const bounds = request.range;
@@ -1034,7 +1112,17 @@
     }
     if (request.action === 'edit' && request.patch) {
       toolRevisions[request.kind] = request.revision;
-      const settings = readTreatment({ ...treatment, ...toolPatch(request.kind, request.patch) });
+      const patch = toolPatch(request.kind, request.patch);
+      if (request.trial !== undefined) {
+        if (request.kind === 'eq' && reference?.generation === request.trial && referenceCandidate) {
+          changeReference(readTreatment({ ...referenceCandidate, ...patch }), request.gesture);
+        }
+        publishToolState(request.kind);
+        return;
+      }
+      const comparisonChanged = request.kind === 'eq' && request.compareEq !== undefined;
+      if (comparisonChanged) comparisonAlternate = request.compareEq ? toolPatch('eq', request.compareEq) : undefined;
+      const settings = readTreatment({ ...treatment, ...patch });
       if (!sameTreatment(settings, treatment)) {
         const gesture = request.gesture ? `${request.kind}:${request.gesture}` : undefined;
         if (!gesture || gesture !== toolGesture) {
@@ -1043,7 +1131,7 @@
           if (gesture) gestureCheckpoint = before;
         }
         toolGesture = gesture;
-        replaceTreatment(settings);
+        replaceTreatment(settings, comparisonChanged);
         const initial = previous.at(-1)?.draft.treatment;
         if (gesture && gestureCheckpoint && initial && sameTreatment(readTreatment(initial), settings)) {
           previous = gestureCheckpoint.undo;
@@ -1052,9 +1140,135 @@
           toolGesture = undefined;
           gestureCheckpoint = undefined;
         }
+      } else if (comparisonChanged) {
+        // Switch both curves together, even when the active curve is unchanged.
+        queueComparison(0);
+        retuneListening(true);
       }
     }
     publishToolState(request.kind);
+  }
+
+  function listeningSettings() {
+    return reference?.preview && referenceCandidate ? referenceCandidate : treatment;
+  }
+
+  function setReference(next: EqReference | undefined) {
+    reference = next;
+    publishToolState('eq');
+  }
+
+  function stopReferencePreview() {
+    const started = referenceStarted;
+    referenceStarted = undefined;
+    if (levelMatch || comparisonAlternate) queueComparison();
+    if (started !== undefined && playing) void transport('pause', started);
+    else retuneListening(true);
+  }
+
+  function clearReference(restore = true) {
+    if (!reference) return;
+    const wasPreviewing = reference.preview;
+    referenceGeneration++;
+    referenceCandidate = undefined;
+    referenceUndo = [];
+    referenceRedo = [];
+    referenceGesture = undefined;
+    referenceRedoBeforeGesture = [];
+    setReference(undefined);
+    if (wasPreviewing && restore) stopReferencePreview();
+    else referenceStarted = undefined;
+  }
+
+  async function matchReference() {
+    const opened = source;
+    if (!opened || !canEdit || reference?.status === 'choosing' || reference?.status === 'analysing') return;
+    clearReference();
+    const generation = ++referenceGeneration;
+    const current = () => active && source?.id === opened.id && generation === referenceGeneration && phase === 'edit';
+    const selectedRange = previewRange();
+    const start = Math.max(0, Math.min(Math.round(playhead), total - Math.min(total, sampleRate * 8)));
+    const range = selectedRange ?? { start, end: Math.min(total, start + sampleRate * 8) };
+    setReference({ status: 'choosing' });
+    try {
+      if (!await settleToolEdits() || !current()) { if (current()) clearReference(); return; }
+      const path = await choosePath({ filters: [{ name: 'Reference recording', extensions: ['mp3', 'wav', 'aif', 'aiff', 'flac'] }] });
+      if (!current()) return;
+      if (!path) { clearReference(); return; }
+      const name = leaf(path);
+      setReference({ status: 'analysing', name });
+      const bands = await audioCommand<EqBand[]>('eq_match', { id: opened.id, range, reference: path });
+      if (!current()) return;
+      if (!bands.length) {
+        setReference({ status: 'error', name, message: 'No useful tonal difference found.' });
+        return;
+      }
+      referenceCandidate = readTreatment({ ...treatment, ...toolPatch('eq', noTreatment), eqBands: bands });
+      setReference({ status: 'ready', generation, name, count: bands.length });
+    } catch (reason) {
+      if (current()) setReference({ status: 'error', name: reference?.name, message: String(reason).replace(/^Error: /, '') });
+    }
+  }
+
+  function previewReference() {
+    if (reference?.status !== 'ready' || !referenceCandidate) return;
+    const preview = !reference.preview;
+    setReference({ ...reference, preview });
+    if (!preview) { stopReferencePreview(); return; }
+    stopMonitor(false);
+    hearOriginal = false;
+    if (levelMatch || comparisonAlternate) queueComparison();
+    if (!playing) {
+      referenceStarted = playhead;
+      togglePlayback();
+    } else retuneListening(true);
+    void refreshToolProbe(false);
+  }
+
+  function updateReferenceAudio(settings: AudioTreatment) {
+    referenceCandidate = settings;
+    if (!reference?.preview) return;
+    if (levelMatch || comparisonAlternate) queueComparison();
+    retuneListening();
+  }
+
+  function changeReference(settings: AudioTreatment, gesture?: string) {
+    if (!referenceCandidate || sameTreatment(referenceCandidate, settings)) return;
+    if (!gesture || gesture !== referenceGesture) {
+      referenceRedoBeforeGesture = referenceRedo;
+      referenceUndo = [...referenceUndo, referenceCandidate];
+      referenceRedo = [];
+    }
+    referenceGesture = gesture;
+    if (gesture && sameTreatment(referenceUndo.at(-1) ?? noTreatment, settings)) {
+      referenceUndo = referenceUndo.slice(0, -1);
+      referenceRedo = referenceRedoBeforeGesture;
+      referenceGesture = undefined;
+    }
+    if (referenceUndo.length > 50) referenceUndo = referenceUndo.slice(-50);
+    updateReferenceAudio(settings);
+  }
+
+  function referenceHistory(redo: boolean) {
+    const stack = redo ? referenceRedo : referenceUndo;
+    const settings = stack.pop();
+    if (!settings || !referenceCandidate) return;
+    (redo ? referenceUndo : referenceRedo).push(referenceCandidate);
+    referenceGesture = undefined;
+    updateReferenceAudio(settings);
+  }
+
+  async function keepReference() {
+    if (reference?.status !== 'ready') return;
+    const generation = reference.generation;
+    if (!await settleToolEdits() || !active || phase !== 'edit' || reference?.generation !== generation) return;
+    const candidate = referenceCandidate;
+    if (!candidate) return;
+    clearReference(false);
+    capture('EQ reference match');
+    replaceTreatment(candidate);
+    retuneListening(true);
+    publishToolState('eq');
   }
 
   function treatmentChangeLabel(kind: Tool, settings: AudioTreatment) {
@@ -1146,12 +1360,13 @@
     } catch (reason) { recipeError = String(reason); }
   }
 
-  function replaceTreatment(settings: AudioTreatment) {
+  function replaceTreatment(settings: AudioTreatment, comparisonChanged = false) {
     if (!source || sameTreatment(settings, treatment)) return;
+    clearReference();
     treatment = settings;
     if (!hasTreatment(settings)) hearOriginal = false;
-    if (levelMatch) queueComparison();
-    retuneListening();
+    if (levelMatch || comparisonAlternate || comparisonChanged) queueComparison(comparisonChanged ? 0 : undefined);
+    retuneListening(comparisonChanged);
     measureTreatment();
   }
 
@@ -1184,7 +1399,8 @@
         const result = await audioCommand<TreatmentAnalysis>('treatment', { id: opened.id, treatment: settings });
         if (!active || revision !== treatmentVersion || source?.id !== opened.id) return;
         treatmentAnalysis = result;
-        if (levelMatch) queueComparison();
+        comparisonCache = undefined;
+        if (levelMatch || comparisonAlternate) queueComparison();
         if (!hearOriginal) retuneListening(true);
       } catch (reason) {
         if (!active || revision !== treatmentVersion || source?.id !== opened.id) return;
@@ -1214,7 +1430,16 @@
   function togglePlayback() {
     if (playing) { stopMonitor(false); void transport('pause'); }
     else if (loopEnabled && loopRegion) void transport('audition', loopRegion.start, loopRegion.end);
-    else void transport('play');
+    else if (playhead < total - 1) void transport('play');
+    else {
+      const firstCut = tracks[0]?.startFrame ?? 0;
+      const restart = firstCut < total - 1 ? firstCut : 0;
+      if (restart < start || restart >= end) {
+        const span = end - start;
+        animateViewport(restart - span / 2, span);
+      }
+      void transport('play', restart);
+    }
   }
 
   function trackRange(id: string) {

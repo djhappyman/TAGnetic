@@ -1,6 +1,6 @@
 import type { FrameRange } from './audio-split';
 import type { TreatmentPlotMode, TreatmentProbe } from './audio-treatment-plot';
-import { effectIsActive, type AudioTreatment } from './audio-treatment';
+import { effectIsActive, eqBandIsActive, type AudioTreatment } from './audio-treatment';
 
 export const toolModes = ['eq', 'dynamics', 'repair'] as const satisfies readonly TreatmentPlotMode[];
 export const toolNames = { eq: 'EQ', dynamics: 'Dynamics', repair: 'Repair' } as const;
@@ -27,7 +27,7 @@ const toolEffects = {
 
 export function toolEffectCount(kind: TreatmentPlotMode, settings: AudioTreatment) {
   const preset = toolEffects[kind].filter(key => effectIsActive(settings, key)).length;
-  if (kind === 'eq') return preset + (settings.eqBands?.filter(band => !band.bypassed && (band.kind === 'notch' || band.gainDb !== 0)).length ?? 0);
+  if (kind === 'eq') return preset + (settings.eqBands?.filter(eqBandIsActive).length ?? 0);
   return kind === 'repair' ? preset + (settings.spectralRepairs?.filter(Boolean).length ?? 0) : preset;
 }
 
@@ -56,6 +56,8 @@ export function applyToolTheme(theme: ToolTheme) {
   });
 }
 
+export type EqReference = { status: 'choosing' | 'analysing' | 'ready' | 'error'; generation?: number; name?: string; count?: number; preview?: boolean; message?: string };
+
 export type ToolSnapshot = {
   sourceId: string;
   frame: number;
@@ -72,9 +74,11 @@ export type ToolSnapshot = {
   cuts?: number[];
   pinned?: boolean;
   levelMatch?: boolean;
+  eqLevelComparison?: boolean;
   monitor?: 'band' | 'bypass-compressor' | 'difference-compressor';
   undoLabel?: string;
   redoLabel?: string;
+  reference?: EqReference;
   normalisation?: { gainDb: number; loudnessLufs: number | null };
   revision?: string;
   theme: ToolTheme;
@@ -82,16 +86,19 @@ export type ToolSnapshot = {
 
 export type SpectrogramViewOptions = { treated?: boolean; channel?: 'combined' | 'left' | 'right' };
 export type PreviewBand = { lowHz: number; highHz: number; channel?: 'left' | 'right' };
-type DirectToolAction = 'play' | 'hide' | 'pin' | 'level-match' | 'seek' | 'solo-band' | 'audition-band'
-  | 'bypass-compressor' | 'difference-compressor' | 'stop-audition';
+type DirectToolAction = 'play' | 'hide' | 'pin' | 'level-match' | 'seek' | 'solo-band' | 'retune-solo-band' | 'audition-band'
+  | 'bypass-compressor' | 'difference-compressor' | 'stop-audition'
+  | 'reference-start' | 'reference-preview' | 'reference-keep' | 'reference-cancel';
 export type ToolRequest = { kind: TreatmentPlotMode } & (
   | { action: 'sync' }
+  | { action: 'analyzer'; sourceId: string; enabled: boolean }
   | { action: DirectToolAction; sourceId: string; range?: FrameRange; band?: PreviewBand }
-  | { action: 'undo' | 'redo'; sourceId: string; revision: string }
+  | { action: 'undo' | 'redo'; sourceId: string; revision: string; trial?: number }
   | { action: 'compare'; sourceId: string; original: boolean }
   | { action: 'loop'; sourceId: string; range?: FrameRange }
   | { action: 'viewport'; sourceId: string; range: FrameRange | null; options?: SpectrogramViewOptions }
-  | { action: 'edit'; sourceId: string; patch: Partial<AudioTreatment>; revision: string; gesture?: string }
+  | { action: 'edit'; sourceId: string; patch: Partial<AudioTreatment>; revision: string; gesture?: string; trial?: number;
+      compareEq?: Partial<AudioTreatment> | null }
   | { action: 'flushed'; sourceId: string; fence: string }
 );
 

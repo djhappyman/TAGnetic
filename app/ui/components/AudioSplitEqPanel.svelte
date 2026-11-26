@@ -1,33 +1,36 @@
 <script lang="ts">
-  import { onDestroy, tick } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import { prefersReducedMotion } from 'svelte/motion';
+  import { fade } from 'svelte/transition';
   import { devicePixelRatio } from 'svelte/reactivity/window';
-  import { ChevronRight, Headphones, Plus, Snowflake, Volume2, VolumeX } from '@lucide/svelte';
+  import { Activity, Check, ChevronRight, FileAudio, Headphones, Plus, Power, Snowflake } from '@lucide/svelte';
   import { Button as GraphButton } from '@ui-sdk/svelte/button';
-  import { createMenuController, Menu, MenuContent, MenuItem, MenuSeparator, MenuShortcut, MenuSub, MenuSubContent, MenuSubTrigger, MenuTrigger } from '@ui-sdk/svelte/menu';
+  import { createMenuController, Menu, MenuCheckboxItem, MenuContent, MenuItem, MenuItemIndicator, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuShortcut, MenuSub, MenuSubContent, MenuSubTrigger, MenuTrigger } from '@ui-sdk/svelte/menu';
   import { createSelectController, Select, SelectContent, SelectItem, SelectTrigger } from '@ui-sdk/svelte/select';
-  import { NumberInput, NumberInputControl } from '@ui-sdk/svelte/number-input';
   import Button from './AudioSplitButton.svelte';
+  import EqDial from './AudioSplitEqDial.svelte';
+  import { eqGainLimit, eqGainStep, roundEqDb } from '../js/audio-eq-range.js';
   import { maxEqBands, noTreatment, treatmentNumbers, type AudioTreatment } from '../js/audio-treatment';
   import {
-    eqBandPatch, eqFrequencyRange, eqSoloRange, eqWidthRange, findEqNode, isLegacyEqBand,
-    legacyEqBands, legacyEqNode, makeExtraEqNode, originalEqBand, removeEqBand,
-    visibleEqNodes, type EqNode, type EqShape, type ExtraEqShape,
+    eqBandPatch, eqFrequencyRange, eqSoloRange, eqWidthRange, findEqNode,
+    legacyEqBands, legacyEqNode, makeExtraEqNode, originalEqBand, removeEqBand, removeEqBands,
+    visibleEqNodes, type EqNode, type EqShape,
   } from '../js/audio-eq';
   import {
-    createSpectrumMotion, drawTreatmentPlot, frequencyX, gainY, plotBounds, xFrequency, yGain,
-    type PlotBounds, type TreatmentProbe,
+    createSpectrumMotion, drawTreatmentPlot, frequencyX, gainY, moveEqView, plotBounds, spectrumY, xFrequency, yGain,
+    type AnalyzerView, type EqView, type PlotBounds, type TreatmentProbe,
   } from '../js/audio-treatment-plot';
   import type { FrameRange } from '../js/audio-split';
-  import type { ToolAction, ToolSnapshot } from '../js/audio-tools-window';
+  import type { PreviewBand, ToolAction, ToolSnapshot } from '../js/audio-tools-window';
 
-  let { snapshot, probe, mode, onmode, onedit, onaction }: {
+  let { snapshot, probe, mode, onmode, onedit, onaction, onanalyzer }: {
     snapshot: ToolSnapshot | null;
     probe: TreatmentProbe | null;
     mode: string | null;
     onmode: (mode: string | null) => void;
+    onanalyzer: (enabled: boolean) => void;
     onedit: (patch: Partial<AudioTreatment>, gesture?: string) => void;
-    onaction: (action: ToolAction, range?: FrameRange, band?: { lowHz: number; highHz: number }) => void;
+    onaction: (action: ToolAction, range?: FrameRange, band?: PreviewBand) => void;
   } = $props();
 
   type Drag = {
@@ -35,9 +38,11 @@
     control: HTMLButtonElement;
     sourceId: string;
     node: EqNode;
+    members: EqNode[];
+    previousKeys: string[];
+    previousMode: string | null;
     before: Partial<AudioTreatment>;
     gesture: string;
-    fromPlot: boolean;
     bounds: PlotBounds;
     x: number;
     y: number;
@@ -45,25 +50,48 @@
     lastY: number;
     targetX: number;
     targetY: number;
+    kind: 'node' | 'solo' | 'dynamic';
     moved: boolean;
     applied: boolean;
   };
   type Point = { x: number; y: number };
+  type SelectionBox = { left: number; top: number; right: number; bottom: number };
+  type CapturedPointer = { pointer: number; control: HTMLButtonElement; x: number; y: number };
+  type RulerDrag = CapturedPointer & { view: EqView; anchor: number; width: number };
+  type PeakDrag = CapturedPointer & {
+    sourceId: string;
+    node: EqNode;
+    before: Partial<AudioTreatment>;
+    gesture: string;
+    gain: number;
+    applied: boolean;
+  };
 
   const id = $props.id();
   const addMenu = createMenuController();
   const bandMenu = createMenuController();
-  const slopeControl = createSelectController();
   const spectrum = createSpectrumMotion();
-  const slopes = [12, 24, 36, 48];
   const shapes = Object.keys(legacyEqBands) as EqShape[];
+  const channels = { stereo: 'Stereo', left: 'Left only', right: 'Right only' };
+  const analyzerViews = { before: 'Before', after: 'After', both: 'Both', off: 'Off' };
+  const meterTicks = [0, -12, -24, -36, -48, -60];
+  const meterFloor = -60;
+  const editorGap = 8;
+  const neutralClickRadius = 4;
+  const addClickRadius = 26;
+  const gainRanges = [6, 12, 24] as const;
   let root: HTMLElement;
   let width = $state(0);
   let height = $state(0);
   let ghost = $state.raw<EqNode>();
-  let frozen = $state.raw<TreatmentProbe | null>(null);
+  let addOrigin: Point | undefined;
+  let marquee: { pointer: number; control: HTMLButtonElement; start: Point; additive: boolean } | undefined;
+  let box = $state.raw<SelectionBox>();
+  let group = $state.raw<{ sourceId: string; primary: string; keys: string[] }>();
+  let analyzer = $state<AnalyzerView>('both');
+  let frozenReadings = $state.raw<{ sourceId: string; probe: TreatmentProbe }>();
   let soloed = $state<string | null>(null);
-  let clipboard = $state.raw<EqNode>();
+  let clipboard = $state.raw<EqNode[]>([]);
   let menuNodeKey = $state<string | null>(null);
   let menuPoint = $state<Point>();
   let menuReturn: HTMLElement | undefined;
@@ -72,26 +100,116 @@
   let dragFrame = 0;
   let gestureNumber = 0;
   let moving = $state(false);
-  let editorOnLeft = $state<boolean>();
+  let draggedKey = $state<string>();
+  let dynamicsGesture = $state.raw<{ key: string; handle: boolean; amount: number }>();
+  let editorWidth = $state(0);
+  const analyzerControl = createSelectController();
+  const gainRangeControl = createSelectController();
+  let view = $state.raw<EqView>({ start: 0, end: 1, gainRange: 24 });
+  let rulerDrag: RulerDrag | undefined;
+  let rulerFrame = 0;
+  let pendingView: EqView | undefined;
+  let peakDrag: PeakDrag | undefined;
+  let peakFrame = 0;
+  let activePeak = $state<number>();
   let heldKey: string | undefined;
-  let heldPointer: number | undefined;
+  let soloTimer: ReturnType<typeof setTimeout> | undefined;
+  let pendingSoloBand: PreviewBand | undefined;
+  let currentSoloBand: PreviewBand | undefined;
   let report = $state('');
 
   const settings = $derived(snapshot?.settings ?? noTreatment);
   const appearance = $derived(snapshot?.theme);
+  const frozen = $derived(frozenReadings?.sourceId === snapshot?.sourceId ? frozenReadings?.probe ?? null : null);
   const rate = $derived(snapshot?.sampleRate || 44100);
-  const bounds = $derived(plotBounds(width, height));
+  const bounds = $derived(plotBounds(width, height, 'eq', view));
   const nodes = $derived(visibleEqNodes(settings, mode));
+  const visibleNodes = $derived(nodes.filter(node => {
+    const x = position(node).x;
+    return node.key === draggedKey || (x >= bounds.left - 0.1 && x <= bounds.right + 0.1);
+  }));
   const selected = $derived(findEqNode(settings, mode));
+  const selectedKeys = $derived(new Set(group && group.sourceId === snapshot?.sourceId && group.primary === mode
+    ? group.keys.filter(key => nodes.some(node => node.key === key)) : mode ? [mode] : []));
+  const boxed = $derived(box ? visibleNodes.filter(node => node.stored && insideBox(position(node), box!)) : []);
+  const highlighted = $derived(box ? new Set([...(marquee?.additive ? selectedKeys : []), ...boxed.map(node => node.key)]) : selectedKeys);
+  const selectedStored = $derived(nodes.filter(node => node.stored && selectedKeys.has(node.key)));
+  const selectionBypassed = $derived(selectedStored.length > 0 && selectedStored.every(node => node.bypassed));
+  const supportsUpward = $derived(probe?.upwardEq === true);
+  const supportsAllShapes = $derived(probe?.dynamicAllShapes === true);
+  const supportsRatio = $derived(probe?.dynamicRatio === true);
+  const soloFocus = $derived.by(() => {
+    const node = findEqNode(settings, soloed);
+    const band = node && soloBand(node);
+    return band && { left: frequencyX(band.lowHz, bounds, rate), right: frequencyX(band.highHz, bounds, rate) };
+  });
+  const hasChannelBands = $derived(!!settings.eqBands?.some(band => !band.bypassed && band.channel && band.channel !== 'stereo'));
+  const leftLead = $derived(selected?.channel !== 'right');
   const menuNode = $derived(findEqNode(settings, menuNodeKey));
-  const canAdd = $derived(Boolean(snapshot) && (settings.eqBands?.length ?? 0) < maxEqBands);
+  const groupMenu = $derived(selectedStored.length > 1 && (!menuNode || selectedKeys.has(menuNode.key)));
+  const reference = $derived(snapshot?.reference);
+  const canAdjust = $derived(!!snapshot);
+  const availableSlots = $derived(canAdjust ? maxEqBands - (settings.eqBands?.length ?? 0) : 0);
+  const canAdd = $derived(availableSlots > 0);
+  const canPasteGroup = $derived(clipboard.length > 0 && clipboard.length <= availableSlots);
+  const frozenPeaks = $derived.by(() => {
+    if (!frozen || analyzer === 'off') return [];
+    const levels = analyzer === 'before' || snapshot?.original ? frozen.original : frozen.treated;
+    const count = Math.min(levels.length, frozen.frequencies.length);
+    const candidates: { hz: number; db: number; x: number; y: number }[] = [];
+    for (let start = 1; start < count - 1;) {
+      let end = start;
+      const db = levels[start];
+      while (end + 1 < count && levels[end + 1] === db) end++;
+      if (db > -80 && db > levels[start - 1] && db > levels[end + 1]) {
+        const hz = Math.sqrt(frozen.frequencies[start] * frozen.frequencies[end]);
+        const x = frequencyX(hz, bounds, rate);
+        if (x >= bounds.left && x <= bounds.right) candidates.push({ hz, db, x, y: spectrumY(db, bounds) });
+      }
+      start = end + 1;
+    }
+    const peaks: typeof candidates = [];
+    for (const peak of candidates.sort((a, b) => b.db - a.db)) {
+      if (peaks.length === 8) break;
+      if (peaks.every(other => Math.abs(other.x - peak.x) >= 25)) peaks.push(peak);
+    }
+    return peaks;
+  });
+
+  $effect(() => {
+    if (!snapshot?.sourceId) return;
+    const enabled = analyzer !== 'off' && !frozen;
+    untrack(() => onanalyzer(enabled));
+  });
 
   function paint(canvas: HTMLCanvasElement) {
     void appearance;
     void devicePixelRatio.current;
     const chart = { width, height, settings, rate };
-    return spectrum(frozen ?? probe, !!snapshot?.playing && !frozen && !prefersReducedMotion.current,
-      measured => drawTreatmentPlot(canvas, chart.width, chart.height, 'eq', chart.settings, chart.rate, measured));
+    const selectedBand = selected && drawableBand(selected);
+    const bands = nodes.flatMap(node => {
+      const band = node.stored ? drawableBand(node) : undefined;
+      return band ? [{ band, color: bandColor(node), selected: highlighted.has(node.key) }] : [];
+    });
+    const ghostBand = ghost && !moving ? drawableBand(ghost) : undefined;
+    const live = Boolean(snapshot?.playing && !snapshot.original && !snapshot.monitor);
+    const measured = frozen ? { ...frozen, dynamicEqMix: probe?.dynamicEqMix } : probe;
+    const options = { analyzer, selectedBand, bands, ghostBand, view, bandSelection: highlighted.size > 0 };
+    return spectrum(measured, !!snapshot?.playing && !prefersReducedMotion.current, reading => {
+      const dynamicMix = live ? reading?.dynamicEqMix?.map(mix => Math.round(mix * 64) / 64) : undefined;
+      drawTreatmentPlot(canvas, chart.width, chart.height, 'eq', chart.settings, chart.rate, reading, undefined, { ...options, dynamicMix });
+    });
+  }
+
+  function drawableBand(node: EqNode) {
+    return eqBandPatch(noTreatment, { ...node, extra: { id: 1 } }, rate).eqBands?.[0];
+  }
+
+  function bandColor(node: EqNode) {
+    const index = node.extra ? shapes.length + (node.extra.id ?? node.extra.index ?? 0) : shapes.indexOf(node.shape);
+    const hue = Math.round((212 + index * 137.508) % 360);
+    const light = appearance?.theme === 'light';
+    return `hsl(${hue}, ${light ? '71%, 39%' : '77%, 70%'})`;
   }
 
   function supportsGain(node: EqNode) {
@@ -101,30 +219,87 @@
   function position(node: EqNode) {
     const [min, max] = eqFrequencyRange(node, rate);
     const hz = Math.max(min, Math.min(node.hz, max));
-    const db = supportsGain(node) ? node.gainDb : node.shape === 'notch' ? -15 : -3;
+    const db = supportsGain(node) ? node.gainDb : 0;
     return { x: frequencyX(hz, bounds, rate), y: gainY(db, bounds) };
   }
 
   function movingNode(node: EqNode, x: number, y: number, geometry = bounds) {
     let gainDb = node.gainDb;
-    if (supportsGain(node)) gainDb = Math.max(-6, Math.min(6, Math.round(yGain(y, geometry))));
+    if (supportsGain(node)) {
+      const initialY = gainY(node.gainDb, geometry);
+      gainDb = roundEqDb(node.gainDb + yGain(y, geometry, false) - yGain(initialY, geometry));
+    }
     return { ...node, hz: xFrequency(x, geometry, rate), gainDb };
   }
 
-  function plotCandidate(x: number, y: number, allocate: boolean): EqNode | undefined {
-    if (!snapshot || x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom) return;
-    const hz = xFrequency(x, bounds, rate);
-    const shape = hz <= 100 ? 'low' : hz >= 7000 && rate * 0.45 >= 7000 ? 'high' : 'bell';
-    let node = legacyEqNode(settings, shape);
-    if (shape === 'bell' && node.stored) {
-      if (!canAdd) return;
-      node = allocate ? makeExtraEqNode(settings, 'bell') : { ...node, extra: {}, stored: false };
-    }
-    const [min, max] = eqFrequencyRange(node, rate);
-    if (max < min) return;
-    const next = movingNode(node, x, y);
-    if (supportsGain(next) && !next.stored && !next.gainDb) next.gainDb = 2;
-    return next;
+  function plotCandidate(x: number, y: number): EqNode | undefined {
+    const centre = gainY(0, bounds);
+    const distance = Math.abs(y - centre);
+    if (!canAdd || x < bounds.left || x > bounds.right || distance > addClickRadius) return;
+    const hz = Math.round(xFrequency(x, bounds, rate));
+    const neutral = distance <= neutralClickRadius;
+    const highEdge = Math.min(12000, xFrequency(bounds.right, plotBounds(width, height), rate) * 0.8);
+    const shape = hz <= 60 ? (neutral ? 'low' : 'bass') : hz >= highEdge ? (neutral ? 'high' : 'treble') : 'bell';
+    const gainDb = neutral ? 0 : roundEqDb(yGain(y, bounds));
+    return { ...legacyEqNode(noTreatment, shape), hz, gainDb, adaptiveQ: shape === 'bell', extra: {} };
+  }
+
+  function clickPlot(event: MouseEvent) {
+    const origin = addOrigin;
+    addOrigin = undefined;
+    if (event.detail !== 1 || !origin || Math.hypot(event.clientX - origin.x, event.clientY - origin.y) >= 5) return;
+    const node = plotCandidate(event.offsetX, event.offsetY);
+    if (node && selectedKeys.size < 2) {
+      ghost = undefined;
+      add(node.shape, node.hz, node.gainDb);
+    } else clearSelection();
+  }
+
+  function insideBox(point: Point, rectangle: SelectionBox) {
+    return point.x >= rectangle.left && point.x <= rectangle.right && point.y >= rectangle.top && point.y <= rectangle.bottom;
+  }
+
+  function plotPoint(event: PointerEvent, control: HTMLButtonElement): Point {
+    const rect = control.getBoundingClientRect();
+    return {
+      x: Math.max(bounds.left, Math.min(bounds.right, event.clientX - rect.left)),
+      y: Math.max(bounds.top, Math.min(bounds.bottom, event.clientY - rect.top)),
+    };
+  }
+
+  function startMarquee(event: PointerEvent) {
+    if (event.button !== 0 || marquee || drag || peakDrag || rulerDrag) return;
+    const control = event.currentTarget as HTMLButtonElement;
+    addOrigin = { x: event.clientX, y: event.clientY };
+    marquee = { pointer: event.pointerId, control, start: plotPoint(event, control), additive: event.ctrlKey || event.metaKey };
+    control.setPointerCapture(event.pointerId);
+  }
+
+  function moveMarquee(event: PointerEvent) {
+    const current = marquee;
+    if (!current || event.pointerId !== current.pointer) return;
+    const { start } = current;
+    const point = plotPoint(event, current.control);
+    if (!box && Math.hypot(point.x - start.x, point.y - start.y) < 5) return;
+    addOrigin = undefined;
+    ghost = undefined;
+    box = { left: Math.min(start.x, point.x), right: Math.max(start.x, point.x),
+      top: Math.min(start.y, point.y), bottom: Math.max(start.y, point.y) };
+  }
+
+  function finishMarquee(event?: PointerEvent) {
+    const current = marquee;
+    if (!current || (event && current.pointer !== event.pointerId)) return;
+    if (event?.type === 'pointerup') {
+      moveMarquee(event);
+      if (box) {
+        const keys = new Set([...(current.additive ? selectedKeys : []), ...boxed.map(node => node.key)]);
+        selectGroup([...keys], mode && keys.has(mode) ? mode : boxed[0]?.key);
+      }
+    } else addOrigin = undefined;
+    box = undefined;
+    marquee = undefined;
+    if (current.control.hasPointerCapture(current.pointer)) current.control.releasePointerCapture(current.pointer);
   }
 
   function focusNode(key: string) {
@@ -134,13 +309,22 @@
   async function exact(node: EqNode) {
     onmode(node.key);
     await tick();
-    const input = root.querySelector<HTMLInputElement>('.band-editor input');
-    input?.focus({ preventScroll: true });
-    input?.select();
+    if (mode === node.key) root.querySelector<HTMLButtonElement>('.band-editor .dial-ring')?.click();
+  }
+
+  function clearSelection() {
+    group = undefined;
+    onmode(null);
   }
 
   function sendBand(node: EqNode, gesture?: string) {
-    const patch = eqBandPatch(settings, node, rate);
+    return sendBands([node], gesture);
+  }
+
+  function sendBands(changed: EqNode[], gesture?: string) {
+    if (!canAdjust) return false;
+    const patch: Partial<AudioTreatment> = {};
+    for (const node of changed) Object.assign(patch, eqBandPatch({ ...settings, ...patch }, node, rate));
     if (!Object.keys(patch).length) return false;
     onedit(patch, gesture);
     return true;
@@ -150,12 +334,16 @@
     root.querySelector<HTMLElement>('.plot-hit')?.focus({ preventScroll: true });
   }
 
-  async function remove(node: EqNode) {
-    if (!node.stored) return;
-    if (soloed === node.key) stopSolo();
-    onedit(removeEqBand(settings, node));
-    onmode(null);
-    report = node.name + ' removed.';
+  function bandsForAction(node?: EqNode) {
+    return !node || selectedKeys.has(node.key) ? selectedStored : node.stored ? [node] : [];
+  }
+
+  async function removeBands(bands: EqNode[]) {
+    if (!canAdjust || !bands.length) return;
+    if (bands.some(node => soloed === node.key)) stopSolo();
+    onedit(removeEqBands(settings, bands));
+    clearSelection();
+    report = bands.length === 1 ? bands[0].name + ' removed.' : bands.length + ' EQ bands removed.';
     await tick();
     focusGraph();
   }
@@ -165,7 +353,29 @@
     else sendBand({ ...node, gainDb: supportsGain(node) ? 2 : node.gainDb, bypassed: false });
   }
 
-  function selectNode(node: EqNode, rotate: boolean) {
+  function toggleSelection() {
+    sendBands(selectedStored.map(band => ({ ...band, bypassed: !selectionBypassed })));
+  }
+
+  function selectGroup(keys: string[], primary = keys[0]) {
+    group = snapshot && primary && keys.length > 1 ? { sourceId: snapshot.sourceId, primary, keys } : undefined;
+    onmode(primary ?? null);
+  }
+
+  function selectNode(node: EqNode, rotate: boolean, event?: MouseEvent) {
+    if (event?.ctrlKey || event?.metaKey) {
+      const keys = new Set(selectedKeys);
+      if (keys.has(node.key)) keys.delete(node.key);
+      else keys.add(node.key);
+      selectGroup([...keys], keys.has(node.key) ? node.key : undefined);
+      return;
+    }
+    if (event?.shiftKey && selected) {
+      const first = Math.min(selected.hz, node.hz);
+      const last = Math.max(selected.hz, node.hz);
+      selectGroup([...new Set([...selectedKeys, ...nodes.filter(item => item.stored && item.hz >= first && item.hz <= last).map(item => item.key)])], node.key);
+      return;
+    }
     const current = position(node);
     const stack = nodes.filter(candidate => {
       const adjacent = position(candidate);
@@ -173,91 +383,159 @@
     });
     const index = stack.findIndex(candidate => candidate.key === mode);
     const next = rotate && stack.length > 1 && index >= 0 ? stack[(index + 1) % stack.length] : node;
-    onmode(next.key);
+    selectGroup([next.key]);
     if (next.key !== node.key) void tick().then(() => focusNode(next.key));
   }
 
-  function add(shape: ExtraEqShape, point?: Point) {
-    const standard = legacyEqNode(settings, shape);
-    if (standard.stored && !canAdd) return;
-    const node = standard.stored ? makeExtraEqNode(settings, shape) : standard;
-    const next = point ? movingNode(node, point.x, point.y) : node;
-    if (shape === 'bell' && !next.gainDb) next.gainDb = 2;
-    if (!sendBand({ ...next, bypassed: false })) return;
+  function add(shape: EqShape, hz?: number, gainDb = 0) {
+    if (!canAdd) return;
+    const node = makeExtraEqNode(settings, shape);
+    if (!sendBand({ ...node, hz: hz ?? node.hz, gainDb })) return;
     onmode(node.key);
     report = node.name + ' added.';
     void tick().then(() => focusNode(node.key));
   }
 
   function paste(node?: EqNode) {
-    if (!clipboard) return;
-    const base = legacyEqNode(settings, clipboard.shape);
-    let target = node?.shape === clipboard.shape ? node : base;
-    if (target === base && base.stored && canAdd && (clipboard.shape === 'bell' || clipboard.shape === 'notch')) {
-      target = makeExtraEqNode(settings, clipboard.shape);
-    }
-    if (sendBand({ ...target, hz: clipboard.hz, gainDb: clipboard.gainDb, q: clipboard.q,
-      slope: clipboard.slope, bypassed: clipboard.bypassed })) {
-      onmode(target.key);
-      report = clipboard.name + ' settings pasted.';
-      void tick().then(() => focusNode(target.key));
-    }
+    if (clipboard.length === 1 && node) replaceBand(node, clipboard[0]);
+    else insertCopies(clipboard);
   }
 
-  function copy(node: EqNode) {
-    clipboard = node;
-    report = node.name + ' settings copied.';
+  function insertCopies(bands: EqNode[]) {
+    if (!bands.length || bands.length > availableSlots) return;
+    const copies = bands.map(band => {
+      const copy = makeExtraEqNode(settings, band.shape);
+      return { ...band, key: copy.key, extra: copy.extra };
+    });
+    if (!sendBands(copies)) return;
+    selectGroup(copies.map(copy => copy.key));
+    void tick().then(() => focusNode(copies[0].key));
   }
 
-  function reset(node: EqNode) {
-    const spec = legacyEqBands[node.shape];
-    sendBand({
+  function replaceBand(node: EqNode | undefined, next: EqNode, focus = true) {
+    if (!canAdjust) return;
+    const target = node?.extra ? node : makeExtraEqNode(settings, next.shape);
+    const removed = node && !node.extra ? removeEqBand(settings, node) : {};
+    const patch = eqBandPatch({ ...settings, ...removed }, { ...next, key: target.key, extra: target.extra }, rate);
+    if (!Object.keys(patch).length) return;
+    onedit({ ...removed, ...patch });
+    onmode(target.key);
+    if (focus) void tick().then(() => focusNode(target.key));
+  }
+
+  function copy(bands: EqNode[]) {
+    if (!bands.length) return;
+    clipboard = bands;
+    report = bands.length === 1 ? bands[0].name + ' settings copied.' : bands.length + ' EQ bands copied.';
+  }
+
+  function reset(bands: EqNode[]) {
+    if (!sendBands(bands.map(node => ({
       ...node,
-      hz: treatmentNumbers[spec.frequency].initial,
+      hz: treatmentNumbers[legacyEqBands[node.shape].frequency].initial,
       gainDb: 0,
       q: node.shape === 'notch' ? 1500 : 80,
       slope: 12,
       bypassed: false,
-    });
-    report = node.name + ' reset.';
-  }
-
-  function canChangeShape(node: EqNode, shape: EqShape) {
-    const base = legacyEqNode(settings, shape);
-    return !base.stored || ((shape === 'bell' || shape === 'notch') && (Boolean(node.extra) || canAdd));
+    })))) return;
+    report = bands.length === 1 ? bands[0].name + ' reset.' : bands.length + ' EQ bands reset.';
   }
 
   function changeShape(node: EqNode, shape: EqShape) {
-    if (!canChangeShape(node, shape)) return;
-    const base = legacyEqNode(settings, shape);
-    if (node.extra && (shape === 'bell' || shape === 'notch')) {
-      sendBand({ ...node, shape, q: base.q, gainDb: shape === 'bell' ? node.gainDb || 2 : 0 });
-      report = 'Band changed to ' + base.name.toLowerCase() + '.';
-      void tick().then(() => focusNode(node.key));
-      return;
-    }
-    const removed = removeEqBand(settings, node);
-    const target = base.stored && (shape === 'bell' || shape === 'notch') ? makeExtraEqNode(settings, shape) : base;
-    const patch = eqBandPatch({ ...settings, ...removed }, {
-      ...target, hz: node.hz, gainDb: supportsGain(target) ? node.gainDb || 2 : 0, bypassed: node.bypassed,
-    }, rate);
-    if (!Object.keys(patch).length) return;
-    onedit({ ...removed, ...patch });
-    onmode(target.key);
-    report = 'Band changed to ' + target.name.toLowerCase() + '.';
-    void tick().then(() => focusNode(target.key));
+    if (shape === node.shape) return;
+    const base = legacyEqNode(noTreatment, shape);
+    replaceBand(node, {
+      ...node, shape, q: base.q, slope: base.slope,
+      gainDb: supportsGain(base) ? node.gainDb : 0,
+      adaptiveQ: shape === 'bell',
+      dynamic: supportsDynamics(shape) ? node.dynamic : undefined,
+    });
+  }
+
+  function changeChannel(node: EqNode, channel: 'stereo' | 'left' | 'right') {
+    replaceBand(node, { ...node, channel }, false);
+  }
+
+  function setDynamic(node: EqNode, enabled: boolean, range = 4) {
+    if (!supportsDynamics(node.shape)) return;
+    const next = dynamicRange(node, enabled ? range : 0);
+    if (node.extra) {
+      if (sendBand(next) && !selectedKeys.has(node.key)) selectGroup([node.key]);
+    } else replaceBand(node, next, false);
+  }
+
+  function supportsDynamics(shape: EqShape) {
+    return shape === 'bell' || supportsAllShapes;
+  }
+
+  function dynamicRange(node: EqNode, amount: number, threshold = node.dynamic?.thresholdDb ?? -24, ratio = node.dynamic?.ratio): EqNode {
+    const limit = supportsUpward ? -12 : 0;
+    const range = roundEqDb(Math.max(limit, Math.min(12, amount)));
+    return { ...node, dynamic: range ? { thresholdDb: threshold, amountDb: Math.sign(range) * Math.max(1, Math.abs(range)),
+      ...(ratio === undefined ? {} : { ratio }) } : undefined };
+  }
+
+  function rangeHandlePosition(node: EqNode) {
+    const spot = position(node);
+    const amount = node.dynamic?.amountDb ?? 0;
+    const direction = Math.sign(amount || dynamicsGesture?.amount || 1);
+    const target = gainY(yGain(spot.y, bounds) - amount, bounds);
+    const y = Math.max(bounds.top, Math.min(bounds.bottom, spot.y + direction * Math.max(24, Math.abs(target - spot.y))));
+    return { x: Math.abs(y - spot.y) < 23 ? (spot.x > (bounds.left + bounds.right) / 2 ? -25 : 25) : 0, y: y - spot.y };
+  }
+
+  function rangeHandleKeys(event: KeyboardEvent, node: EqNode) {
+    const { key } = event;
+    if (key === 'ArrowLeft' || key === 'ArrowRight') { nodeKeys(event, node); return; }
+    if (event.altKey || event.ctrlKey || event.metaKey || !['ArrowUp', 'ArrowDown', 'Home'].includes(key)) return;
+    event.preventDefault();
+    const amount = key === 'Home' ? 0 : (node.dynamic?.amountDb ?? 0) + (key === 'ArrowDown' ? 1 : -1) * (event.shiftKey ? eqGainStep : 0.5);
+    const next = dynamicRange(node, amount);
+    if (sendBand(next) && !next.dynamic) void tick().then(() => focusNode(node.key));
+  }
+
+  async function editRange(node: EqNode) {
+    selectGroup(selectedKeys.has(node.key) ? [...selectedKeys] : [node.key], node.key);
+    await tick();
+    root.querySelector<HTMLButtonElement>('.band-editor [data-eq-dial="Dynamic range"] button')?.click();
+  }
+
+  function setAdaptiveQ(node: EqNode, enabled: boolean) {
+    const next = { ...node, adaptiveQ: enabled };
+    if (node.extra) sendBand(next);
+    else replaceBand(node, next);
+  }
+
+  function soloBand(node: EqNode): PreviewBand | undefined {
+    const [min, max] = eqFrequencyRange(node, rate);
+    const range = eqSoloRange({ ...node, hz: Math.max(min, Math.min(max, node.hz)) }, rate);
+    return range && { ...range, channel: node.channel === 'stereo' ? undefined : node.channel };
   }
 
   function startSolo(node: EqNode) {
-    const range = eqSoloRange(node, rate);
-    if (!snapshot || !range) return;
+    const band = soloBand(node);
+    if (!snapshot || !band) return false;
     soloed = node.key;
-    onaction('solo-band', undefined, range);
+    currentSoloBand = band;
+    onaction('solo-band', undefined, band);
+    return true;
+  }
+
+  function retuneSolo() {
+    soloTimer = undefined;
+    const band = pendingSoloBand;
+    if (!band || !soloed) return;
+    pendingSoloBand = undefined;
+    if (band.lowHz === currentSoloBand?.lowHz && band.highHz === currentSoloBand.highHz && band.channel === currentSoloBand.channel) return;
+    currentSoloBand = band;
+    onaction('retune-solo-band', undefined, band);
   }
 
   function stopSolo() {
+    clearTimeout(soloTimer);
+    soloTimer = undefined;
+    pendingSoloBand = currentSoloBand = undefined;
     heldKey = undefined;
-    heldPointer = undefined;
     if (!soloed) return;
     soloed = null;
     onaction('stop-audition');
@@ -268,20 +546,8 @@
     else startSolo(node);
   }
 
-  function holdSolo(event: PointerEvent, node: EqNode) {
-    if (event.button !== 0 || heldPointer !== undefined) return;
-    const control = event.currentTarget as HTMLButtonElement;
-    control.setPointerCapture(event.pointerId);
-    heldPointer = event.pointerId;
-    startSolo(node);
-  }
-
-  function releaseSolo(event: PointerEvent) {
-    if (heldPointer === event.pointerId) stopSolo();
-  }
-
   function releaseHeldSolo() {
-    if (heldPointer !== undefined || heldKey !== undefined) stopSolo();
+    if (heldKey !== undefined) stopSolo();
   }
 
   function soloKeys(event: KeyboardEvent, node: EqNode) {
@@ -297,30 +563,134 @@
 
   function freezeSpectrum() {
     if (frozen) {
-      frozen = null;
+      finishPeak();
+      frozenReadings = undefined;
       report = 'Live spectrum resumed.';
-    } else if (probe) {
-      frozen = probe;
+    } else if (probe && snapshot) {
+      frozenReadings = { sourceId: snapshot.sourceId, probe };
       report = 'Spectrum frozen.';
     }
   }
 
-  function startDrag(event: PointerEvent, picked?: EqNode) {
-    if (!snapshot || event.button !== 0 || drag) return;
+  function startRuler(event: PointerEvent) {
+    if (event.button !== 0 || rulerDrag || drag || peakDrag) return;
     const control = event.currentTarget as HTMLButtonElement;
-    const rect = control.parentElement!.getBoundingClientRect();
-    const x = event.clientX - rect.left;
-    const y = event.clientY - rect.top;
-    const node = picked ?? plotCandidate(x, y, true);
-    if (!node) return;
-    const origin = picked ? position(picked) : { x, y };
+    const rect = control.getBoundingClientRect();
+    rulerDrag = { control, pointer: event.pointerId, x: event.clientX, y: event.clientY, width: rect.width,
+      anchor: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)), view };
+    ghost = undefined;
+    control.setPointerCapture(event.pointerId);
+  }
+
+  function rulerView(current: RulerDrag, event: PointerEvent) {
+    return moveEqView(current.view, current.anchor, Math.exp((event.clientY - current.y) / 130),
+      (current.x - event.clientX) / current.width);
+  }
+
+  function moveRuler(event: PointerEvent) {
+    if (!rulerDrag || rulerDrag.pointer !== event.pointerId) return;
+    pendingView = rulerView(rulerDrag, event);
+    if (!rulerFrame) rulerFrame = requestAnimationFrame(() => {
+      rulerFrame = 0;
+      if (pendingView) view = pendingView;
+    });
+  }
+
+  function finishRuler(event?: PointerEvent) {
+    const current = rulerDrag;
+    if (!current || (event && current.pointer !== event.pointerId)) return;
+    cancelAnimationFrame(rulerFrame);
+    rulerFrame = 0;
+    rulerDrag = undefined;
+    pendingView = undefined;
+    view = event?.type === 'pointerup' ? rulerView(current, event) : current.view;
+    if (current.control.hasPointerCapture(current.pointer)) current.control.releasePointerCapture(current.pointer);
+  }
+
+  function resetRuler() {
+    view = { ...view, start: 0, end: 1 };
+  }
+
+  function rulerKeys(event: KeyboardEvent) {
+    switch (event.key) {
+      case '0': resetRuler(); break;
+      case '+': case '=': case 'ArrowUp': view = moveEqView(view, 0.5, 0.75, 0); break;
+      case '-': case 'ArrowDown': view = moveEqView(view, 0.5, 1.33, 0); break;
+      case 'ArrowLeft': view = moveEqView(view, 0.5, 1, -0.15); break;
+      case 'ArrowRight': view = moveEqView(view, 0.5, 1, 0.15); break;
+      default: return;
+    }
+    event.preventDefault();
+  }
+
+  function startPeak(event: PointerEvent, hz: number) {
+    if (!snapshot || !canAdd || event.button !== 0 || peakDrag || drag || rulerDrag) return;
+    const control = event.currentTarget as HTMLButtonElement;
+    const node = { ...makeExtraEqNode(settings, 'bell'), hz, q: 800, adaptiveQ: false };
+    peakDrag = { control, pointer: event.pointerId, x: event.clientX, y: event.clientY,
+      sourceId: snapshot.sourceId, node, before: { eqBands: settings.eqBands },
+      gesture: id + '-spectrum-' + ++gestureNumber, gain: 0, applied: false };
+    activePeak = hz;
+    control.setPointerCapture(event.pointerId);
+  }
+
+  function peakGain(current: PeakDrag, event: PointerEvent) {
+    const distance = event.clientY - current.y;
+    return distance < 3 ? 0 : -Math.min(eqGainLimit, roundEqDb(distance / 4));
+  }
+
+  function paintPeak(current: PeakDrag) {
+    if (current.sourceId !== snapshot?.sourceId || (!current.applied && !current.gain)) return;
+    if (sendBand({ ...current.node, gainDb: current.gain }, current.gesture)) current.applied = true;
+  }
+
+  function movePeak(event: PointerEvent) {
+    const current = peakDrag;
+    if (!current || event.pointerId !== current.pointer) return;
+    const gain = peakGain(current, event);
+    if (gain === current.gain) return;
+    current.gain = gain;
+    if (!peakFrame) peakFrame = requestAnimationFrame(() => {
+      peakFrame = 0;
+      paintPeak(current);
+    });
+  }
+
+  function finishPeak(event?: PointerEvent) {
+    const current = peakDrag;
+    if (!current || (event && event.pointerId !== current.pointer)) return;
+    cancelAnimationFrame(peakFrame);
+    peakFrame = 0;
+    peakDrag = undefined;
+    activePeak = undefined;
+    if (current.sourceId === snapshot?.sourceId) {
+      current.gain = event?.type === 'pointerup' ? peakGain(current, event) : 0;
+      if (current.gain) {
+        paintPeak(current);
+        if (current.applied) onmode(current.node.key);
+      } else if (current.applied) onedit(current.before, current.gesture);
+    }
+    if (current.control.hasPointerCapture(current.pointer)) current.control.releasePointerCapture(current.pointer);
+  }
+
+  function startDrag(event: PointerEvent, node: EqNode, kind: Drag['kind'] = 'node') {
+    if (!snapshot || !canAdjust || event.button !== 0 || drag || peakDrag || rulerDrag || marquee) return;
+    if (kind === 'solo' && !startSolo(node)) return;
+    const control = event.currentTarget as HTMLButtonElement;
+    const origin = position(node);
+    const canPan = kind === 'node' || (kind === 'dynamic' && node.dynamic);
+    const members = canPan && selectedKeys.has(node.key) && !event.ctrlKey && !event.metaKey
+      ? nodes.filter(item => selectedKeys.has(item.key)) : [node];
+    const before = Object.assign({}, ...members.map(item => originalEqBand(settings, item)));
     drag = {
-      pointerId: event.pointerId, control, sourceId: snapshot.sourceId, node,
-      before: originalEqBand(settings, node), gesture: id + '-' + ++gestureNumber,
-      fromPlot: !picked, bounds, x: event.clientX, y: event.clientY, lastX: event.clientX, lastY: event.clientY,
-      targetX: origin.x, targetY: origin.y, moved: false, applied: false,
+      pointerId: event.pointerId, control, sourceId: snapshot.sourceId, node, members, previousMode: mode, previousKeys: [...selectedKeys],
+      before, gesture: id + '-' + ++gestureNumber,
+      bounds, x: event.clientX, y: event.clientY, lastX: event.clientX, lastY: event.clientY,
+      targetX: origin.x, targetY: origin.y, kind, moved: false, applied: false,
     };
-    editorOnLeft = origin.x > width * 0.6;
+    draggedKey = node.key;
+    if (kind === 'dynamic') dynamicsGesture = { key: node.key, handle: !!node.dynamic, amount: node.dynamic?.amountDb ?? 0 };
+    if (kind === 'solo') selectGroup([node.key]);
     ghost = undefined;
     control.setPointerCapture(event.pointerId);
   }
@@ -331,25 +701,58 @@
     current.lastX = event.clientX;
     current.lastY = event.clientY;
     const fine = event.shiftKey ? 0.2 : 1;
-    current.targetX += dx * fine;
-    current.targetY += dy * fine;
+    if (current.kind !== 'dynamic' || current.node.dynamic) current.targetX += dx * fine;
+    if (current.kind !== 'solo') current.targetY += dy * fine;
     current.moved ||= Math.hypot(event.clientX - current.x, event.clientY - current.y) >= 3;
     return current.moved && (dx !== 0 || dy !== 0);
   }
 
-  function applyDrag(current: Drag, isClick: boolean) {
+  function moveGroup(members: EqNode[], ratio: number, gainDelta: number, anchorGain: number) {
+    let minimumRatio = 0;
+    let maximumRatio = Infinity;
+    let largestGain = 0;
+    for (const member of members) {
+      const [min, max] = eqFrequencyRange(member, rate);
+      minimumRatio = Math.max(minimumRatio, min / member.hz);
+      maximumRatio = Math.min(maximumRatio, max / member.hz);
+      if (supportsGain(member)) largestGain = Math.max(largestGain, Math.abs(member.gainDb));
+    }
+    const scale = Math.max(minimumRatio, Math.min(maximumRatio, ratio));
+    const amplitude = largestGain ? Math.max(0, Math.min(eqGainLimit / largestGain, 1 + gainDelta / (anchorGain || largestGain))) : 1;
+    return members.map(member => ({ ...member, hz: member.hz * scale,
+      gainDb: supportsGain(member) ? (largestGain ? member.gainDb * amplitude : gainDelta) : member.gainDb }));
+  }
+
+  function applyDrag(current: Drag) {
     if (current.sourceId !== snapshot?.sourceId) return;
-    const next = isClick ? current.node : movingNode(current.node, current.targetX, current.targetY, current.bounds);
-    if (!sendBand(next, current.gesture)) return;
+    const { node, members, bounds: geometry } = current;
+    const origin = gainY(supportsGain(node) ? node.gainDb : 0, geometry);
+    let changed: EqNode[];
+    if (current.kind === 'dynamic') {
+      const change = node.dynamic ? yGain(origin, geometry) - yGain(current.targetY, geometry, false) : (current.targetY - origin) / 4;
+      const moved = node.dynamic ? moveGroup(members, xFrequency(current.targetX, geometry, rate) / node.hz, 0, node.gainDb) : members;
+      changed = moved.map(member => member.key === node.key
+        ? dynamicRange(member, (node.dynamic?.amountDb ?? 0) + change) : member);
+    } else if (members.length > 1) {
+      const gain = yGain(current.targetY, geometry, false) - yGain(origin, geometry);
+      changed = moveGroup(members, xFrequency(current.targetX, geometry, rate) / node.hz, gain, yGain(origin, geometry));
+    } else changed = [movingNode(node, current.targetX, current.targetY, geometry)];
+    if (!sendBands(changed, current.gesture)) return;
     current.applied = true;
-    if (mode !== next.key) onmode(next.key);
+    if (mode !== node.key) selectGroup(current.kind === 'dynamic' && selectedKeys.has(node.key)
+      ? [...selectedKeys] : members.map(member => member.key), node.key);
+    if (current.kind === 'solo' && soloed === node.key) {
+      pendingSoloBand = soloBand(changed[0]);
+      soloTimer ??= setTimeout(retuneSolo, 75);
+    }
   }
 
   function move(event: PointerEvent) {
     const current = drag;
     if (!current) {
+      if (marquee) { moveMarquee(event); return; }
       if (event.currentTarget instanceof HTMLElement && event.currentTarget.classList.contains('plot-hit') && event.pointerType !== 'touch') {
-        ghost = plotCandidate(event.offsetX, event.offsetY, false);
+        ghost = plotCandidate(event.offsetX, event.offsetY);
       }
       return;
     }
@@ -357,7 +760,7 @@
     moving = true;
     dragFrame = requestAnimationFrame(() => {
       dragFrame = 0;
-      if (drag === current) applyDrag(current, false);
+      if (drag === current) applyDrag(current);
     });
   }
 
@@ -368,34 +771,35 @@
     cancelAnimationFrame(dragFrame);
     dragFrame = 0;
     drag = undefined;
+    draggedKey = undefined;
     moving = false;
-    editorOnLeft = undefined;
     if (event?.type === 'pointerup') {
       const changed = accumulate(current, event);
-      if (pending || changed) applyDrag(current, false);
-      else if (current.fromPlot && !current.moved) applyDrag(current, true);
-      else if (!current.moved) selectNode(current.node, true);
-      if (current.fromPlot && current.applied) void tick().then(() => focusNode(current.node.key));
+      if (pending || changed) applyDrag(current);
+      else if (!current.moved && current.kind === 'node') selectNode(current.node, true, event);
+      else if (!current.moved && current.kind === 'dynamic' && !current.node.dynamic) setDynamic(current.node, true);
     } else if (current.applied && current.sourceId === snapshot?.sourceId) {
       onedit(current.before, current.gesture);
-      onmode(current.node.stored || isLegacyEqBand(current.node.key) ? current.node.key : null);
+      selectGroup(current.previousKeys, current.previousMode ?? undefined);
       report = 'Band adjustment cancelled.';
     }
+    if (current.kind === 'solo') stopSolo();
+    if (current.kind === 'dynamic') dynamicsGesture = undefined;
     if (current.control.hasPointerCapture(current.pointerId)) current.control.releasePointerCapture(current.pointerId);
   }
 
   function openContext(event: MouseEvent, node?: EqNode) {
-    if (!snapshot) return;
+    if (!canAdjust) return;
     event.preventDefault();
     event.stopPropagation();
     const control = event.currentTarget as HTMLElement;
-    const rect = control.parentElement!.getBoundingClientRect();
+    const rect = control.closest('.plot')!.getBoundingClientRect();
     menuPoint = { x: event.clientX - rect.left, y: event.clientY - rect.top };
     menuNodeKey = node?.key ?? null;
     menuReturn = control;
     menuEditsValue = false;
     ghost = undefined;
-    if (node) onmode(node.key);
+    if (node) selectGroup(selectedKeys.has(node.key) ? [...selectedKeys] : [node.key], node.key);
     void bandMenu.open({ anchor: { x: event.clientX, y: event.clientY }, event });
   }
 
@@ -423,23 +827,21 @@
     if (contextFromKey(event) || event.altKey || event.isComposing) return;
     if (event.ctrlKey || event.metaKey) {
       const key = event.key.toLowerCase();
-      if (key === 'c' && node.stored) {
+      if (key === 'c' && bandsForAction(node).length) {
         event.preventDefault();
-        copy(node);
-      } else if (key === 'v' && clipboard) {
+        copy(bandsForAction(node));
+      } else if (key === 'v' && (clipboard.length === 1 || canPasteGroup)) {
         event.preventDefault();
         paste(node);
+      } else if (key === 'a') {
+        event.preventDefault();
+        selectGroup(nodes.filter(band => band.stored).map(band => band.key));
       }
       return;
     }
     if (event.key === 'Enter') {
       event.preventDefault();
       void exact(node);
-      return;
-    }
-    if (event.key === 'Delete' || event.key === 'Backspace') {
-      event.preventDefault();
-      void remove(node);
       return;
     }
     if (event.key === '[' || event.key === ']') {
@@ -457,25 +859,47 @@
     if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
     event.preventDefault();
     const direction = event.key === 'ArrowRight' || event.key === 'ArrowUp' ? 1 : -1;
-    if (supportsGain(node) && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
-      sendBand({ ...node, gainDb: node.gainDb + direction * (event.shiftKey ? 1 : 2) });
+    const vertical = event.key === 'ArrowUp' || event.key === 'ArrowDown';
+    const members = selectedKeys.has(node.key) ? nodes.filter(item => selectedKeys.has(item.key)) : [node];
+    if (members.length > 1) {
+      sendBands(moveGroup(members, vertical ? 1 : (event.shiftKey ? 1.015 : 1.1) ** direction,
+        vertical ? direction * (event.shiftKey ? eqGainStep : 0.5) : 0, node.gainDb));
+    } else if (supportsGain(node) && vertical) {
+      sendBand({ ...node, gainDb: node.gainDb + direction * (event.shiftKey ? eqGainStep : 0.5) });
     } else sendBand({ ...node, hz: node.hz * (event.shiftKey ? 1.015 : 1.1) ** direction });
   }
 
-  function scrollNode(node: EqNode) {
+  function adjustWheel(event: WheelEvent, node: EqNode, current?: Drag) {
+    if (!event.deltaY) return;
+    const spec = legacyEqBands[node.shape];
+    const direction = -Math.sign(event.deltaY);
+    let next: EqNode;
+    if ('slope' in spec) {
+      next = { ...node, slope: Math.max(12, Math.min(48, node.slope + direction * 12)) };
+    } else if ('q' in spec) {
+      const [min, max] = eqWidthRange(node.shape);
+      const step = node.shape === 'notch' && !node.extra ? 100 : event.shiftKey ? 1 : 10;
+      next = { ...node, q: Math.max(min, Math.min(max, node.q + direction * step)) };
+    } else return;
+    event.preventDefault();
+    if (current) {
+      current.node = next;
+      current.members = current.members.map(member => member.key === next.key ? next : member);
+      cancelAnimationFrame(dragFrame);
+      dragFrame = 0;
+      applyDrag(current);
+    } else sendBand(next);
+  }
+
+  function scrollNode(node: EqNode, handle = false) {
     return (element: HTMLButtonElement) => {
       const wheel = (event: WheelEvent) => {
-        if (mode !== node.key || !event.deltaY) return;
-        const spec = legacyEqBands[node.shape];
-        const direction = -Math.sign(event.deltaY);
-        if ('slope' in spec) {
-          event.preventDefault();
-          sendBand({ ...node, slope: node.slope + direction * 12 });
-        } else if ('q' in spec) {
-          event.preventDefault();
-          const step = node.shape === 'notch' && !node.extra ? 100 : event.shiftKey ? 1 : 10;
-          sendBand({ ...node, q: node.q + direction * step });
+        if (event.defaultPrevented || (!handle && mode !== node.key)) return;
+        if (drag) {
+          if (drag.node.dynamic && drag.kind === 'dynamic') adjustWheel(event, drag.node, drag);
+          return;
         }
+        adjustWheel(event, findEqNode(settings, node.key) ?? node);
       };
       element.addEventListener('wheel', wheel, { passive: false });
       return () => element.removeEventListener('wheel', wheel);
@@ -484,29 +908,54 @@
 
   function escape(event: KeyboardEvent) {
     if (event.key !== 'Escape' || event.defaultPrevented) return;
-    if (drag || soloed) {
+    if (drag || soloed || peakDrag || rulerDrag || marquee) {
       event.preventDefault();
       finishDrag();
+      finishPeak();
+      finishRuler();
+      finishMarquee();
       stopSolo();
-    } else if (selected && event.target instanceof Element && event.target.closest('.band-editor')) {
-      event.preventDefault();
-      focusNode(selected.key);
     } else if (mode && event.target instanceof Element && root.contains(event.target)) {
       event.preventDefault();
-      onmode(null);
+      clearSelection();
       focusGraph();
     }
   }
 
   function finishInteraction() {
+    ghost = undefined;
+    addOrigin = undefined;
     finishDrag();
+    finishPeak();
+    finishRuler();
+    finishMarquee();
     stopSolo();
   }
 
   function keyboard(element: HTMLElement) {
     root = element;
-    element.addEventListener('keydown', escape);
-    return () => element.removeEventListener('keydown', escape);
+    const keydown = (event: KeyboardEvent) => {
+      escape(event);
+      if (event.defaultPrevented || event.isComposing || event.altKey || event.ctrlKey || event.metaKey
+        || (event.key !== 'Delete' && event.key !== 'Backspace') || drag || rulerDrag || peakDrag || marquee) return;
+      const target = event.target;
+      if (!(target instanceof HTMLElement) || !target.closest('.plot')
+        || target.closest('input, textarea, [contenteditable], [role=menu], [role=listbox]')) return;
+      const key = target.closest<HTMLElement>('[data-eq-key]')?.dataset.eqKey;
+      const bands = bandsForAction(key ? findEqNode(settings, key) : undefined);
+      if (!bands.length) return;
+      event.preventDefault();
+      if (!event.repeat) void removeBands(bands);
+    };
+    const wheel = (event: WheelEvent) => {
+      if (!event.defaultPrevented && drag?.kind === 'dynamic' && drag.node.dynamic) adjustWheel(event, drag.node, drag);
+    };
+    element.addEventListener('keydown', keydown);
+    element.addEventListener('wheel', wheel, { passive: false });
+    return () => {
+      element.removeEventListener('keydown', keydown);
+      element.removeEventListener('wheel', wheel);
+    };
   }
 
   onDestroy(finishInteraction);
@@ -514,97 +963,232 @@
 
 <svelte:window onblur={finishInteraction}/>
 
-{#snippet numberField(label: string, value: number, min: number, max: number, step: number, unit: string, commit: (value: number) => void)}
-  <div class="parameter">
-    <span>{label}</span>
-    <NumberInput class="eq-number" {value} {min} max={Math.max(min, max)} {step} largeStep={step * 5}
-      disabled={!snapshot || max < min} onValueCommit={next => { if (next !== null) commit(next); }}>
-      <NumberInputControl class="eq-input" aria-label={unit ? label + ' in ' + unit : label}/>
-      {#if unit}<span class="unit" aria-hidden="true">{unit}</span>{/if}
-    </NumberInput>
+{#snippet dial(node: EqNode, label: string, value: number, min: number, max: number, step: number, unit: string, adjust: (current: EqNode, value: number) => EqNode, logarithmic = false, variant: 'regular' | 'gain' | 'range' = 'regular', activity = 0)}
+  {#key node.key}
+    <EqDial {label} {value} {min} max={Math.max(min, max)} {step} {unit} color={bandColor(node)}
+      disabled={!snapshot || max < min} {logarithmic} {variant} {activity} onvalue={(next, gesture) => {
+        const current = findEqNode(settings, node.key);
+        if (current) sendBand(adjust(current, next), gesture);
+      }}/>
+  {/key}
+{/snippet}
+
+{#snippet peakMeter(label: string, peak: number | undefined)}
+  {@const db = peak === undefined ? meterFloor : Math.max(meterFloor, Math.min(0, peak))}
+  <div class="peak-meter" class:peaking={db >= -1.01} role="meter" aria-label={label + ' peak level'} aria-valuemin={meterFloor}
+    aria-valuemax={0} aria-valuenow={db} aria-valuetext={peak === undefined ? 'Waiting for audio' : peak.toFixed(1) + ' dBFS'}>
+    <div class="peak-fill" style:--empty={100 * db / meterFloor + '%'}></div>
   </div>
+{/snippet}
+
+{#snippet rangeDial(node: EqNode, ring = false)}
+  {#if node.extra && supportsDynamics(node.shape)}
+    {@const mix = snapshot?.playing && !snapshot.original && !snapshot.monitor && !node.bypassed
+      ? probe?.dynamicEqMix?.[node.extra.index ?? -1] ?? 0 : 0}
+    {@render dial(node, 'Dynamic range', -(node.dynamic?.amountDb ?? 0), -12, supportsUpward ? 12 : 0, eqGainStep, 'dB',
+      (current, amount) => dynamicRange(current, -amount, current.dynamic?.thresholdDb ?? node.dynamic?.thresholdDb, current.dynamic?.ratio ?? node.dynamic?.ratio),
+      false, ring ? 'range' : 'regular', mix)}
+  {/if}
 {/snippet}
 
 <section class="eq-panel" aria-label="Equaliser controls" {@attach keyboard}>
   <Menu controller={bandMenu} onOpenChange={closeMenu}>
-    <div class="plot" role="group" aria-label="Frequency response and spectrum" bind:clientWidth={width} bind:clientHeight={height}>
+    <div class="plot" class:has-band-selection={highlighted.size > 0}
+      role="group" aria-label="Frequency response and spectrum" bind:clientWidth={width} bind:clientHeight={height}>
       <canvas {@attach paint} aria-hidden="true"></canvas>
-      <GraphButton type="button" class="plot-hit" aria-label="Add EQ band on the graph" aria-describedby={id + '-help'} disabled={!snapshot}
-        onpointerdown={event => startDrag(event)} onpointermove={move} onpointerleave={() => ghost = undefined}
-        onpointerup={finishDrag} onpointercancel={finishDrag} onlostpointercapture={finishDrag}
+      {#if soloFocus}
+        <div class="solo-shade" aria-hidden="true" style:--solo-start={soloFocus.left + 'px'}
+          style:--solo-end={soloFocus.right + 'px'} transition:fade={{ duration: prefersReducedMotion.current ? 0 : 120 }}></div>
+      {/if}
+      {#if hasChannelBands}
+        <div class="curve-key" aria-label="Channel curves">
+          <span class={{ secondary: !leftLead }}>Left</span><span class={{ secondary: leftLead }}>Right</span>
+        </div>
+      {/if}
+      <GraphButton type="button" class={['plot-hit', { 'add-ready': ghost }]} aria-label="Add EQ band on the graph" aria-describedby={id + '-help'} disabled={!canAdjust}
+        onclick={clickPlot} onpointerdown={startMarquee} onpointerup={finishMarquee}
+        onpointercancel={finishMarquee} onlostpointercapture={finishMarquee}
+        onpointermove={move} onpointerleave={() => ghost = undefined}
         onkeydown={event => {
           if (contextFromKey(event) || event.isComposing) return;
-          if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'v' && clipboard) {
-            event.preventDefault();
-            paste();
+          if (event.ctrlKey || event.metaKey) {
+            const key = event.key.toLowerCase();
+            if (key === 'v' && canPasteGroup) { event.preventDefault(); paste(); }
+            else if (key === 'c' && selectedStored.length) { event.preventDefault(); copy(selectedStored); }
+            else if (key === 'a') {
+              event.preventDefault();
+              selectGroup(nodes.filter(band => band.stored).map(band => band.key));
+            }
           } else if (event.key === 'Enter' && !event.ctrlKey && !event.metaKey) {
             event.preventDefault();
             add('bell');
           }
         }} oncontextmenu={event => openContext(event)}/>
+      {#if box}
+        <div class="selection-box" aria-hidden="true"
+          style:left={box.left + 'px'} style:top={box.top + 'px'}
+          style:width={box.right - box.left + 'px'} style:height={box.bottom - box.top + 'px'}></div>
+      {/if}
       {#if ghost && !moving}
         {@const spot = position(ghost)}
-        <div class="ghost" aria-hidden="true" style:left={spot.x + 'px'} style:top={spot.y + 'px'}>
-          <Plus size={13}/>
-          <span>{ghost.stored ? 'Move ' : 'Add '}{ghost.name.toLowerCase()}</span>
-        </div>
+        <div class="ghost" aria-hidden="true" style:left={spot.x + 'px'} style:top={spot.y + 'px'}></div>
       {/if}
-      {#each nodes as node (node.key)}
-        {@const spot = position(node)}
-        <GraphButton type="button" data-eq-key={node.key}
-          class={['marker', { active: node.stored && !node.bypassed, bypassed: node.bypassed, selected: node.key === mode, soloed: node.key === soloed }]}
-          disabled={!snapshot} style={'left:' + spot.x + 'px;top:' + spot.y + 'px'}
-          aria-label={node.name} aria-description={node.bypassed ? 'Bypassed' : node.stored ? 'Active' : 'Inactive'} aria-describedby={id + '-node-help'}
-          aria-pressed={node.key === mode} title={node.name + ' · ' + Math.round(node.hz) + ' Hz' + (node.bypassed ? ' · Bypassed' : '') + ' · Enter to edit'}
-          onclick={event => { if (event.detail === 0) selectNode(node, false); }} ondblclick={() => void exact(node)}
-          onpointerdown={event => startDrag(event, node)} onpointermove={move}
-          onpointerup={finishDrag} onpointercancel={finishDrag} onlostpointercapture={finishDrag}
-          onkeydown={event => nodeKeys(event, node)} oncontextmenu={event => openContext(event, node)}
-          {@attach scrollNode(node)}/>
+      {#each frozenPeaks as peak (peak.hz)}
+        <GraphButton type="button" class="frozen-peak" aria-label={'Grab spectrum peak at ' + Math.round(peak.hz) + ' Hz'}
+          title="Drag down to cut this peak · Enter adds a 3 dB cut" disabled={!canAdd && activePeak !== peak.hz}
+          data-grabbed={activePeak === peak.hz} style={'left:' + peak.x + 'px;top:' + peak.y + 'px'}
+          onpointerdown={event => startPeak(event, peak.hz)} onpointermove={movePeak}
+          onpointerup={finishPeak} onpointercancel={finishPeak} onlostpointercapture={finishPeak}
+          onclick={event => {
+            if (event.detail === 0 && canAdd && !peakDrag) {
+              const node = { ...makeExtraEqNode(settings, 'bell'), hz: peak.hz, q: 800, adaptiveQ: false, gainDb: -3 };
+              if (sendBand(node)) {
+                onmode(node.key);
+                void tick().then(() => focusNode(node.key));
+              }
+            }
+          }}/>
       {/each}
-      {#if selected}
-        {@const node = selected}
-        {@const [min, max] = eqFrequencyRange(node, rate)}
-        {@const spec = legacyEqBands[node.shape]}
-        <div class={['band-editor', { left: editorOnLeft ?? (position(node).x > width * 0.6) }]} role="group" aria-label={node.name + ' settings'}>
-          <Button variant="ghost" size="icon-sm" aria-label={node.stored && !node.bypassed ? 'Bypass band' : 'Enable band'}
-            title={node.stored && !node.bypassed ? 'Bypass band' : 'Enable band'} aria-pressed={node.stored && !node.bypassed} onclick={() => toggle(node)}>
-            {#if node.stored && !node.bypassed}<Volume2 size={15} aria-hidden="true"/>{:else}<VolumeX size={15} aria-hidden="true"/>{/if}
+      {#each visibleNodes as node (node.key)}
+        {@const spot = position(node)}
+        {@const gesture = dynamicsGesture?.key === node.key ? dynamicsGesture : undefined}
+        {@const showDynamicsIcon = supportsDynamics(node.shape) && (gesture ? !gesture.handle : !node.dynamic)}
+        <div class="node-anchor" class:flip={spot.x > width - 44} class:has-dynamics={showDynamicsIcon} class:selected={highlighted.has(node.key)}
+          class:soloed={node.key === soloed} style:left={spot.x + 'px'} style:top={spot.y + 'px'} style:--band-color={bandColor(node)}>
+          <GraphButton type="button" data-eq-key={node.key} disabled={!canAdjust}
+            class={['marker', { active: node.stored && !node.bypassed, bypassed: node.bypassed }]}
+            aria-label={node.name} aria-description={node.bypassed ? 'Bypassed' : node.stored ? 'Active' : 'Inactive'} aria-describedby={id + '-node-help'}
+            aria-pressed={highlighted.has(node.key)} title={node.name + ' · ' + Math.round(node.hz) + ' Hz' + (node.bypassed ? ' · Bypassed' : '') + ' · Enter to edit'}
+            onclick={event => { if (event.detail === 0) selectNode(node, false, event); }} ondblclick={() => void exact(node)}
+            onpointerenter={() => ghost = undefined}
+            onpointerdown={event => startDrag(event, node)} onpointermove={move}
+            onpointerup={finishDrag} onpointercancel={finishDrag} onlostpointercapture={finishDrag}
+            onkeydown={event => nodeKeys(event, node)} oncontextmenu={event => openContext(event, node)}
+            {@attach scrollNode(node)}/>
+          {#if node.stored}
+            <GraphButton type="button" class="solo-grip" disabled={!canAdjust}
+              aria-label={'Hold to solo ' + node.name} aria-pressed={node.key === soloed}
+              title={'Hold to solo ' + node.name + ' · Drag to move it'}
+              onpointerdown={event => startDrag(event, node, 'solo')} onpointermove={move}
+              onpointerup={finishDrag} onpointercancel={finishDrag} onlostpointercapture={finishDrag}
+              onkeydown={event => soloKeys(event, node)} onkeyup={event => soloKeys(event, node)}
+              onblur={releaseHeldSolo} onclick={event => { if (event.detail === 0) soloToggle(node); }}>
+              <Headphones size={14} aria-hidden="true"/>
+            </GraphButton>
+          {/if}
+          {#if showDynamicsIcon}
+            <GraphButton type="button" class="dynamics-grip" disabled={!canAdjust || (!node.extra && !canAdd)}
+              aria-label={'Dynamic EQ for ' + node.name} aria-pressed={!!node.dynamic}
+              title={node.extra ? (supportsUpward ? 'Toggle dynamics · Drag up to lift quiet sound or down to reduce loud sound'
+                : 'Toggle dynamics · Drag down for more reduction') : 'Enable dynamic EQ'}
+              onpointerdown={event => { if (node.extra) startDrag(event, node, 'dynamic'); }} onpointermove={move}
+              onpointerup={finishDrag} onpointercancel={finishDrag} onlostpointercapture={finishDrag}
+              onclick={event => { if (event.detail === 0 || !node.extra) setDynamic(node, !node.dynamic); }}>
+              <Activity size={13} aria-hidden="true"/>
+            </GraphButton>
+          {:else if supportsDynamics(node.shape) && (node.dynamic || gesture?.handle)}
+            {@const handle = rangeHandlePosition(node)}
+            <GraphButton type="button" class="range-handle" disabled={!canAdjust} data-adjusting={gesture?.handle || undefined}
+              aria-label={'Dynamic range for ' + node.name} title="Drag sideways to move the band · Drag up or down for range · Scroll for width or slope"
+              style={'left:calc(50% + ' + handle.x + 'px);top:calc(50% + ' + handle.y + 'px)'}
+              onpointerdown={event => startDrag(event, node, 'dynamic')} onpointermove={move}
+              onpointerup={finishDrag} onpointercancel={finishDrag} onlostpointercapture={finishDrag}
+              onkeydown={event => rangeHandleKeys(event, node)} {@attach scrollNode(node, true)}
+              onclick={event => { if (event.detail === 0) void editRange(node); }}/>
+          {/if}
+        </div>
+      {/each}
+      <GraphButton type="button" class="frequency-ruler" aria-label="Zoom or pan frequencies"
+        aria-description="Drag up to zoom, sideways to pan, or double-click to reset."
+        title="Drag vertically to zoom · Drag sideways to pan · Double-click to reset"
+        style={'left:' + bounds.left + 'px;right:' + (width - bounds.right) + 'px;top:' + bounds.bottom + 'px'}
+        disabled={!snapshot} onpointerdown={startRuler} onpointermove={moveRuler} onpointerup={finishRuler}
+        onpointercancel={finishRuler} onlostpointercapture={finishRuler} ondblclick={resetRuler} onkeydown={rulerKeys}/>
+      <div class="gain-range" style:left={bounds.left + 'px'}>
+        <Select controller={gainRangeControl} value={String(view.gainRange)} onValueChange={value => {
+          const gainRange = gainRanges.find(range => String(range) === value);
+          if (gainRange) view = { ...view, gainRange };
+        }}>
+          <SelectTrigger class="range-trigger" aria-label="EQ gain display range" title="EQ gain display range">±{view.gainRange} dB</SelectTrigger>
+          <SelectContent class="app-select-menu audio-tool-popup" align="start" sideOffset={4}>
+            {#each gainRanges as range (range)}
+              <SelectItem value={String(range)} label={'±' + range + ' dB'} data-slot="select-item">±{range} dB</SelectItem>
+            {/each}
+          </SelectContent>
+        </Select>
+      </div>
+    {#if selected && canAdjust}
+      {@const node = selected}
+      {@const [min, max] = eqFrequencyRange(node, rate)}
+      {@const spec = legacyEqBands[node.shape]}
+      <div class="band-editor" role="group" aria-label={node.name + ' settings'} bind:clientWidth={editorWidth}
+        style:--band-x={position(node).x + 'px'} style:--editor-half={editorWidth / 2 + 'px'}
+        style:bottom={height - bounds.bottom + editorGap + 'px'}>
+          <Button variant="ghost" size="icon-sm" class="band-power" disabled={!selectedStored.length}
+            aria-label={selectionBypassed ? 'Enable selected EQ bands' : 'Bypass selected EQ bands'}
+            title={selectionBypassed ? 'Enable selected EQ bands' : 'Bypass selected EQ bands'} aria-pressed={selectionBypassed}
+            onclick={toggleSelection}>
+            <Power size={14} aria-hidden="true"/>
           </Button>
-          {@render numberField('Frequency', Math.max(min, Math.min(node.hz, max)), min, max, 1, 'Hz', hz => sendBand({ ...node, hz }))}
+          {@render dial(node, 'Frequency', Math.max(min, Math.min(node.hz, max)), min, max, 1, 'Hz', (current, hz) => ({ ...current, hz }), true)}
           {#if 'gain' in spec}
-            {@render numberField('Gain', node.gainDb, -6, 6, 1, 'dB', gainDb => sendBand({ ...node, gainDb }))}
+            <div class="gain-stack">
+              {@render dial(node, 'Gain', node.gainDb, -eqGainLimit, eqGainLimit, eqGainStep, 'dB',
+                (current, gainDb) => ({ ...current, gainDb }), false, 'gain')}
+              {@render rangeDial(node, true)}
+            </div>
+          {:else}
+            {@render rangeDial(node)}
           {/if}
           {#if 'q' in spec}
             {@const [minimum, maximum] = eqWidthRange(node.shape)}
-            {@render numberField('Width (Q)', node.q / 100, minimum / 100, maximum / 100,
-              node.shape === 'notch' && !node.extra ? 1 : 0.01, '', q => sendBand({ ...node, q: q * 100 }))}
+            {@render dial(node, 'Width (Q)', node.q / 100, minimum / 100, maximum / 100,
+              node.shape === 'notch' && !node.extra ? 1 : 0.01, '', (current, q) => ({ ...current, q: q * 100 }), true)}
           {/if}
           {#if 'slope' in spec}
-            <div class="parameter">
-              <span>Slope</span>
-              <Select controller={slopeControl} value={String(node.slope)} onValueChange={value => { if (value) sendBand({ ...node, slope: Number(value) }); }}>
-                <SelectTrigger class="eq-slope" aria-label="Slope">{node.slope} dB/oct</SelectTrigger>
-                <SelectContent class="app-select-menu audio-tool-popup" align="start" sideOffset={4}>
-                  {#each slopes as slope (slope)}
-                    <SelectItem value={String(slope)} label={slope + ' dB/oct'} data-slot="select-item">{slope} dB/oct</SelectItem>
-                  {/each}
-                </SelectContent>
-              </Select>
-            </div>
+            {@render dial(node, 'Slope', node.slope, 12, 48, 12, 'dB/oct', (current, slope) => ({ ...current, slope }))}
           {/if}
-          <Button variant="ghost" size="icon-sm" aria-label="Hold to solo band" title="Hold to solo band" aria-pressed={soloed === node.key}
-            onpointerdown={(event: PointerEvent) => holdSolo(event, node)} onpointerup={releaseSolo} onpointercancel={releaseSolo} onlostpointercapture={releaseSolo}
-            onkeydown={(event: KeyboardEvent) => soloKeys(event, node)} onkeyup={(event: KeyboardEvent) => soloKeys(event, node)}
-            onblur={releaseHeldSolo}
-            onclick={(event: MouseEvent) => { if (event.detail === 0) soloToggle(node); }}>
-            <Headphones size={15} aria-hidden="true"/>
-          </Button>
-        </div>
-      {/if}
+          {#if node.dynamic}
+            {@const cut = node.dynamic}
+            {@render dial(node, 'Threshold', cut.thresholdDb, -72, -6, eqGainStep, 'dBFS', (current, thresholdDb) => ({
+              ...current, dynamic: current.dynamic && { ...current.dynamic, thresholdDb },
+            }))}
+            {#if supportsRatio}
+              {@render dial(node, 'Ratio', cut.ratio ?? 2, 1, 20, 0.1, ':1', (current, ratio) => ({
+                ...current, dynamic: current.dynamic && { ...current.dynamic, ratio },
+              }))}
+            {/if}
+          {/if}
+      </div>
+    {/if}
+    </div>
+    <div class="eq-meters" class:playing={snapshot?.playing} role="group" aria-label="EQ levels">
+      {@render peakMeter('Input', probe?.inputPeak)}
+      {@render peakMeter('Output', probe?.outputPeak)}
+      <div class="meter-scale" aria-hidden="true">
+        {#each meterTicks as db (db)}
+          <span style:top={100 * db / meterFloor + '%'}>{db}</span>
+        {/each}
+      </div>
+      <div class="meter-labels" aria-hidden="true"><span>In</span><span>Out</span><span>dBFS</span></div>
     </div>
     <MenuContent class="app-select-menu audio-tool-popup eq-menu">
-      {#if menuNode}
+      {#if groupMenu}
+        <MenuItem onSelect={toggleSelection}>{selectionBypassed ? 'Enable selected bands' : 'Bypass selected bands'}</MenuItem>
+        <MenuItem onSelect={() => reset(selectedStored)}>Reset selected bands</MenuItem>
+        <MenuItem disabled={selectedStored.length > availableSlots}
+          onSelect={() => { menuEditsValue = true; insertCopies(selectedStored); }}>Duplicate selected bands</MenuItem>
+        <MenuItem onSelect={() => copy(selectedStored)}>
+          Copy selected bands <MenuShortcut aria-hidden="true">Ctrl/⌘+C</MenuShortcut>
+        </MenuItem>
+        <MenuItem disabled={!canPasteGroup} onSelect={() => { menuEditsValue = true; paste(); }}>
+          Paste copied bands <MenuShortcut aria-hidden="true">Ctrl/⌘+V</MenuShortcut>
+        </MenuItem>
+        <MenuSeparator/>
+        <MenuItem onSelect={() => { menuEditsValue = true; void removeBands(selectedStored); }}>
+          Remove selected bands <MenuShortcut aria-hidden="true">Del</MenuShortcut>
+        </MenuItem>
+      {:else if menuNode}
         {@const node = menuNode}
         <MenuItem onSelect={() => { menuEditsValue = true; void exact(node); }}>Edit exact values <MenuShortcut aria-hidden="true">Enter</MenuShortcut></MenuItem>
         <MenuItem onSelect={() => toggle(node)}>{node.stored && !node.bypassed ? 'Bypass band' : 'Enable band'}</MenuItem>
@@ -612,106 +1196,303 @@
         <MenuSeparator/>
         <MenuSub>
           <MenuSubTrigger>Change shape <ChevronRight size={14} aria-hidden="true"/></MenuSubTrigger>
-          <MenuSubContent class="app-select-menu eq-menu" sideOffset={4}>
+          <MenuSubContent class="app-select-menu audio-tool-popup eq-menu" sideOffset={4}>
             {#each shapes as shape (shape)}
               {#if shape !== node.shape}
-                <MenuItem disabled={!canChangeShape(node, shape)}
+                <MenuItem disabled={!node.extra && !canAdd}
                   onSelect={() => { menuEditsValue = true; changeShape(node, shape); }}>{legacyEqBands[shape].name}</MenuItem>
               {/if}
             {/each}
           </MenuSubContent>
         </MenuSub>
-        <MenuItem onSelect={() => reset(node)}>Reset band</MenuItem>
-        <MenuItem disabled={!node.stored} onSelect={() => copy(node)}>Copy band settings <MenuShortcut aria-hidden="true">Ctrl/⌘+C</MenuShortcut></MenuItem>
-        <MenuItem disabled={!clipboard} onSelect={() => { menuEditsValue = true; paste(node); }}>Paste band settings <MenuShortcut aria-hidden="true">Ctrl/⌘+V</MenuShortcut></MenuItem>
-        <MenuItem disabled={!node.stored} onSelect={() => { menuEditsValue = true; void remove(node); }}>Remove band <MenuShortcut aria-hidden="true">Del</MenuShortcut></MenuItem>
+        {#if snapshot?.stereo}
+          <MenuSub>
+            <MenuSubTrigger disabled={!node.extra && !canAdd}>Change channel <ChevronRight size={14} aria-hidden="true"/></MenuSubTrigger>
+            <MenuSubContent class="app-select-menu audio-tool-popup eq-menu" sideOffset={4}>
+              <MenuRadioGroup value={node.channel ?? 'stereo'} onValueChange={value => changeChannel(node, value as keyof typeof channels)}>
+                {#each Object.entries(channels) as [channel, label] (channel)}
+                  <MenuRadioItem value={channel} closeOnSelect>
+                    {label}<MenuItemIndicator aria-hidden="true"><Check size={14}/></MenuItemIndicator>
+                  </MenuRadioItem>
+                {/each}
+              </MenuRadioGroup>
+            </MenuSubContent>
+          </MenuSub>
+        {/if}
+        {#if node.shape === 'bell'}
+          <MenuCheckboxItem value="adaptive-q" checked={!!node.adaptiveQ} disabled={!node.extra && !canAdd}
+            onCheckedChange={enabled => { menuEditsValue = !node.extra; setAdaptiveQ(node, enabled === true); }} closeOnSelect>
+            Adaptive Q<MenuItemIndicator aria-hidden="true"><Check size={14}/></MenuItemIndicator>
+          </MenuCheckboxItem>
+        {/if}
+        {#if supportsDynamics(node.shape)}
+          <MenuCheckboxItem value="dynamic-cut" checked={(node.dynamic?.amountDb ?? 0) > 0} disabled={!node.extra && !canAdd}
+            onCheckedChange={enabled => setDynamic(node, enabled === true)} closeOnSelect>
+            Dynamic cut<MenuItemIndicator aria-hidden="true"><Check size={14}/></MenuItemIndicator>
+          </MenuCheckboxItem>
+          <MenuCheckboxItem value="dynamic-lift" checked={(node.dynamic?.amountDb ?? 0) < 0} disabled={!supportsUpward || (!node.extra && !canAdd)}
+            onCheckedChange={enabled => setDynamic(node, enabled === true, -4)} closeOnSelect>
+            Upward compression<MenuItemIndicator aria-hidden="true"><Check size={14}/></MenuItemIndicator>
+          </MenuCheckboxItem>
+        {/if}
+        <MenuItem onSelect={() => reset([node])}>Reset band</MenuItem>
+        <MenuItem disabled={!node.stored || !canAdd} onSelect={() => { menuEditsValue = true; insertCopies([node]); }}>Duplicate band</MenuItem>
+        <MenuItem disabled={!node.stored} onSelect={() => copy([node])}>Copy band settings <MenuShortcut aria-hidden="true">Ctrl/⌘+C</MenuShortcut></MenuItem>
+        <MenuItem disabled={!(clipboard.length === 1 && node.extra) && !canPasteGroup}
+          onSelect={() => { menuEditsValue = true; paste(node); }}>Paste band settings <MenuShortcut aria-hidden="true">Ctrl/⌘+V</MenuShortcut></MenuItem>
+        <MenuItem disabled={!node.stored} onSelect={() => { menuEditsValue = true; void removeBands([node]); }}>Remove band <MenuShortcut aria-hidden="true">Del</MenuShortcut></MenuItem>
       {:else}
-        <MenuItem disabled={!canAdd && legacyEqNode(settings, 'bell').stored}
-          onSelect={() => { menuEditsValue = true; add('bell', menuPoint); }}>Add bell</MenuItem>
-        <MenuItem disabled={!canAdd && legacyEqNode(settings, 'notch').stored}
-          onSelect={() => { menuEditsValue = true; add('notch', menuPoint); }}>Add notch</MenuItem>
-        <MenuItem disabled={!clipboard} onSelect={() => { menuEditsValue = true; paste(); }}>Paste band settings <MenuShortcut aria-hidden="true">Ctrl/⌘+V</MenuShortcut></MenuItem>
+        {#each shapes as shape (shape)}
+          <MenuItem disabled={!canAdd} onSelect={() => { menuEditsValue = true; add(shape, menuPoint ? xFrequency(menuPoint.x, bounds, rate) : undefined); }}>
+            Add {legacyEqBands[shape].name.toLowerCase()}
+          </MenuItem>
+        {/each}
+        <MenuItem disabled={!canPasteGroup} onSelect={() => { menuEditsValue = true; paste(); }}>Paste band settings <MenuShortcut aria-hidden="true">Ctrl/⌘+V</MenuShortcut></MenuItem>
       {/if}
     </MenuContent>
   </Menu>
   <div class="eq-footer">
-    <div class="band-list" role="group" aria-label="EQ bands">
-      {#each nodes.filter(node => node.stored) as node (node.key)}
-        <Button variant="ghost" size="sm" class="band-chip" aria-pressed={node.key === mode}
-          data-bypassed={node.bypassed} title={node.name + (node.bypassed ? ' · Bypassed' : '')}
-          onclick={() => { onmode(node.key); void tick().then(() => focusNode(node.key)); }}>
-          {node.name} {Math.round(node.hz)} Hz
-        </Button>
-      {/each}
-      <span id={id + '-help'} class={nodes.length ? 'sr-only' : 'hint'}>
-        Click to add a band. Shift-drag makes smaller changes.
-      </span>
-    </div>
+    <span id={id + '-help'} class={nodes.length ? 'sr-only' : 'hint'}>
+      Click near 0 dB to add a band. Drag across empty space to select several bands.
+    </span>
     <div class="eq-actions">
       <Menu controller={addMenu}>
-        <MenuTrigger class="eq-command" aria-label="Add EQ band" title="Add EQ band" disabled={!snapshot}>
+        <MenuTrigger class="eq-command" aria-label="Add EQ band" title="Add EQ band" disabled={!canAdd}>
           <Plus size={17} aria-hidden="true"/>
         </MenuTrigger>
         <MenuContent class="app-select-menu audio-tool-popup eq-menu">
-          <MenuItem disabled={!canAdd && legacyEqNode(settings, 'bell').stored} onSelect={() => add('bell')}>Add bell</MenuItem>
-          <MenuItem disabled={!canAdd && legacyEqNode(settings, 'notch').stored} onSelect={() => add('notch')}>Add notch</MenuItem>
+          {#each shapes as shape (shape)}
+            <MenuItem disabled={!canAdd} onSelect={() => add(shape)}>Add {legacyEqBands[shape].name.toLowerCase()}</MenuItem>
+          {/each}
         </MenuContent>
       </Menu>
+      <Button variant="ghost" size="icon-sm" aria-label="Match to reference" title="Match to a reference recording"
+        disabled={!snapshot || reference?.status === 'choosing' || reference?.status === 'analysing'}
+        onclick={() => onaction('reference-start')}><FileAudio size={15} aria-hidden="true"/></Button>
+      <Select controller={analyzerControl} value={analyzer} onValueChange={value => { if (value) analyzer = value as AnalyzerView; }}>
+        <SelectTrigger class="analyzer-choice" aria-label="Spectrum display" title="Choose which spectrum to show">{analyzerViews[analyzer]}</SelectTrigger>
+        <SelectContent class="app-select-menu audio-tool-popup" align="end" sideOffset={4}>
+          {#each Object.entries(analyzerViews) as [value, label] (value)}
+            <SelectItem {value} {label} data-slot="select-item">{label}</SelectItem>
+          {/each}
+        </SelectContent>
+      </Select>
       <Button variant="ghost" size="icon-sm" aria-label={frozen ? 'Resume spectrum' : 'Freeze spectrum'}
-        title={frozen ? 'Resume spectrum' : 'Freeze spectrum'} aria-pressed={Boolean(frozen)} disabled={!probe && !frozen}
+        title={frozen ? 'Resume spectrum' : 'Freeze spectrum'} aria-pressed={Boolean(frozen)} disabled={analyzer === 'off' || (!probe && !frozen)}
         onclick={freezeSpectrum}><Snowflake size={16} aria-hidden="true"/></Button>
     </div>
   </div>
-  <span id={id + '-node-help'} class="sr-only">Enter edits exact values. Arrows move the band and Shift makes smaller changes. Brackets select the previous or next band.</span>
+  {#if reference}
+    <div class="reference" role="group" aria-label="Reference EQ">
+      {#if reference.status === 'choosing'}
+        <span role="status">Choosing a reference…</span>
+      {:else if reference.status === 'analysing'}
+        <span role="status">Analysing {reference.name}…</span>
+      {:else if reference.status === 'error'}
+        <span role="status">{reference.message}</span>
+      {:else}
+        <span title={reference.name}>{reference.name} · {reference.count} {reference.count === 1 ? 'band' : 'bands'}</span>
+      {/if}
+      <div class="reference-actions">
+        {#if reference.status === 'ready'}
+          <Button size="sm" variant="ghost" aria-pressed={reference.preview ?? false}
+            title="Hear and edit the suggested curve before keeping it"
+            onclick={() => onaction('reference-preview')}>Preview match</Button>
+          <Button size="sm" onclick={() => onaction('reference-keep')}>Keep match</Button>
+        {/if}
+        <Button size="sm" variant="ghost" onclick={() => onaction('reference-cancel')}>Dismiss</Button>
+      </div>
+    </div>
+  {/if}
+  <span id={id + '-node-help'} class="sr-only">Drag a selected band to move the selection. Ctrl or Command-click toggles a band. Shift-click selects a range. Enter opens exact values.</span>
   <span class="sr-only" aria-live="polite">{report}</span>
 </section>
 
 <style>
-  .eq-panel { grid-column:1; grid-row:2 / 4; display:grid; grid-template-rows:minmax(218px, 1fr) auto; gap:var(--sp-2, 8px); min-width:0; }
-  .plot { position:relative; isolation:isolate; overflow:hidden; overflow:clip; min-width:0; min-height:218px; }
+  .eq-panel {
+    grid-column:1; grid-row:2 / 4; display:grid;
+    grid-template-columns:minmax(0,1fr) auto; grid-template-rows:minmax(218px,1fr);
+    gap:var(--sp-2,8px); min-width:0;
+  }
+  .eq-meters {
+    grid-column:2; grid-row:1; display:grid; grid-template-columns:repeat(2, 13px) 22px;
+    grid-template-rows:minmax(0,1fr) 25px; column-gap:4px; padding-block-start:25px;
+    font:10px var(--font-literal); color:var(--muted);
+  }
+  .meter-scale { position:relative; font-variant-numeric:tabular-nums; }
+  .meter-scale span { position:absolute; inset-inline-start:0; transform:translateY(-50%); }
+  .peak-meter { position:relative; overflow:hidden; background:var(--bg); border-radius:3px; }
+  .peak-fill {
+    position:absolute; inset:0; clip-path:inset(var(--empty) 0 0);
+    background:linear-gradient(to top, var(--add) 0 90%, var(--accent-ink) 98.3%, var(--del) 98.3%);
+  }
+  .playing .peak-fill { transition:clip-path 105ms ease-out; }
+  .peak-meter.peaking::after { content:''; position:absolute; inset:0 0 auto; block-size:2px; background:var(--del); }
+  .meter-labels {
+    grid-column:1 / -1; display:grid; grid-template-columns:inherit;
+    column-gap:4px; justify-items:center; align-items:end; padding-block-end:5px;
+    font-size:9px;
+  }
+  .plot { grid-column:1; grid-row:1; position:relative; isolation:isolate; overflow:hidden; overflow:clip; min-width:0; min-height:218px; }
+  .eq-footer, .reference { grid-column:1; }
   canvas, .plot :global(.plot-hit) { position:absolute; inset:0; width:100%; height:100%; border-radius:inherit; }
   canvas { pointer-events:none; }
-  .plot :global(.plot-hit), .plot :global(.marker) { appearance:none; background:transparent; color:inherit; border:0; padding:0; touch-action:none; }
-  .plot :global(.plot-hit) { cursor:crosshair; }
-  .plot :global(.plot-hit:disabled) { cursor:default; }
-  .plot :global(.plot-hit:focus-visible) { outline:2px solid var(--accent); outline-offset:-2px; }
-  .plot :global(.marker) { position:absolute; transform:translate(-50%, -50%); display:grid; place-items:center; width:34px; height:34px; border-radius:50%; cursor:grab; }
+  .solo-shade {
+    --shade:color-mix(in srgb, var(--panel) 78%, transparent);
+    --feather:clamp(3px,calc((var(--solo-end) - var(--solo-start)) / 4),14px);
+    position:absolute; z-index:5; inset:0; pointer-events:none;
+    background:linear-gradient(to right,
+      var(--shade) calc(var(--solo-start) - var(--feather)),transparent var(--solo-start),
+      transparent var(--solo-end),var(--shade) calc(var(--solo-end) + var(--feather)));
+  }
+  .plot :global(.plot-hit), .plot :global(.marker) { appearance:none; background:transparent; color:inherit; border:0; padding:0; box-shadow:none; touch-action:none; }
+  .plot :global(.plot-hit) { z-index:0; cursor:default; }
+  .plot :global(.plot-hit.add-ready) { cursor:crosshair; }
+  .selection-box {
+    position:absolute; z-index:2; pointer-events:none; box-sizing:border-box;
+    background:color-mix(in srgb, var(--accent) 13%, transparent);
+    border:1px solid color-mix(in srgb, var(--accent-ink) 70%, transparent);
+    border-radius:2px;
+  }
+  .plot :global(.plot-hit:focus-visible) { outline:none; box-shadow:inset 0 -1px var(--accent-ink); }
+  .plot :global(.frequency-ruler) {
+    position:absolute; z-index:2; bottom:0; width:auto; height:auto; border:0;
+    background:transparent; box-shadow:none; cursor:grab; touch-action:none;
+  }
+  .plot :global(.frequency-ruler:active) { cursor:grabbing; }
+  .plot :global(.frequency-ruler:focus-visible) { outline:none; background:var(--sel-tint); }
+  .gain-range { position:absolute; z-index:2; top:0; }
+  .gain-range :global(.range-trigger) {
+    display:block; padding:0 6px; height:23px; border:0; border-radius:var(--r-compact);
+    background:transparent; color:var(--muted); font:10px var(--font-literal);
+  }
+  .gain-range :global(.range-trigger:is(:hover,:focus-visible,[aria-expanded=true])) { background:var(--sel-tint); color:var(--text); }
+  .plot :global(.frozen-peak) {
+    position:absolute; z-index:1; transform:translate(-50%, -50%); display:grid; place-items:center;
+    width:25px; height:25px; border:0; border-radius:50%; padding:0;
+    background:transparent; box-shadow:none; color:var(--accent-ink); cursor:ns-resize; touch-action:none;
+  }
+  .plot :global(.frozen-peak::before) {
+    content:''; width:7px; height:7px; border:1px solid currentColor; border-radius:50%;
+    background:color-mix(in srgb, currentColor 42%, transparent);
+  }
+  .plot :global(.frozen-peak:is(:hover,:focus-visible,[data-grabbed=true])) {
+    background:var(--sel-tint); outline:none;
+  }
+  .plot :global(.frozen-peak[data-grabbed=true]) { cursor:grabbing; }
+  .node-anchor { position:absolute; z-index:3; transform:translate(-50%, -50%); width:34px; height:34px; transition:opacity 110ms ease-out; }
+  .node-anchor:is(:hover,:focus-within,.selected,.soloed) { z-index:4; }
+  .has-band-selection .node-anchor:not(.selected):not(:hover):not(:focus-within) { opacity:.6; }
+  .node-anchor :global(.marker) {
+    position:absolute; inset:0; width:100%; height:100%; display:grid; place-items:center; border-radius:50%; cursor:grab;
+  }
   .plot :global(.marker:active) { cursor:grabbing; }
   .plot :global(.marker)::before {
-    content:''; width:12px; height:12px; border-radius:inherit;
-    border:1.5px solid var(--accent-ink, var(--text)); background:var(--panel);
+    content:''; width:10px; height:10px; border-radius:inherit;
+    border:1.5px solid var(--band-color); background:var(--panel);
   }
-  .plot :global(.marker.active)::before { background:var(--accent); }
+  .plot :global(.marker.active)::before { background:var(--band-color); opacity:.78; }
+  .node-anchor.selected :global(.marker.active)::before, .plot :global(.marker.active:hover)::before { opacity:1; }
   .plot :global(.marker.bypassed)::before { border-style:dashed; opacity:.7; }
-  .plot :global(.marker.soloed)::before { box-shadow:0 0 0 3px var(--sel-tint); }
-  .plot :global(.marker:hover), .plot :global(.marker.selected) { background:var(--sel-tint); }
-  .plot :global(.marker:focus-visible) { outline:2px solid var(--accent); outline-offset:-1px; }
-  .plot :global(.marker:focus-visible), .plot :global(.marker.selected) { z-index:1; }
-  .ghost { position:absolute; transform:translate(-50%, -50%); display:grid; place-items:center; width:22px; height:22px; pointer-events:none; border:1px dashed var(--accent-ink); border-radius:50%; color:var(--accent-ink); background:var(--panel); }
-  .ghost span { position:absolute; top:calc(100% + 4px); width:max-content; max-width:120px; padding:2px var(--sp-1); border-radius:var(--r-compact); background:var(--panel); font-size:.6875rem; }
+  .node-anchor.soloed :global(.marker)::before { box-shadow:0 0 0 3px color-mix(in srgb, var(--band-color) 35%, transparent); }
+  .node-anchor :global(.marker:hover),
+  .node-anchor.selected :global(.marker) { background:color-mix(in srgb, var(--band-color) 19%, transparent); }
+  .node-anchor :global(.marker:focus-visible) { outline:none; background:color-mix(in srgb, var(--band-color) 38%, transparent); }
+  .node-anchor :global(.solo-grip) {
+    position:absolute; left:calc(100% - 1px); top:50%; transform:translateY(-50%);
+    display:grid; place-items:center; width:24px; height:24px; padding:0; border:0; border-radius:50%;
+    background:var(--panel); color:var(--band-color); box-shadow:none; opacity:0; pointer-events:none;
+    cursor:grab; touch-action:none;
+  }
+  .node-anchor.flip :global(.solo-grip) { left:auto; right:calc(100% - 1px); }
+  .node-anchor.flip.has-dynamics :global(.solo-grip) { right:calc(100% + 26px); }
+  .node-anchor:is(:hover,.soloed) :global(.solo-grip),
+  .node-anchor :global(.marker:focus-visible + .solo-grip),
+  .node-anchor :global(.solo-grip:focus-visible) { opacity:1; pointer-events:auto; }
+  .node-anchor :global(.solo-grip:active) { cursor:grabbing; }
+  .node-anchor :global(.solo-grip:focus-visible) { outline:2px solid var(--accent); outline-offset:1px; }
+  .node-anchor :global(.dynamics-grip) {
+    position:absolute; right:calc(100% - 1px); top:50%; transform:translateY(-50%);
+    display:grid; place-items:center; width:24px; height:24px; padding:0; border:0; border-radius:50%;
+    background:var(--panel); color:var(--band-color); box-shadow:none; opacity:0; pointer-events:none;
+    cursor:ns-resize; touch-action:none;
+  }
+  .node-anchor:is(:hover,.selected) :global(.dynamics-grip),
+  .node-anchor :global(.dynamics-grip:is([aria-pressed=true],:focus-visible)) { opacity:1; pointer-events:auto; }
+  .node-anchor:not(:hover):not(.selected) :global(.dynamics-grip[aria-pressed=true]) {
+    opacity:.72; background:color-mix(in srgb, var(--band-color) 12%, var(--panel));
+  }
+  .node-anchor :global(.dynamics-grip:focus-visible) { outline:2px solid var(--accent); outline-offset:1px; }
+  .node-anchor :global(.range-handle) {
+    position:absolute; transform:translate(-50%, -50%); display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:3px;
+    width:24px; height:24px; padding:0; border:0; box-shadow:none; border-radius:50%;
+    background:transparent; color:color-mix(in srgb, var(--text) 72%, var(--panel)); cursor:move; touch-action:none;
+  }
+  .node-anchor :global(.range-handle)::before,
+  .node-anchor :global(.range-handle)::after {
+    content:''; width:8px; height:5px; background:currentColor; opacity:0;
+  }
+  .node-anchor :global(.range-handle)::before { clip-path:polygon(50% 0,100% 100%,0 100%); }
+  .node-anchor :global(.range-handle)::after { clip-path:polygon(0 0,100% 0,50% 100%); }
+  .node-anchor :global(.range-handle:focus-visible) { background:var(--sel-tint); outline:none; }
+  .node-anchor :global(.range-handle:is(:hover,:focus-visible,[data-adjusting=true]))::before,
+  .node-anchor :global(.range-handle:is(:hover,:focus-visible,[data-adjusting=true]))::after { opacity:1; }
+  @media (hover: none) {
+    .node-anchor.selected :global(.solo-grip) { opacity:1; pointer-events:auto; }
+  }
+  .curve-key { position:absolute; z-index:1; inset:17px 44px auto auto; display:flex; gap:10px; pointer-events:none; color:var(--accent-ink); font-size:var(--text-xs); }
+  .curve-key span { display:flex; align-items:center; gap:4px; }
+  .curve-key span::before { content:''; width:10px; border-top:1px solid currentColor; }
+  .curve-key .secondary { color:var(--muted); }
+  .curve-key .secondary::before { border-top-style:dashed; }
+  .ghost { position:absolute; transform:translate(-50%, -50%); width:12px; height:12px; pointer-events:none;
+    border:1px solid color-mix(in srgb, var(--accent-ink) 85%, transparent); border-radius:50%;
+    background:color-mix(in srgb, var(--accent-ink) 48%, transparent);
+    box-shadow:0 0 9px color-mix(in srgb, var(--accent) 52%, transparent); }
   .band-editor {
-    position:absolute; z-index:2; inset-inline-end:33px; inset-block-end:29px; display:flex; flex-wrap:wrap;
-    align-items:end; gap:var(--sp-2); padding:var(--sp-2); max-inline-size:calc(100% - 66px);
-    border-radius:var(--r-inset); background:var(--panel); box-shadow:0 5px 16px rgb(0 0 0 / 22%);
+    --eq-dial-size:36px;
+    --eq-dial-width:60px;
+    position:absolute; z-index:2;
+    left:clamp(calc(var(--editor-half) + 8px),var(--band-x),calc(100% - var(--editor-half) - 8px));
+    transform:translateX(-50%);
+    display:flex; flex-wrap:wrap; justify-content:center; align-items:end; gap:var(--sp-1);
+    inline-size:max-content; max-inline-size:calc(100% - 16px); box-sizing:border-box;
+    padding:var(--sp-2); padding-inline-start:calc(var(--sp-2) + 24px); border-radius:var(--r-inset);
+    background:color-mix(in srgb, var(--panel) 91%, transparent);
+    -webkit-backdrop-filter:blur(10px); backdrop-filter:blur(10px);
+    box-shadow:0 6px 18px rgb(0 0 0 / 23%);
   }
-  .band-editor.left { inset-inline:33px auto; }
-  .parameter { display:grid; gap:2px; color:var(--muted); font-size:.6875rem; font-weight:500; }
-  .parameter :global(.eq-number), .parameter :global(.eq-slope) {
-    display:inline-flex; align-items:center; min-height:28px; border:0; border-radius:var(--input-radius);
-    background:transparent; color:var(--text); padding-inline:8px; font-size:.75rem;
+  .gain-stack { position:relative; --eq-dial-width:72px; --eq-gain-disc:42px; --eq-range-disc:60px; }
+  .band-editor :global(.band-power) {
+    position:absolute; inset:4px auto auto 4px; width:24px; height:24px; border:0;
+    background:transparent; box-shadow:none; color:var(--accent-ink);
   }
-  .parameter :global(.eq-number:hover), .parameter :global(.eq-slope:hover) { background:var(--row-hover); }
-  .parameter :global(.eq-input) { width:5ch; min-width:0; padding:0; border:0; background:transparent; color:inherit; outline:none; text-align:right; font-variant-numeric:tabular-nums; }
-  .parameter :global(.eq-number:focus-within), .parameter :global(.eq-slope:focus-visible) { outline:2px solid var(--accent); outline-offset:1px; }
-  .unit { color:var(--muted); margin-inline-start:4px; }
-  .eq-footer { min-height:36px; display:flex; align-items:start; gap:var(--sp-2); min-width:0; }
-  .band-list { flex:1; display:flex; flex-wrap:wrap; gap:var(--sp-1); min-width:0; align-items:center; min-height:28px; }
-  .band-list :global(.band-chip) { color:var(--muted); white-space:nowrap; border-radius:var(--r-pill); font-variant-numeric:tabular-nums; }
-  .band-list :global(.band-chip[aria-pressed=true]), .eq-actions :global(button[aria-pressed=true]) { background:var(--sel-tint); color:var(--accent-ink); }
-  .band-list :global(.band-chip[data-bypassed=true]) { text-decoration:line-through; }
+  .band-editor :global(.band-power[aria-pressed=true]) { color:var(--muted); }
+  .band-editor :global(.band-power:focus-visible) { outline:none; background:var(--sel-tint); }
+  .reference { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:var(--sp-1) var(--sp-2); font-size:var(--text-xs); color:var(--muted); }
+  .reference > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; }
+  .reference-actions { display:flex; align-items:center; gap:var(--sp-1); }
+  .reference-actions :global([aria-pressed=true]) { background:var(--sel-tint); color:var(--accent-ink); }
+  .eq-footer { min-height:28px; display:flex; align-items:center; gap:var(--sp-2); min-width:0; }
+  .eq-actions :global(button[aria-pressed=true]) { background:var(--sel-tint); color:var(--accent-ink); }
   .hint { color:var(--muted); font-size:.75rem; }
-  .eq-actions { display:flex; align-items:center; gap:var(--sp-1); color:var(--muted); }
+  .eq-actions { display:flex; align-items:center; gap:var(--sp-1); margin-inline-start:auto; color:var(--muted); }
   .eq-actions :global(.eq-command) { display:grid; place-items:center; width:28px; height:28px; border:0; border-radius:var(--r-compact); background:transparent; color:inherit; }
+  .eq-actions :global(.analyzer-choice) { min-width:46px; height:28px; padding-inline:6px; border:0; border-radius:var(--r-compact); background:transparent; color:inherit; font-size:var(--text-xs); }
+  .eq-actions :global(.analyzer-choice:hover) { color:var(--text); }
+  .eq-actions :global(.analyzer-choice:focus-visible) { outline:2px solid var(--accent); }
   .eq-actions :global(.eq-command:hover) { color:var(--text); }
   .eq-actions :global(.eq-command:focus-visible) { outline:2px solid var(--accent); }
+  @media (max-width:460px) {
+    .band-editor { --eq-dial-size:30px; --eq-dial-width:49px; padding:var(--sp-1); padding-inline-start:28px; }
+    .gain-stack { --eq-dial-width:60px; --eq-gain-disc:36px; --eq-range-disc:52px; }
+  }
+  @media (max-height:420px) {
+    .eq-panel { grid-template-rows:minmax(146px,1fr); }
+    .plot { min-height:146px; }
+  }
+  @media (prefers-reduced-motion:reduce) {
+    .playing .peak-fill, .node-anchor { transition:none; }
+  }
 </style>

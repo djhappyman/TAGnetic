@@ -21,7 +21,7 @@ use tagrex_audio_workbench::{
     RenderSegment,
 };
 pub use tagrex_audio_workbench::{
-    AudioTreatment, FrameRange, PreviewMonitor, SpectrogramChannel, TreatmentProbe,
+    AudioTreatment, EqBand, FrameRange, PreviewMonitor, SpectrogramChannel, TreatmentProbe,
     TreatmentProbeOptions,
 };
 use tagrex_core::mask::{portable_file_name, Mask};
@@ -198,7 +198,14 @@ impl Source {
     }
 
     fn preview_treatment(&self, settings: AudioTreatment) -> Result<PreparedTreatment> {
-        match self.cached_treatment(settings)? {
+        // Whole-recording measurements serve export and explicit normalization.
+        // Merely reviewing an export must not change the level of an EQ preview.
+        let measured = if settings.normalize {
+            self.cached_treatment(settings)?
+        } else {
+            None
+        };
+        match measured {
             Some(prepared) => Ok(prepared),
             None => PreparedTreatment::preview(settings, self.info)
                 .map(|prepared| {
@@ -957,6 +964,33 @@ impl Studio {
         .map_err(StudioError::new)?;
         source.open_current()?;
         Ok(probe)
+    }
+
+    pub fn match_reference(
+        &self,
+        id: &str,
+        range: FrameRange,
+        reference: &Path,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<EqBand>> {
+        let source = self.source(id)?;
+        if range.start >= range.end || range.end > source.info.frames {
+            return Err(StudioError::new("Choose an excerpt inside the recording"));
+        }
+        let target = File::open(reference).map_err(StudioError::new)?;
+        let bands = audio::match_reference(
+            source.open_current()?,
+            range,
+            source
+                .analysis
+                .as_ref()
+                .and_then(|analysis| analysis.seek_index.as_deref()),
+            target,
+            cancelled,
+        )
+        .map_err(StudioError::new)?;
+        source.open_current()?;
+        Ok(bands)
     }
 
     pub fn cue_geometry(&self, id: &str) -> Result<(u32, u64)> {

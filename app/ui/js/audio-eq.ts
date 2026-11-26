@@ -1,4 +1,5 @@
-import { eqBandBypassBits, maxEqBands, treatmentNumbers, type AudioTreatment, type EqBand, type TreatmentNumber } from './audio-treatment';
+import { bellQuality, eqFrequencyLimit, eqGainLimit, roundEqDb } from './audio-eq-range.js';
+import { eqBandBypassBits, maxEqBands, noTreatment, treatmentNumbers, type AudioTreatment, type EqBand, type EqShape, type TreatmentNumber } from './audio-treatment';
 
 export const legacyEqBands = {
   low: { name: 'Low cut', enabled: 'rumble', frequency: 'rumbleHz', slope: 'rumbleSlope', bypassBit: eqBandBypassBits.rumble },
@@ -17,8 +18,7 @@ export const legacyEqBands = {
   bypassBit: number;
 }>;
 
-export type EqShape = keyof typeof legacyEqBands;
-export type ExtraEqShape = EqBand['kind'];
+export type { EqShape } from './audio-treatment';
 
 export type EqNode = {
   key: string;
@@ -29,6 +29,9 @@ export type EqNode = {
   q: number;
   slope: number;
   bypassed: boolean;
+  channel?: EqBand['channel'];
+  adaptiveQ?: boolean;
+  dynamic?: EqBand['dynamic'];
   stored: boolean;
   extra?: { id?: number; index?: number };
 };
@@ -55,7 +58,7 @@ export function legacyEqNode(settings: AudioTreatment, shape: EqShape): EqNode {
     shape,
     name: spec.name,
     hz: value(spec.frequency),
-    gainDb: 'gain' in spec ? settings[spec.gain] : 0,
+    gainDb: 'gain' in spec ? settings[spec.gain] || 0 : 0,
     q: 'q' in spec ? value(spec.q) * (shape === 'notch' ? 100 : 1) : 80,
     slope: 'slope' in spec ? value(spec.slope) : 12,
     bypassed: (bypassMask(settings) & spec.bypassBit) !== 0,
@@ -77,7 +80,10 @@ function extraEqNodes(settings: AudioTreatment): EqNode[] {
     hz: band.hz,
     gainDb: band.gainDb,
     q: band.q,
-    slope: 12,
+    slope: band.slope || 12,
+    channel: band.channel,
+    adaptiveQ: band.adaptiveQ,
+    dynamic: band.dynamic,
     bypassed: Boolean(band.bypassed),
     stored: true,
     extra: { id: band.id, index },
@@ -90,18 +96,18 @@ export function visibleEqNodes(settings: AudioTreatment, selected: string | null
     .concat(extraEqNodes(settings));
 }
 
-export function makeExtraEqNode(settings: AudioTreatment, shape: ExtraEqShape): EqNode {
+export function makeExtraEqNode(settings: AudioTreatment, shape: EqShape): EqNode {
   const used = new Set(extrasOf(settings).map(band => band.id));
   while (used.has(nextBandId)) nextBandId++;
   const id = nextBandId++;
-  const original = legacyEqNode(settings, shape);
-  return { ...original, key: extraKey(id), stored: false, bypassed: false, extra: { id } };
+  const original = legacyEqNode(noTreatment, shape);
+  return { ...original, key: extraKey(id), stored: false, bypassed: false, adaptiveQ: shape === 'bell', extra: { id } };
 }
 
 export function eqFrequencyRange(node: EqNode, rate: number): [number, number] {
   const spec = treatmentNumbers[legacyEqBands[node.shape].frequency];
   const min = node.extra ? 20 : spec.min;
-  const max = Math.min(node.extra ? 18000 : spec.max, Math.floor(rate * 0.45));
+  const max = Math.min(node.extra ? eqFrequencyLimit : spec.max, Math.floor(rate * 0.45));
   return [min, max];
 }
 
@@ -115,10 +121,10 @@ export function eqBandPatch(settings: AudioTreatment, node: EqNode, rate: number
   const [min, max] = eqFrequencyRange(node, rate);
   if (max < min) return {};
   const hz = clamp(node.hz, min, max);
-  const gainDb = clamp(node.gainDb, -6, 6);
+  const gainDb = roundEqDb(Math.max(-eqGainLimit, Math.min(eqGainLimit, node.gainDb)));
   const [minQ, maxQ] = eqWidthRange(node.shape);
   const q = clamp(node.q, minQ, maxQ);
-  if (node.extra && (node.shape === 'bell' || node.shape === 'notch')) {
+  if (node.extra) {
     const bands = Array.from(extrasOf(settings));
     const found = node.extra.id === undefined ? node.extra.index ?? -1 : bands.findIndex(band => band.id === node.extra?.id);
     if (found === -1 && bands.length >= maxEqBands) return {};
@@ -126,9 +132,13 @@ export function eqBandPatch(settings: AudioTreatment, node: EqNode, rate: number
       id: node.extra.id,
       kind: node.shape,
       hz,
-      gainDb: node.shape === 'notch' ? 0 : gainDb,
+      gainDb: 'gain' in legacyEqBands[node.shape] ? gainDb : 0,
       q,
       bypassed: node.bypassed,
+      channel: node.channel,
+      slope: 'slope' in legacyEqBands[node.shape] ? clamp(node.slope / 12, 1, 4) * 12 : undefined,
+      adaptiveQ: node.shape === 'bell' && node.adaptiveQ === true ? true : undefined,
+      dynamic: node.dynamic,
     };
     if (found === -1) bands.push(band);
     else bands[found] = band;
@@ -148,15 +158,26 @@ export function eqBandPatch(settings: AudioTreatment, node: EqNode, rate: number
 }
 
 export function removeEqBand(settings: AudioTreatment, node: EqNode): Partial<AudioTreatment> {
-  if (node.extra) {
-    const bands = extrasOf(settings).filter((band, index) => extraKey(band.id, index) !== node.key);
-    return { eqBands: bands.length ? bands : null };
+  return removeEqBands(settings, [node]);
+}
+
+export function removeEqBands(settings: AudioTreatment, nodes: readonly EqNode[]): Partial<AudioTreatment> {
+  const patch: Partial<AudioTreatment> = {};
+  const extraKeys = new Set<string>();
+  for (const node of nodes) {
+    if (node.extra) {
+      extraKeys.add(node.key);
+      continue;
+    }
+    const spec = legacyEqBands[node.shape];
+    Object.assign(patch, { [spec.enabled]: node.shape === 'low' ? false : 0 });
+    patch.eqBypassed = (patch.eqBypassed ?? bypassMask(settings)) & ~spec.bypassBit;
   }
-  const spec = legacyEqBands[node.shape];
-  return {
-    [spec.enabled]: node.shape === 'low' ? false : 0,
-    eqBypassed: bypassMask(settings) & ~spec.bypassBit,
-  };
+  if (extraKeys.size) {
+    const bands = extrasOf(settings).filter((band, index) => !extraKeys.has(extraKey(band.id, index)));
+    patch.eqBands = bands.length ? bands : null;
+  }
+  return patch;
 }
 
 export function originalEqBand(settings: AudioTreatment, node: EqNode): Partial<AudioTreatment> {
@@ -177,7 +198,8 @@ export function eqSoloRange(node: EqNode, sampleRate: number): { lowHz: number; 
   if (max < 40) return;
   if (node.shape === 'low' || node.shape === 'bass') return { lowHz: 20, highHz: clamp(node.hz, 40, max) };
   if (node.shape === 'high' || node.shape === 'treble') return { lowHz: clamp(node.hz, 20, max - 20), highHz: max };
-  const width = Math.max(10, node.hz * 50 / Math.max(1, node.q));
+  const quality = node.shape === 'bell' ? bellQuality(node.q, node.gainDb, node.adaptiveQ) : node.q / 100;
+  const width = Math.max(10, node.hz / (2 * Math.max(0.01, quality)));
   const lowHz = clamp(node.hz - width, 20, max - 20);
   return { lowHz, highHz: clamp(node.hz + width, lowHz + 20, max) };
 }

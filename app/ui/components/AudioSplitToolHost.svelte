@@ -53,18 +53,19 @@
     });
   }
 
-  function edit(patch: Partial<AudioTreatment>, gesture?: string) {
+  function edit(patch: Partial<AudioTreatment>, gesture?: string, compareEq?: Partial<AudioTreatment> | null) {
     if (!snapshot) return;
     const accepted = toolPatch(kind, patch);
     const settings = readTreatment({ ...snapshot.settings, ...accepted });
-    if (sameTreatment(snapshot.settings, settings)) return;
+    if (sameTreatment(snapshot.settings, settings) && compareEq === undefined) return;
     snapshot = { ...snapshot, settings };
+    const trial = snapshot.reference?.preview ? snapshot.reference.generation : undefined;
     const tail = queued.at(-1);
-    if (gesture && tail?.action === 'edit' && tail.gesture === gesture) {
+    if (gesture && tail?.action === 'edit' && tail.gesture === gesture && tail.trial === trial) {
       Object.assign(tail.patch, accepted);
     } else {
       queued.push({
-        kind, action: 'edit', sourceId: snapshot.sourceId, patch: accepted, revision: `${revisionPrefix}-${++revision}`, gesture,
+        kind, action: 'edit', sourceId: snapshot.sourceId, patch: accepted, revision: `${revisionPrefix}-${++revision}`, gesture, trial, compareEq,
       });
     }
     flush();
@@ -74,7 +75,8 @@
     if (!snapshot) return;
     const { sourceId } = snapshot;
     if (action === 'undo' || action === 'redo') {
-      queued.push({ kind, action, sourceId, revision: `${revisionPrefix}-${++revision}` });
+      const trial = snapshot.reference?.preview ? snapshot.reference.generation : undefined;
+      queued.push({ kind, action, sourceId, revision: `${revisionPrefix}-${++revision}`, trial });
       flush();
       return;
     }
@@ -84,13 +86,17 @@
     void send(message)?.catch(reason => { connectionError = String(reason); });
   }
 
+  function analyzer(enabled: boolean) {
+    if (snapshot) void send({ kind, action: 'analyzer', sourceId: snapshot.sourceId, enabled })?.catch(reason => { connectionError = String(reason); });
+  }
+
   function viewport(range: FrameRange | null, options?: SpectrogramViewOptions) {
     if (snapshot) void send({ kind, action: 'viewport', sourceId: snapshot.sourceId, range, options })?.catch(reason => { connectionError = String(reason); });
   }
 
   function acceptProbe(update: ToolProbeUpdate) {
     if (!active) return;
-    if (update.probe && (kind === 'repair' ? !update.probe.spectrogram?.length : kind === 'eq' && !update.probe.frequencies.length)) return;
+    if (update.probe && kind === 'repair' && !update.probe.spectrogram?.length) return;
     if (received?.sourceId !== update.sourceId) {
       earlyProbe = update;
       return;
@@ -126,8 +132,9 @@
       flush();
     }
     let settings = state.settings;
+    const trial = state.reference?.preview ? state.reference.generation : undefined;
     for (const request of [sending, ...queued]) {
-      if (request?.action === 'edit') settings = { ...settings, ...request.patch };
+      if (request?.action === 'edit' && request.trial === trial) settings = { ...settings, ...request.patch };
     }
     snapshot = {
       ...state,
@@ -171,7 +178,7 @@
     <p class="problem" role="status">{connectionError || probeError}</p>
   {/if}
   {#key snapshot?.sourceId}
-    <AudioSplitToolWindow {kind} {snapshot} {probe} onedit={edit} onaction={action} onviewport={viewport}/>
+    <AudioSplitToolWindow {kind} {snapshot} {probe} onedit={edit} onaction={action} onviewport={viewport} onanalyzer={analyzer}/>
   {/key}
 </main>
 

@@ -1,3 +1,6 @@
+mod reference;
+pub use reference::match_reference;
+
 use super::{
     check_cancelled, MediaError, PreparedTreatment, PreviewDecoder, SeekIndex, SourceInfo,
 };
@@ -73,6 +76,11 @@ pub struct TreatmentProbe {
     /// Quiet-gap gain in dB, oldest to newest.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gate_reduction: Option<Vec<f32>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dynamic_eq_mix: Vec<f32>,
+    pub upward_eq: bool,
+    pub dynamic_all_shapes: bool,
+    pub dynamic_ratio: bool,
     /// Original audio, with one frequency-band array per column in time order.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spectrogram: Option<Vec<Vec<f32>>>,
@@ -164,6 +172,11 @@ pub fn probe_treatment_with_options(
     let track_compressor = !options.spectrogram_only() && prepared.settings().compressor_db != 0;
     let track_gate = !options.spectrogram_only() && prepared.settings().gate_db != 0;
     let track_dynamics = track_compressor || track_gate;
+    let track_eq = !options.spectrogram_only()
+        && prepared
+            .settings()
+            .bands()
+            .any(|band| !band.bypassed && band.dynamic.is_some());
     let keep_raw = if let Some(range) = viewport {
         range
     } else if options.spectrogram {
@@ -217,6 +230,7 @@ pub fn probe_treatment_with_options(
     let mut reduction = vec![0.0; REDUCTION_POINTS];
     let mut gate_reduction = track_gate.then(|| vec![0.0; REDUCTION_POINTS]);
     let mut detector = None;
+    let mut dynamic_eq_mix = Vec::new();
     let reduction_step = (history.end - history.start).div_ceil(REDUCTION_POINTS as u64);
 
     while cursor < end {
@@ -242,6 +256,11 @@ pub fn probe_treatment_with_options(
             } else {
                 process_end
             };
+            let last = if track_eq && first <= frame {
+                last.min(frame + 1)
+            } else {
+                last
+            };
             let span = FrameRange {
                 start: first,
                 end: last,
@@ -260,6 +279,9 @@ pub fn probe_treatment_with_options(
                 if let Some(gains) = &mut gate_reduction {
                     gains[bucket] = processor.gate_gain_db();
                 }
+            }
+            if track_eq && last == frame + 1 {
+                dynamic_eq_mix = processor.dynamic_eq_mix();
             }
             first = last;
         }
@@ -356,6 +378,10 @@ pub fn probe_treatment_with_options(
         output_peak,
         detector,
         gate_reduction,
+        dynamic_eq_mix,
+        upward_eq: true,
+        dynamic_all_shapes: true,
+        dynamic_ratio: true,
         spectrogram,
         spectrogram_start: options.spectrogram.then_some(keep_raw.start),
         spectrogram_end: options.spectrogram.then_some(visual_end),
@@ -434,6 +460,7 @@ struct Spectrum {
     buffer: Vec<Complex32>,
     window: Vec<f32>,
     power: Vec<f32>,
+    bin_spacing: f32,
     frequencies: Vec<f32>,
     bands: Vec<Range<usize>>,
 }
@@ -463,6 +490,7 @@ impl Spectrum {
             buffer: vec![Complex32::default(); size],
             window: hann(size),
             power: vec![0.0; size / 2 + 1],
+            bin_spacing,
             frequencies,
             bands,
         }
@@ -474,7 +502,19 @@ impl Spectrum {
         channels: usize,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<f32>, MediaError> {
-        self.measure_channel(samples, channels, None, cancelled)
+        let mut levels = self.measure_channel(samples, channels, None, cancelled)?;
+        // Narrow display bands often share an FFT bin in the bass. Interpolate
+        // their positions instead of repeating the same reading across a step.
+        for (index, level) in levels.iter_mut().enumerate() {
+            if self.bands[index].len() == 1 {
+                let bin = (self.frequencies[index] / self.bin_spacing).max(1.0);
+                let left = bin as usize;
+                let right = (left + 1).min(self.power.len() - 1);
+                let power = self.power[left] + (self.power[right] - self.power[left]) * bin.fract();
+                *level = power_db(power);
+            }
+        }
+        Ok(levels)
     }
 
     fn measure_channel(
@@ -622,6 +662,57 @@ mod tests {
             .iter()
             .all(|db| db.is_finite() && *db <= 0.0));
         assert!(probe.reduction.iter().any(|db| *db < -2.0));
+    }
+
+    #[test]
+    fn probe_reports_dynamic_eq_mix_for_the_band_that_is_cutting() {
+        use crate::{DynamicEq, EqBand, EqChannel, MAX_EQ_BANDS};
+        let mut bands = [None; MAX_EQ_BANDS];
+        bands[0] = Some(EqBand {
+            hz: 10_500,
+            q: 500,
+            channel: EqChannel::Right,
+            dynamic: Some(DynamicEq {
+                threshold_db: -24.0,
+                ratio: 2.0,
+                amount_db: 9.0,
+            }),
+            ..EqBand::default()
+        });
+        bands[1] = Some(EqBand {
+            hz: 92,
+            ..bands[0].unwrap()
+        });
+        let prepared = PreparedTreatment::preview(
+            AudioTreatment {
+                eq_bands: Some(bands),
+                ..AudioTreatment::default()
+            },
+            INFO,
+        )
+        .unwrap();
+        let low = probe_treatment(
+            recording(),
+            INFO,
+            INFO.frames / 4,
+            None,
+            prepared,
+            false,
+            || false,
+        )
+        .unwrap();
+        let high = probe_treatment(
+            recording(),
+            INFO,
+            INFO.frames * 3 / 4,
+            None,
+            prepared,
+            false,
+            || false,
+        )
+        .unwrap();
+        assert_eq!(low.dynamic_eq_mix, vec![0.0, 1.0]);
+        assert_eq!(high.dynamic_eq_mix, vec![1.0, 0.0]);
     }
 
     #[test]

@@ -12,7 +12,7 @@ use std::fs::File;
 use std::marker::PhantomData;
 
 mod band_repair;
-mod biquad;
+pub(super) mod biquad;
 mod dynamics;
 mod eq_band;
 
@@ -20,7 +20,8 @@ use band_repair::BandRepair;
 pub use band_repair::{RepairChannel, SpectralRepair, MAX_SPECTRAL_REPAIRS};
 use biquad::Biquad;
 use dynamics::Dynamics;
-pub use eq_band::{EqBand, EqBandKind, MAX_EQ_BANDS};
+use eq_band::{DynamicBand, MAX_EQ_GAIN_DB};
+pub use eq_band::{DynamicEq, EqBand, EqBandKind, EqChannel, MAX_EQ_BANDS};
 
 const TARGET_LUFS: i8 = -18;
 const CEILING_DBTP: f64 = -1.0;
@@ -110,7 +111,7 @@ pub enum Polarity {
     Right,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AudioTreatment {
     pub normalize: bool,
@@ -126,13 +127,13 @@ pub struct AudioTreatment {
     pub high_cut_slope: u8,
     pub notch_hz: u16,
     pub notch_q: u8,
-    pub bass_db: i8,
+    pub bass_db: f32,
     pub bass_hz: u16,
-    pub presence_db: i8,
+    pub presence_db: f32,
     pub presence_hz: u16,
     /// Peaking filter Q multiplied by 100.
     pub presence_q: u16,
-    pub treble_db: i8,
+    pub treble_db: f32,
     pub treble_hz: u16,
     pub eq_bypassed: u8,
     #[serde(
@@ -178,9 +179,9 @@ impl AudioTreatment {
             || self.dc_hz != 0
             || self.eq_enabled(self.high_cut_hz != 0, BYPASS_HIGH_CUT)
             || self.eq_enabled(self.notch_hz != 0, BYPASS_NOTCH)
-            || self.eq_enabled(self.bass_db != 0, BYPASS_BASS)
-            || self.eq_enabled(self.presence_db != 0, BYPASS_BELL)
-            || self.eq_enabled(self.treble_db != 0, BYPASS_TREBLE)
+            || self.eq_enabled(self.bass_db != 0.0, BYPASS_BASS)
+            || self.eq_enabled(self.presence_db != 0.0, BYPASS_BELL)
+            || self.eq_enabled(self.treble_db != 0.0, BYPASS_TREBLE)
             || self.bands().any(EqBand::active)
     }
 
@@ -188,7 +189,7 @@ impl AudioTreatment {
         configured && self.eq_bypassed & mask == 0
     }
 
-    fn bands(&self) -> impl Iterator<Item = EqBand> + '_ {
+    pub(super) fn bands(&self) -> impl Iterator<Item = EqBand> + '_ {
         self.eq_bands.iter().flatten().copied().flatten()
     }
 
@@ -258,6 +259,14 @@ impl AudioTreatment {
 
     fn validate(self, sample_rate: u32) -> Result<(), MediaError> {
         let in_range = |value, min, max| value == 0 || (min..=max).contains(&value);
+        if [self.bass_db, self.presence_db, self.treble_db]
+            .into_iter()
+            .any(|gain| !(-MAX_EQ_GAIN_DB..=MAX_EQ_GAIN_DB).contains(&gain))
+        {
+            return Err(MediaError::Unsupported(
+                "Choose an EQ gain between −24 and +24 dB",
+            ));
+        }
         for (value, min, max, error) in [
             (
                 i32::from(self.normalize_target_db),
@@ -300,24 +309,6 @@ impl AudioTreatment {
                 5,
                 30,
                 "Choose a notch sharpness between 5 and 30",
-            ),
-            (
-                i32::from(self.bass_db),
-                -6,
-                6,
-                "Choose a bass adjustment between −6 and +6 dB",
-            ),
-            (
-                i32::from(self.presence_db),
-                -6,
-                6,
-                "Choose a presence adjustment between −6 and +6 dB",
-            ),
-            (
-                i32::from(self.treble_db),
-                -6,
-                6,
-                "Choose a treble adjustment between −6 and +6 dB",
             ),
             (
                 i32::from(self.presence_q),
@@ -429,17 +420,17 @@ impl AudioTreatment {
             } else {
                 0
             },
-            if self.eq_enabled(self.bass_db != 0, BYPASS_BASS) {
+            if self.eq_enabled(self.bass_db != 0.0, BYPASS_BASS) {
                 bass_hz
             } else {
                 0
             },
-            if self.eq_enabled(self.presence_db != 0, BYPASS_BELL) {
+            if self.eq_enabled(self.presence_db != 0.0, BYPASS_BELL) {
                 presence_hz
             } else {
                 0
             },
-            if self.eq_enabled(self.treble_db != 0, BYPASS_TREBLE) {
+            if self.eq_enabled(self.treble_db != 0.0, BYPASS_TREBLE) {
                 treble_hz
             } else {
                 0
@@ -475,6 +466,11 @@ impl AudioTreatment {
             ));
         }
         self.validate(source.sample_rate)?;
+        if source.channels != 2 && self.bands().any(|band| band.channel.index().is_some()) {
+            return Err(MediaError::Unsupported(
+                "Channel EQ needs a stereo recording",
+            ));
+        }
         let frequency_limit = (u64::from(source.sample_rate) * 45 / 100).min(20_000);
         for repair in self.repairs() {
             if repair.channel.is_some() && source.channels != 2 {
@@ -579,36 +575,24 @@ impl PreparedTreatment {
         })
     }
 
-    /// Use the dry overview to estimate level and leave constant headroom
-    /// before the treated recording's loudness and peak are measured.
+    /// Estimate recording-wide level changes from the dry overview.
+    /// EQ uses the linked sample ceiling only when processed peaks reach it.
     pub fn with_preview_level(mut self, mean_square: f64, peak: f64) -> Self {
         if !self.preview_ceiling || !(0.0..=1.0).contains(&peak) {
             return self;
         }
         let manual_db = self.settings.level_gain_db();
+        let width = 1.0 + f64::from(self.settings.stereo_width.max(0)) * 0.01;
+        if !self.settings.normalize && manual_db <= 0.0 && width == 1.0 {
+            return self;
+        }
         let estimated_gain = if self.settings.normalize && (1e-7..=1.0).contains(&mean_square) {
             let approximate_db = 10.0 * mean_square.log10() + manual_db;
             db_gain((self.settings.normalize_target() - approximate_db).min(MAX_PREVIEW_BOOST_DB))
         } else {
             1.0
         };
-        let tone_boost: f64 = [
-            (self.settings.bass_db, BYPASS_BASS),
-            (self.settings.presence_db, BYPASS_BELL),
-            (self.settings.treble_db, BYPASS_TREBLE),
-        ]
-        .into_iter()
-        .filter(|(_, bit)| self.settings.eq_enabled(true, *bit))
-        .map(|(value, _)| f64::from(value.max(0)))
-        .chain(
-            self.settings
-                .bands()
-                .filter(|band| band.active())
-                .map(|band| f64::from(band.gain_db.max(0))),
-        )
-        .sum();
-        let width = 1.0 + f64::from(self.settings.stereo_width.max(0)) * 0.01;
-        let estimated_peak = peak * db_gain(manual_db + tone_boost) * width;
+        let estimated_peak = peak * db_gain(manual_db) * width;
         // Constant gain keeps ordinary peaks out of the instantaneous guard.
         // The guard remains a fallback for unmeasured filter transients.
         self.gain = if estimated_peak > 0.0 {
@@ -686,7 +670,8 @@ impl PreparedTreatment {
         for band in settings.bands().filter(|band| band.active()) {
             let frequency = u64::from(band.hz);
             let edge = frequency.min((rate / 2).saturating_sub(frequency)).max(1);
-            frames = frames.max((rate * u64::from(band.q) * 6).div_ceil(edge * 100));
+            let quality = (band.effective_quality() * 100.0).round() as u64;
+            frames = frames.max((rate * quality * 6).div_ceil(edge * 100));
         }
         decode_start.min(start.saturating_sub(frames))
     }
@@ -797,11 +782,14 @@ pub struct TreatmentProcessor {
     output: SourceInfo,
     filters: Vec<Vec<Biquad>>,
     monitor_filters: Vec<[Biquad; 2]>,
+    source_eq: [(Vec<Biquad>, Vec<DynamicBand>); 2],
+    dynamic_eq: Vec<DynamicBand>,
     band_repairs: Vec<BandRepair>,
     channel_repairs: Vec<BandRepair>,
     next_frame: u64,
     dynamics: Option<Dynamics>,
     frame: Vec<f64>,
+    eq_sidechain: Vec<f64>,
     width: f64,
     balance: [f64; 2],
     level_gain: f64,
@@ -853,10 +841,10 @@ impl TreatmentProcessor {
             ));
         }
         let [bass_hz, presence_hz, treble_hz] = settings.tone_frequencies();
-        if settings.eq_enabled(settings.bass_db != 0, BYPASS_BASS) {
+        if settings.eq_enabled(settings.bass_db != 0.0, BYPASS_BASS) {
             filters.push(Biquad::shelf(rate, bass_hz, settings.bass_db, false));
         }
-        if settings.eq_enabled(settings.presence_db != 0, BYPASS_BELL) {
+        if settings.eq_enabled(settings.presence_db != 0.0, BYPASS_BELL) {
             let quality = if settings.presence_q == 0 {
                 0.8
             } else {
@@ -869,17 +857,28 @@ impl TreatmentProcessor {
                 quality,
             ));
         }
-        if settings.eq_enabled(settings.treble_db != 0, BYPASS_TREBLE) {
+        if settings.eq_enabled(settings.treble_db != 0.0, BYPASS_TREBLE) {
             filters.push(Biquad::shelf(rate, treble_hz, settings.treble_db, true));
         }
-        filters.extend(
-            settings
-                .bands()
-                .filter(|band| band.active())
-                .map(|band| band.filter(rate)),
-        );
         let balance = f64::from(settings.balance) * 0.01;
         let channels = usize::from(output.channels);
+        let mut source_eq: [(Vec<Biquad>, Vec<DynamicBand>); 2] = Default::default();
+        let mut dynamic_eq = Vec::new();
+        for (index, band) in settings
+            .bands()
+            .enumerate()
+            .filter(|(_, band)| band.active())
+        {
+            if let Some(channel) = band.channel.index() {
+                source_eq[channel].0.extend(band.filters(rate));
+                source_eq[channel]
+                    .1
+                    .extend(DynamicBand::new(index, band, rate, 1));
+            } else {
+                filters.extend(band.filters(rate));
+                dynamic_eq.extend(DynamicBand::new(index, band, rate, channels));
+            }
+        }
         let monitor_filters = if let PreviewMonitor::Band { low_hz, high_hz } = prepared.monitor {
             if low_hz < 20
                 || high_hz.saturating_sub(low_hz) < 20
@@ -911,11 +910,14 @@ impl TreatmentProcessor {
             output,
             filters: vec![filters; channels],
             monitor_filters,
+            source_eq,
+            dynamic_eq,
             band_repairs,
             channel_repairs,
             next_frame: first_frame,
             dynamics: Dynamics::new(settings, rate),
             frame: vec![0.0; channels],
+            eq_sidechain: vec![0.0; channels],
             width: 1.0 + f64::from(settings.stereo_width) * 0.01,
             balance: [1.0 - balance.max(0.0), 1.0 + balance.min(0.0)],
             level_gain: db_gain(settings.level_gain_db()),
@@ -941,6 +943,21 @@ impl TreatmentProcessor {
 
     pub fn gate_gain_db(&self) -> f32 {
         self.dynamics.as_ref().map_or(0.0, Dynamics::gate_gain_db)
+    }
+
+    pub(super) fn dynamic_eq_mix(&self) -> Vec<f32> {
+        let mut mixes = Vec::new();
+        for band in self
+            .dynamic_eq
+            .iter()
+            .chain(self.source_eq.iter().flat_map(|(_, bands)| bands))
+        {
+            if mixes.len() <= band.index {
+                mixes.resize(band.index + 1, 0.0);
+            }
+            mixes[band.index] = band.mix() as f32;
+        }
+        mixes
     }
 
     /// Process complete, interleaved frames, retaining history between blocks.
@@ -979,6 +996,15 @@ impl TreatmentProcessor {
                 for repair in &mut self.channel_repairs {
                     repair.apply(self.next_frame, &mut stereo);
                 }
+                for (sample, (filters, dynamic)) in stereo.iter_mut().zip(&mut self.source_eq) {
+                    let dry = *sample;
+                    for filter in filters {
+                        *sample = filter.filter(*sample);
+                    }
+                    for band in dynamic {
+                        band.apply(std::slice::from_mut(sample), std::slice::from_ref(&dry));
+                    }
+                }
                 if settings.swap_channels {
                     stereo.swap(0, 1);
                 }
@@ -1011,10 +1037,16 @@ impl TreatmentProcessor {
             if !self.band_repairs.is_empty() || !self.channel_repairs.is_empty() {
                 self.next_frame += 1;
             }
+            if !self.dynamic_eq.is_empty() {
+                self.eq_sidechain.copy_from_slice(&self.frame);
+            }
             for (sample, filters) in self.frame.iter_mut().zip(&mut self.filters) {
                 for filter in filters {
                     *sample = filter.filter(*sample);
                 }
+            }
+            for band in &mut self.dynamic_eq {
+                band.apply(&mut self.frame, &self.eq_sidechain);
             }
             let dynamics_gain = if self.prepared.monitor == PreviewMonitor::CompressorDifference {
                 self.dynamics.as_mut().map_or(0.0, |dynamics| {
@@ -1185,6 +1217,34 @@ mod tests {
     }
 
     #[test]
+    fn a_narrow_eq_boost_does_not_turn_down_unrelated_preview_frequencies() {
+        let input = tone(60.0, 0.65);
+        let mut bands = [None; MAX_EQ_BANDS];
+        bands[0] = Some(EqBand {
+            kind: EqBandKind::Bell,
+            hz: 450,
+            gain_db: 16.0,
+            q: 400,
+            ..EqBand::default()
+        });
+        let settings = AudioTreatment {
+            eq_bands: Some(bands),
+            ..AudioTreatment::default()
+        };
+        let preview = PreparedTreatment::preview(settings, info(1))
+            .unwrap()
+            .with_preview_level(0.65 * 0.65 / 2.0, 0.65);
+        let mut output = Vec::new();
+        preview
+            .processor(info(1))
+            .unwrap()
+            .process(&input, &mut output);
+        let settled = RATE as usize / 2;
+        let change = 20.0 * (rms(&output[settled..]) / rms(&input[settled..])).log10();
+        assert!(change.abs() < 0.1, "60 Hz changed by {change:.2} dB");
+    }
+
+    #[test]
     fn legacy_draft_and_dormant_parameters_leave_dry_audio_inactive() {
         let draft = serde::de::value::MapDeserializer::<_, serde::de::value::Error>::new(
             [("rumble", false), ("normalize", false)].into_iter(),
@@ -1282,19 +1342,19 @@ mod tests {
         };
         assert!(settings.output_info(source).is_ok());
         assert!(AudioTreatment {
-            bass_db: 1,
+            bass_db: 1.0,
             ..settings
         }
         .output_info(source)
         .is_ok());
         assert!(AudioTreatment {
-            presence_db: 1,
+            presence_db: 1.0,
             ..settings
         }
         .output_info(source)
         .is_err());
         assert!(AudioTreatment {
-            treble_db: 1,
+            treble_db: 1.0,
             ..settings
         }
         .output_info(source)
@@ -1369,7 +1429,7 @@ mod tests {
         for (settings, in_band, out_of_band, db) in [
             (
                 AudioTreatment {
-                    bass_db: 6,
+                    bass_db: 6.0,
                     ..AudioTreatment::default()
                 },
                 30.0,
@@ -1378,7 +1438,7 @@ mod tests {
             ),
             (
                 AudioTreatment {
-                    presence_db: -6,
+                    presence_db: -6.0,
                     ..AudioTreatment::default()
                 },
                 1500.0,
@@ -1387,7 +1447,7 @@ mod tests {
             ),
             (
                 AudioTreatment {
-                    treble_db: 6,
+                    treble_db: 6.0,
                     ..AudioTreatment::default()
                 },
                 13000.0,
@@ -1404,6 +1464,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn eq_applies_fractional_gain_beyond_six_db() {
+        let legacy = AudioTreatment {
+            presence_db: -18.3,
+            ..AudioTreatment::default()
+        };
+        assert!((tone_gain(legacy, 1500.0) + 18.3).abs() < 0.01);
+
+        let mut bands = [None; MAX_EQ_BANDS];
+        bands[0] = Some(EqBand {
+            kind: EqBandKind::Bell,
+            hz: 1500,
+            gain_db: 16.7,
+            q: 80,
+            ..EqBand::default()
+        });
+        let editable = AudioTreatment {
+            eq_bands: Some(bands),
+            ..AudioTreatment::default()
+        };
+        assert!((tone_gain(editable, 1500.0) - 16.7).abs() < 0.01);
+        assert!(AudioTreatment {
+            presence_db: 24.1,
+            ..legacy
+        }
+        .output_info(info(1))
+        .is_err());
+    }
+
     fn tone_gain(settings: AudioTreatment, frequency: f64) -> f64 {
         let input = tone(frequency, 0.1);
         let output = audition(&input, settings, 1);
@@ -1412,9 +1501,37 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_eq_narrows_bell_boosts_and_cuts_without_changing_centre_gain() {
+        for gain_db in [-12.0, 12.0] {
+            let band = EqBand {
+                kind: EqBandKind::Bell,
+                hz: 1500,
+                gain_db,
+                q: 80,
+                ..EqBand::default()
+            };
+            let treatment_for = |band| {
+                let mut bands = [None; MAX_EQ_BANDS];
+                bands[0] = Some(band);
+                AudioTreatment {
+                    eq_bands: Some(bands),
+                    ..AudioTreatment::default()
+                }
+            };
+            let fixed = treatment_for(band);
+            let adaptive = treatment_for(EqBand {
+                adaptive_q: true,
+                ..band
+            });
+            assert!((tone_gain(adaptive, 1500.0) - f64::from(gain_db)).abs() < 0.01);
+            assert!(tone_gain(adaptive, 1000.0).abs() + 2.0 < tone_gain(fixed, 1000.0).abs());
+        }
+    }
+
+    #[test]
     fn presence_center_and_q_change_the_native_response() {
         let legacy = AudioTreatment {
-            presence_db: 6,
+            presence_db: 6.0,
             ..AudioTreatment::default()
         };
         let shifted = AudioTreatment {
@@ -1436,7 +1553,7 @@ mod tests {
         for (settings, frequency) in [
             (
                 AudioTreatment {
-                    bass_db: 6,
+                    bass_db: 6.0,
                     bass_hz: 480,
                     ..AudioTreatment::default()
                 },
@@ -1444,7 +1561,7 @@ mod tests {
             ),
             (
                 AudioTreatment {
-                    treble_db: 6,
+                    treble_db: 6.0,
                     treble_hz: 7500,
                     ..AudioTreatment::default()
                 },
@@ -1607,23 +1724,201 @@ mod tests {
     }
 
     #[test]
+    fn channel_eq_keeps_the_other_source_channel_untouched() {
+        let signal = tone(1_000.0, 0.1);
+        let input: Vec<_> = signal
+            .iter()
+            .flat_map(|sample| [*sample, *sample])
+            .collect();
+        let mut bands = [None; MAX_EQ_BANDS];
+        bands[0] = Some(EqBand {
+            kind: EqBandKind::Notch,
+            hz: 1_000,
+            q: 1500,
+            channel: EqChannel::Left,
+            ..EqBand::default()
+        });
+        let settings = AudioTreatment {
+            eq_bands: Some(bands),
+            ..AudioTreatment::default()
+        };
+        let processed = audition(&input, settings, 2);
+        let left: Vec<_> = processed.iter().step_by(2).copied().collect();
+        let right: Vec<_> = processed.iter().skip(1).step_by(2).copied().collect();
+        assert_eq!(right, signal);
+        assert!(rms(&left[6000..]) < rms(&signal) * 0.05);
+        assert_eq!(
+            audition(
+                &input,
+                AudioTreatment {
+                    mono: MonoMode::Right,
+                    ..settings
+                },
+                2
+            ),
+            signal
+        );
+    }
+
+    #[test]
+    fn dynamic_bell_only_reduces_loud_content_near_its_frequency() {
+        let mut bands = [None; MAX_EQ_BANDS];
+        bands[0] = Some(EqBand {
+            hz: 1_000,
+            q: 300,
+            dynamic: Some(DynamicEq {
+                threshold_db: -24.0,
+                ratio: 2.0,
+                amount_db: 9.0,
+            }),
+            ..EqBand::default()
+        });
+        let settings = AudioTreatment {
+            eq_bands: Some(bands),
+            ..AudioTreatment::default()
+        };
+        let quiet = tone(1_000.0, 0.015);
+        assert_eq!(audition(&quiet, settings, 1), quiet);
+        let off_band = tone(4_000.0, 0.5);
+        let processed = audition(&off_band, settings, 1);
+        assert!(rms(&processed[6000..]) > rms(&off_band) * 0.97);
+        let loud = tone(1_000.0, 0.5);
+        let reduced = audition(&loud, settings, 1);
+        assert!(rms(&reduced[6000..]) < rms(&loud) * 0.4);
+    }
+
+    #[test]
+    fn dynamic_eq_ratio_sets_the_in_band_level_slope() {
+        for (amount_db, quiet, loud) in [(12.0, 0.13, 0.26), (-12.0, 0.027, 0.054)] {
+            let quiet = tone(1_000.0, quiet);
+            let loud = tone(1_000.0, loud);
+            let recipe = |ratio| {
+                let mut bands = [None; MAX_EQ_BANDS];
+                bands[0] = Some(EqBand {
+                    hz: 1_000,
+                    q: 300,
+                    dynamic: Some(DynamicEq {
+                        threshold_db: -24.0,
+                        amount_db,
+                        ratio,
+                    }),
+                    ..EqBand::default()
+                });
+                AudioTreatment {
+                    eq_bands: Some(bands),
+                    ..AudioTreatment::default()
+                }
+            };
+            assert_eq!(audition(&quiet, recipe(1.0), 1), quiet);
+            assert_eq!(audition(&loud, recipe(1.0), 1), loud);
+            for ratio in [2.0, 4.0] {
+                let quiet_rms = rms(&audition(&quiet, recipe(ratio), 1)[18000..]);
+                let loud_rms = rms(&audition(&loud, recipe(ratio), 1)[18000..]);
+                let expected = 2.0_f64.powf(1.0 / f64::from(ratio));
+                assert!(
+                    (loud_rms / quiet_rms - expected).abs() < 0.08,
+                    "{amount_db}, {ratio}: {loud_rms}/{quiet_rms}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn upward_dynamic_bell_lifts_quiet_in_band_audio_and_leaves_loud_audio_alone() {
+        let mut bands = [None; MAX_EQ_BANDS];
+        bands[0] = Some(EqBand {
+            hz: 1_000,
+            q: 300,
+            dynamic: Some(DynamicEq {
+                threshold_db: -24.0,
+                ratio: 2.0,
+                amount_db: -9.0,
+            }),
+            ..EqBand::default()
+        });
+        let settings = AudioTreatment {
+            eq_bands: Some(bands),
+            ..AudioTreatment::default()
+        };
+        let quiet = tone(1_000.0, 0.012);
+        let quiet_boost = audition(&quiet, settings, 1);
+        assert!(rms(&quiet_boost[12000..]) > rms(&quiet[12000..]) * 1.35);
+        assert!(rms(&quiet_boost[12000..]) < rms(&quiet[12000..]) * 2.83);
+        let loud = tone(1_000.0, 0.5);
+        assert_eq!(audition(&loud, settings, 1)[12000..], loud[12000..]);
+        let off_band = tone(4_000.0, 0.012);
+        let lifted = audition(&off_band, settings, 1);
+        assert!(rms(&lifted[12000..]) < rms(&off_band[12000..]) * 1.04);
+        let silence = vec![0; quiet.len()];
+        assert_eq!(audition(&silence, settings, 1), silence);
+    }
+
+    #[test]
+    fn dynamic_eq_moves_both_ways_on_every_filter_shape() {
+        let cases = [
+            (EqBandKind::Low, 520.0, 0.0, 80),
+            (EqBandKind::Bass, 250.0, -3.0, 80),
+            (EqBandKind::Bell, 1_000.0, 3.0, 300),
+            (EqBandKind::Notch, 1_070.0, 0.0, 500),
+            (EqBandKind::Treble, 4_000.0, 3.0, 80),
+            (EqBandKind::High, 2_000.0, 0.0, 80),
+        ];
+        for (kind, frequency, gain_db, q) in cases {
+            let recipe = |amount_db: Option<f32>| {
+                let mut bands = [None; MAX_EQ_BANDS];
+                bands[0] = Some(EqBand {
+                    kind,
+                    hz: 1_000,
+                    gain_db,
+                    q,
+                    dynamic: amount_db.map(|amount_db| DynamicEq {
+                        threshold_db: -24.0,
+                        ratio: 2.0,
+                        amount_db,
+                    }),
+                    ..EqBand::default()
+                });
+                AudioTreatment {
+                    eq_bands: Some(bands),
+                    ..AudioTreatment::default()
+                }
+            };
+            let quiet = tone(frequency, 0.012);
+            let loud = tone(frequency, 0.55);
+            let power = |input: &[i32], amount| rms(&audition(input, recipe(amount), 1)[12000..]);
+            let quiet_static = power(&quiet, None);
+            let loud_static = power(&loud, None);
+            assert!(power(&quiet, Some(-9.0)) > quiet_static * 1.1, "{kind:?}");
+            assert!(power(&loud, Some(9.0)) < loud_static * 0.9, "{kind:?}");
+            assert!(
+                (power(&loud, Some(-9.0)) / loud_static - 1.0).abs() < 0.01,
+                "{kind:?}"
+            );
+            assert!(
+                (power(&quiet, Some(9.0)) / quiet_static - 1.0).abs() < 0.01,
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
     fn added_eq_bands_and_independent_bypass_affect_native_audio() {
         let mut bands = [None; MAX_EQ_BANDS];
         bands[0] = Some(EqBand {
             id: Some(7),
             kind: EqBandKind::Bell,
             hz: 1000,
-            gain_db: -6,
+            gain_db: -6.0,
             q: 300,
-            bypassed: false,
+            ..EqBand::default()
         });
         bands[1] = Some(EqBand {
             id: Some(8),
             kind: EqBandKind::Notch,
             hz: 6000,
-            gain_db: 0,
+            gain_db: 0.0,
             q: 1500,
-            bypassed: false,
+            ..EqBand::default()
         });
         let settings = AudioTreatment {
             eq_bands: Some(bands),
@@ -1638,7 +1933,7 @@ mod tests {
         };
         assert!(tone_gain(bypassed, 6000.0).abs() < 0.05);
         let legacy = AudioTreatment {
-            presence_db: -6,
+            presence_db: -6.0,
             presence_hz: 1000,
             eq_bypassed: BYPASS_BELL,
             ..AudioTreatment::default()

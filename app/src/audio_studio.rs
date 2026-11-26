@@ -7,7 +7,7 @@ use std::sync::{
     Arc, Mutex,
 };
 use tagrex_commands::audio_studio::{
-    AudioTreatment, CueEncoding, DiscogsProposal, DraftSegment, ExportResult, ImportedCue,
+    AudioTreatment, CueEncoding, DiscogsProposal, DraftSegment, EqBand, ExportResult, ImportedCue,
     OpenedRecording, PreviewMonitor, Progress, ProviderAnchor, RecordingProgress, RestoreResult,
     Review, ReviewRequest, SpectrogramChannel, Studio, StudioError, TreatmentAnalysis,
     TreatmentProbe, TreatmentProbeOptions,
@@ -250,6 +250,8 @@ static PROBE: blocking::Queue = blocking::Queue::new();
 static LATEST_PROBE: blocking::Latest = blocking::Latest::new();
 static SPECTROGRAM: blocking::Queue = blocking::Queue::new();
 static LATEST_SPECTROGRAM: blocking::Latest = blocking::Latest::new();
+static EQ_MATCH: blocking::Queue = blocking::Queue::new();
+static LATEST_EQ_MATCH: blocking::Latest = blocking::Latest::new();
 static REVIEW: blocking::Queue = blocking::Queue::new();
 static EXPORT: blocking::Queue = blocking::Queue::new();
 static CUE: blocking::Queue = blocking::Queue::new();
@@ -408,6 +410,27 @@ pub(super) async fn audio_split_probe(
         .run_latest(lane, move |cancel| {
             studio
                 .treatment_probe(&id, frame, treatment, options, || cancel.cancelled())
+                .map_err(shell_error)
+        })
+        .await
+}
+
+#[tauri::command]
+pub(super) async fn audio_split_eq_match(
+    window: WebviewWindow,
+    studio: State<'_, StudioState>,
+    id: String,
+    range: tagrex_commands::audio_studio::FrameRange,
+    reference: String,
+) -> Result<Vec<EqBand>, ErrorDto> {
+    if window.label() != "main" {
+        return Err(shell_error("Choose the reference from Split Studio."));
+    }
+    let studio = studio.inner().clone();
+    EQ_MATCH
+        .run_latest(&LATEST_EQ_MATCH, move |cancel| {
+            studio
+                .match_reference(&id, range, Path::new(&reference), || cancel.cancelled())
                 .map_err(shell_error)
         })
         .await

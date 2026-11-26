@@ -4,7 +4,7 @@
 use std::f64::consts::{FRAC_1_SQRT_2, PI, TAU};
 
 #[derive(Clone)]
-pub(super) struct Biquad {
+pub(in crate::codec) struct Biquad {
     b: [f64; 3],
     a: [f64; 2],
     delay: [f64; 2],
@@ -14,6 +14,11 @@ impl Biquad {
     pub(super) fn high_pass(rate: f64, frequency: u16) -> Self {
         let (sin, cos) = angle(rate, frequency);
         Self::pass(cos, sin * FRAC_1_SQRT_2, true)
+    }
+
+    pub(super) fn low_pass(rate: f64, frequency: u16) -> Self {
+        let (sin, cos) = angle(rate, frequency);
+        Self::pass(cos, sin * FRAC_1_SQRT_2, false)
     }
 
     pub(super) fn cut(
@@ -52,7 +57,7 @@ impl Biquad {
         Self::symmetric([1.0, -2.0 * cos, 1.0], cos, sin / (2.0 * quality.into()))
     }
 
-    pub(super) fn peak(rate: f64, frequency: u16, db: i8, quality: f64) -> Self {
+    pub(in crate::codec) fn peak(rate: f64, frequency: u16, db: f32, quality: f64) -> Self {
         let (sin, cos) = angle(rate, frequency);
         let amplitude = 10.0_f64.powf(f64::from(db) / 40.0);
         let alpha = sin / (2.0 * quality);
@@ -80,7 +85,13 @@ impl Biquad {
         )
     }
 
-    pub(super) fn shelf(rate: f64, frequency: u16, db: i8, high: bool) -> Self {
+    pub(super) fn band_detector(rate: f64, frequency: u16, quality: f64) -> Self {
+        let (sin, cos) = angle(rate, frequency);
+        let alpha = sin / (2.0 * quality);
+        Self::symmetric([alpha, 0.0, -alpha], cos, alpha)
+    }
+
+    pub(super) fn shelf(rate: f64, frequency: u16, db: f32, high: bool) -> Self {
         let (sin, cos) = angle(rate, frequency);
         let amplitude = 10.0_f64.powf(f64::from(db) / 40.0);
         let slope = 2.0 * amplitude.sqrt() * sin * FRAC_1_SQRT_2;
@@ -125,6 +136,18 @@ impl Biquad {
             a: [a1 / a0, a2 / a0],
             delay: [0.0; 2],
         }
+    }
+
+    pub(in crate::codec) fn response_db(&self, rate: f64, hz: f64) -> f64 {
+        let (sin, cos) = (TAU * hz / rate).sin_cos();
+        let power = |[b0, b1, b2]: [f64; 3]| {
+            let real = b0 + b1 * cos + b2 * (2.0 * cos * cos - 1.0);
+            let imag = b1 * sin + b2 * (2.0 * cos * sin);
+            real * real + imag * imag
+        };
+        10.0 * (power(self.b) / power([1.0, self.a[0], self.a[1]]))
+            .max(1e-24)
+            .log10()
     }
 
     pub(super) fn filter(&mut self, input: f64) -> f64 {

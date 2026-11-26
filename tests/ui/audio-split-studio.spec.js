@@ -54,6 +54,8 @@ test.beforeEach(async ({ page }) => {
           if (target === 'main') eventHandlers.get(name)?.({ payload });
           else if (name === 'tagnetic:audio-tools-state') {
             window.studioFixture.toolSnapshots = { ...window.studioFixture.toolSnapshots, [target]: payload };
+          } else if (name === 'tagnetic:audio-tools-probe') {
+            window.studioFixture.toolProbes = { ...window.studioFixture.toolProbes, [target]: payload };
           } else if (name === 'tagnetic:audio-tools-flush') {
             window.studioFixture.toolFence = payload;
           }
@@ -88,6 +90,8 @@ test.beforeEach(async ({ page }) => {
               return { gainDb: args.treatment.normalize ? 4.2 : 0, loudnessLufs: -22.2, outputChannels: args.treatment.mono === 'off' ? 2 : 1 };
             case 'audio_split_probe':
               return { input: -30, output: -30, ...window.studioFixture.treatmentProbe?.(args) };
+            case 'audio_split_eq_match':
+              return [{ id: 1, kind: 'bell', hz: 2500, gainDb: -4, q: 140 }];
             case 'audio_split_tool_window':
               if (args.action === 'hide_all') { toolVisibility.clear(); return false; }
               if (args.action === 'pin' || args.action === 'unpin') toolPins.set(args.kind, args.action === 'pin');
@@ -1476,6 +1480,80 @@ test('treatment recipes restore reusable settings and preserve the current repai
   await expect(studio).toBeVisible();
 });
 
+test('EQ still receives peak levels when its spectrum is disabled', async ({ page }) => {
+  await page.evaluate(() => {
+    window.studioFixture.treatmentProbe = ({ spectrum }) => ({
+      frequencies: spectrum ? [120, 3000] : [], inputPeak: -14, outputPeak: -5,
+    });
+  });
+  await page.getByRole('button', { name: 'Split recording', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Split recording' }).getByRole('button', { name: 'EQ', exact: true }).click();
+  await expect.poll(async () => (await calls(page, 'probe')).at(-1)?.args.spectrum).toBe(true);
+  await page.evaluate(() => window.__TAURI__.event.emitTo('main', 'tagnetic:audio-tools-command', {
+    kind: 'eq', action: 'analyzer', sourceId: 'recording', enabled: false,
+  }));
+  await expect.poll(async () => (await calls(page, 'probe')).at(-1)?.args.spectrum).toBe(false);
+  await expect.poll(() => page.evaluate(() => window.studioFixture.toolProbes?.['audio-tool-eq']?.probe)).toMatchObject({
+    frequencies: [], inputPeak: -14, outputPeak: -5,
+  });
+});
+
+test('A/B EQ curves share a measured level in preview and retain the selected EQ for export', async ({ page }) => {
+  await page.evaluate(() => {
+    window.studioFixture.treatmentProbe = ({ treatment }) => ({ input: -30, output: -30 + treatment.presenceDb });
+  });
+  await page.getByRole('button', { name: 'Split recording', exact: true }).click();
+  const studio = page.getByRole('dialog', { name: 'Split recording' });
+  await studio.getByRole('button', { name: 'EQ', exact: true }).click();
+  const send = request => page.evaluate(request => window.__TAURI__.event.emitTo('main', 'tagnetic:audio-tools-command', {
+    kind: 'eq', sourceId: 'recording', ...request,
+  }), request);
+  const lastTransport = async () => (await calls(page, 'transport')).at(-1)?.args;
+  const setComparison = (current, alternate) => send({
+    action: 'edit', patch: { presenceDb: current, presenceHz: 1000 },
+    compareEq: { presenceDb: alternate, presenceHz: 1000 },
+  });
+  await send({ action: 'play' });
+  await setComparison(4, -6);
+  await expect.poll(lastTransport).toMatchObject({ action: 'retune', previewGainDb: -10, treatment: { presenceDb: 4 } });
+  await setComparison(-6, 4);
+  await expect.poll(lastTransport).toMatchObject({ action: 'retune', treatment: { presenceDb: -6 } });
+  expect(await lastTransport()).not.toHaveProperty('previewGainDb');
+  await reviewAndSave(studio);
+  const review = (await calls(page, 'preview')).at(-1)?.args.request;
+  expect(review.treatment).toMatchObject({ presenceDb: -6 });
+  expect(review).not.toHaveProperty('previewGainDb');
+});
+
+test('Space restarts a finished recording from the first cut and resumes from an ordinary pause', async ({ page }) => {
+  await page.evaluate(() => {
+    window.studioFixture.statusProbe = ({ sequence }) => window.studioFixture.finishPlayback
+      ? { sequence, frame: 479999, playing: false }
+      : { sequence, frame: 72000, playing: true };
+  });
+  await page.getByRole('button', { name: 'Split recording', exact: true }).click();
+  const studio = page.getByRole('dialog', { name: 'Split recording' });
+  const wave = studio.getByRole('slider', { name: 'Waveform playhead' });
+  const firstCut = studio.getByRole('button', { name: /^Start of Track 1 at/ });
+  const transport = async () => (await calls(page, 'transport')).at(-1)?.args;
+  // Shift-Right moves the first cut by 10 ms without moving the playhead.
+  await firstCut.press('Shift+ArrowRight');
+  await wave.press('Space');
+  await expect.poll(transport).toMatchObject({ action: 'play' });
+  await expect.poll(async () => Number(await wave.getAttribute('aria-valuenow'))).toBeGreaterThanOrEqual(72000);
+  await wave.press('Space');
+  await expect.poll(transport).toMatchObject({ action: 'pause' });
+  const paused = (await transport()).frame;
+  await page.evaluate(() => { window.studioFixture.finishPlayback = true; });
+  await wave.press('Space');
+  await expect.poll(transport).toMatchObject({ action: 'play', frame: paused });
+  await expect(wave).toHaveAttribute('aria-valuenow', '479999');
+  await expect(studio.getByRole('button', { name: 'Play audio' })).toBeVisible();
+  await page.evaluate(() => { window.studioFixture.finishPlayback = false; });
+  await wave.press('Space');
+  await expect.poll(transport).toMatchObject({ action: 'play', frame: 480 });
+});
+
 test('level matching and single-channel audition stay confined to preview', async ({ page }) => {
   await page.evaluate(() => {
     window.studioFixture.stereo = true;
@@ -1500,6 +1578,52 @@ test('level matching and single-channel audition stay confined to preview', asyn
   await request('stop-audition', {}, 'repair');
   await expect.poll(lastTransport).toMatchObject({ action: 'retune', treatment: { mono: 'off', gainDb: 4 } });
   expect(await lastTransport()).not.toHaveProperty('monitor');
+  const { sequence } = await lastTransport();
+  await request('solo-band', { band: { lowHz: 500, highHz: 1000 } }, 'eq');
+  await expect.poll(lastTransport).toMatchObject({ action: 'retune', sequence, monitor: { lowHz: 500, highHz: 1000 } });
+  await request('retune-solo-band', { band: { lowHz: 750, highHz: 1500 } }, 'eq');
+  await expect.poll(lastTransport).toMatchObject({ action: 'retune', sequence, monitor: { lowHz: 750, highHz: 1500 } });
+  await request('stop-audition', {}, 'eq');
+  await request('retune-solo-band', { band: { lowHz: 600, highHz: 1200 } }, 'eq');
+  await expect.poll(lastTransport).toMatchObject({ action: 'retune', sequence, treatment: { gainDb: 4 } });
+  expect(await lastTransport()).not.toHaveProperty('monitor');
   await reviewAndSave(studio);
   await expect.poll(async () => (await calls(page, 'preview')).at(-1)?.args.request.treatment).toMatchObject({ gainDb: 4, mono: 'off' });
+});
+
+test('reference EQ auditions without changing edits, then keeps the fit as one undo step', async ({ page }) => {
+  await page.getByRole('button', { name: 'Split recording', exact: true }).click();
+  const studio = page.getByRole('dialog', { name: 'Split recording' });
+  const eq = studio.getByRole('button', { name: 'EQ', exact: true });
+  await eq.click();
+  const request = (action, extra = {}) => page.evaluate(payload =>
+    window.__TAURI__.event.emitTo('main', 'tagnetic:audio-tools-command', { kind: 'eq', sourceId: 'recording', ...payload }),
+    { action, ...extra });
+  const snapshot = () => page.evaluate(() => window.studioFixture.toolSnapshots?.['audio-tool-eq']);
+  await request('edit', { revision: '1', patch: { rumble: true } });
+  await expect.poll(async () => (await snapshot()).settings.rumble).toBe(true);
+  await request('reference-start');
+  await expect.poll(async () => (await snapshot()).reference?.status).toBe('ready');
+  await request('reference-preview');
+  await expect.poll(async () => (await calls(page, 'transport')).at(-1)?.args.treatment.eqBands?.[0]?.hz).toBe(2500);
+  const { settings, reference } = await snapshot();
+  const fit = settings.eqBands[0];
+  const trial = reference.generation;
+  await request('edit', { revision: 'trial-1', trial, patch: { eqBands: [{ ...fit, gainDb: -5 }] } });
+  await expect.poll(async () => (await snapshot()).settings.eqBands?.[0]?.gainDb).toBe(-5);
+  await request('undo', { revision: 'trial-2', trial });
+  await expect.poll(async () => (await snapshot()).settings.eqBands?.[0]?.gainDb).toBe(-4);
+  await request('redo', { revision: 'trial-3', trial });
+  await expect.poll(async () => (await snapshot()).settings.eqBands?.[0]?.gainDb).toBe(-5);
+  await request('reference-cancel');
+  await request('edit', { revision: 'late-trial', trial, patch: { eqBands: [{ ...fit, gainDb: 6 }] } });
+  await expect.poll(async () => (await snapshot()).settings.rumble).toBe(true);
+  await expect.poll(async () => (await snapshot()).settings.eqBands).toBeNull();
+  await request('reference-start');
+  await expect.poll(async () => (await snapshot()).reference?.status).toBe('ready');
+  await request('reference-keep');
+  await expect.poll(async () => (await snapshot()).settings.eqBands?.[0]?.gainDb).toBe(-4);
+  await expect.poll(async () => (await snapshot()).undoLabel).toBe('Undo EQ reference match');
+  await request('undo', { revision: '2' });
+  await expect.poll(async () => (await snapshot()).settings.rumble).toBe(true);
 });

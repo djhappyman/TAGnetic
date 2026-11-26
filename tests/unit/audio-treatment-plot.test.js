@@ -67,6 +67,61 @@ test('EQ response includes additional bands and skips separately bypassed bands'
   assert.equal(settings.presenceDb, 6);
 });
 
+test('EQ drafts and plot coordinates preserve fractional gain beyond six decibels', () => {
+  const legacy = readTreatment({ presenceDb: -18.3 });
+  closeTo(eqResponse(legacy, rate)(1500), -18.3);
+  const editable = readTreatment({ eqBands: [{ kind: 'bell', hz: 1500, gainDb: 16.7, q: 80 }] });
+  closeTo(eqResponse(editable, rate)(1500), 16.7);
+  assert.deepEqual(readTreatment(JSON.parse(JSON.stringify(editable))), editable);
+  const bounds = plotBounds(650, 350, 'eq');
+  assert.equal(gainY(0, bounds), 175);
+  for (const gain of [-24, -18.3, 0.1, 16.7, 24]) {
+    closeTo(yGain(gainY(gain, bounds), bounds), gain);
+  }
+});
+
+test('Adaptive Q narrows the plotted bell and preserves fixed-width drafts', () => {
+  for (const gainDb of [-12, 12]) {
+    const band = { kind: 'bell', hz: 1500, gainDb, q: 80 };
+    const fixed = readTreatment({ eqBands: [band] });
+    const adaptive = readTreatment({ eqBands: [{ ...band, adaptiveQ: true }] });
+    assert.equal(sameTreatment(fixed, adaptive), false);
+    assert.deepEqual(readTreatment(JSON.parse(JSON.stringify(adaptive))), adaptive);
+    closeTo(eqResponse(adaptive, rate)(1500), gainDb);
+    assert.ok(Math.abs(eqResponse(adaptive, rate)(1000)) + 2 < Math.abs(eqResponse(fixed, rate)(1000)));
+  }
+});
+
+test('the live EQ line uses the measured mix and respects band channels', () => {
+  const settings = readTreatment({ eqBands: [{
+    kind: 'bell', hz: 1500, gainDb: 6, q: 250, channel: 'left', adaptiveQ: true,
+    dynamic: { thresholdDb: -24, amountDb: 12 },
+  }] });
+  const before = eqResponse(settings, rate, 'left');
+  const reacting = eqResponse(settings, rate, 'left', [0.5]);
+  closeTo(reacting(1500), 6 + 20 * Math.log10((1 + 10 ** (-12 / 20)) / 2));
+  closeTo(reacting(50), before(50), 0.005);
+  closeTo(eqResponse(settings, rate, 'right', [0.5])(1500), 0);
+  closeTo(eqResponse(settings, rate, 'left', [1])(1500), -6);
+});
+
+test('dynamic curves lift or reduce the intended frequency range on every shape', () => {
+  for (const [kind, inside, outside, q] of [
+    ['low', 200, 8000, 80], ['bass', 200, 8000, 80], ['bell', 1000, 50, 80],
+    ['notch', 1070, 50, 500], ['treble', 8000, 200, 80], ['high', 8000, 200, 80],
+  ]) {
+    for (const amountDb of [-6, 6]) {
+      const settings = readTreatment({ eqBands: [{
+        kind, hz: 1000, gainDb: 0, q, dynamic: { thresholdDb: -24, amountDb },
+      }] });
+      const staticCurve = eqResponse(settings, rate);
+      const dynamicCurve = eqResponse(settings, rate, 'stereo', [1]);
+      assert.ok((dynamicCurve(inside) - staticCurve(inside)) * Math.sign(-amountDb) > 1, kind);
+      closeTo(dynamicCurve(outside), staticCurve(outside), 0.1);
+    }
+  }
+});
+
 test('pointer transforms match the rendered scales on desktop and compact plots', () => {
   for (const [width, height] of [[1000, 240], [375, 190]]) {
     const bounds = plotBounds(width, height);
