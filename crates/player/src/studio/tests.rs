@@ -890,13 +890,16 @@ fn editing_a_running_spectral_selection_keeps_its_position_and_uses_the_new_loop
     let mut previous = status.position;
     let (last, first) = (0..100)
         .find_map(|_| {
-            // The fake device pulls on demand. Give the decoder the time
-            // it would have between callbacks on an 8 kHz device.
             for _ in 0..64 {
                 assert_eq!(pcm(&mut fixture.studio).1, 0);
             }
-            thread::sleep(Duration::from_millis(8));
-            let next = fixture.player.studio_status(&owner).position;
+            // The fake device advances on demand, but the actor publishes its
+            // position on a separate tick. Read it before pulling another block.
+            let mut next = previous;
+            crate::test_support::wait_until("the Studio clock to report the output block", || {
+                next = fixture.player.studio_status(&owner).position;
+                next != previous
+            });
             let wrap = (next < previous).then_some((previous, next));
             previous = next;
             wrap
