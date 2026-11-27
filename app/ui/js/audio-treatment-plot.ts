@@ -5,6 +5,7 @@ import type { DynamicsMode, DynamicsPlotOptions } from './audio-dynamics';
 export type TreatmentPlotMode = 'eq' | 'dynamics' | 'repair';
 export type EqView = { start: number; end: number; gainRange: 6 | 12 | 24 };
 export type PlotBounds = { left: number; right: number; top: number; bottom: number; eq?: EqView };
+export type SpectrogramFocus = { lowHz: number; highHz: number };
 type SpectralResponse = {
   channel: EqChannel;
   binHz: number;
@@ -41,6 +42,7 @@ export type TreatmentProbe = {
   spectrogramTreated?: boolean;
   spectrogramDifference?: boolean;
   spectrogramDetail?: 'balanced' | 'transients' | 'tones';
+  spectrogramFocus?: SpectrogramFocus;
   spectrogramWindowFrames?: number;
   spectrogramLeft?: readonly (readonly number[])[];
   spectrogramRight?: readonly (readonly number[])[];

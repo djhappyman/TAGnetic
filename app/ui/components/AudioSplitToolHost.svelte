@@ -201,11 +201,12 @@
 <svelte:document onvisibilitychange={() => { if (document.visibilityState === 'visible') sync(); }}/>
 <ControllerTooltip/>
 <main class="tool-host">
-  {#if connectionError || probeError}
+  {#if kind !== 'repair' && (connectionError || probeError)}
     <p class="problem" role="status">{connectionError || probeError}</p>
   {/if}
   {#key snapshot?.sourceId}
-    <AudioSplitToolWindow {kind} {snapshot} {probe} {meter} onedit={edit} onaction={action} onviewport={viewport} onanalyzer={analyzer} onlearn={learnThreshold} onlisten={listen}/>
+    <AudioSplitToolWindow {kind} {snapshot} {probe} {meter} notice={connectionError || probeError}
+      onedit={edit} onaction={action} onviewport={viewport} onanalyzer={analyzer} onlearn={learnThreshold} onlisten={listen}/>
   {/key}
 </main>
 

@@ -10,8 +10,8 @@ use tagrex_commands::audio_studio::{
     AudioTreatment, CueEncoding, DiscogsProposal, DraftSegment, EqBand, ExportResult, ImportedCue,
     OpenedRecording, PreviewComparison, PreviewMonitor, Progress, ProviderAnchor,
     RecordingProgress, RestoreResult, Review, ReviewRequest, SpectralRepair, SpectrogramChannel,
-    SpectrogramDetail, SpectrumView, Studio, StudioError, TreatmentAnalysis, TreatmentProbe,
-    TreatmentProbeOptions,
+    SpectrogramDetail, SpectrogramFocus, SpectrumView, Studio, StudioError, TreatmentAnalysis,
+    TreatmentProbe, TreatmentProbeOptions,
 };
 use tagrex_commands::ErrorDto;
 use tauri::{
@@ -403,6 +403,7 @@ pub(super) async fn audio_split_probe(
     spectrogram_treated: Option<bool>,
     spectrogram_difference: Option<bool>,
     spectrogram_detail: Option<SpectrogramDetail>,
+    spectrogram_focus: Option<SpectrogramFocus>,
 ) -> Result<Option<TreatmentProbe>, ErrorDto> {
     let studio = studio.inner().clone();
     let options = TreatmentProbeOptions {
@@ -414,6 +415,7 @@ pub(super) async fn audio_split_probe(
         spectrogram_treated: spectrogram_treated.unwrap_or_default(),
         spectrogram_difference: spectrogram_difference.unwrap_or_default(),
         spectrogram_detail: spectrogram_detail.unwrap_or_default(),
+        spectrogram_focus,
     };
     let (producing, window) = if playback.unwrap_or_default() && !options.spectrogram {
         player.studio_playback_window(&id, frame, treatment.clone())

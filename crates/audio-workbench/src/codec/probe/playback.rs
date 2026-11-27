@@ -324,6 +324,7 @@ impl PlaybackProbeWindow {
             spectrogram_waveform: None,
             spectrogram_difference: None,
             spectrogram_detail: None,
+            spectrogram_focus: None,
             spectrogram_window_frames: None,
             spectrogram_left: None,
             spectrogram_right: None,

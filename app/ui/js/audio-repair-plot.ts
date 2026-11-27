@@ -52,7 +52,7 @@ export function recordingFrequencyRange(rate: number): FrequencyRange {
 export function repairPlotBounds(width: number, height: number, sharedTime = false): PlotBounds {
   const bounds = plotBounds(width, height);
   return sharedTime
-    ? { ...bounds, left: 0, top: 7, bottom: Math.max(8, height - 7) }
+    ? { ...bounds, left: 0, top: 0, bottom: Math.max(1, height) }
     : { ...bounds, left: 1 };
 }
 
@@ -122,6 +122,8 @@ export function repairDbScale(contrast: RepairContrast, offset = 0) {
 export function repairLevelAt(probe: TreatmentProbe, frame: number, hz: number): number | undefined {
   const range = spectrogramRange(probe);
   const columns = probe.spectrogram;
+  const focus = probe.spectrogramFocus;
+  if (focus && (hz < focus.lowHz || hz > focus.highHz)) return;
   if (!range || !columns?.length || frame < range.start || frame > range.end || hz <= 0) return;
   const column = clampRepair(Math.floor((frame - range.start) * columns.length / (range.end - range.start)), 0, columns.length - 1);
   const bin = probe.frequencies.findIndex((frequency, index, all) =>
@@ -136,10 +138,10 @@ export function buildRepairTexture(
   const columns = probe.spectrogram;
   const frequencies = probe.frequencies;
   if (!time || !columns?.length || frequencies.length < 2) return null;
-  const frequency = recordingFrequencyRange(rate);
+  const frequency = probe.spectrogramFocus ?? recordingFrequencyRange(rate);
   const bitmap = document.createElement('canvas');
   bitmap.width = columns.length;
-  bitmap.height = 240;
+  bitmap.height = probe.spectrogramFocus ? Math.max(240, frequencies.length * 2) : 240;
   const ctx = bitmap.getContext('2d');
   if (!ctx) return null;
   const bounds = { left: 0, top: 0, right: bitmap.width, bottom: bitmap.height };
@@ -194,7 +196,7 @@ export function drawRepairViewport(
   const pixelsHigh = Math.round(height * scale);
   if (canvas.width !== pixelsWide) canvas.width = pixelsWide;
   if (canvas.height !== pixelsHigh) canvas.height = pixelsHigh;
-  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  ctx.setTransform(pixelsWide / width, 0, 0, pixelsHigh / height, 0, 0);
   ctx.clearRect(0, 0, width, height);
   const { time, frequency } = viewport;
   const bounds = repairPlotBounds(width, height, sharedTime);
@@ -274,13 +276,17 @@ export function drawRepairViewport(
     ticks.length = 0;
     for (let i = 0; i < 3; i++) ticks.push(frequency.lowHz * (frequency.highHz / frequency.lowHz) ** (i / 2));
   }
+  let previousLabel = Infinity;
   for (const tick of ticks) {
     const y = waveformOnly ? (bounds.top + bounds.bottom) / 2 - (bounds.bottom - bounds.top) * .47 * tick
       : frequencyY(tick, bounds, frequency);
     ctx.globalAlpha = .45;
-    strokeLine(ctx, bounds.left, y, bounds.right, y);
+    if (!sharedTime || (y > bounds.top + 1 && y < bounds.bottom - 1)) strokeLine(ctx, bounds.left, y, bounds.right, y);
+    const labelY = sharedTime ? clampRepair(y, bounds.top + 6, bounds.bottom - 6) : y;
+    if (sharedTime && previousLabel - labelY < 12) continue;
+    previousLabel = labelY;
     ctx.globalAlpha = .9;
-    ctx.fillText(waveformOnly ? String(tick) : hertzLabel(tick), bounds.right + 6, y);
+    ctx.fillText(waveformOnly ? String(tick) : hertzLabel(tick), bounds.right + 6, labelY);
   }
   if (!waveformOnly && !sharedTime) ctx.fillText('Hz', bounds.right + 6, bounds.bottom + 13);
   ctx.textAlign = 'center';

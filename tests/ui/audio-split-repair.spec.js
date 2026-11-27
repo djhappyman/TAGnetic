@@ -46,6 +46,7 @@ test.beforeEach(async ({ page }) => {
           spectrogramStart: start, spectrogramEnd: end, spectrogramChannel: options?.channel ?? 'combined',
           spectrogramTreated: options?.treated === true, spectrogramWaveform: overview,
           spectrogramDifference: options?.difference === true, spectrogramDetail: options?.detail ?? 'balanced',
+          spectrogramFocus: options?.focus,
           ...(options?.detail === 'transients' && !options.treated ? {
             spectrogramClicks: [{ frame: 10 * rate + 171, sensitivity: 2 }],
             spectrogramWindowFrames: 1024,
@@ -86,6 +87,9 @@ test.beforeEach(async ({ page }) => {
       loadRecording(frames, frame) {
         snapshot = { ...snapshot, sourceId: 'long-repair-fixture', frames, frame };
         send('state', snapshot);
+      },
+      failProbe() {
+        send('probe', { sourceId: snapshot.sourceId, error: 'Could not measure the current audio.' });
       },
       deliverProbe() {
         if (pendingProbe) showProbe(pendingProbe.range, pendingProbe.options);
@@ -221,6 +225,40 @@ async function reduceSelected(page) {
   await page.getByRole('button', { name: 'Reduce', exact: true }).click();
   await closePopup(page, 'Selection details');
 }
+
+test('requests fresh spectral detail after time zoom and after frequency-only zoom', async ({ page }) => {
+  const request = () => page.evaluate(() => window.repairFixture.calls.findLast(call => call.action === 'viewport'));
+  await expect.poll(async () => (await request())?.range).toEqual({ start: 0, end: 60 * rate });
+  await zoomToPlayhead(page);
+  await expect.poll(async () => (await request())?.options?.focus).toEqual({ lowHz: 20, highHz: 20_000 });
+  const before = await request();
+  const graph = page.locator('.repair-plot');
+  await page.evaluate(() => { window.repairFixture.holdProbe = true; });
+  await graph.dispatchEvent('wheel', { deltaY: -280, shiftKey: true, clientX: 400, clientY: 165, bubbles: true, cancelable: true });
+  await expect.poll(async () => (await request())?.options?.focus?.highHz).toBeLessThan(20_000);
+  expect((await request()).range).toEqual(before.range);
+  await expect(graph.getByText('Updating spectrogram…')).toBeVisible();
+  expect(await graph.locator('canvas').evaluate(canvas => {
+    const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+    return pixels.some((value, index) => index % 4 === 3 && value > 0);
+  })).toBe(true);
+  await page.evaluate(() => window.repairFixture.deliverProbe());
+  await expect(graph.getByText('Updating spectrogram…')).toHaveCount(0);
+});
+
+test('keeps graph notices and transport hints above the live meters', async ({ page }) => {
+  const graph = page.locator('.repair-plot');
+  const footer = page.locator('.repair-transport');
+  const tip = page.locator('#controller-tooltip-content');
+  await graph.getByRole('button', { name: 'Select time and frequency' }).hover();
+  await footer.getByRole('button', { name: 'Back 5 seconds' }).hover();
+  await expect(tip).toHaveText('Back 5 seconds');
+  const box = await tip.boundingBox();
+  expect(box.y + box.height).toBeLessThanOrEqual((await footer.boundingBox()).y);
+  await page.evaluate(() => window.repairFixture.failProbe());
+  await expect(graph.getByRole('status').filter({ hasText: 'Could not measure the current audio.' })).toBeVisible();
+  await expect(footer.getByRole('meter', { name: 'Left playback level' })).toBeVisible();
+});
 
 test('keeps audition bounds and preview strengths separate from repair edits', async ({ page }) => {
   await zoomToPlayhead(page);
@@ -577,7 +615,7 @@ test('selects matching regions in both stereo lanes unless Ctrl or Command scope
   await expect(right).toHaveCSS('opacity', '1');
 });
 
-test('opens two channel strips with one ruler and leaves only transport and meters in the footer', async ({ page }) => {
+test('opens two channel strips with one ruler and groups playback and graph controls in the footer', async ({ page }) => {
   await page.evaluate(() => localStorage.setItem('tagnetic.audio-repair-view.v1', JSON.stringify({ channel: 'combined', opacity: 37 })));
   await page.reload();
   const graph = page.locator('.repair-plot');
@@ -592,10 +630,12 @@ test('opens two channel strips with one ruler and leaves only transport and mete
     const box = node => node.getBoundingClientRect();
     const leftBox = box(l);
     const rightBox = box(r);
+    const divider = box(plot.querySelector('.lane-divider'));
     return {
       equalLaneWidths: Math.abs(leftBox.width - rightBox.width) < 1,
       railTouchesPlot: Math.abs(box(leftRail).right - leftBox.left) < 1,
-      sharedMiddle: Math.abs(box(leftRail).bottom - rightBox.top) < 1 && Math.abs(box(rightRail).top - rightBox.top) < 1,
+      sharedMiddle: Math.abs(box(leftRail).bottom - rightBox.top) < 1 && Math.abs(box(rightRail).top - rightBox.top) < 1
+        && Math.abs(divider.top + divider.height / 2 - rightBox.top) < 1 && Math.abs(leftBox.bottom - rightBox.top) < 1,
       railsEndAtCanvas: Math.abs(box(rightRail).bottom - rightBox.bottom) < 1,
       writingMode: getComputedStyle(leftRail.querySelector('span')).writingMode,
     };
@@ -637,12 +677,22 @@ test('opens two channel strips with one ruler and leaves only transport and mete
   await expect(graph.locator('.playhead')).toBeVisible();
   await expect(page.locator('.overview-playhead')).toBeVisible();
 
-  const footer = page.locator('.repair-transport');
+  const footer = page.locator('footer.repair-transport');
   await expect(footer.getByRole('button', { name: 'Play', exact: true })).toBeVisible();
   await expect(footer.getByRole('meter', { name: 'Left playback level' })).toBeVisible();
-  await expect(footer.getByRole('button', { name: /selection details|reduce|play selection/i })).toHaveCount(0);
-  await expect(page.locator('.overview-bar').getByRole('button', { name: 'Keep tool on top' })).toBeVisible();
-  await expect(graph.getByRole('button', { name: 'Spectrogram display' })).toBeVisible();
+  await expect(footer.getByRole('button', { name: 'Selection details' })).toBeVisible();
+  await expect(footer.getByRole('button', { name: /reduce|play selection/i })).toHaveCount(0);
+  const dropdown = await footer.getByRole('button', { name: 'Playback signal, Repaired' }).boundingBox();
+  const meters = await footer.getByRole('group', { name: 'Playback output levels' }).boundingBox();
+  const tools = await footer.getByRole('group', { name: 'Spectrogram controls' }).boundingBox();
+  expect(meters.x - (dropdown.x + dropdown.width)).toBeGreaterThanOrEqual(0);
+  expect(meters.x - (dropdown.x + dropdown.width)).toBeLessThanOrEqual(12);
+  expect(tools.x).toBeGreaterThan(meters.x + meters.width);
+  const header = page.locator('header.overview-bar');
+  await expect(header.getByRole('button', { name: 'Keep tool on top' })).toBeVisible();
+  await expect(header.getByRole('button', { name: 'Jump in recording overview' })).toBeVisible();
+  await expect(graph.getByRole('button', { name: 'Spectrogram display' })).toHaveCount(0);
+  await expect(footer.getByRole('button', { name: 'Spectrogram display' })).toBeVisible();
 
   for (const channel of ['left', 'right', 'combined', 'stereo']) {
     await openPopup(page, 'Spectrogram display');
@@ -651,6 +701,30 @@ test('opens two channel strips with one ruler and leaves only transport and mete
     await expect(graph.locator('canvas')).toHaveCount(channel === 'stereo' ? 2 : 1);
     await expect(graph.locator('canvas').first()).toHaveAttribute('data-channel', channel === 'stereo' ? 'left' : channel);
   }
+
+  const measureFrame = () => page.locator('.tool-window.repair').evaluate(tool => {
+    const workspace = tool.querySelector('.repair-workspace');
+    const header = tool.querySelector('header');
+    const footer = tool.querySelector('footer');
+    const rect = element => element.getBoundingClientRect();
+    return {
+      sameWidth: rect(workspace).width === rect(header).width && rect(workspace).width === rect(footer).width,
+      inOrder: rect(header).bottom <= rect(workspace).top && rect(workspace).bottom <= rect(footer).top,
+      overflowY: Math.max(0, rect(footer).bottom - innerHeight),
+      overflowX: Math.max(0, document.documentElement.scrollWidth - document.documentElement.clientWidth),
+      surface: getComputedStyle(workspace).backgroundColor,
+    };
+  });
+  const dark = await measureFrame();
+  const fitted = { sameWidth: true, inOrder: true, overflowY: 0, overflowX: 0 };
+  expect(dark).toMatchObject(fitted);
+  await page.setViewportSize({ width: 420, height: 320 });
+  await page.evaluate(() => window.repairFixture.setTheme('light', 'forest'));
+  await page.getByRole('button', { name: 'Brush', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Brush size' })).toBeInViewport({ ratio: 1 });
+  await expect.poll(measureFrame).toMatchObject(fitted);
+  await expect(footer.getByRole('meter', { name: 'Right playback level' })).toBeInViewport({ ratio: 1 });
+  expect((await measureFrame()).surface).not.toBe(dark.surface);
 });
 
 test('uses the same theme shades for signal levels in the spectrogram and legend', async ({ page }) => {
@@ -754,8 +828,7 @@ test('persists spectrogram display choices and requests the correct channel and 
   const mode = await page.getByRole('button', { name: 'Rectangle' }).boundingBox();
   const controls = await page.getByRole('group', { name: 'Spectrogram controls' }).boundingBox();
   expect(mode.x).toBeGreaterThanOrEqual(graph.x + graph.width);
-  expect(controls.y).toBeGreaterThan(graph.y);
-  expect(controls.y + controls.height).toBeLessThanOrEqual(graph.y + graph.height);
+  expect(controls.y).toBeGreaterThanOrEqual(graph.y + graph.height);
   expect(await page.getByRole('button', { name: 'Rectangle' }).innerText()).toBe('');
   const hum = await openPopup(page, 'Mains hum');
   await expect(page.getByRole('combobox', { name: 'Mains frequency' })).toBeVisible();

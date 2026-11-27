@@ -1,5 +1,5 @@
 import type { FrameRange } from './audio-split';
-import type { AnalyzerView, TreatmentPlotMode, TreatmentProbe } from './audio-treatment-plot';
+import type { AnalyzerView, SpectrogramFocus, TreatmentPlotMode, TreatmentProbe } from './audio-treatment-plot';
 import { effectIsActive, eqBandIsActive, type AudioTreatment, type EqChannel, type SpectralRepair } from './audio-treatment';
 
 export const toolModes = ['eq', 'dynamics', 'repair'] as const satisfies readonly TreatmentPlotMode[];
@@ -104,7 +104,11 @@ export type SpectrogramViewOptions = {
   difference?: boolean;
   channel?: 'combined' | 'left' | 'right' | 'stereo';
   detail?: 'balanced' | 'transients' | 'tones';
+  focus?: SpectrogramFocus;
 };
+export function sameSpectrogramFocus(left?: SpectrogramFocus, right?: SpectrogramFocus): boolean {
+  return left?.lowHz === right?.lowHz && left?.highHz === right?.highHz;
+}
 export type PreviewBand = { lowHz: number; highHz: number; channel?: Exclude<EqChannel, 'stereo'> };
 export type RepairMonitorChannel = 'stereo' | 'left' | 'right';
 export type RepairListenState = {

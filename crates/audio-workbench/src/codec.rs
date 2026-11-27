@@ -22,8 +22,8 @@ pub use peaks::{Peak, WaveformIndex, WaveformPeaks};
 pub use probe::{
     compare_preview_levels, learn_eq_threshold, match_reference, probe_treatment,
     probe_treatment_with_options, PlaybackHistory, PlaybackProbeWindow, PlaybackReadings,
-    PreviewComparison, SpectralEqResponse, SpectrogramChannel, SpectrogramDetail, SpectrumView,
-    TreatmentProbe, TreatmentProbeOptions,
+    PreviewComparison, SpectralEqResponse, SpectrogramChannel, SpectrogramDetail, SpectrogramFocus,
+    SpectrumView, TreatmentProbe, TreatmentProbeOptions,
 };
 pub use repair_source::{RepairBlock, RepairSource, SelectionPcm};
 pub use seek::SeekIndex;

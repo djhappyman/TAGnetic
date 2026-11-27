@@ -15,7 +15,7 @@
   import AudioSplitOutput from './AudioSplitOutput.svelte';
   import AudioSplitImport from './AudioSplitImport.svelte';
   import {
-    activeRepairCount, listenToolRequests, listenToolVisibility, requestToolFlush, sendRepairMeter, sendToolProbe, sendToolState,
+    activeRepairCount, listenToolRequests, listenToolVisibility, requestToolFlush, sameSpectrogramFocus, sendRepairMeter, sendToolProbe, sendToolState,
     toolEffectCount, toolModes, toolNames, toolPatch, toolTheme,
     type EqReference, type PreviewBand, type RepairListenCommand, type RepairListenState, type RepairLoopPreferences,
     type SpectrogramViewOptions, type ToolRequest, type ToolSnapshot, type ToolVisibility,
@@ -108,7 +108,9 @@
   const meterLane: ProbeLane = { retryAt: 0 };
   const repairLane: ProbeLane = { retryAt: 0 };
   let repairViewport: FrameRange | null = null;
-  const defaultRepairView: Readonly<Required<Omit<SpectrogramViewOptions, 'overview'>>> = {
+  type RepairProbeView = Required<Pick<SpectrogramViewOptions, 'treated' | 'difference' | 'channel' | 'detail'>>
+    & Pick<SpectrogramViewOptions, 'focus'>;
+  const defaultRepairView: Readonly<RepairProbeView> = {
     treated: true, difference: false, channel: 'combined', detail: 'balanced',
   };
   let repairView = defaultRepairView;
@@ -1356,7 +1358,7 @@
       const probe = await audioCommand<TreatmentProbe | null>('probe', { id: opened.id, frame, treatment: settings, spectrogram, spectrum, spectrumView, viewport,
         playback,
         ...(spectrogram ? { spectrogramChannel: view.channel, spectrogramTreated: view.treated,
-          spectrogramDifference: view.difference, spectrogramDetail: view.detail } : {}) });
+          spectrogramDifference: view.difference, spectrogramDetail: view.detail, spectrogramFocus: view.focus } : {}) });
       const currentViewport = viewport ? repairViewport?.start === viewport.start && repairViewport.end === viewport.end
         : (!spectrogram || !repairViewport) && version === transportVersion;
       const currentSettings = listening === listeningSettings();
@@ -1508,8 +1510,13 @@
         const stereo = hasStereo && (!treated || treatment.mono === 'off');
         const channel = stereo && (requested === 'left' || requested === 'right' || requested === 'stereo') ? requested : 'combined';
         const detail = request.options?.detail === 'tones' || request.options?.detail === 'transients' ? request.options.detail : 'balanced';
-        if (channel !== repairView.channel || treated !== repairView.treated || difference !== repairView.difference || detail !== repairView.detail) {
-          repairView = { channel, treated, difference, detail };
+        const band = request.options?.focus;
+        const focus = bounds && band && Number.isSafeInteger(band.lowHz) && Number.isSafeInteger(band.highHz)
+          && band.lowHz >= 20 && band.highHz <= Math.min(20_000, Math.floor(source.sampleRate * .45)) && band.highHz > band.lowHz
+          ? { lowHz: band.lowHz, highHz: band.highHz } : undefined;
+        if (channel !== repairView.channel || treated !== repairView.treated || difference !== repairView.difference || detail !== repairView.detail
+          || !sameSpectrogramFocus(focus, repairView.focus)) {
+          repairView = { channel, treated, difference, detail, focus };
         }
         void refreshToolProbe(true, true);
       }

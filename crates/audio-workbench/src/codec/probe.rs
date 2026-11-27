@@ -24,8 +24,10 @@ use std::time::{Duration, Instant};
 const FLOOR_DB: f32 = -96.0;
 const PCM_SCALE: f32 = 2_147_483_648.0;
 const BAND_COUNT: usize = 112;
+const FOCUSED_BAND_COUNT: usize = 256;
 const REDUCTION_POINTS: usize = 48;
 const SPECTROGRAM_COLUMNS: u64 = 32;
+const FOCUSED_FFT_SAMPLE_BUDGET: u64 = 3_000_000;
 const MAX_VISUAL_SAMPLES: u64 = 4_000_000;
 const DECODE_BUDGET: Duration = Duration::from_millis(650);
 
@@ -58,6 +60,19 @@ pub enum SpectrogramDetail {
     Tones,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SpectrogramFocus {
+    pub low_hz: u32,
+    pub high_hz: u32,
+}
+
+impl SpectrogramFocus {
+    fn narrow(self) -> bool {
+        self.high_hz <= self.low_hz.saturating_mul(4)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum SpectrumView {
@@ -77,6 +92,7 @@ pub struct TreatmentProbeOptions {
     pub spectrogram_treated: bool,
     pub spectrogram_difference: bool,
     pub spectrogram_detail: SpectrogramDetail,
+    pub spectrogram_focus: Option<SpectrogramFocus>,
 }
 
 impl TreatmentProbeOptions {
@@ -149,6 +165,8 @@ pub struct TreatmentProbe {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spectrogram_detail: Option<SpectrogramDetail>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub spectrogram_focus: Option<SpectrogramFocus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub spectrogram_window_frames: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spectrogram_left: Option<Vec<Vec<f32>>>,
@@ -204,6 +222,16 @@ pub fn probe_treatment_with_options(
     }
     let rate = u64::from(info.sample_rate);
     let viewport = options.viewport.filter(|_| options.spectrogram_only());
+    let max_hz = (rate * 45 / 100).min(20_000) as u32;
+    let options = TreatmentProbeOptions {
+        spectrogram_focus: options.spectrogram_focus.filter(|focus| {
+            viewport.is_some()
+                && focus.low_hz >= 20
+                && focus.high_hz > focus.low_hz
+                && focus.high_hz <= max_hz
+        }),
+        ..options
+    };
     if let Some(range) = viewport {
         if range.start >= range.end || range.end > info.frames {
             return Err(MediaError::Range(
@@ -242,7 +270,9 @@ fn probe_overview(
     let detailed = prepared.settings().is_active() && !options.dry_spectrogram();
     let count = if detailed { 96 } else { 192 };
     let width = u64::from(match options.spectrogram_detail {
-        SpectrogramDetail::Balanced => probe_fft_size(info.sample_rate),
+        SpectrogramDetail::Balanced => {
+            balanced_fft_size(info.sample_rate, options.spectrogram_focus)
+        }
         SpectrogramDetail::Tones => probe_fft_size(info.sample_rate)
             .saturating_mul(4)
             .min(32_768),
@@ -333,14 +363,21 @@ fn probe_window(
     let channels = usize::from(info.channels);
     let base_fft_size = probe_fft_size(info.sample_rate);
     let viewport = options.viewport.filter(|_| options.spectrogram_only());
+    let focus = options.spectrogram_focus;
+    let balanced_max = balanced_fft_size(info.sample_rate, focus);
+    let window_divisor = if focus.is_some_and(SpectrogramFocus::narrow) {
+        4
+    } else {
+        8
+    };
     let balanced_size = viewport.map_or(base_fft_size, |range| {
-        (((range.end - range.start) / 8).max(2_048) as u32)
+        (((range.end - range.start) / window_divisor).max(2_048) as u32)
             .next_power_of_two()
-            .min(base_fft_size)
+            .min(balanced_max)
     });
     let fft_size = if options.spectrogram_only() {
         match options.spectrogram_detail {
-            SpectrogramDetail::Balanced if overview_column => base_fft_size,
+            SpectrogramDetail::Balanced if overview_column => balanced_max,
             SpectrogramDetail::Balanced => balanced_size,
             SpectrogramDetail::Transients => {
                 (info.sample_rate / 48).next_power_of_two().clamp(256, 4096)
@@ -549,7 +586,7 @@ fn probe_window(
         }
     });
     if options.spectrum || options.spectrogram {
-        with_spectrum(fft_size as usize, info.sample_rate, |analyzer| {
+        with_spectrum_focus(fft_size as usize, info.sample_rate, focus, |analyzer| {
             if options.spectrum {
                 (original, treated) = spectrum_views(
                     analyzer,
@@ -577,6 +614,8 @@ fn probe_window(
                 }
                 let max_columns = if overview_column {
                     1
+                } else if focus.is_some() {
+                    (FOCUSED_FFT_SAMPLE_BUDGET / u64::from(fft_size)).min(512)
                 } else if options.spectrogram_detail == SpectrogramDetail::Transients {
                     128
                 } else if viewport.is_some() {
@@ -584,7 +623,9 @@ fn probe_window(
                 } else {
                     SPECTROGRAM_COLUMNS
                 };
-                let stride = if options.spectrogram_detail == SpectrogramDetail::Transients {
+                let stride = if focus.is_some() {
+                    u64::from((fft_size / 16).clamp(32, 256))
+                } else if options.spectrogram_detail == SpectrogramDetail::Transients {
                     u64::from(fft_size / 4)
                 } else if viewport.is_some() {
                     256
@@ -711,6 +752,7 @@ fn probe_window(
             .spectrogram
             .then_some(options.spectrogram_difference),
         spectrogram_detail: options.spectrogram.then_some(options.spectrogram_detail),
+        spectrogram_focus: focus,
         spectrogram_window_frames: options
             .spectrogram
             .then_some(fft_size.min((visual_end - keep_raw.start) as u32)),
@@ -726,18 +768,36 @@ fn probe_fft_size(rate: u32) -> u32 {
     (rate / 6).next_power_of_two().clamp(2_048, 32_768)
 }
 
-type SpectrumKey = (usize, u32);
+fn balanced_fft_size(rate: u32, focus: Option<SpectrogramFocus>) -> u32 {
+    let size = probe_fft_size(rate);
+    if focus.is_some_and(SpectrogramFocus::narrow) {
+        (size * 2).min(32_768)
+    } else {
+        size
+    }
+}
+
+type SpectrumKey = (usize, u32, Option<SpectrogramFocus>);
 
 thread_local! {
     static SPECTRUM_CACHE: RefCell<Option<(SpectrumKey, Spectrum)>> = const { RefCell::new(None) };
 }
 
 fn with_spectrum<R>(size: usize, rate: u32, run: impl FnOnce(&mut Spectrum) -> R) -> R {
+    with_spectrum_focus(size, rate, None, run)
+}
+
+fn with_spectrum_focus<R>(
+    size: usize,
+    rate: u32,
+    focus: Option<SpectrogramFocus>,
+    run: impl FnOnce(&mut Spectrum) -> R,
+) -> R {
     SPECTRUM_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        let key = (size, rate);
+        let key = (size, rate, focus);
         if cache.as_ref().is_none_or(|(cached, _)| *cached != key) {
-            *cache = Some((key, Spectrum::new(size, rate)));
+            *cache = Some((key, Spectrum::focused(size, rate, focus)));
         }
         run(&mut cache.as_mut().expect("initialized spectrum cache").1)
     })
@@ -848,14 +908,25 @@ struct Spectrum {
 
 impl Spectrum {
     fn new(size: usize, rate: u32) -> Self {
+        Self::focused(size, rate, None)
+    }
+
+    fn focused(size: usize, rate: u32, focus: Option<SpectrogramFocus>) -> Self {
         let fft = FftPlanner::new().plan_fft_forward(size);
         let high = (rate as f32 * 0.45).min(20_000.0);
         let low = (high * 0.5).min(20.0);
-        let frequencies: Vec<_> = (0..BAND_COUNT)
-            .map(|band| low * (high / low).powf(band as f32 / (BAND_COUNT - 1) as f32))
+        let (low, high, band_count) = focus.map_or((low, high, BAND_COUNT), |focus| {
+            (
+                focus.low_hz as f32,
+                focus.high_hz as f32,
+                FOCUSED_BAND_COUNT,
+            )
+        });
+        let frequencies: Vec<_> = (0..band_count)
+            .map(|band| low * (high / low).powf(band as f32 / (band_count - 1) as f32))
             .collect();
         let bin_spacing = rate as f32 / size as f32;
-        let band_radius = (high / low).powf(0.5 / (BAND_COUNT - 1) as f32);
+        let band_radius = (high / low).powf(0.5 / (band_count - 1) as f32);
         let bands = frequencies
             .iter()
             .map(|&frequency| {
@@ -1424,6 +1495,47 @@ mod tests {
             || false,
         )
         .is_err());
+    }
+
+    #[test]
+    fn zoomed_spectrogram_measures_denser_time_columns_and_focused_frequency_bins() {
+        let viewport = FrameRange {
+            start: u64::from(INFO.sample_rate) * 3 / 2,
+            end: INFO.frames,
+        };
+        let display = |focus| {
+            probe_treatment_with_options(
+                recording(),
+                INFO,
+                viewport.start,
+                None,
+                PreparedTreatment::default(),
+                TreatmentProbeOptions {
+                    spectrogram: true,
+                    viewport: Some(viewport),
+                    spectrogram_focus: focus,
+                    ..TreatmentProbeOptions::default()
+                },
+                || false,
+            )
+            .unwrap()
+        };
+        let broad = display(None);
+        let focus = SpectrogramFocus {
+            low_hz: 9_800,
+            high_hz: 11_200,
+        };
+        let zoomed = display(Some(focus));
+        let columns = zoomed.spectrogram.as_ref().unwrap();
+        assert_eq!(zoomed.spectrogram_focus, Some(focus));
+        assert_eq!(zoomed.spectrogram_start, broad.spectrogram_start);
+        assert_eq!(zoomed.spectrogram_end, broad.spectrogram_end);
+        assert!(columns.len() > broad.spectrogram.unwrap().len());
+        assert!(zoomed.frequencies.len() > broad.frequencies.len());
+        assert!((10_480.0..10_520.0).contains(&strongest_band(
+            &zoomed.frequencies,
+            &columns[columns.len() / 2]
+        )));
     }
 
     #[test]

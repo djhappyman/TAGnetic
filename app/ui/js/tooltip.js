@@ -79,7 +79,7 @@ function hintText(element) {
   return '';
 }
 function hintAnchor(target) {
-  if (!(target instanceof HTMLElement || target instanceof SVGElement) || target.closest('.mode-tabs, #tooltip')) return null;
+  if (!(target instanceof HTMLElement || target instanceof SVGElement) || target.closest('.mode-tabs, #tooltip, [data-tooltip-disabled]')) return null;
   for (let element = target; element && element !== document.body; element = element.parentElement) {
     if (!(element instanceof HTMLElement)) continue;
     suppressTitle(element);

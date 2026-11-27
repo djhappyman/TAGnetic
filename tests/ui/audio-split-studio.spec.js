@@ -1907,4 +1907,7 @@ test('requests the full spectrogram once and reuses it through transport seeks',
   await expect.poll(async () => (await probes()).at(-1)?.args).toMatchObject({
     viewport: local, spectrogram: true, spectrogramTreated: true, spectrogramDifference: true,
   });
+  const focus = { lowHz: 250, highHz: 700 };
+  await viewport(local, { channel: 'combined', treated: true, difference: true, focus });
+  await expect.poll(async () => (await probes()).at(-1)?.args).toMatchObject({ viewport: local, spectrogramFocus: focus });
 });

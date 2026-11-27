@@ -113,7 +113,7 @@
   .meter-unit { grid-column: 3; text-align: right; }
   .meter-channel { grid-column: 1; color: var(--text); }
   .meter-channel.dimmed { color: var(--muted); }
-  .meter-track { position: relative; grid-column: 2; height: 6px; border-radius: var(--r-pill); background: var(--row-hover); }
+  .meter-track { position: relative; grid-column: 2; height: 6px; border-radius: var(--r-pill); background: var(--bg); }
   .meter-fill {
     position: absolute; inset: 0; border-radius: inherit; clip-path: inset(0 calc(100% - var(--level)) 0 0);
     background: linear-gradient(90deg, var(--sel-tint), var(--accent), var(--accent-ink));

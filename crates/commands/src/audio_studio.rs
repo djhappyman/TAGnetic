@@ -22,7 +22,8 @@ use tagrex_audio_workbench::{
 };
 pub use tagrex_audio_workbench::{
     AudioTreatment, EqBand, FrameRange, PreviewComparison, PreviewMonitor, SpectralRepair,
-    SpectrogramChannel, SpectrogramDetail, SpectrumView, TreatmentProbe, TreatmentProbeOptions,
+    SpectrogramChannel, SpectrogramDetail, SpectrogramFocus, SpectrumView, TreatmentProbe,
+    TreatmentProbeOptions,
 };
 use tagrex_core::mask::{portable_file_name, Mask};
 use tagrex_core::model::{

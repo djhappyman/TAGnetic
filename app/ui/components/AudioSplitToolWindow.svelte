@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick, untrack } from 'svelte';
+  import { tick, untrack, type Snippet } from 'svelte';
   import { AudioLines, Check, ChevronDown, ChevronLeft, ChevronRight, Ellipsis, Equal, FastForward, Headphones, Pause, Pin, Play, Power, Repeat2, Rewind, Scale, SkipBack, X, Zap } from '@lucide/svelte';
   import { createMenuController, Menu, MenuContent, MenuGroup, MenuGroupLabel, MenuItem, MenuItemIndicator, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuShortcut, MenuSub, MenuSubContent, MenuSubTrigger, MenuTrigger } from '@ui-sdk/svelte/menu';
   import { createSelectController, Select, SelectContent, SelectItem, SelectTrigger } from '@ui-sdk/svelte/select';
@@ -23,10 +23,11 @@
   import { toolPatch, type PreviewBand, type RepairListenCommand, type RepairMeterUpdate, type SpectrogramViewOptions, type ToolAction, type ToolSnapshot } from '../js/audio-tools-window';
   import { projectRepairFrame, repairClockHorizon } from '../js/audio-repair-clock';
 
-  let { kind, snapshot, probe, meter, onedit, onaction, onviewport, onanalyzer, onlearn, onlisten }: {
+  let { kind, snapshot, probe, notice, meter, onedit, onaction, onviewport, onanalyzer, onlearn, onlisten }: {
     kind: TreatmentPlotMode;
     snapshot: ToolSnapshot | null;
     probe: TreatmentProbe | null;
+    notice?: string;
     meter?: RepairMeterUpdate;
     onanalyzer: (view: AnalyzerView) => void;
     onlearn: (index: number) => void;
@@ -385,22 +386,24 @@
         {#if snapshot?.playing}<Pause size={15} aria-hidden="true"/>{:else}<Play size={15} aria-hidden="true"/>{/if}
       </Button>
       {#if kind === 'repair'}
-        <Button variant="ghost" size="icon-sm" disabled={!snapshot} aria-label="Go to recording start" title="Go to recording start"
-          onclick={() => seek(0)}><SkipBack size={15} aria-hidden="true"/></Button>
-        <Button variant="ghost" size="icon-sm" disabled={!snapshot} aria-label="Back 5 seconds" title="Back 5 seconds"
-          onclick={() => seek((snapshot?.frame ?? 0) - 5 * sampleRate)}><Rewind size={15} aria-hidden="true"/></Button>
-        <Input class="repair-position" type="text" inputmode="decimal" aria-label="Playback position"
-          {@attach playbackPosition}
-          title="Playback position · enter a time to seek" value={enteredTime ?? playTime} disabled={!snapshot} aria-invalid={timeInvalid}
-          onfocus={event => event.currentTarget.select()}
-          oninput={event => { enteredTime = event.currentTarget.value; timeInvalid = false; }}
-          onblur={() => { commitPlayTime(); enteredTime = undefined; timeInvalid = false; }}
-          onkeydown={event => {
-            if (event.key === 'Enter') { event.preventDefault(); commitPlayTime(); }
-            if (event.key === 'Escape') { event.preventDefault(); enteredTime = undefined; timeInvalid = false; }
-          }}/>
-        <Button variant="ghost" size="icon-sm" disabled={!snapshot} aria-label="Forward 5 seconds" title="Forward 5 seconds"
-          onclick={() => seek((snapshot?.frame ?? 0) + 5 * sampleRate)}><FastForward size={15} aria-hidden="true"/></Button>
+        <div class="repair-seek" role="group" aria-label="Seek">
+          <Button variant="ghost" size="icon-sm" disabled={!snapshot} aria-label="Go to recording start" title="Go to recording start"
+            onclick={() => seek(0)}><SkipBack size={15} aria-hidden="true"/></Button>
+          <Button variant="ghost" size="icon-sm" disabled={!snapshot} aria-label="Back 5 seconds" title="Back 5 seconds"
+            onclick={() => seek((snapshot?.frame ?? 0) - 5 * sampleRate)}><Rewind size={15} aria-hidden="true"/></Button>
+          <Input class="repair-position" type="text" inputmode="decimal" aria-label="Playback position"
+            {@attach playbackPosition}
+            title="Playback position · enter a time to seek" value={enteredTime ?? playTime} disabled={!snapshot} aria-invalid={timeInvalid}
+            onfocus={event => event.currentTarget.select()}
+            oninput={event => { enteredTime = event.currentTarget.value; timeInvalid = false; }}
+            onblur={() => { commitPlayTime(); enteredTime = undefined; timeInvalid = false; }}
+            onkeydown={event => {
+              if (event.key === 'Enter') { event.preventDefault(); commitPlayTime(); }
+              if (event.key === 'Escape') { event.preventDefault(); enteredTime = undefined; timeInvalid = false; }
+            }}/>
+          <Button variant="ghost" size="icon-sm" disabled={!snapshot} aria-label="Forward 5 seconds" title="Forward 5 seconds"
+            onclick={() => seek((snapshot?.frame ?? 0) + 5 * sampleRate)}><FastForward size={15} aria-hidden="true"/></Button>
+        </div>
       {/if}
       <Button variant="ghost" size="icon-sm" class="tool-power" disabled={!snapshot}
         aria-label={kind === 'repair' ? 'Loop selection' : 'Loop preview'} title={kind === 'repair' ? 'Repeat the selection or add a playback loop (Ctrl/⌘+L)' : 'Loop preview (L)'}
@@ -522,7 +525,7 @@
 
 <section class={['tool-window', { eq: kind === 'eq', repair: kind === 'repair' }]} aria-label={title[kind]}>
   {#if kind !== 'repair'}
-    <header class="tool-header">
+    <header class={['tool-header', { 'tool-chrome': kind === 'eq' }]}>
       {@render transportControls()}
       {@render windowControls()}
     </header>
@@ -532,18 +535,27 @@
   {:else if kind === 'dynamics'}
     <AudioSplitDynamicsPanel {snapshot} {probe} mode={mode ?? 'compressor'} {onedit} {onaction}/>
   {:else}
+    {#snippet repairHeader(overview: Snippet)}
+      <header class="tool-header tool-chrome overview-bar">
+        {@render overview()}
+        {@render windowControls()}
+      </header>
+    {/snippet}
+    {#snippet repairFooter(controls: Snippet)}
+      <footer class="repair-transport tool-chrome" data-tooltip-side="top">
+        {@render transportControls()}
+        <AudioSplitRepairMeters reading={meterReading} running={!!(snapshot?.clockRunning ?? snapshot?.playing)}
+          stereo={!!(snapshot?.repairStereoOutput ?? snapshot?.stereo)} monitor={snapshot?.repairListen?.channel ?? 'stereo'}/>
+        {@render controls()}
+      </footer>
+    {/snippet}
     {#snippet listen(selection: SpectralRepair | undefined, candidate: SpectralRepair | undefined, repairSlot: number | undefined)}
       <AudioSplitRepairListen {snapshot} {selection} {candidate} {repairSlot} {onlisten}/>
     {/snippet}
     {#key snapshot?.sourceId}
-      <AudioSplitRepairPlot {snapshot} {probe} {onviewport} {onedit} {onaction} {onlisten} {modeRail} {listen} {windowControls}
+      <AudioSplitRepairPlot {snapshot} {probe} {notice} {onviewport} {onedit} {onaction} {onlisten} {modeRail} {listen} header={repairHeader} footer={repairFooter}
         signal={repairSignal} onsignal={signal => onlisten({ type: 'signal', signal })}/>
     {/key}
-    <div class="repair-transport">
-      {@render transportControls()}
-      <AudioSplitRepairMeters reading={meterReading} running={!!(snapshot?.clockRunning ?? snapshot?.playing)}
-        stereo={!!(snapshot?.repairStereoOutput ?? snapshot?.stereo)} monitor={snapshot?.repairListen?.channel ?? 'stereo'}/>
-    </div>
   {/if}
 
   {#if kind === 'dynamics'}
@@ -627,32 +639,38 @@
     border-radius:var(--r-dialog); pointer-events:none;
   }
   .tool-window:is(.eq,.repair) { grid-template-columns:minmax(0,1fr); }
-  .tool-window.repair { grid-template-rows:1fr auto; }
+  .tool-window.repair {
+    --repair-well:color-mix(in srgb,var(--panel) 87%,var(--border));
+    min-height:100dvh; grid-template-rows:minmax(0,1fr);
+  }
   .tool-header,.transport,.comparison { display:flex; align-items:center; gap:var(--sp-2,8px); }
   .tool-header { grid-column:1 / -1; justify-content:space-between; min-width:0; }
+  .tool-header.overview-bar { min-height:32px; }
+  .overview-bar .preset-controls { flex:none; }
   .repair-transport {
-    display:flex; align-items:center; flex-wrap:wrap; gap:var(--sp-1) var(--sp-4); min-width:0;
-    padding-block:var(--sp-2) var(--sp-1); border-top:1px solid var(--border);
+    display:flex; align-items:center; flex-wrap:wrap; gap:var(--sp-1) var(--sp-2); min-width:0;
+    min-height:36px; padding-inline:var(--sp-1);
   }
   .repair-transport .transport { flex-wrap:wrap; }
-  .repair-transport :global(.repair-meters) { flex:1 1 260px; max-width:480px; }
+  .repair-transport :global(.repair-meters) { flex:1 1 210px; max-inline-size:360px; }
+  .repair-transport :global(.repair-footer-tools) { margin-inline-start:auto; }
   .tool-side { grid-column:2; grid-row:2 / 4; align-self:start; }
   .transport { gap:var(--sp-1,4px); }
   .comparison { gap:2px; }
   .comparison :global(button) { block-size:24px; border:0; border-radius:var(--r-compact); background:transparent; }
   .comparison :global([aria-pressed=true]) { background:var(--sel-tint); color:var(--accent-ink,var(--text)); }
+  .repair-seek { display:flex; align-items:center; gap:2px; }
   .repair :global(.repair-position) {
-    width:11ch; min-width:0; padding:0 2px; block-size:26px; border:0; background:transparent;
+    width:11ch; min-width:0; padding:0 var(--sp-1); block-size:28px;
+    border:0; border-radius:var(--r-compact); background:var(--repair-well); box-shadow:none;
     color:var(--text); font-family:var(--font-literal); font-variant-numeric:tabular-nums; font-size:var(--text-xs); text-align:center;
   }
+  .repair :global(.repair-position:focus-visible) { outline:2px solid var(--accent); outline-offset:1px; }
   .repair :global(.repair-position[aria-invalid=true]) { outline:1px solid var(--del); }
   .repair :global(.repair-signal) {
     display:inline-flex; align-items:center; gap:var(--sp-1); block-size:28px; padding-inline:var(--sp-2);
     border:0; border-radius:var(--r-compact); background:transparent; color:var(--muted); font-size:var(--text-xs);
   }
-  .repair :global(.repair-signal:hover:enabled) { background:var(--row-hover); color:var(--text); }
-  .repair :global(.repair-signal[aria-expanded=true]) { background:var(--sel-tint); color:var(--accent-ink); }
-  .repair :global(.repair-signal:focus-visible) { outline:2px solid var(--accent); outline-offset:1px; }
   .eq :global(.ab-toggle) {
     gap:2px; padding-inline:6px; block-size:24px; min-inline-size:36px; border:0; background:transparent; color:var(--muted);
   }
@@ -667,14 +685,14 @@
   }
   :global(.tool-window .compact-presets) span { max-inline-size:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .eq .tool-header { flex-wrap:wrap; gap:var(--sp-1) var(--sp-3); }
-  .eq .tool-header :global(button) {
+  .tool-chrome .transport :global(button) {
     border:0; box-shadow:none; background:transparent; color:var(--muted);
   }
-  .eq .tool-header :global(button:hover:not(:disabled)) { color:var(--text); background:var(--row-hover); }
-  .eq .tool-header :global(button:is([aria-pressed=true],[aria-expanded=true])) {
+  .tool-chrome .transport :global(button:hover:not(:disabled)) { color:var(--text); background:var(--row-hover); }
+  .tool-chrome .transport :global(button:is([aria-pressed=true],[aria-expanded=true])) {
     color:var(--accent-ink); background:var(--sel-tint);
   }
-  .eq .tool-header :global(button:focus-visible) { outline:2px solid var(--accent); outline-offset:1px; }
+  .tool-chrome .transport :global(button:focus-visible) { outline:2px solid var(--accent); outline-offset:1px; }
   .eq .tool-header :global(button.treatment-bypass[aria-pressed=true]) {
     color:color-mix(in srgb,var(--del) 78%,var(--muted));
     background:color-mix(in srgb,var(--del) 14%,transparent);
@@ -701,5 +719,9 @@
   :global(.app-select-menu.audio-tool-popup) { background:var(--panel); }
   @media (max-width: 480px) {
     .repair .transport { gap: 2px; }
+  }
+  @media (max-height: 420px) {
+    .tool-window.repair { height:100dvh; padding:var(--sp-2); }
+    .tool-header.overview-bar { min-height:28px; }
   }
 </style>
