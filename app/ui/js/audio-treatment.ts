@@ -1,5 +1,17 @@
 import { eqFrequencyLimit, eqGainLimit, eqGainStep, eqSpectralShape, roundEqDb } from './audio-eq-range.js';
 
+export type RepairMaskPoint = { frame: number; hz: number };
+type MaskOperation = 'add' | 'subtract';
+export type RepairMaskRegion = { operation: MaskOperation } & (
+  | { kind: 'rectangle'; startFrame: number; endFrame: number; lowHz: number; highHz: number }
+  | { kind: 'brush'; radiusFrames: number; radiusHz: number; points: RepairMaskPoint[] }
+  | { kind: 'lasso'; points: RepairMaskPoint[] }
+);
+export type RepairMask = { version: 1; featherFrames: number; featherHz: number; regions: RepairMaskRegion[] };
+export const maxRepairMaskRegions = 16;
+export const maxRepairMaskPoints = 256;
+export const maxRepairMaskTotalPoints = 512;
+
 export type SpectralRepair = {
   startFrame: number;
   endFrame: number;
@@ -7,6 +19,10 @@ export type SpectralRepair = {
   highHz: number;
   amountDb: number;
   channel?: 'left' | 'right';
+  name?: string;
+  bypassed?: boolean;
+  interpolate?: boolean;
+  mask?: RepairMask;
 };
 export const maxSpectralRepairs = 8;
 
@@ -133,15 +149,57 @@ export function sameRepairBounds(left: Omit<SpectralRepair, 'amountDb'>, right: 
     && left.lowHz === right.lowHz && left.highHz === right.highHz && left.channel === right.channel;
 }
 
+function repairInteger(value: number, min: number, max = Number.MAX_SAFE_INTEGER) {
+  return Number.isSafeInteger(value) && value >= min && value <= max;
+}
+
+function readRepairMask(mask: RepairMask, bounds: SpectralRepair): RepairMask | undefined {
+  const { featherFrames, featherHz, regions } = mask;
+  if (mask.version !== 1 || !repairInteger(featherFrames, 0, 384_000) || !repairInteger(featherHz, 0, 10_000)
+    || !Array.isArray(regions) || !regions.length || regions.length > maxRepairMaskRegions || regions[0]?.operation !== 'add') return;
+  let total = 0;
+  const clean: RepairMaskRegion[] = [];
+  for (const region of regions) {
+    if (!region || (region.operation !== 'add' && region.operation !== 'subtract')) return;
+    const { kind, operation } = region;
+    const valid = (frame: number, hz: number) => operation === 'add'
+      ? repairInteger(frame, bounds.startFrame, bounds.endFrame) && repairInteger(hz, bounds.lowHz, bounds.highHz)
+      : repairInteger(frame, 0) && repairInteger(hz, 0, 384_000);
+    if (kind === 'rectangle') {
+      const { startFrame, endFrame, lowHz, highHz } = region;
+      if (!valid(startFrame, lowHz) || !valid(endFrame, highHz) || startFrame >= endFrame || lowHz >= highHz) return;
+      clean.push({ kind, operation, startFrame, endFrame, lowHz, highHz });
+    } else if (kind === 'lasso' || kind === 'brush') {
+      if (!Array.isArray(region.points) || region.points.length < (kind === 'lasso' ? 3 : 1)
+        || region.points.length > maxRepairMaskPoints) return;
+      total += region.points.length;
+      if (total > maxRepairMaskTotalPoints || !region.points.every(p => p && valid(p.frame, p.hz))) return;
+      const points = region.points.map(({ frame, hz }) => ({ frame, hz }));
+      if (kind === 'brush') {
+        const { radiusFrames, radiusHz } = region;
+        if (!repairInteger(radiusFrames, 1, 768_000) || !repairInteger(radiusHz, 1, 20_000)) return;
+        clean.push({ kind, operation, radiusFrames, radiusHz, points });
+      } else clean.push({ kind, operation, points });
+    } else return;
+  }
+  return { version: 1, featherFrames, featherHz, regions: clean };
+}
+
 function readRepairs(value: AudioTreatment['spectralRepairs']) {
   if (!Array.isArray(value)) return null;
   const repairs = value.slice(0, maxSpectralRepairs).map(edit => {
     if (!edit) return null;
-    const { startFrame, endFrame, lowHz, highHz, amountDb, channel } = edit;
-    return [startFrame, endFrame, lowHz, highHz, amountDb].every(Number.isSafeInteger)
-      && startFrame >= 0 && startFrame < endFrame && lowHz >= 20 && highHz - lowHz >= 20 && highHz <= 20_000
-      && amountDb >= 1 && amountDb <= 36 ? { startFrame, endFrame, lowHz, highHz, amountDb,
-        ...(channel === 'left' || channel === 'right' ? { channel } : {}) } : null;
+    const { startFrame, endFrame, lowHz, highHz, amountDb, channel, name, bypassed } = edit;
+    if (!repairInteger(startFrame, 0) || !repairInteger(endFrame, startFrame + 1) || !repairInteger(amountDb, 1, 36)
+      || !repairInteger(lowHz, edit.mask ? 0 : 20) || !repairInteger(highHz, lowHz + (edit.mask ? 1 : 20), edit.mask ? 384_000 : 20_000)) return null;
+    const mask = edit.mask && readRepairMask(edit.mask, edit);
+    const interpolate = edit.interpolate === true;
+    if ((edit.mask != null && !mask) || (interpolate && mask)) return null;
+    const label = typeof name === 'string' ? Array.from(name.trim()).slice(0, 80).join('') : '';
+    return { startFrame, endFrame, lowHz, highHz, amountDb,
+      ...(channel === 'left' || channel === 'right' ? { channel } : {}),
+      ...(label ? { name: label } : {}), ...(bypassed === true ? { bypassed: true } : {}),
+      ...(interpolate ? { interpolate: true } : {}), ...(mask ? { mask } : {}) };
   });
   while (repairs.length && !repairs.at(-1)) repairs.pop();
   return repairs.length ? repairs : null;
@@ -220,10 +278,13 @@ export function sameTreatment(left: AudioTreatment, right: AudioTreatment): bool
   }))) return false;
   const a = left.spectralRepairs;
   const b = right.spectralRepairs;
-  return a === b || (!!a && !!b && a.length === b.length && a.every((edit, index) => {
-    const other = b[index];
-    return edit === other || (!!edit && !!other && sameRepairBounds(edit, other) && edit.amountDb === other.amountDb);
-  }));
+  return a === b || (!!a && !!b && a.length === b.length && a.every((edit, index) => sameSavedRepair(edit, b[index])));
+}
+
+export function sameSavedRepair(left: SpectralRepair | null, right: SpectralRepair | null): boolean {
+  return left === right || (!!left && !!right && sameRepairBounds(left, right) && left.amountDb === right.amountDb
+    && left.name === right.name && !!left.bypassed === !!right.bypassed && !!left.interpolate === !!right.interpolate
+    && (left.mask === right.mask || JSON.stringify(left.mask) === JSON.stringify(right.mask)));
 }
 
 export const effectCategories = ['Repair', 'Tone', 'Level', 'Stereo'] as const;
@@ -244,7 +305,7 @@ type Effect = {
 
 export const audioEffects: readonly Effect[] = [
   { key: 'eqBands', category: 'Tone', label: 'Additional EQ bands', description: 'Adjust additional frequency ranges.', reset: { eqBands: null } },
-  { key: 'spectralRepairs', category: 'Repair', label: 'Selected frequency attenuation', description: 'Turn down selected frequency ranges at specific times.', reset: { spectralRepairs: null } },
+  { key: 'spectralRepairs', category: 'Repair', label: 'Spectral repairs', description: 'Reduce selected sounds and restore short clicks.', reset: { spectralRepairs: null } },
   { key: 'dcHz', category: 'Repair', label: 'Remove DC offset', description: 'Recenter a waveform shifted above or below zero.', numbers: ['dcHz'], reset: { dcHz: 0 } },
   { key: 'rumble', category: 'Repair', label: 'Reduce rumble', description: 'Cut low vibration and handling noise.', numbers: ['rumbleHz'], reset: { rumble: false, rumbleHz: 0 } },
   { key: 'hum', category: 'Repair', label: 'Reduce mains hum', description: 'Choose the mains frequency and cut its harmonics.', numbers: ['humHarmonics'], reset: { hum: 'off', humHarmonics: 0 } },
@@ -269,6 +330,7 @@ export const audioEffects: readonly Effect[] = [
 export function effectIsActive(settings: AudioTreatment, key: EffectKey): boolean {
   if (Object.prototype.hasOwnProperty.call(eqBandBypassBits, key)
     && (settings.eqBypassed & eqBandBypassBits[key as keyof typeof eqBandBypassBits])) return false;
+  if (key === 'spectralRepairs') return settings.spectralRepairs?.some(repair => repair != null && !repair.bypassed) ?? false;
   if (key === 'eqBands') return !!settings.eqBands?.some(band => eqBandIsActive(band, settings.eqStrength));
   if (settings.eqStrength === 0 && (key === 'bassDb' || key === 'presenceDb' || key === 'trebleDb')) return false;
   if (key === 'compressorDb') return !!(settings.compressorDb || settings.compressorInputDb);

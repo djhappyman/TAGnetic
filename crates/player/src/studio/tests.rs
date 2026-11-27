@@ -83,7 +83,7 @@ impl Fixture {
         let channels = rodio::ChannelCount::new(2).unwrap();
         let rate = rodio::SampleRate::new(rate).unwrap();
         let (main_handle, main) = router::Router::new(channels, rate);
-        let (studio_handle, studio) = router::Router::new(channels, rate);
+        let (studio_handle, studio) = router::Router::new_studio(rate);
         let output = Routed {
             main: main_handle,
             studio: studio_handle,
@@ -177,6 +177,7 @@ fn live_treatment_preserves_loop_and_ignores_older_settings_or_owners() {
     let audition = StudioAudition {
         start: point(100),
         end: point(108),
+        smooth: false,
     };
     let owner = "editor".to_owned();
     f.player
@@ -232,9 +233,10 @@ fn live_treatment_preserves_loop_and_ignores_older_settings_or_owners() {
         || {
             let (left, right) = pcm(&mut f.studio);
             assert_eq!(left, -right);
-            assert_eq!(left.abs(), next);
+            assert!(left.abs() <= next);
+            let fully_treated = left == -next;
             next = 4_100 + (next - 4_100 + 1) % 8;
-            if left < 0 {
+            if fully_treated {
                 first_treated = right;
                 true
             } else {
@@ -330,9 +332,9 @@ fn live_treatment_continues_streaming_and_keeps_current_sound_on_failure() {
     crate::test_support::wait_until("separate decoder catches the live playhead", || {
         let (left, right) = pcm(&mut f.studio);
         assert_eq!(left, -right);
-        assert_eq!(left.abs(), previous + 1);
-        previous = left.abs();
-        left < 0
+        previous += 1;
+        assert!(left.abs() <= previous);
+        left == -previous
     });
     let broken = Recording::ramp("retune-broken", 1, 4_000);
     std::fs::write(&broken.0, b"invalid recording").unwrap();
@@ -350,6 +352,7 @@ fn live_treatment_continues_streaming_and_keeps_current_sound_on_failure() {
         |p| p.studio_status("editor").retune_failed == Some(2),
     );
     assert!(f.player.studio_status("editor").playing);
+    assert_eq!(f.player.studio_status("editor").retune_pending, None);
     assert!(pcm(&mut f.studio).0 < 0);
     f.drain();
 }
@@ -394,16 +397,16 @@ fn retune_handoff_accounts_for_a_frame_rendered_after_the_control_snapshot() {
         },
     )
     .unwrap();
-    let geometry = Geometry {
-        treatment: wet,
-        ..geometry
+    let wet_geometry = Geometry {
+        treatment: wet.clone(),
+        ..geometry.clone()
     };
     let prepare = |position| {
         let pending = Voice::prepare(
             &router,
             1.0,
             &pending_worker,
-            geometry.request(&file, position, None).unwrap(),
+            wet_geometry.request(&file, position, None).unwrap(),
         );
         crate::test_support::wait_until("treated decoder ready", || pending.ready());
         assert!(pending.covers(position));
@@ -420,11 +423,41 @@ fn retune_handoff_accounts_for_a_frame_rendered_after_the_control_snapshot() {
         assert_eq!(frame, (dry.0 + 1, dry.1 - 1));
         dry = frame;
     }
-    expired.submit_handoff(&router, snapshot, &active, None);
+    expired.submit_handoff(&router, snapshot, &active, None, None);
     let dry = (dry.0 + 1, dry.1 - 1);
     assert_eq!(pcm(&mut output), dry);
     assert!(matches!(expired.handoff(), Handoff::Missed));
-    drop(expired);
+    let mut lease = Lease {
+        voice: active,
+        file: file.try_clone().unwrap(),
+        router: router.clone(),
+        geometry,
+        playing: true,
+        seek_index: None,
+        pending: Some(Retune {
+            voice: expired,
+            target: RetuneTarget {
+                file: file.try_clone().unwrap(),
+                treatment: wet,
+                range: None,
+            },
+            retries: 0,
+            submitted: true,
+        }),
+        queued: Some(RetuneTarget {
+            file: file.try_clone().unwrap(),
+            treatment: PreparedTreatment::default(),
+            range: None,
+        }),
+        revision: 2,
+    };
+    assert!(!lease.advance_retune(&pending_worker).unwrap());
+    assert!(
+        lease.pending.is_none(),
+        "an expired preview must leave the worker for the latest edit"
+    );
+    assert!(lease.queued.is_some());
+    let active = lease.voice;
 
     // The device completes a full stereo frame while the controller still
     // has the earlier position.
@@ -436,9 +469,18 @@ fn retune_handoff_accounts_for_a_frame_rendered_after_the_control_snapshot() {
     // belongs to the old frame, and the new voice starts on the next frame.
     let convert = |sample: f32| (sample * 32_768.0).round() as i32;
     assert_eq!(convert(output.next().unwrap()), last_dry.0 + 1);
-    pending.submit_handoff(&router, snapshot, &active, None);
+    pending.submit_handoff(&router, snapshot, &active, None, None);
     assert_eq!(convert(output.next().unwrap()), last_dry.1 - 1);
-    assert_eq!(pcm(&mut output), (last_dry.1 - 2, last_dry.0 + 2));
+    // The replacement starts at the same source frame and blends both
+    // channels together for the fade. A hard swap starts with opposite polarity.
+    let blend_frames = RATE / 250;
+    for offset in 0..blend_frames {
+        let dry = last_dry.0 + 2 + offset as i32;
+        let mix = (offset + 1) as f32 / blend_frames as f32;
+        let expected = (dry as f32 * (1.0 - 2.0 * mix)).round() as i32;
+        let (left, right) = pcm(&mut output);
+        assert!((left - expected).abs() <= 1 && (right + expected).abs() <= 1);
+    }
     assert!(matches!(pending.handoff(), Handoff::Switched));
 }
 
@@ -489,7 +531,8 @@ fn sustained_retunes_hand_off_an_intermediate_voice_and_the_last_edit() {
             audition: None,
             sample_rate: RATE,
             seek_index: None,
-            treatment: Box::new(dry),
+            treatment: Box::new(dry.clone()),
+            channel: StudioMonitorChannel::Stereo,
         },
         Some(&routed),
         1.0,
@@ -505,8 +548,9 @@ fn sustained_retunes_hand_off_an_intermediate_voice_and_the_last_edit() {
         revision,
         file: File::open(&recording.0).unwrap(),
         treatment: Box::new(treatment),
+        range: None,
     };
-    actor.handle(retune(1, first), Some(&routed), 1.0);
+    actor.handle(retune(1, first.clone()), Some(&routed), 1.0);
     for revision in 2..=12 {
         actor.handle(
             retune(revision, gain(-(revision as i8))),
@@ -514,39 +558,43 @@ fn sustained_retunes_hand_off_an_intermediate_voice_and_the_last_edit() {
             1.0,
         );
     }
-    let current = |actor: &Actor| actor.lease.as_ref().unwrap().geometry.treatment;
+    assert_eq!(actor.shared.for_owner("editor").retune_pending, Some(12));
+    fn current(actor: &Actor) -> &PreparedTreatment {
+        &actor.lease.as_ref().unwrap().geometry.treatment
+    }
     crate::test_support::wait_until("the prepared edit hands off despite newer requests", || {
         actor.tick();
-        if same_treatment(current(&actor), dry) {
+        if same_treatment(current(&actor), &dry) {
             let _ = pcm(&mut output);
             false
         } else {
             true
         }
     });
-    assert!(same_treatment(current(&actor), first));
+    assert!(same_treatment(current(&actor), &first));
     assert!(pcm(&mut output).0 < 0);
 
     let latest = gain(-12);
     crate::test_support::wait_until("the latest edit alone follows the handoff", || {
         actor.tick();
-        if same_treatment(current(&actor), first) {
+        if same_treatment(current(&actor), &first) {
             let _ = pcm(&mut output);
             false
         } else {
             true
         }
     });
-    assert!(same_treatment(current(&actor), latest));
+    assert!(same_treatment(current(&actor), &latest));
+    assert_eq!(actor.shared.for_owner("editor").retune_pending, None);
     assert!((1..dry_sample / 2).contains(&pcm(&mut output).0));
 
     actor.handle(retune(13, first), Some(&routed), 1.0);
-    actor.handle(retune(14, dry), Some(&routed), 1.0);
+    actor.handle(retune(14, dry.clone()), Some(&routed), 1.0);
     crate::test_support::wait_until(
         "the final bypass request restores the original sound",
         || {
             actor.tick();
-            if same_treatment(current(&actor), dry) {
+            if same_treatment(current(&actor), &dry) {
                 true
             } else {
                 let _ = pcm(&mut output);
@@ -620,12 +668,262 @@ fn studio_freezes_exact_main_samples_and_keeps_queued_next_track() {
 }
 
 #[test]
+fn spectral_selection_plays_to_its_end_once_or_repeats_from_its_start() {
+    use tagrex_audio_workbench::{RepairChannel, SpectralRepair};
+
+    let recording = Recording::ramp("spectral-selection", 4096, 8000);
+    let mut fixture = Fixture::new(true);
+    let start = 500;
+    let end = 1500;
+    let owner = "editor".to_string();
+    let treatment = PreparedTreatment::default().with_preview_selection(Some(SpectralRepair {
+        start_frame: start,
+        end_frame: end,
+        low_hz: 0,
+        high_hz: RATE / 2,
+        amount_db: 1,
+        channel: Some(RepairChannel::Left),
+        ..SpectralRepair::default()
+    }));
+    for (sequence, repeat) in [(1, false), (2, true)] {
+        fixture
+            .player
+            .studio_play_request(
+                owner.clone(),
+                sequence,
+                crate::StudioPlayback {
+                    file: File::open(&recording.0).unwrap(),
+                    start: point(start),
+                    end: point(if repeat { 4096 } else { end }),
+                    audition: repeat.then_some(StudioAudition {
+                        start: point(start),
+                        end: point(end),
+                        smooth: false,
+                    }),
+                    sample_rate: RATE,
+                    seek_index: None,
+                    treatment: treatment.clone(),
+                },
+            )
+            .unwrap();
+        fixture.wait("the spectral selection is audible", |player| {
+            let status = player.studio_status(&owner);
+            status.sequence == sequence && status.playing
+        });
+        let (_, right) = first_audio(&mut fixture.studio);
+        assert_eq!(right, 0);
+        if repeat {
+            for _ in 0..2 * (end - start) {
+                assert_eq!(pcm(&mut fixture.studio).1, 0);
+            }
+            assert!(fixture.player.studio_status(&owner).playing);
+        } else {
+            fixture.wait("one-shot playback ends at the selected frame", |player| {
+                let status = player.studio_status(&owner);
+                !status.playing && status.position == point(end)
+            });
+        }
+    }
+    fixture.drain();
+}
+
+#[test]
+fn studio_peaks_follow_audible_selection_and_channel_switches_without_restarting() {
+    use tagrex_audio_workbench::{RepairChannel, SpectralRepair};
+
+    let recording = Recording::ramp("audible-meter", 4_096, 8_000);
+    let mut fixture = Fixture::new(true);
+    let owner = "editor".to_string();
+    let sequence = 3;
+    let treatment = PreparedTreatment::default().with_preview_selection(Some(SpectralRepair {
+        start_frame: 500,
+        end_frame: 2_000,
+        high_hz: RATE / 2,
+        amount_db: 1,
+        channel: Some(RepairChannel::Left),
+        ..SpectralRepair::default()
+    }));
+    fixture
+        .player
+        .studio_play_monitored(
+            owner.clone(),
+            sequence,
+            crate::StudioPlayback {
+                file: File::open(&recording.0).unwrap(),
+                start: point(900),
+                end: point(4_096),
+                audition: Some(StudioAudition {
+                    start: point(500),
+                    end: point(2_000),
+                    smooth: false,
+                }),
+                sample_rate: RATE,
+                seek_index: None,
+                treatment,
+            },
+            StudioMonitorChannel::Stereo,
+        )
+        .unwrap();
+    fixture.wait("the selected channel is audible", |player| {
+        player.studio_status(&owner).playing
+    });
+    first_audio(&mut fixture.studio);
+    for _ in 0..64 {
+        assert_eq!(pcm(&mut fixture.studio).1, 0);
+    }
+    let [left, right] = fixture.player.studio_meter(&owner, sequence, None).unwrap();
+    assert!(left > 0.2);
+    assert_eq!(
+        right, 0.0,
+        "reviewing the pre-mask decoder would show the right channel"
+    );
+
+    fixture
+        .player
+        .studio_meter("stale-owner", sequence, Some(StudioMonitorChannel::Right));
+    fixture
+        .player
+        .studio_meter(&owner, sequence - 1, Some(StudioMonitorChannel::Right));
+    for _ in 0..64 {
+        assert!(pcm(&mut fixture.studio).0 > 0);
+    }
+    fixture
+        .player
+        .studio_meter(&owner, sequence, Some(StudioMonitorChannel::Right));
+    // Give the short monitor ramp time to finish and clear peaks from before it.
+    for _ in 0..96 {
+        pcm(&mut fixture.studio);
+    }
+    fixture.player.studio_meter(&owner, sequence, None);
+    for _ in 0..64 {
+        assert_eq!(pcm(&mut fixture.studio), (0, 0));
+    }
+    assert_eq!(
+        fixture.player.studio_meter(&owner, sequence, None),
+        Some([0.0; 2])
+    );
+
+    fixture
+        .player
+        .studio_meter(&owner, sequence, Some(StudioMonitorChannel::Stereo));
+    for _ in 0..64 {
+        pcm(&mut fixture.studio);
+    }
+    let [left, right] = fixture.player.studio_meter(&owner, sequence, None).unwrap();
+    assert!(left > 0.2);
+    assert_eq!(right, 0.0);
+    let status = fixture.player.studio_status(&owner);
+    assert!(status.playing);
+    assert_eq!(status.sequence, sequence);
+    fixture.drain();
+}
+
+#[test]
+fn editing_a_running_spectral_selection_keeps_its_position_and_uses_the_new_loop() {
+    let recording = Recording::ramp("edit-spectral-loop", 12_000, 8_000);
+    let mut fixture = Fixture::new(true);
+    let owner = "editor".to_string();
+    let selection = |start_frame, end_frame| {
+        PreparedTreatment::default().with_preview_selection(Some(
+            tagrex_audio_workbench::SpectralRepair {
+                start_frame,
+                end_frame,
+                high_hz: RATE / 2,
+                amount_db: 1,
+                channel: Some(tagrex_audio_workbench::RepairChannel::Left),
+                ..Default::default()
+            },
+        ))
+    };
+    fixture
+        .player
+        .studio_play_request(
+            owner.clone(),
+            1,
+            crate::StudioPlayback {
+                file: File::open(&recording.0).unwrap(),
+                start: point(3_000),
+                end: point(12_000),
+                audition: Some(StudioAudition {
+                    start: point(500),
+                    end: point(9_000),
+                    smooth: false,
+                }),
+                sample_rate: RATE,
+                seek_index: None,
+                treatment: selection(500, 9_000),
+            },
+        )
+        .unwrap();
+    fixture.wait("the first selection is playing", |player| {
+        player.studio_status(&owner).playing
+    });
+    let before = first_audio(&mut fixture.studio).0;
+    assert!(before >= 11_000);
+    fixture
+        .player
+        .studio_retune_range(
+            owner.clone(),
+            1,
+            1,
+            File::open(&recording.0).unwrap(),
+            selection(1_500, 6_000),
+            Some(StudioPreviewRange {
+                start: point(1_500),
+                end: point(6_000),
+                repeat: true,
+                smooth: false,
+            }),
+        )
+        .unwrap();
+    fixture.wait("the edited selection was scheduled", |player| {
+        player.studio_status(&owner).retune_pending == Some(1)
+    });
+    fixture.wait("the edited selection is playing", |player| {
+        let status = player.studio_status(&owner);
+        status.retune_pending.is_none() && status.retune_failed.is_none()
+    });
+    let status = fixture.player.studio_status(&owner);
+    assert_eq!(status.sequence, 1);
+    assert!(status.playing && status.position >= point(3_000));
+
+    let mut previous = status.position;
+    let (last, first) = (0..100)
+        .find_map(|_| {
+            for _ in 0..64 {
+                assert_eq!(pcm(&mut fixture.studio).1, 0);
+            }
+            // The fake device advances on demand, but the actor publishes its
+            // position on a separate tick. Read it before pulling another block.
+            let mut next = previous;
+            crate::test_support::wait_until("the Studio clock to report the output block", || {
+                next = fixture.player.studio_status(&owner).position;
+                next != previous
+            });
+            let wrap = (next < previous).then_some((previous, next));
+            previous = next;
+            wrap
+        })
+        .expect("the edited range should wrap before the original end");
+    assert!(
+        (point(5_872)..=point(6_000)).contains(&last),
+        "last position: {last:?}"
+    );
+    assert!(
+        (point(1_500)..point(1_628)).contains(&first),
+        "first position: {first:?}"
+    );
+    fixture.drain();
+}
+
+#[test]
 fn audition_repeats_selected_frames_and_latest_paused_seek_is_owner_bound() {
     let preview = Recording::ramp("audition", 256, 12_000);
     let mut f = Fixture::new(true);
     let audition = StudioAudition {
         start: point(18),
         end: point(24),
+        smooth: false,
     };
     f.player
         .studio_play(
@@ -663,6 +961,7 @@ fn audition_repeats_selected_frames_and_latest_paused_seek_is_owner_bound() {
                     state: StudioPreviewState::Ready,
                     sequence: 0,
                     retune_failed: None,
+                    retune_pending: None,
                 }
         },
     );
@@ -814,6 +1113,7 @@ fn paused_seek_cancels_a_full_decoder_queue_and_keeps_exact_native_time() {
                 state: StudioPreviewState::Ready,
                 sequence: 0,
                 retune_failed: None,
+                retune_pending: None,
             }
     });
     for position in 100..255 {
@@ -829,6 +1129,7 @@ fn paused_seek_cancels_a_full_decoder_queue_and_keeps_exact_native_time() {
                 state: StudioPreviewState::Ready,
                 sequence: 0,
                 retune_failed: None,
+                retune_pending: None,
             }
     });
     f.player.studio_seek("editor".into(), point(255)).unwrap();
@@ -840,6 +1141,7 @@ fn paused_seek_cancels_a_full_decoder_queue_and_keeps_exact_native_time() {
                 state: StudioPreviewState::Ready,
                 sequence: 0,
                 retune_failed: None,
+                retune_pending: None,
             }
     });
     f.player.studio_close("editor".into()).unwrap();
@@ -893,7 +1195,11 @@ fn native_cbr_and_vbr_mp3_seek_and_loop_at_the_recorded_section() {
         let duration = frame_time(info.frames, info.sample_rate);
         let start = duration - Duration::from_millis(170);
         let end = duration - Duration::from_millis(70);
-        let audition = StudioAudition { start, end };
+        let audition = StudioAudition {
+            start,
+            end,
+            smooth: false,
+        };
         f.player
             .studio_play(
                 "editor".into(),

@@ -21,8 +21,9 @@ use tagrex_audio_workbench::{
     RenderSegment,
 };
 pub use tagrex_audio_workbench::{
-    AudioTreatment, EqBand, FrameRange, PreviewComparison, PreviewMonitor, SpectrogramChannel,
-    SpectrumView, TreatmentProbe, TreatmentProbeOptions,
+    AudioTreatment, EqBand, FrameRange, PreviewComparison, PreviewMonitor, SpectralRepair,
+    SpectrogramChannel, SpectrogramDetail, SpectrogramFocus, SpectrumView, TreatmentProbe,
+    TreatmentProbeOptions,
 };
 use tagrex_core::mask::{portable_file_name, Mask};
 use tagrex_core::model::{
@@ -184,14 +185,14 @@ impl Source {
         Ok(self.frame_index.get_or_init(|| Arc::new(index)).clone())
     }
 
-    fn cached_treatment(&self, settings: AudioTreatment) -> Result<Option<PreparedTreatment>> {
+    fn cached_treatment(&self, settings: &AudioTreatment) -> Result<Option<PreparedTreatment>> {
         let mut treatments = lock(&self.treatments)?;
         if let Some(index) = treatments
             .iter()
             .position(|item| item.settings() == settings)
         {
             let prepared = treatments.remove(index).expect("cached treatment at index");
-            treatments.push_back(prepared);
+            treatments.push_back(prepared.clone());
             return Ok(Some(prepared));
         }
         Ok(None)
@@ -201,7 +202,7 @@ impl Source {
         // Whole-recording measurements serve export and explicit normalization.
         // Merely reviewing an export must not change the level of an EQ preview.
         let measured = if settings.normalize {
-            self.cached_treatment(settings)?
+            self.cached_treatment(&settings)?
         } else {
             None
         };
@@ -217,7 +218,7 @@ impl Source {
 
     fn prepare_treatment(
         &self,
-        settings: AudioTreatment,
+        settings: &AudioTreatment,
         cancelled: impl FnMut() -> bool,
     ) -> Result<PreparedTreatment> {
         let file = self.open_current()?;
@@ -225,21 +226,22 @@ impl Source {
             return Ok(prepared);
         }
         if !settings.needs_measurement() {
-            return PreparedTreatment::preview(settings, self.info).map_err(StudioError::new);
+            return PreparedTreatment::preview(settings.clone(), self.info)
+                .map_err(StudioError::new);
         }
-        let prepared =
-            audio::prepare_treatment(file, settings, cancelled).map_err(StudioError::new)?;
+        let prepared = audio::prepare_treatment(file, settings.clone(), cancelled)
+            .map_err(StudioError::new)?;
         self.open_current()?;
         // Preview can build a provisional recipe even after eviction. Reviewed
         // exports own their measured recipe independently of this cache.
         let mut treatments = lock(&self.treatments)?;
         if let Some(existing) = treatments.iter().find(|item| item.settings() == settings) {
-            return Ok(*existing);
+            return Ok(existing.clone());
         }
         if treatments.len() >= MAX_TREATMENT_RECIPES {
             treatments.pop_front();
         }
-        treatments.push_back(prepared);
+        treatments.push_back(prepared.clone());
         Ok(prepared)
     }
 
@@ -791,7 +793,7 @@ impl Studio {
     ) -> Result<TreatmentAnalysis> {
         let source = self.source(id)?;
         let mut last_session_check = Instant::now();
-        let prepared = source.prepare_treatment(settings, || {
+        let prepared = source.prepare_treatment(&settings, || {
             if cancelled() {
                 return true;
             }
@@ -882,7 +884,7 @@ impl Studio {
                 .analysis
                 .as_ref()
                 .and_then(|analysis| analysis.seek_index.clone()),
-            output.treatment,
+            output.treatment.clone(),
         )
     }
 
@@ -974,9 +976,10 @@ impl Studio {
         cancelled: impl FnMut() -> bool,
     ) -> Result<PreviewComparison> {
         let source = self.source(id)?;
+        let [first, second] = settings;
         let prepared = [
-            source.preview_treatment(settings[0])?,
-            source.preview_treatment(settings[1])?,
+            source.preview_treatment(first)?,
+            source.preview_treatment(second)?,
         ];
         let levels = audio::compare_preview_levels(
             source.open_current()?,
@@ -1420,7 +1423,7 @@ impl Studio {
             Ok(())
         };
         if let (Some(source), Some(ranges)) = (split_source, split_ranges) {
-            let treatment = source.prepare_treatment(request.treatment, || false)?;
+            let treatment = source.prepare_treatment(&request.treatment, || false)?;
             let mut number = 0;
             for (requested, segment) in ranges {
                 let range = frame_index.as_ref().map_or(requested, |index| FrameRange {
@@ -1436,7 +1439,7 @@ impl Studio {
                     number += 1;
                     add(
                         &source,
-                        treatment,
+                        treatment.clone(),
                         range,
                         requested,
                         &segment.tags,
@@ -1474,7 +1477,7 @@ impl Studio {
                     start: 0,
                     end: source.info.frames,
                 };
-                let treatment = source.prepare_treatment(request.treatment, || false)?;
+                let treatment = source.prepare_treatment(&request.treatment, || false)?;
                 add(&source, treatment, range, range, &Values::new(), None)?;
                 sources.push(source);
             }
@@ -1947,7 +1950,7 @@ fn execute(mut plan: Plan, job: &ExportState, studio: &Studio) -> Result<ExportR
                     held,
                     &ranges,
                     plan.format,
-                    files[0].treatment,
+                    files[0].treatment.clone(),
                     cancelled,
                     progress,
                     open,

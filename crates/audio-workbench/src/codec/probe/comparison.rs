@@ -2,7 +2,7 @@ use super::{
     centered, check_cancelled, interleaved, level_db, overlap, probe_fft_size, MediaError,
     PreparedTreatment, PreviewDecoder, SeekIndex, SourceInfo,
 };
-use crate::{FrameRange, TreatmentProcessor};
+use crate::{FrameRange, RepairSource, TreatmentProcessor};
 use serde::Serialize;
 use std::{
     fs::File,
@@ -28,7 +28,7 @@ struct Variant {
 
 impl Variant {
     fn new(
-        settings: PreparedTreatment,
+        settings: &PreparedTreatment,
         info: SourceInfo,
         frame: u64,
         span: FrameRange,
@@ -49,9 +49,48 @@ impl Variant {
             pcm: Vec::new(),
         })
     }
+
+    fn measure_source_repair(
+        &mut self,
+        mut decoder: RepairSource,
+        info: SourceInfo,
+        span: FrameRange,
+        mut dry: Option<&mut Vec<i32>>,
+        stop: &mut impl FnMut() -> bool,
+    ) -> Result<(), MediaError> {
+        let mut cursor = self.start;
+        if decoder.source_info().channels != info.channels
+            || decoder.source_info().sample_rate != info.sample_rate
+        {
+            return Err(MediaError::Range("Audio parameters changed"));
+        }
+        let channels = usize::from(info.channels);
+        let output_channels = usize::from(self.processor.output_info().channels);
+        let mut processed = Vec::new();
+        while cursor < span.end {
+            let Some(block) = decoder.next_block(&mut *stop)? else {
+                break;
+            };
+            let end = (cursor + (block.dry.len() / channels) as u64).min(span.end);
+            let length = (end - cursor) as usize * channels;
+            self.processor
+                .process(&block.samples()[..length], &mut processed);
+            if let Some(measurement) = overlap(cursor, end, span) {
+                if let Some(dry) = &mut dry {
+                    dry.extend_from_slice(&block.dry[interleaved(measurement, cursor, channels)]);
+                }
+                self.pcm.extend_from_slice(
+                    &processed[interleaved(measurement, cursor, output_channels)],
+                );
+            }
+            cursor = end;
+        }
+        Ok(())
+    }
 }
 
-/// Measure two treatments over the same dry excerpt, with one seek and decode.
+/// Measure two treatments over the same dry excerpt. Ordinary treatment
+/// shares one decode. Each source repair needs its own bounded PCM context.
 pub fn compare_preview_levels(
     source: File,
     info: SourceInfo,
@@ -71,20 +110,43 @@ pub fn compare_preview_levels(
         info.frames,
     );
     let mut variants = [
-        Variant::new(settings[0], info, frame, span)?,
-        Variant::new(settings[1], info, frame, span)?,
+        Variant::new(&settings[0], info, frame, span)?,
+        Variant::new(&settings[1], info, frame, span)?,
     ];
     let mut cursor = variants[0].start.min(variants[1].start);
     let channels = usize::from(info.channels);
     let deadline = Instant::now() + COMPARISON_BUDGET;
     let mut stop = || cancelled() || Instant::now() >= deadline;
+    let mut dry = Vec::with_capacity((span.end - span.start) as usize * channels);
+    if settings.iter().any(|treatment| {
+        let recipe = treatment.settings();
+        recipe.mask_repairs().next().is_some() || recipe.click_repairs().next().is_some()
+    }) {
+        for (number, (variant, treatment)) in variants.iter_mut().zip(&settings).enumerate() {
+            let decoder = RepairSource::open(
+                source.try_clone()?,
+                variant.start,
+                index,
+                treatment.settings(),
+                &mut stop,
+            )?;
+            variant.measure_source_repair(
+                decoder,
+                info,
+                span,
+                (number == 0).then_some(&mut dry),
+                &mut stop,
+            )?;
+        }
+        return levels(&dry, &variants);
+    }
+
     let mut decoder = PreviewDecoder::open_indexed(source, cursor, index, &mut stop)?;
     if decoder.source_info().channels != info.channels
         || decoder.source_info().sample_rate != info.sample_rate
     {
         return Err(MediaError::Range("Audio parameters changed"));
     }
-    let mut dry = Vec::with_capacity((span.end - span.start) as usize * channels);
     let mut processed = Vec::new();
     while cursor < span.end {
         check_cancelled(&mut stop)?;
@@ -114,13 +176,17 @@ pub fn compare_preview_levels(
         }
         cursor = end;
     }
+    levels(&dry, &variants)
+}
+
+fn levels(dry: &[i32], variants: &[Variant; 2]) -> Result<PreviewComparison, MediaError> {
     if dry.is_empty() {
         return Err(MediaError::Range(
             "No decoded samples at the comparison position",
         ));
     }
     Ok(PreviewComparison {
-        input: level_db(&dry).0,
+        input: level_db(dry).0,
         output: level_db(&variants[0].pcm).0,
         alternate_output: level_db(&variants[1].pcm).0,
     })

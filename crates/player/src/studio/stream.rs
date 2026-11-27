@@ -2,7 +2,7 @@
 //! voice and leaves only one pending decoder request on the worker.
 use super::{
     retune::{LiveProcessor, RetuneSlot},
-    StudioAudition,
+    StudioAudition, StudioPreviewRange,
 };
 use crate::{fixed::Fixed, router, RodioSink};
 use rodio::{ChannelCount, SampleRate, Source};
@@ -16,7 +16,9 @@ use std::{
     },
     time::Duration,
 };
-use tagrex_audio_workbench::{PlaybackHistory, PreparedTreatment, PreviewDecoder, SeekIndex};
+use tagrex_audio_workbench::{
+    PlaybackHistory, PreparedTreatment, RepairSource, SeekIndex, SelectionPcm,
+};
 
 const CHUNK_FRAMES: usize = 256;
 const BUFFERED_CHUNKS: usize = 12;
@@ -115,6 +117,7 @@ pub(super) struct DecodeRequest {
     pub(super) start: u64,
     pub(super) end: u64,
     pub(super) loop_start: Option<u64>,
+    pub(super) smooth_loop: bool,
     pub(super) seek_index: Option<Arc<SeekIndex>>,
     pub(super) treatment: PreparedTreatment,
 }
@@ -207,6 +210,7 @@ impl Voice {
         position: Duration,
         active: &Voice,
         audition: Option<StudioAudition>,
+        target: Option<StudioPreviewRange>,
     ) {
         let Some((mut source, output)) = self.preload(position) else {
             self.shared
@@ -229,42 +233,51 @@ impl Voice {
         let rate = source.rate.get();
         let active = active.shared.clone();
         let incoming = self.shared.clone();
+        let faded = incoming.clone();
         source.align_handoff = true;
         self.sink.append(source);
-        router.replace_if(output, move || {
-            let mut position = active.position_ns.load(Ordering::Acquire);
-            if let Some(audition) = audition {
-                if position >= audition.end.as_nanos() as u64 {
-                    position = audition.start.as_nanos() as u64;
+        router.replace_if(
+            output,
+            move || {
+                let mut position = active.position_ns.load(Ordering::Acquire);
+                if let Some(audition) = audition {
+                    if position >= audition.end.as_nanos() as u64 {
+                        position = audition.start.as_nanos() as u64;
+                    }
                 }
-            }
-            let frame = output_frames(position.saturating_sub(origin), rate);
-            let half_frame = 500_000_000 / u64::from(rate) + 1;
-            if !active.cancelled()
-                && !incoming.cancelled()
-                && origin <= position.saturating_add(half_frame)
-                && (first..first + frames).contains(&frame)
-            {
-                let sample = (frame - first) as usize * channels;
-                incoming.position_ns.store(position, Ordering::Release);
-                incoming
-                    .handoff_sample
-                    .store(HANDOFF_SAMPLE + sample, Ordering::Release);
-                true
-            } else {
-                incoming
-                    .handoff_sample
-                    .store(HANDOFF_MISSED, Ordering::Release);
-                false
-            }
-        });
+                if let Some(target) = target {
+                    position = target.position(Duration::from_nanos(position)).as_nanos() as u64;
+                }
+                let frame = output_frames(position.saturating_sub(origin), rate);
+                let half_frame = 500_000_000 / u64::from(rate) + 1;
+                if !active.cancelled()
+                    && !incoming.cancelled()
+                    && origin <= position.saturating_add(half_frame)
+                    && (first..first + frames).contains(&frame)
+                {
+                    let sample = (frame - first) as usize * channels;
+                    incoming.position_ns.store(position, Ordering::Release);
+                    incoming
+                        .handoff_sample
+                        .store(HANDOFF_SAMPLE + sample, Ordering::Release);
+                    true
+                } else {
+                    incoming
+                        .handoff_sample
+                        .store(HANDOFF_MISSED, Ordering::Release);
+                    false
+                }
+            },
+            move || faded.handoff_complete.store(true, Ordering::Release),
+        );
     }
 
     pub(super) fn handoff(&self) -> Handoff {
         match self.shared.handoff_sample.load(Ordering::Acquire) {
             HANDOFF_WAITING => Handoff::Waiting,
             HANDOFF_MISSED => Handoff::Missed,
-            _ => Handoff::Switched,
+            _ if self.shared.handoff_complete.load(Ordering::Acquire) => Handoff::Switched,
+            _ => Handoff::Waiting,
         }
     }
 
@@ -359,6 +372,7 @@ struct Shared {
     position_ns: AtomicU64,
     catch_up_ns: AtomicU64,
     handoff_sample: AtomicUsize,
+    handoff_complete: AtomicBool,
     buffer_end_ns: AtomicU64,
     buffer_full: AtomicBool,
     analysis: Arc<Mutex<PlaybackHistory>>,
@@ -555,41 +569,73 @@ impl Job {
         origin_nanos: u64,
         cache: bool,
     ) -> Result<Option<Arc<Vec<f32>>>, String> {
-        let treatment = self.decode.treatment;
-        let decode_start = treatment.preview_start(start, self.decode.source_rate);
-        let decoder = PreviewDecoder::open_indexed(
+        let treatment = &self.decode.treatment;
+        let input_start = if treatment.preview_selection().is_some() {
+            start.saturating_sub(4096)
+        } else {
+            start
+        };
+        let decode_start = treatment.preview_start(input_start, self.decode.source_rate);
+        let decoder = RepairSource::open(
             self.decode.file.try_clone().map_err(|e| e.to_string())?,
             decode_start,
             self.decode.seek_index.as_deref(),
+            treatment.settings(),
             || self.shared.cancelled(),
         )
         .map_err(|e| e.to_string())?;
         let processor = treatment
             .processor_at(decoder.source_info(), decode_start)
             .map_err(|e| e.to_string())?;
-        let channels = u64::from(processor.output_info().channels);
-        let mut remaining = (self.decode.end - start) * channels;
+        let info = processor.output_info();
+        let selection = treatment
+            .preview_selection()
+            .map(|pick| SelectionPcm::new(info, pick.clone(), input_start, start))
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        let mut remaining = (self.decode.end - input_start) * u64::from(info.channels);
         if decoder.source_info().sample_rate != self.decode.source_rate {
             return Err("The recording sample rate changed".into());
         }
         let mut failure = None;
         let retunable = self.decode.loop_start.is_none() && treatment.can_stream_eq();
-        let processor = LiveProcessor::new(processor, treatment, decoder.source_info(), retunable);
+        let processor = LiveProcessor::new(
+            processor,
+            treatment.clone(),
+            decoder.source_info(),
+            retunable,
+        );
         if retunable {
             self.shared.retune.enable();
         }
         let native = Native::new(
             decoder,
             processor,
-            start..self.decode.end,
+            input_start..self.decode.end,
             decode_start,
             &self.shared,
             &mut remaining,
             &mut failure,
         )?;
-        let mut fixed = Fixed::new(native, self.channels, self.rate);
+        let mut fixed = Fixed::new(
+            SelectedSource { native, selection },
+            self.channels,
+            self.rate,
+        );
         let mut cache = cache.then(Vec::new);
         let channels = usize::from(self.channels.get());
+        let seam = self
+            .decode
+            .loop_start
+            .filter(|_| self.decode.smooth_loop)
+            .map(|loop_start| {
+                let device_frame =
+                    |frames| convert_frame(frames, self.decode.source_rate, self.rate.get());
+                (
+                    device_frame(start - loop_start),
+                    device_frame(self.decode.end - loop_start),
+                )
+            });
         let mut position = 0;
         let mut emitted = false;
         while !self.shared.cancelled() {
@@ -600,6 +646,15 @@ impl Job {
                 break;
             }
             emitted = true;
+            if let Some((offset, length)) = seam {
+                soften_loop_join(
+                    &mut pcm,
+                    channels,
+                    offset + position,
+                    length,
+                    self.rate.get(),
+                );
+            }
             if let Some(cache) = cache.as_mut() {
                 cache.extend_from_slice(&pcm);
             }
@@ -657,7 +712,7 @@ impl Job {
 }
 
 struct Native<'a> {
-    decoder: PreviewDecoder,
+    decoder: RepairSource,
     processor: LiveProcessor,
     discard_samples: u64,
     decoded_frame: u64,
@@ -673,7 +728,7 @@ struct Native<'a> {
 
 impl<'a> Native<'a> {
     fn new(
-        decoder: PreviewDecoder,
+        decoder: RepairSource,
         processor: LiveProcessor,
         playback: Range<u64>,
         decode_start: u64,
@@ -714,7 +769,7 @@ impl Iterator for Native<'_> {
                 Ok(Some(block)) => {
                     let frame = self.decoded_frame;
                     let channels = usize::from(input.channels);
-                    let frames = block.len() / channels;
+                    let frames = block.dry.len() / channels;
                     self.decoded_frame += frames as u64;
                     self.processor.retune(
                         &self.shared.retune,
@@ -728,7 +783,9 @@ impl Iterator for Native<'_> {
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
                         .wanted();
-                    if let Some(readings) = self.processor.process(block, &mut self.packet, wanted)
+                    if let Some(readings) =
+                        self.processor
+                            .process_source(block, &mut self.packet, wanted)
                     {
                         let output = self.processor.output_info();
                         let inside = frames.min(self.end_frame.saturating_sub(frame) as usize);
@@ -739,8 +796,8 @@ impl Iterator for Native<'_> {
                             .push(
                                 frame,
                                 (input, output),
-                                self.processor.prepared().settings(),
-                                &block[..inside * channels],
+                                self.processor.prepared().settings().clone(),
+                                &block.dry[..inside * channels],
                                 &self.packet[..inside * usize::from(output.channels)],
                                 readings,
                             );
@@ -778,10 +835,81 @@ impl Source for Native<'_> {
     }
 }
 
+struct SelectedSource<'a> {
+    native: Native<'a>,
+    selection: Option<SelectionPcm>,
+}
+
+impl Iterator for SelectedSource<'_> {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        match &mut self.selection {
+            Some(selection) => selection.next_sample(&mut self.native),
+            None => self.native.next(),
+        }
+    }
+}
+
+impl Source for SelectedSource<'_> {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+    fn channels(&self) -> ChannelCount {
+        self.native.channels
+    }
+    fn sample_rate(&self) -> SampleRate {
+        self.native.rate
+    }
+    fn total_duration(&self) -> Option<Duration> {
+        None
+    }
+}
+
 fn convert_frame(frame: u64, from: u32, to: u32) -> u64 {
     ((u128::from(frame) * u128::from(to) + u128::from(from / 2)) / u128::from(from)) as u64
 }
 
+fn soften_loop_join(samples: &mut [f32], channels: usize, offset: u64, length: u64, rate: u32) {
+    let fade = (u64::from(rate) * 3 / 1000).min(length / 4);
+    if fade == 0 || (offset >= fade && offset + (samples.len() / channels) as u64 <= length - fade)
+    {
+        return;
+    }
+    for (index, frame) in samples.chunks_exact_mut(channels).enumerate() {
+        let position = offset + index as u64;
+        let edge = position.min(length.saturating_sub(position + 1));
+        let ramp = edge.min(fade) as f32 / fade as f32;
+        let gain = ramp * ramp * (3.0 - 2.0 * ramp);
+        for sample in frame {
+            *sample *= gain;
+        }
+    }
+}
+
 fn native_time(frame: u64, rate: u32) -> u64 {
     super::frame_time(frame, rate).as_nanos() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::soften_loop_join;
+
+    #[test]
+    fn smooth_loop_fades_only_the_linked_boundary_frames() {
+        let mut first = [1.0, -1.0].repeat(256);
+        let mut last = first.clone();
+        soften_loop_join(&mut first, 2, 0, 512, 48_000);
+        soften_loop_join(&mut last, 2, 256, 512, 48_000);
+        assert_eq!(&first[..2], &[0.0, 0.0]);
+        assert_eq!(&last[510..], &[0.0, 0.0]);
+        assert_eq!(&first[288..], &[1.0, -1.0].repeat(112));
+        assert_eq!(&last[..224], &[1.0, -1.0].repeat(112));
+        assert!(first
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(last.as_chunks::<2>().0.iter().rev())
+            .all(|(a, b)| a == b));
+    }
 }

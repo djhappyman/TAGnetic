@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 import { openTagSource } from './navigation.js';
 
-const root = resolve('.test-dist');
+const root = resolve(process.env.TAGNETIC_STUDIO_FIXTURE ?? '.test-dist');
 
 async function serveFixture(route) {
   const path = resolve(root, '.' + new URL(route.request().url()).pathname);
@@ -53,9 +53,15 @@ test.beforeEach(async ({ page }) => {
         async emitTo(target, name, payload) {
           if (target === 'main') eventHandlers.get(name)?.({ payload });
           else if (name === 'tagnetic:audio-tools-state') {
-            window.studioFixture.toolSnapshots = { ...window.studioFixture.toolSnapshots, [target]: payload };
+            if (target === 'audio-tool-repair') window.studioFixture.repairUpdates?.push(JSON.parse(JSON.stringify(payload)));
+            const previous = window.studioFixture.toolSnapshots?.[target];
+            const state = payload?.sourceId === previous?.sourceId && payload && !payload.settings
+              ? { ...payload, settings: previous.settings } : payload;
+            window.studioFixture.toolSnapshots = { ...window.studioFixture.toolSnapshots, [target]: state };
           } else if (name === 'tagnetic:audio-tools-probe') {
             window.studioFixture.toolProbes = { ...window.studioFixture.toolProbes, [target]: payload };
+          } else if (name === 'tagnetic:audio-tools-meter') {
+            window.studioFixture.meterUpdates?.push({ ...payload, time: performance.now() });
           } else if (name === 'tagnetic:audio-tools-flush') {
             window.studioFixture.toolFence = payload;
           }
@@ -63,7 +69,8 @@ test.beforeEach(async ({ page }) => {
       },
       core: {
         async invoke(command, args) {
-          calls.push({ command, args });
+          const timed = command === 'audio_split_transport' && window.studioFixture.repairUpdates;
+          calls.push({ command, args, ...(timed ? { at: performance.now() } : {}) });
           switch (command) {
             case 'open_provider_page': return;
             case 'read_cover_summary': return { samples: [] };
@@ -108,6 +115,8 @@ test.beforeEach(async ({ page }) => {
             case 'audio_split_status':
               if (args.audition) return { playing: true, loading: false, sequence: args.sequence };
               return window.studioFixture.statusProbe?.(args) ?? { frame: 48001, playing: true };
+            case 'audio_split_meter':
+              return args.channel ? null : window.studioFixture.outputPeaks ?? null;
             case 'audio_split_audition_output': return;
             case 'audio_split_transport':
             case 'audio_split_close': return;
@@ -205,9 +214,11 @@ async function waveformOption(page, studio, name) {
 }
 
 test('opening waveform options clears its tooltip while the menu is open', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.getByRole('button', { name: 'Split recording', exact: true }).click();
   const studio = page.getByRole('dialog', { name: 'Split recording' });
   const options = studio.getByRole('button', { name: 'Waveform options' });
+  await expect(options).toBeEnabled();
   const time = new Date('2026-01-01T00:00:00Z');
   await page.clock.install({ time });
   await page.clock.pauseAt(new Date(time.getTime() + 1000));
@@ -1088,6 +1099,187 @@ test('row actions renumber splits and undo an adjacent merge in one step', async
   expect(parseFloat(await marker.evaluate(node => node.style.left))).toBeCloseTo(frame / 4800, 4);
 });
 
+test('Repair playhead updates carry changing frames without resending a dense mask', async ({ page }, testInfo) => {
+  await page.evaluate(() => {
+    const fixture = window.studioFixture;
+    fixture.repairUpdates = [];
+    fixture.statusProbe = ({ sequence }) => {
+      const retune = fixture.calls.findLast(call => call.args.action === 'retune');
+      return { sequence, frame: 8_000, playing: true,
+        ...(fixture.holdRetune && retune ? { retunePending: retune.args.revision } : {}) };
+    };
+  });
+  await page.getByRole('button', { name: 'Split recording', exact: true }).click();
+  const studio = page.getByRole('dialog', { name: 'Split recording' });
+  await studio.getByRole('button', { name: 'Repair', exact: true }).click();
+  const mask = {
+    startFrame: 20_000, endFrame: 52_000, lowHz: 400, highHz: 3_200, amountDb: 18,
+    mask: { version: 1, featherFrames: 0, featherHz: 0, regions: [
+      { kind: 'brush', operation: 'add', radiusFrames: 20, radiusHz: 40,
+        points: Array.from({ length: 256 }, (_, index) => ({ frame: 20_050 + index * 120, hz: 440 + index * 10 })) },
+    ] },
+  };
+  const send = request => page.evaluate(request => window.__TAURI__.event.emitTo('main', 'tagnetic:audio-tools-command', {
+    kind: 'repair', sourceId: 'recording', ...request,
+  }), request);
+  await send({ action: 'edit', revision: 'dense-mask', patch: { spectralRepairs: [mask] } });
+  await send({ action: 'play' });
+  const updates = () => page.evaluate(() => window.studioFixture.repairUpdates.filter(update => !!update?.playing));
+  await expect.poll(async () => new Set((await updates()).map(update => update.frame)).size).toBeGreaterThanOrEqual(5);
+  const messages = await updates();
+  expect(messages.every(message => !('settings' in message))).toBe(true);
+  const initial = await page.evaluate(() => window.studioFixture.repairUpdates.find(update => update.revision === 'dense-mask')?.settings);
+  const frameUpdate = messages.at(-1);
+  const clockBytes = Buffer.byteLength(JSON.stringify(frameUpdate));
+  const fullBytes = Buffer.byteLength(JSON.stringify({ ...frameUpdate, settings: initial }));
+  expect(clockBytes / fullBytes).toBeLessThan(0.1);
+  const editAt = await page.evaluate(async next => {
+    window.studioFixture.holdRetune = true;
+    const at = performance.now();
+    await window.__TAURI__.event.emitTo('main', 'tagnetic:audio-tools-command', {
+      kind: 'repair', sourceId: 'recording', action: 'edit', revision: 'changed-mask', patch: { spectralRepairs: [next] },
+    });
+    return at;
+  }, { ...mask, amountDb: 6 });
+  await expect.poll(async () => (await updates()).some(message => message.settings?.spectralRepairs?.[0]?.amountDb === 6)).toBe(true);
+  await expect.poll(async () => (await updates()).at(-1)).toMatchObject({ repairPlayback: 'updating', clockRunning: true });
+  await page.evaluate(() => { window.studioFixture.holdRetune = false; });
+  await expect.poll(async () => (await updates()).at(-1)?.repairPlayback).toBeUndefined();
+  const transports = await calls(page, 'transport');
+  expect(transports.filter(call => call.args.action === 'play')).toHaveLength(1);
+  expect(transports.some(call => call.args.action === 'pause')).toBe(false);
+  const retune = transports.findLast(call => call.args.action === 'retune');
+  await testInfo.attach('repair-transport-metrics', {
+    contentType: 'application/json',
+    body: JSON.stringify({ fullBytes, clockBytes, retuneRequestMs: retune.at - editAt }),
+  });
+});
+
+test('Repair plot shortcuts use the configured audition seam, return point and monitor lane', async ({ page }) => {
+  await page.evaluate(() => {
+    const fixture = window.studioFixture;
+    fixture.stereo = true;
+    fixture.statusProbe = ({ sequence }) => ({
+      sequence,
+      frame: fixture.calls.find(call => call.command === 'audio_split_transport' && call.args.sequence === sequence)?.args.frame ?? 0,
+      playing: true,
+    });
+  });
+  await page.getByRole('button', { name: 'Split recording', exact: true }).click();
+  const studio = page.getByRole('dialog', { name: 'Split recording' });
+  await expect(studio.getByRole('button', { name: 'Repair', exact: true })).toBeEnabled();
+  const send = request => page.evaluate(request => window.__TAURI__.event.emitTo('main', 'tagnetic:audio-tools-command', {
+    kind: 'repair', sourceId: 'recording', ...request,
+  }), request);
+  const lastTransport = async () => (await calls(page, 'transport')).at(-1)?.args;
+  const range = { start: 96_000, end: 144_000 };
+  await send({ action: 'repair-listen', command: { type: 'preferences', smooth: true, returnTo: 'start' } });
+  await send({ action: 'repair-listen', command: { type: 'channel', channel: 'right' } });
+  await send({ action: 'loop', range });
+  await expect.poll(lastTransport).toMatchObject({
+    action: 'audition', frame: range.start, endFrame: range.end, loopStartFrame: range.start,
+    smoothLoop: true, monitorChannel: 'right',
+  });
+  await send({ action: 'audition-band', range, band: { lowHz: 400, highHz: 1_700, channel: 'left' } });
+  await expect.poll(lastTransport).toMatchObject({
+    action: 'audition', frame: range.start, endFrame: range.end, loopStartFrame: range.start,
+    smoothLoop: true, monitorChannel: 'right', monitor: { kind: 'band', channel: 'left', lowHz: 400, highHz: 1_700 },
+  });
+  await send({ action: 'play' });
+  await expect.poll(lastTransport).toMatchObject({ action: 'pause' });
+  expect((await lastTransport()).frame).toBeGreaterThanOrEqual(range.start);
+  await send({ action: 'play' });
+  await expect.poll(lastTransport).toMatchObject({
+    action: 'audition', endFrame: range.end, loopStartFrame: range.start,
+    monitorChannel: 'right', monitor: { kind: 'band', channel: 'left', lowHz: 400, highHz: 1_700 },
+  });
+  await send({ action: 'repair-listen', command: { type: 'stop' } });
+  await expect.poll(lastTransport).toMatchObject({ action: 'pause', frame: 0 });
+});
+
+test('Repair selection arms a filtered loop and changes its boundaries on the running transport', async ({ page }) => {
+  await page.evaluate(() => {
+    window.studioFixture.statusProbe = ({ sequence }) => ({ sequence, frame: 120_000, playing: true });
+  });
+  await page.getByRole('button', { name: 'Split recording', exact: true }).click();
+  const studio = page.getByRole('dialog', { name: 'Split recording' });
+  await studio.getByRole('button', { name: 'Repair', exact: true }).click();
+  const send = request => page.evaluate(request => window.__TAURI__.event.emitTo('main', 'tagnetic:audio-tools-command', {
+    kind: 'repair', sourceId: 'recording', ...request,
+  }), request);
+  const listen = command => send({ action: 'repair-listen', command });
+  const transport = () => calls(page, 'transport');
+  const lastTransport = async () => (await transport()).at(-1)?.args;
+  const selection = { startFrame: 96_000, endFrame: 144_000, lowHz: 400, highHz: 1_700, amountDb: 1 };
+  await listen({ type: 'set-selection', selection });
+  await expect.poll(lastTransport).toMatchObject({ action: 'seek', frame: selection.startFrame });
+  await send({ action: 'play' });
+  await expect.poll(lastTransport).toMatchObject({ action: 'audition', frame: selection.startFrame, repeat: true,
+    loopStartFrame: selection.startFrame, endFrame: selection.endFrame, previewSelection: selection });
+  const { sequence } = await lastTransport();
+  const adjustment = { ...selection, startFrame: 110_000, endFrame: 160_000, highHz: 900 };
+  await listen({ type: 'set-selection', selection: adjustment, adjust: true });
+  await expect.poll(lastTransport).toMatchObject({ action: 'retune', sequence, repeat: true,
+    loopStartFrame: adjustment.startFrame, endFrame: adjustment.endFrame, previewSelection: adjustment });
+  await listen({ type: 'clear-selection' });
+  await expect.poll(lastTransport).toMatchObject({ action: 'retune', sequence, repeat: false,
+    loopStartFrame: 0, endFrame: 480_000 });
+  expect(await lastTransport()).not.toHaveProperty('previewSelection');
+  expect((await transport()).map(call => call.args.action)).toEqual(['seek', 'audition', 'retune', 'retune']);
+
+  await listen({ type: 'set-selection', selection: adjustment });
+  await expect.poll(lastTransport).toMatchObject({ action: 'audition', frame: adjustment.startFrame, repeat: true });
+  await send({ action: 'seek', range: { start: 125_000, end: 125_001 } });
+  await expect.poll(async () => (await transport()).findLast(call => call.args.action === 'seek')?.args)
+    .toMatchObject({ frame: 125_000 });
+  expect((await transport()).filter(call => call.args.action === 'audition')).toHaveLength(2);
+  await send({ action: 'play' });
+  await expect.poll(lastTransport).toMatchObject({ action: 'pause' });
+  expect((await lastTransport()).frame).toBeGreaterThan(adjustment.startFrame);
+  await send({ action: 'play' });
+  await expect.poll(lastTransport).toMatchObject({
+    action: 'audition', repeat: true, loopStartFrame: adjustment.startFrame,
+    endFrame: adjustment.endFrame, previewSelection: adjustment,
+  });
+  expect((await lastTransport()).frame).toBeGreaterThan(adjustment.startFrame);
+  await listen({ type: 'clear-selection', frame: 88_000 });
+  await expect.poll(lastTransport).toMatchObject({ action: 'play', frame: 88_000 });
+  expect(await lastTransport()).not.toHaveProperty('previewSelection');
+});
+
+test('Repair streams native output peaks at the live meter cadence and solos without retuning audio', async ({ page }) => {
+  await page.evaluate(() => {
+    const fixture = window.studioFixture;
+    fixture.meterUpdates = [];
+    fixture.stereo = true;
+    fixture.outputPeaks = [.25, .5];
+    fixture.statusProbe = ({ sequence }) => ({ sequence, frame: 120_000, playing: true });
+  });
+  await page.getByRole('button', { name: 'Split recording', exact: true }).click();
+  const studio = page.getByRole('dialog', { name: 'Split recording' });
+  await studio.getByRole('button', { name: 'Repair', exact: true }).click();
+  const send = data => page.evaluate(data => window.__TAURI__.event.emitTo('main', 'tagnetic:audio-tools-command', {
+    kind: 'repair', sourceId: 'recording', ...data,
+  }), data);
+  const selection = { startFrame: 96_000, endFrame: 144_000, lowHz: 400, highHz: 1_700, amountDb: 1 };
+  await send({ action: 'repair-listen', command: { type: 'set-selection', selection } });
+  await send({ action: 'play' });
+  const updates = () => page.evaluate(() => window.studioFixture.meterUpdates);
+  await expect.poll(async () => (await updates()).length).toBeGreaterThanOrEqual(6);
+  const series = await updates();
+  const intervals = series.slice(1).map((item, index) => item.time - series[index].time).sort((a, b) => a - b);
+  expect(intervals[Math.floor(intervals.length / 2)]).toBeLessThan(75);
+  expect(series.at(-1)).toMatchObject({ sourceId: 'recording', peaks: [.25, .5] });
+  const count = (await calls(page, 'transport')).length;
+  await send({ action: 'repair-listen', command: { type: 'channel', channel: 'left' } });
+  await expect.poll(async () => (await calls(page, 'meter')).findLast(call => call.args.channel)?.args)
+    .toMatchObject({ sequence: series.at(-1).sequence, channel: 'left' });
+  expect((await calls(page, 'transport')).length).toBe(count);
+  await send({ action: 'repair-listen', command: { type: 'signal', signal: 'removed' } });
+  await expect.poll(async () => (await calls(page, 'transport')).at(-1)?.args)
+    .toMatchObject({ action: 'retune', previewSelection: selection, monitor: { kind: 'repair-difference' } });
+});
+
 test('track and Shift-drag loops share playback and the waveform handles', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.evaluate(() => {
@@ -1683,4 +1875,39 @@ test('reference EQ auditions without changing edits, then keeps the fit as one u
   await expect.poll(async () => (await snapshot()).undoLabel).toBe('Undo EQ reference match');
   await request('undo', { revision: '2' });
   await expect.poll(async () => (await snapshot()).settings.rumble).toBe(true);
+});
+
+test('requests the full spectrogram once and reuses it through transport seeks', async ({ page }) => {
+  await page.evaluate(() => { window.studioFixture.sampleRate = 16_000; });
+  await page.getByRole('button', { name: 'Split recording', exact: true }).click();
+  const studio = page.getByRole('dialog', { name: 'Split recording' });
+  await studio.getByRole('button', { name: 'Repair', exact: true }).click();
+
+  const probes = async () => (await calls(page, 'probe')).filter(({ args }) => args.spectrogram);
+  const wholeRecording = { start: 0, end: 480_000 };
+  await expect.poll(async () => (await probes())[0]?.args).toMatchObject({
+    viewport: wholeRecording, spectrogram: true, spectrogramTreated: true, spectrogramDifference: false,
+  });
+  const viewport = (range, options) => page.evaluate(({ range, options }) =>
+    window.__TAURI__.event.emitTo('main', 'tagnetic:audio-tools-command', {
+      sourceId: 'recording', kind: 'repair', action: 'viewport', range, options,
+    }), { range, options });
+  await viewport(wholeRecording, { overview: true, treated: true, difference: true });
+  await expect.poll(async () => (await probes()).at(-1)?.args).toMatchObject({
+    viewport: wholeRecording, spectrogram: true, spectrogramTreated: true, spectrogramDifference: true,
+  });
+  const count = (await probes()).length;
+  await studio.getByRole('slider', { name: 'Waveform playhead' }).press('End');
+  // Give the 125 ms tool timer multiple opportunities to run after the seek.
+  await page.waitForTimeout(340);
+  expect(await probes()).toHaveLength(count);
+
+  const local = { start: 28_000, end: 72_000 };
+  await viewport(local, { channel: 'combined', treated: true, difference: true });
+  await expect.poll(async () => (await probes()).at(-1)?.args).toMatchObject({
+    viewport: local, spectrogram: true, spectrogramTreated: true, spectrogramDifference: true,
+  });
+  const focus = { lowHz: 250, highHz: 700 };
+  await viewport(local, { channel: 'combined', treated: true, difference: true, focus });
+  await expect.poll(async () => (await probes()).at(-1)?.args).toMatchObject({ viewport: local, spectrogramFocus: focus });
 });

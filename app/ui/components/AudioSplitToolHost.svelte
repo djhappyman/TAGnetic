@@ -6,13 +6,14 @@
   import { readTreatment, sameTreatment, type AudioTreatment } from '../js/audio-treatment';
   import type { AnalyzerView, TreatmentPlotMode, TreatmentProbe } from '../js/audio-treatment-plot';
   import {
-    applyToolTheme, listenToolFlush, listenToolProbe, listenToolState, sendToolRequest, toolPatch,
-    type PreviewBand, type SpectrogramViewOptions, type ToolAction, type ToolProbeUpdate, type ToolRequest, type ToolSnapshot,
+    applyToolTheme, listenRepairMeter, listenToolFlush, listenToolProbe, listenToolState, sendToolRequest, toolPatch,
+    type PreviewBand, type RepairListenCommand, type RepairMeterUpdate, type SpectrogramViewOptions, type ToolAction, type ToolProbeUpdate, type ToolRequest, type ToolSnapshot, type ToolStateUpdate,
   } from '../js/audio-tools-window';
 
   let { kind }: { kind: TreatmentPlotMode } = $props();
   let snapshot = $state.raw<ToolSnapshot | null>(null);
   let probe = $state.raw<TreatmentProbe | null>(null);
+  let meter = $state.raw<RepairMeterUpdate | undefined>();
   let connectionError = $state('');
   let probeError = $state('');
   let received: ToolSnapshot | null = null;
@@ -98,6 +99,13 @@
     flush();
   }
 
+  function listen(command: RepairListenCommand) {
+    if (snapshot && kind === 'repair') {
+      void send({ kind, sourceId: snapshot.sourceId, action: 'repair-listen', command })
+        ?.catch(reason => { connectionError = String(reason); });
+    }
+  }
+
   function analyzer(view: AnalyzerView) {
     if (snapshot) void send({ kind, action: 'analyzer', sourceId: snapshot.sourceId, enabled: view !== 'off', view })?.catch(reason => { connectionError = String(reason); });
   }
@@ -117,13 +125,17 @@
     probeError = update.error ?? '';
   }
 
-  function accept(state: ToolSnapshot | null) {
+  function accept(update: ToolStateUpdate | null) {
     if (!active) return;
+    const settingsUpdate = update?.settings ?? (update?.sourceId === received?.sourceId ? received?.settings : undefined);
+    if (update && !settingsUpdate) return;
+    const state = update && settingsUpdate ? { ...update, settings: settingsUpdate } : null;
     if (state?.sourceId !== received?.sourceId) {
       sending = undefined;
       queued.length = 0;
       requestedFence = undefined;
       probe = null;
+      meter = undefined;
       probeError = '';
     }
     received = state;
@@ -153,7 +165,7 @@
       overview: state.overview ?? (snapshot?.sourceId === state.sourceId ? snapshot.overview : undefined),
       stereoOverview: state.stereoOverview ?? (snapshot?.sourceId === state.sourceId ? snapshot.stereoOverview : undefined),
       cuts: state.cuts ?? (snapshot?.sourceId === state.sourceId ? snapshot.cuts : undefined),
-      settings: snapshot && sameTreatment(snapshot.settings, settings) ? snapshot.settings : settings,
+      settings: snapshot && (snapshot.settings === settings || sameTreatment(snapshot.settings, settings)) ? snapshot.settings : settings,
       theme: appearanceChanged ? state.theme : snapshot?.theme || state.theme,
     };
   }
@@ -169,6 +181,9 @@
       requestedFence = fence;
       flush();
     })];
+    if (kind === 'repair') listeners.push(listenRepairMeter(update => {
+      if (active && received?.sourceId === update.sourceId) meter = update;
+    }));
     if (listeners.every(Boolean)) {
       void Promise.all(listeners.map(pending => pending?.then(stop => {
         if (active) unlisten.push(stop);
@@ -186,11 +201,12 @@
 <svelte:document onvisibilitychange={() => { if (document.visibilityState === 'visible') sync(); }}/>
 <ControllerTooltip/>
 <main class="tool-host">
-  {#if connectionError || probeError}
+  {#if kind !== 'repair' && (connectionError || probeError)}
     <p class="problem" role="status">{connectionError || probeError}</p>
   {/if}
   {#key snapshot?.sourceId}
-    <AudioSplitToolWindow {kind} {snapshot} {probe} onedit={edit} onaction={action} onviewport={viewport} onanalyzer={analyzer} onlearn={learnThreshold}/>
+    <AudioSplitToolWindow {kind} {snapshot} {probe} {meter} notice={connectionError || probeError}
+      onedit={edit} onaction={action} onviewport={viewport} onanalyzer={analyzer} onlearn={learnThreshold} onlisten={listen}/>
   {/key}
 </main>
 

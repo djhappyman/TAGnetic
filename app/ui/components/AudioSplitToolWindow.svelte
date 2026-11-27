@@ -1,30 +1,37 @@
 <script lang="ts">
-  import { tick, untrack } from 'svelte';
-  import { Check, ChevronDown, ChevronLeft, ChevronRight, Ellipsis, Pause, Pin, Play, Power, Repeat2, Scale, X } from '@lucide/svelte';
+  import { tick, untrack, type Snippet } from 'svelte';
+  import { AudioLines, Check, ChevronDown, ChevronLeft, ChevronRight, Ellipsis, Equal, FastForward, Headphones, Pause, Pin, Play, Power, Repeat2, Rewind, Scale, SkipBack, X, Zap } from '@lucide/svelte';
   import { createMenuController, Menu, MenuContent, MenuGroup, MenuGroupLabel, MenuItem, MenuItemIndicator, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuShortcut, MenuSub, MenuSubContent, MenuSubTrigger, MenuTrigger } from '@ui-sdk/svelte/menu';
   import { createSelectController, Select, SelectContent, SelectItem, SelectTrigger } from '@ui-sdk/svelte/select';
-  import { NumberInput, NumberInputControl } from '@ui-sdk/svelte/number-input';
   import { Input } from '@ui-sdk/svelte/input';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
   import AudioSplitDynamicsPanel from './AudioSplitDynamicsPanel.svelte';
   import AudioSplitEqPanel from './AudioSplitEqPanel.svelte';
+  import EqDial from './AudioSplitEqDial.svelte';
+  import AudioSplitRepairListen from './AudioSplitRepairListen.svelte';
   import AudioSplitRepairPlot from './AudioSplitRepairPlot.svelte';
+  import AudioSplitRepairMeters from './AudioSplitRepairMeters.svelte';
+  import RepairPopup from './AudioSplitRepairPopup.svelte';
   import AudioSplitToolModes, { isToolMode } from './AudioSplitToolModes.svelte';
   import Button from './AudioSplitButton.svelte';
   import { findEqNode, legacyEqBands, visibleEqNodes } from '../js/audio-eq';
   import { dynamicsMode, dynamicsPresets } from '../js/audio-dynamics';
-  import type { FrameRange } from '../js/audio-split';
-  import { noTreatment, readTreatment, sameTreatment, treatmentNumbers, type AudioTreatment, type TreatmentNumber } from '../js/audio-treatment';
+  import { frameAtTime, timeLabel, type FrameRange } from '../js/audio-split';
+  import { noTreatment, readTreatment, sameTreatment, treatmentNumbers, type AudioTreatment, type SpectralRepair, type TreatmentNumber } from '../js/audio-treatment';
   import type { AnalyzerView, TreatmentPlotMode, TreatmentProbe } from '../js/audio-treatment-plot';
   import { readEqPresets, saveEqPresets, treatmentForRecording, type SavedEqPreset } from '../js/audio-treatment-recipes';
-  import { toolPatch, type PreviewBand, type SpectrogramViewOptions, type ToolAction, type ToolSnapshot } from '../js/audio-tools-window';
+  import { toolPatch, type PreviewBand, type RepairListenCommand, type RepairMeterUpdate, type SpectrogramViewOptions, type ToolAction, type ToolSnapshot } from '../js/audio-tools-window';
+  import { projectRepairFrame, repairClockHorizon } from '../js/audio-repair-clock';
 
-  let { kind, snapshot, probe, onedit, onaction, onviewport, onanalyzer, onlearn }: {
+  let { kind, snapshot, probe, notice, meter, onedit, onaction, onviewport, onanalyzer, onlearn, onlisten }: {
     kind: TreatmentPlotMode;
     snapshot: ToolSnapshot | null;
     probe: TreatmentProbe | null;
+    notice?: string;
+    meter?: RepairMeterUpdate;
     onanalyzer: (view: AnalyzerView) => void;
     onlearn: (index: number) => void;
+    onlisten: (command: RepairListenCommand) => void;
     onedit: (patch: Partial<AudioTreatment>, gesture?: string, compareEq?: Partial<AudioTreatment> | null) => void;
     onaction: (action: ToolAction, range?: FrameRange, band?: PreviewBand) => void;
     onviewport: (range: FrameRange | null, options?: SpectrogramViewOptions) => void;
@@ -36,6 +43,8 @@
   const title = { eq: 'Equaliser', dynamics: 'Dynamics', repair: 'Repair' };
   const defaultMode = { eq: null, dynamics: 'compressor', repair: 'selection' };
   const presetMenu = createMenuController();
+  const signalMenu = createMenuController();
+  const signalLabels = { original: 'Original', repaired: 'Repaired', removed: 'Removed' } as const;
   const humControl = createSelectController<string>();
   const monoControl = createSelectController<string>();
   const polarityControl = createSelectController<string>();
@@ -65,13 +74,18 @@
   let presetError = $state('');
   let presetToSave: Partial<AudioTreatment> = {};
   let eqComparison = $state.raw<{ sourceId: string; slot: CompareSlot; A: Partial<AudioTreatment>; B: Partial<AudioTreatment> }>();
-  let restoreDc = 0;
+  let restoreDc = $state(0);
   const settings = $derived(snapshot?.settings ?? noTreatment);
+  const sampleRate = $derived(snapshot?.sampleRate || 44100);
+  const repairSignal = $derived(snapshot?.repairListen?.signal ?? (snapshot?.original ? 'original' : 'repaired'));
+  const playTime = $derived(timeLabel(snapshot?.frame ?? 0, sampleRate, 3));
+  const meterReading = $derived(meter?.sequence === snapshot?.transportSequence ? meter : undefined);
+  let enteredTime = $state<string>();
+  let timeInvalid = $state(false);
   const selectedShape = $derived(kind === 'eq' ? findEqNode(settings, mode)?.shape ?? '' : '');
   function chooseEqShape(value: string) {
     setMode(visibleEqNodes(settings, null).find(node => node.shape === value)?.key ?? value);
   }
-  const sampleRate = $derived(snapshot?.sampleRate || 44100);
   const presets: readonly Preset[] = $derived(
     kind === 'eq' ? [...eqPresets.filter(preset => (preset.patch.highCutHz ?? 0) <= Math.floor(sampleRate * .45)), ...savedPresets]
       : kind === 'dynamics' ? dynamicsPresets[dynamicsMode(mode ?? '')] : repairPresets,
@@ -84,13 +98,14 @@
   const eqPresetName = $derived(presets[eqPresetIndex]?.label ?? 'Custom EQ');
   const compareSlots = $derived(eqComparison?.sourceId === snapshot?.sourceId ? eqComparison : undefined);
   const modKey = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
-  const commonKeys = [['Space', 'Play or pause'], ['L', 'Toggle loop'], ['B', 'Compare Original and Treated'],
+  const commonKeys = [['Space', 'Play or pause'], ['L', 'Toggle loop'], ['B', 'Compare the preview with Original'],
     [modKey + '+Z', 'Undo'], [modKey + '+Shift+Z', 'Redo'], ['?', 'Show keyboard shortcuts']];
   const details = {
     eq: [['Enter', 'Add a band or edit its exact values'], ['Arrows', 'Move the focused band'], ['Shift+arrows', 'Move in finer steps'], [modKey === '⌘' ? 'Option+drag' : 'Alt+drag', 'Lock the drag to one axis'], ['Delete', 'Remove the focused band']],
     dynamics: [['Arrows', 'Adjust the focused handle'], ['Shift+arrows', 'Adjust in finer steps']],
-    repair: [['Enter', 'Audition the selection'], [modKey + '+Enter', 'Apply the repair'], ['Delete', 'Remove a selected repair'],
-      ['F', 'Fit the selection'], ['0', 'Reset zoom'], ['Shift+scroll', 'Zoom frequencies']],
+    repair: [['1–5', 'Rectangle, Time, Frequency, Brush, Lasso'], ['Enter', 'Audition the selection'],
+      ['Shift+Enter', 'Audition the surrounding mix'], [modKey + '+Enter', 'Apply the repair'], ['Delete', 'Remove a selected repair'],
+      ['F', 'Fit the selection'], ['0', 'Fit the recording'], ['Shift+scroll', 'Zoom frequencies']],
   };
 
   function readMode() {
@@ -223,7 +238,14 @@
     document.getElementById(id + (help ? '-close-help' : '-tools-menu'))?.focus({ preventScroll: true });
   }
 
+  let pointerButton: Element | null = null;
+
+  function rememberPointerButton(event: PointerEvent) {
+    if (kind === 'repair') pointerButton = event.target instanceof Element ? event.target.closest('button') : null;
+  }
+
   function windowKeys(event: KeyboardEvent) {
+    if (event.key === 'Tab') pointerButton = null;
     if (event.defaultPrevented || event.isComposing || event.altKey || presetDialog) return;
     const target = event.target;
     if (target instanceof Element && target.closest('input, textarea, select, [contenteditable=true], [role=menu], [role=listbox]')) return;
@@ -246,23 +268,65 @@
       return;
     }
     if (!snapshot) return;
+    if (kind === 'repair' && key === 'l' && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      if (!event.repeat) onaction('loop');
+      return;
+    }
     if (event.ctrlKey || event.metaKey) {
       if (key !== 'z' && key !== 'y') return;
       event.preventDefault();
       onaction(key === 'y' || event.shiftKey ? 'redo' : 'undo');
     } else if (key === 'b' || key === 'l') {
       event.preventDefault();
-      if (!event.repeat) onaction(key === 'l' ? 'loop' : snapshot.original ? 'treated' : 'original');
-    } else if (key === ' ' && !event.repeat && !(target instanceof Element
-      && target.closest('button:not(.plot-hit):not(.marker):not(.repair-hit):not([data-transport-space]), [role=option], [role=menuitem]'))) {
+      const original = kind === 'repair' ? repairSignal === 'original' : snapshot.original;
+      if (!event.repeat) onaction(key === 'l' ? 'loop' : original ? 'treated' : 'original');
+    } else if (key === ' ' || (kind === 'repair' && event.code === 'Space')) {
+      const control = target instanceof Element && target.closest(
+        'button:not(.plot-hit):not(.marker):not(.repair-hit):not(.overview-hit):not([data-transport-space]), summary, [role=option], [role=menuitem]');
+      if (control && (control !== pointerButton || control.matches('[role], [aria-haspopup], [aria-expanded]')
+        || control.closest('[role=dialog]'))) return;
       event.preventDefault();
-      onaction('play');
+      if (!event.repeat) onaction('play');
     }
   }
 
   function toggleDc() {
     if (settings.dcHz) restoreDc = settings.dcHz;
     onedit({ dcHz: settings.dcHz ? 0 : restoreDc || treatmentNumbers.dcHz.initial });
+  }
+
+  function seek(frame: number) {
+    if (!snapshot?.frames) return;
+    const start = Math.max(0, Math.min(frame, snapshot.frames - 1));
+    if (start !== snapshot.frame) onaction('seek', { start, end: start + 1 });
+  }
+
+  function commitPlayTime() {
+    if (enteredTime === undefined) return;
+    const frame = frameAtTime(enteredTime, sampleRate);
+    if (frame === null || frame < 0 || frame > (snapshot?.frames ?? 0)) {
+      timeInvalid = true;
+      return;
+    }
+    if (enteredTime !== playTime) seek(frame);
+    enteredTime = undefined;
+    timeInvalid = false;
+  }
+
+  function playbackPosition(input: HTMLInputElement) {
+    if (!snapshot || !(snapshot.clockRunning ?? snapshot.playing) || enteredTime !== undefined) return;
+    const loop = snapshot.loop ? snapshot.loopRange : undefined;
+    const observed = performance.now();
+    const clock = { frame: snapshot.frame, observed, running: true, rate: sampleRate, frames: snapshot.frames, loop,
+      endFrame: !loop && snapshot.selectionPlaying ? snapshot.loopRange?.end : undefined };
+    let animation = 0;
+    const paint = (now: number) => {
+      if (document.activeElement !== input) input.value = timeLabel(projectRepairFrame(clock, now), clock.rate, 3);
+      if (now - observed < repairClockHorizon) animation = requestAnimationFrame(paint);
+    };
+    animation = requestAnimationFrame(paint);
+    return () => cancelAnimationFrame(animation);
   }
 </script>
 
@@ -275,48 +339,103 @@
   </Select>
 {/snippet}
 
-{#snippet number(key: TreatmentNumber, label: string)}
+{#snippet dial(key: TreatmentNumber, label: string)}
   {@const spec = treatmentNumbers[key]}
-  {@const value = settings[key] || spec.initial}
-  <label class="parameter">
-    <span>{label}</span>
-    <NumberInput class="tool-number" {value} min={spec.min} max={spec.max} step={spec.step ?? 1} disabled={!snapshot}
-      onValueCommit={next => { if (next !== null) onedit({ [key]: next }); }}>
-      <NumberInputControl class="parameter-input" aria-label={spec.unit ? label + ' in ' + spec.unit : label}/>
-      {#if spec.unit}<span class="unit" aria-hidden="true">{spec.unit}</span>{/if}
-    </NumberInput>
-  </label>
+  <EqDial {label} value={settings[key] || (key === 'dcHz' ? restoreDc || spec.initial : 0)}
+    min={spec.min} max={spec.max} step={spec.step ?? 1} unit={spec.unit} color="var(--accent-ink)"
+    resetValue={spec.initial} onvalue={(value, gesture) => onedit({ [key]: value }, gesture)}/>
 {/snippet}
 
-<svelte:window onkeydown={windowKeys}/>
+<svelte:window onkeydown={windowKeys} onpointerdowncapture={rememberPointerButton}/>
 {#snippet modeRail()}
-  {#if kind !== 'eq'}
-    <AudioSplitToolModes {kind} {settings} selected={mode} enabled={!!snapshot} stereo={!!snapshot?.stereo} onchoose={setMode}/>
-  {/if}
+  <RepairPopup label="Mains hum" disabled={!snapshot} active={settings.hum !== 'off'}>
+    {#snippet icon()}<Zap size={16} aria-hidden="true"/>{/snippet}
+    <div class="repair-options">
+      {@render choice('Mains frequency', settings.hum, humOptions, humControl, value => onedit({ hum: value as AudioTreatment['hum'] }))}
+      {@render dial('humHarmonics', 'Harmonics')}
+    </div>
+  </RepairPopup>
+  <RepairPopup label="DC offset" disabled={!snapshot} active={!!settings.dcHz}>
+    {#snippet icon()}<Equal size={16} aria-hidden="true"/>{/snippet}
+    <div class="repair-options">
+      <Button role="switch" size="sm" variant="ghost" class="repair-switch" aria-checked={!!settings.dcHz}
+        onclick={toggleDc}>Remove DC offset</Button>
+      {@render dial('dcHz', 'Cutoff')}
+    </div>
+  </RepairPopup>
+  <RepairPopup label="Stereo" disabled={!snapshot?.stereo}
+    active={!!(settings.balance || settings.stereoWidth || settings.swapChannels || settings.mono !== 'off' || settings.polarity !== 'off')}>
+    {#snippet icon()}<Headphones size={16} aria-hidden="true"/>{/snippet}
+    <div class="repair-options stereo-options">
+      {@render choice('Mono conversion', settings.mono, monoOptions, monoControl, value => onedit({ mono: value as AudioTreatment['mono'] }))}
+      {@render choice('Channel polarity', settings.polarity, polarityOptions, polarityControl, value => onedit({ polarity: value as AudioTreatment['polarity'] }))}
+      <Button role="switch" size="sm" variant="ghost" class="repair-switch" aria-checked={settings.swapChannels}
+        onclick={() => onedit({ swapChannels: !settings.swapChannels })}>Swap L/R</Button>
+    </div>
+    <div class="repair-dials">
+      {@render dial('balance', 'Balance')}
+      {@render dial('stereoWidth', 'Width change')}
+    </div>
+  </RepairPopup>
 {/snippet}
 
-<section class="tool-window" class:eq={kind === 'eq'} class:repair={kind === 'repair'} aria-label={title[kind]}>
-  <header class="tool-header">
+{#snippet transportControls()}
     <div class="transport" role="group" aria-label="Preview controls">
       <Button variant="ghost" size="icon-sm" disabled={!snapshot} aria-label={snapshot?.playing ? 'Pause' : 'Play'} aria-keyshortcuts="Space"
         title={snapshot?.playing ? 'Pause (Space)' : 'Play (Space)'} data-transport-space onclick={() => onaction('play')}>
         {#if snapshot?.playing}<Pause size={15} aria-hidden="true"/>{:else}<Play size={15} aria-hidden="true"/>{/if}
       </Button>
-      <Button variant="ghost" size="icon-sm" class="tool-power" disabled={!snapshot} aria-label="Loop preview" title="Loop preview (L)"
-        aria-keyshortcuts="L" aria-pressed={snapshot?.loop ?? false} onclick={() => onaction('loop')}><Repeat2 size={16} aria-hidden="true"/></Button>
+      {#if kind === 'repair'}
+        <div class="repair-seek" role="group" aria-label="Seek">
+          <Button variant="ghost" size="icon-sm" disabled={!snapshot} aria-label="Go to recording start" title="Go to recording start"
+            onclick={() => seek(0)}><SkipBack size={15} aria-hidden="true"/></Button>
+          <Button variant="ghost" size="icon-sm" disabled={!snapshot} aria-label="Back 5 seconds" title="Back 5 seconds"
+            onclick={() => seek((snapshot?.frame ?? 0) - 5 * sampleRate)}><Rewind size={15} aria-hidden="true"/></Button>
+          <Input class="repair-position" type="text" inputmode="decimal" aria-label="Playback position"
+            {@attach playbackPosition}
+            title="Playback position · enter a time to seek" value={enteredTime ?? playTime} disabled={!snapshot} aria-invalid={timeInvalid}
+            onfocus={event => event.currentTarget.select()}
+            oninput={event => { enteredTime = event.currentTarget.value; timeInvalid = false; }}
+            onblur={() => { commitPlayTime(); enteredTime = undefined; timeInvalid = false; }}
+            onkeydown={event => {
+              if (event.key === 'Enter') { event.preventDefault(); commitPlayTime(); }
+              if (event.key === 'Escape') { event.preventDefault(); enteredTime = undefined; timeInvalid = false; }
+            }}/>
+          <Button variant="ghost" size="icon-sm" disabled={!snapshot} aria-label="Forward 5 seconds" title="Forward 5 seconds"
+            onclick={() => seek((snapshot?.frame ?? 0) + 5 * sampleRate)}><FastForward size={15} aria-hidden="true"/></Button>
+        </div>
+      {/if}
+      <Button variant="ghost" size="icon-sm" class="tool-power" disabled={!snapshot}
+        aria-label={kind === 'repair' ? 'Loop selection' : 'Loop preview'} title={kind === 'repair' ? 'Repeat the selection or add a playback loop (Ctrl/⌘+L)' : 'Loop preview (L)'}
+        aria-keyshortcuts={kind === 'repair' ? 'L Control+L Meta+L' : 'L'}
+        aria-pressed={!!(snapshot?.loop || (kind === 'repair' && snapshot?.repeatSelection))} onclick={() => onaction('loop')}><Repeat2 size={16} aria-hidden="true"/></Button>
       {#if kind === 'eq'}
         <Button variant="ghost" size="icon-sm" class="treatment-bypass" disabled={!snapshot}
           aria-label="Bypass treatment" aria-pressed={snapshot?.original ?? false} aria-keyshortcuts="B"
           title={snapshot?.original ? 'Resume treated playback (B)' : 'Bypass treatment (B)'}
           onclick={() => onaction(snapshot?.original ? 'treated' : 'original')}><Power size={15} aria-hidden="true"/></Button>
+      {:else if kind === 'repair'}
+        <Menu controller={signalMenu}>
+          <MenuTrigger class="repair-signal" aria-label={'Playback signal, ' + signalLabels[repairSignal]} title="Change playback and spectrogram signal (B)"
+            disabled={!snapshot}><AudioLines size={15} aria-hidden="true"/>{signalLabels[repairSignal]}<ChevronDown size={11} aria-hidden="true"/></MenuTrigger>
+          <MenuContent class="audio-action-menu" align="start" sideOffset={5} collisionPadding={8}>
+            <MenuRadioGroup value={repairSignal} onValueChange={value => onlisten({ type: 'signal', signal: value as typeof repairSignal })}>
+              {#each Object.entries(signalLabels) as [key, label] (key)}
+                <MenuRadioItem value={key} closeOnSelect>{label}<MenuItemIndicator class="menu-trailing" aria-hidden="true"><Check size={14}/></MenuItemIndicator></MenuRadioItem>
+              {/each}
+            </MenuRadioGroup>
+          </MenuContent>
+        </Menu>
       {:else}
         <div class="comparison" role="group" aria-label="Preview sound">
           <Button variant="ghost" size="sm" disabled={!snapshot} title="Compare Original and Treated (B)" aria-pressed={snapshot?.original ?? false} onclick={() => onaction('original')}>Original</Button>
           <Button variant="ghost" size="sm" disabled={!snapshot} title="Compare Original and Treated (B)" aria-pressed={!!snapshot && !snapshot.original} onclick={() => onaction('treated')}>Treated</Button>
         </div>
       {/if}
-      <Button variant="ghost" size="icon-sm" class="tool-power" disabled={!snapshot} aria-label="Match preview levels" title="Match Original and Treated volume"
-        aria-pressed={snapshot?.levelMatch ?? false} onclick={() => onaction('level-match')}><Scale size={15} aria-hidden="true"/></Button>
+      {#if kind !== 'repair'}
+        <Button variant="ghost" size="icon-sm" class="tool-power" disabled={!snapshot} aria-label="Match preview levels" title="Match Original and Treated volume"
+          aria-pressed={snapshot?.levelMatch ?? false} onclick={() => onaction('level-match')}><Scale size={15} aria-hidden="true"/></Button>
+      {/if}
       {#if kind === 'eq'}
         <Button variant="ghost" size="sm" class="ab-toggle" disabled={!snapshot?.eqLevelComparison || !!snapshot.reference?.preview}
           aria-label={compareSlots ? 'Switch to EQ ' + (compareSlots.slot === 'A' ? 'B' : 'A') : 'Start EQ A/B comparison'}
@@ -327,6 +446,9 @@
         </Button>
       {/if}
     </div>
+{/snippet}
+
+{#snippet windowControls()}
     <div class="transport preset-controls">
       <Button variant="ghost" size="icon-sm" class="tool-power" disabled={!snapshot} aria-label="Keep tool on top" title="Keep tool on top"
         aria-pressed={snapshot?.pinned ?? false} onclick={() => onaction('pin')}><Pin size={15} aria-hidden="true"/></Button>
@@ -399,34 +521,48 @@
           onclick={() => stepEqPreset(1)}><ChevronRight size={15} aria-hidden="true"/></Button>
       {/if}
     </div>
-  </header>
+{/snippet}
 
+<section class={['tool-window', { eq: kind === 'eq', repair: kind === 'repair' }]} aria-label={title[kind]}>
+  {#if kind !== 'repair'}
+    <header class={['tool-header', { 'tool-chrome': kind === 'eq' }]}>
+      {@render transportControls()}
+      {@render windowControls()}
+    </header>
+  {/if}
   {#if kind === 'eq'}
     <AudioSplitEqPanel {snapshot} {probe} {mode} onmode={setMode} {onedit} {onaction} {onanalyzer} {onlearn}/>
   {:else if kind === 'dynamics'}
     <AudioSplitDynamicsPanel {snapshot} {probe} mode={mode ?? 'compressor'} {onedit} {onaction}/>
   {:else}
-    <AudioSplitRepairPlot {snapshot} {probe} {onviewport} {onedit} {onaction} {modeRail}/>
-    {#if mode !== 'selection'}
-    <div class="tool-controls">
-      {#if mode === 'hum'}
-        {@render choice('Mains frequency', settings.hum, humOptions, humControl, value => onedit({ hum: value as AudioTreatment['hum'] }))}
-        {@render number('humHarmonics', 'Harmonics')}
-      {:else if mode === 'dc'}
-        <Button variant="ghost" size="icon-sm" class="tool-power" aria-pressed={!!settings.dcHz} aria-label="Remove DC offset" title="Remove DC offset" onclick={toggleDc}><Power size={15}/></Button>
-        {@render number('dcHz', 'Cutoff')}
-      {:else if snapshot?.stereo}
-        {@render choice('Mono conversion', settings.mono, monoOptions, monoControl, value => onedit({ mono: value as AudioTreatment['mono'] }))}
-        <Button variant="ghost" size="sm" class="tool-power" aria-pressed={settings.swapChannels} onclick={() => onedit({ swapChannels: !settings.swapChannels })}>Swap L/R</Button>
-        {@render choice('Channel polarity', settings.polarity, polarityOptions, polarityControl, value => onedit({ polarity: value as AudioTreatment['polarity'] }))}
-        {@render number('balance', 'Balance')}
-        {@render number('stereoWidth', 'Width change')}
-      {/if}
-    </div>
-    {/if}
+    {#snippet repairHeader(overview: Snippet)}
+      <header class="tool-header tool-chrome overview-bar">
+        {@render overview()}
+        {@render windowControls()}
+      </header>
+    {/snippet}
+    {#snippet repairFooter(controls: Snippet)}
+      <footer class="repair-transport tool-chrome" data-tooltip-side="top">
+        {@render transportControls()}
+        <AudioSplitRepairMeters reading={meterReading} running={!!(snapshot?.clockRunning ?? snapshot?.playing)}
+          stereo={!!(snapshot?.repairStereoOutput ?? snapshot?.stereo)} monitor={snapshot?.repairListen?.channel ?? 'stereo'}/>
+        {@render controls()}
+      </footer>
+    {/snippet}
+    {#snippet listen(selection: SpectralRepair | undefined, candidate: SpectralRepair | undefined, repairSlot: number | undefined)}
+      <AudioSplitRepairListen {snapshot} {selection} {candidate} {repairSlot} {onlisten}/>
+    {/snippet}
+    {#key snapshot?.sourceId}
+      <AudioSplitRepairPlot {snapshot} {probe} {notice} {onviewport} {onedit} {onaction} {onlisten} {modeRail} {listen} header={repairHeader} footer={repairFooter}
+        signal={repairSignal} onsignal={signal => onlisten({ type: 'signal', signal })}/>
+    {/key}
   {/if}
 
-  {#if kind === 'dynamics'}<div class="tool-side">{@render modeRail()}</div>{/if}
+  {#if kind === 'dynamics'}
+    <div class="tool-side">
+      <AudioSplitToolModes {kind} {settings} selected={mode} enabled={!!snapshot} stereo={!!snapshot?.stereo} onchoose={setMode}/>
+    </div>
+  {/if}
 
   {#if kind === 'eq'}
     <Dialog.Root open={presetDialog !== null} onOpenChange={open => { if (!open) presetDialog = null; }}>
@@ -498,18 +634,43 @@
     grid-template-columns:minmax(0,1fr) auto; grid-template-rows:auto 1fr auto;
     gap:var(--sp-2,8px); padding:var(--sp-3,12px); background:var(--panel); color:var(--text); font-family:var(--font-ui,system-ui);
   }
-  .tool-window.eq::after {
+  .tool-window:is(.eq,.repair)::after {
     content:''; position:absolute; inset:1px; border:1px solid var(--border);
     border-radius:var(--r-dialog); pointer-events:none;
   }
   .tool-window:is(.eq,.repair) { grid-template-columns:minmax(0,1fr); }
-  .tool-header,.transport,.tool-controls,.comparison { display:flex; align-items:center; gap:var(--sp-2,8px); }
+  .tool-window.repair {
+    --repair-well:color-mix(in srgb,var(--panel) 87%,var(--border));
+    min-height:100dvh; grid-template-rows:minmax(0,1fr);
+  }
+  .tool-header,.transport,.comparison { display:flex; align-items:center; gap:var(--sp-2,8px); }
   .tool-header { grid-column:1 / -1; justify-content:space-between; min-width:0; }
+  .tool-header.overview-bar { min-height:32px; }
+  .overview-bar .preset-controls { flex:none; }
+  .repair-transport {
+    display:flex; align-items:center; flex-wrap:wrap; gap:var(--sp-1) var(--sp-2); min-width:0;
+    min-height:36px; padding-inline:var(--sp-1);
+  }
+  .repair-transport .transport { flex-wrap:wrap; }
+  .repair-transport :global(.repair-meters) { flex:1 1 210px; max-inline-size:360px; }
+  .repair-transport :global(.repair-footer-tools) { margin-inline-start:auto; }
   .tool-side { grid-column:2; grid-row:2 / 4; align-self:start; }
   .transport { gap:var(--sp-1,4px); }
   .comparison { gap:2px; }
   .comparison :global(button) { block-size:24px; border:0; border-radius:var(--r-compact); background:transparent; }
   .comparison :global([aria-pressed=true]) { background:var(--sel-tint); color:var(--accent-ink,var(--text)); }
+  .repair-seek { display:flex; align-items:center; gap:2px; }
+  .repair :global(.repair-position) {
+    width:11ch; min-width:0; padding:0 var(--sp-1); block-size:28px;
+    border:0; border-radius:var(--r-compact); background:var(--repair-well); box-shadow:none;
+    color:var(--text); font-family:var(--font-literal); font-variant-numeric:tabular-nums; font-size:var(--text-xs); text-align:center;
+  }
+  .repair :global(.repair-position:focus-visible) { outline:2px solid var(--accent); outline-offset:1px; }
+  .repair :global(.repair-position[aria-invalid=true]) { outline:1px solid var(--del); }
+  .repair :global(.repair-signal) {
+    display:inline-flex; align-items:center; gap:var(--sp-1); block-size:28px; padding-inline:var(--sp-2);
+    border:0; border-radius:var(--r-compact); background:transparent; color:var(--muted); font-size:var(--text-xs);
+  }
   .eq :global(.ab-toggle) {
     gap:2px; padding-inline:6px; block-size:24px; min-inline-size:36px; border:0; background:transparent; color:var(--muted);
   }
@@ -517,21 +678,21 @@
   .tool-window :global([data-size="icon-sm"]:not([data-tool-mode])) { border:0; background:transparent; }
   .tool-window :global([data-size="icon-sm"]:not([data-tool-mode]):hover:not(:disabled)) { color:var(--text); }
   .tool-window :global([data-size="icon-sm"][aria-pressed=true]:not([data-tool-mode])),
-  .tool-window :global([data-size="icon-sm"][aria-expanded=true]), .tool-controls :global(.tool-power[aria-pressed=true]) { color:var(--accent-ink,var(--text)); }
+  .tool-window :global([data-size="icon-sm"][aria-expanded=true]) { color:var(--accent-ink,var(--text)); }
   :global(.tool-window .tool-menu) { display:grid; place-items:center; inline-size:28px; block-size:28px; border:0; border-radius:var(--r-compact,8px); background:transparent; color:var(--muted); }
   :global(.tool-window .compact-presets) {
     display:grid; inline-size:104px; padding-inline:4px; font-size:var(--text-xs); color:var(--text);
   }
   :global(.tool-window .compact-presets) span { max-inline-size:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .eq .tool-header { flex-wrap:wrap; gap:var(--sp-1) var(--sp-3); }
-  .eq .tool-header :global(button) {
+  .tool-chrome .transport :global(button) {
     border:0; box-shadow:none; background:transparent; color:var(--muted);
   }
-  .eq .tool-header :global(button:hover:not(:disabled)) { color:var(--text); background:var(--row-hover); }
-  .eq .tool-header :global(button:is([aria-pressed=true],[aria-expanded=true])) {
+  .tool-chrome .transport :global(button:hover:not(:disabled)) { color:var(--text); background:var(--row-hover); }
+  .tool-chrome .transport :global(button:is([aria-pressed=true],[aria-expanded=true])) {
     color:var(--accent-ink); background:var(--sel-tint);
   }
-  .eq .tool-header :global(button:focus-visible) { outline:2px solid var(--accent); outline-offset:1px; }
+  .tool-chrome .transport :global(button:focus-visible) { outline:2px solid var(--accent); outline-offset:1px; }
   .eq .tool-header :global(button.treatment-bypass[aria-pressed=true]) {
     color:color-mix(in srgb,var(--del) 78%,var(--muted));
     background:color-mix(in srgb,var(--del) 14%,transparent);
@@ -540,19 +701,27 @@
   .eq .preset-controls :global(.compact-presets) { color:var(--text); font-weight:var(--fw-medium,500); }
   :global(.tool-window .tool-menu:hover) { color:var(--text); }
   :global(.tool-window .tool-menu:focus-visible) { outline:2px solid var(--accent); }
-  .tool-controls { grid-column:1; min-height:38px; padding-inline:var(--sp-1,4px); flex-wrap:wrap; }
-  .parameter { display:grid; gap:2px; color:var(--muted); font-size:.6875rem; font-weight:500; }
-  .parameter :global(.tool-number),:global(.tool-window .tool-select) { display:inline-flex; align-items:center; min-height:28px; border-radius:var(--input-radius,10px); border:0; background:transparent; color:var(--text); font-size:.75rem; }
-  .parameter :global(.tool-number:hover), :global(.tool-window .tool-select:hover:not(:disabled)) { background:var(--row-hover); }
-  .parameter :global(.tool-number) { padding-inline:8px; }
-  .parameter :global(.parameter-input) { width:6ch; min-width:0; padding:0; border:0; background:transparent; color:inherit; outline:none; text-align:right; font-variant-numeric:tabular-nums; }
-  .parameter :global(.tool-number:focus-within),:global(.tool-window .tool-select:focus-visible) { outline:2px solid var(--accent); outline-offset:1px; }
-  :global(.tool-window .tool-select) { gap:7px; justify-content:space-between; padding-inline:9px; }
-  .unit { color:var(--muted); margin-inline-start:4px; }
+  .repair-options,.repair-dials { display:flex; align-items:center; gap:var(--sp-3); }
+  .stereo-options { flex-wrap:wrap; gap:var(--sp-1); }
+  .repair-dials { justify-content:center; }
+  .repair-options :global(.tool-select) {
+    display:inline-flex; align-items:center; justify-content:space-between; gap:var(--sp-2); min-height:28px;
+    padding-inline:var(--sp-2); border-radius:var(--input-radius); border:0;
+    background:var(--row-hover); color:var(--text); font-size:var(--text-xs);
+  }
+  .repair-options :global(.tool-select:focus-visible) { outline:2px solid var(--accent); outline-offset:1px; }
+  .repair-options :global(.repair-switch[aria-checked=true]) { background:var(--sel-tint); color:var(--accent-ink); }
   .shortcut-help { position:absolute; z-index:10; inset-block-start:49px; inset-inline-end:var(--sp-3,12px); width:min(310px,calc(100% - 24px)); background:var(--panel); padding:var(--sp-3,12px); border-radius:var(--r-inset,14px); box-shadow:0 8px 24px rgb(0 0 0 / 24%); }
   .shortcut-help div { display:flex; align-items:center; justify-content:space-between; gap:8px; }
   .shortcut-help h2 { margin:0; font-size:.875rem; font-weight:600; }
   .shortcut-help dl { display:grid; grid-template-columns:max-content 1fr; gap:6px 12px; margin:8px 0 0; font-size:.75rem; }
   .shortcut-help dd { margin:0; color:var(--muted); }
   :global(.app-select-menu.audio-tool-popup) { background:var(--panel); }
+  @media (max-width: 480px) {
+    .repair .transport { gap: 2px; }
+  }
+  @media (max-height: 420px) {
+    .tool-window.repair { height:100dvh; padding:var(--sp-2); }
+    .tool-header.overview-bar { min-height:28px; }
+  }
 </style>

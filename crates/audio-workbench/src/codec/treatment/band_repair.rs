@@ -1,10 +1,11 @@
 //! Temporal band attenuation with four minimum-phase second-order sections.
 
-use super::{deserialize_slots, Biquad};
+use super::{deserialize_slots, Biquad, RepairMask};
 use rustfft::num_complex::Complex64;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::f64::consts::PI;
 use std::ops::Range;
+use std::sync::Arc;
 
 pub const MAX_SPECTRAL_REPAIRS: usize = 8;
 const SECTIONS: usize = 4;
@@ -16,16 +17,24 @@ pub enum RepairChannel {
     Right,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpectralRepair {
     pub start_frame: u64,
     pub end_frame: u64,
-    pub low_hz: u16,
-    pub high_hz: u16,
+    pub low_hz: u32,
+    pub high_hz: u32,
     pub amount_db: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<RepairChannel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<Arc<str>>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bypassed: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interpolate: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<Arc<RepairMask>>,
 }
 
 type RepairSlots = [Option<SpectralRepair>; MAX_SPECTRAL_REPAIRS];
@@ -45,7 +54,7 @@ pub(super) struct BandRepair {
 }
 
 impl BandRepair {
-    pub(super) fn new(repair: SpectralRepair, rate: u32, channels: usize) -> Self {
+    pub(super) fn new(repair: &SpectralRepair, rate: u32, channels: usize) -> Self {
         let length = repair.end_frame - repair.start_frame;
         let design = band_design(rate, repair);
         Self {
@@ -84,7 +93,7 @@ impl BandRepair {
     }
 }
 
-pub(super) fn history_frames(rate: u32, repair: SpectralRepair) -> u64 {
+pub(super) fn history_frames(rate: u32, repair: &SpectralRepair) -> u64 {
     settle_frames(rate, &band_design(rate, repair))
 }
 
@@ -98,7 +107,7 @@ fn settle_frames(rate: u32, design: &[(Complex64, Complex64); SECTIONS]) -> u64 
     ((-18.0 / radius.ln()).ceil() as u64).min(u64::from(rate) * 4)
 }
 
-fn band_design(rate: u32, repair: SpectralRepair) -> [(Complex64, Complex64); SECTIONS] {
+fn band_design(rate: u32, repair: &SpectralRepair) -> [(Complex64, Complex64); SECTIONS] {
     let warp = |hz| (PI * f64::from(hz) / f64::from(rate)).tan();
     let low = warp(repair.low_hz);
     let high = warp(repair.high_hz);
@@ -157,7 +166,7 @@ mod tests {
             |len| SeqDeserializer::new(std::iter::repeat_n(UnitDeserializer::<Error>::new(), len));
         assert_eq!(
             deserialize(list(1)).unwrap(),
-            Some([None; MAX_SPECTRAL_REPAIRS])
+            Some([const { None }; MAX_SPECTRAL_REPAIRS])
         );
         assert!(deserialize(list(MAX_SPECTRAL_REPAIRS + 1)).is_err());
     }

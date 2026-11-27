@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-11-27
+
+**Spectral Repair’s interaction and design have been rewritten.** The Repair
+window now shares Split Studio’s EQ styling, with a recording overview at the
+top and transport, live output meters and view controls along the bottom.
+
+- Draw rectangle, time, frequency, brush or lasso selections. Stereo drags
+  select both lanes by default. Hold Ctrl or Command to select just one channel.
+- Audition the selected time and frequency region on a loop. Adjust the range
+  while playing, or click within the selection to move the playhead.
+- Inspect Left, Right, Both or Combined views, and switch between Original,
+  Repaired and Removed audio. The spectrogram measures finer detail as you zoom
+  into time or frequency.
+
+More dedicated repair tools will follow in future releases.
+
 ## [1.5.0] - 2026-11-26
 
 **Milestone 1.5 brings live audio restoration to Split Studio.** You can clean

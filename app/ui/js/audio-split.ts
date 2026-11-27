@@ -53,7 +53,7 @@ import type { AudioTreatment } from './audio-treatment';
 export { activeEffectLabels, audioTreatmentCount, hasTreatment, noTreatment, readTreatment, sameTreatment } from './audio-treatment';
 export type { AudioTreatment } from './audio-treatment';
 export type TreatmentAnalysis = { gainDb: number; loudnessLufs: number | null; outputChannels: number };
-export type Status = { frame: number; playing: boolean; loading?: boolean; sequence?: number; retuneFailed?: number };
+export type Status = { frame: number; playing: boolean; loading?: boolean; sequence?: number; retuneFailed?: number; retunePending?: number };
 export type Cue = {
   sourceName: string;
   markers: Array<{ frame: number; title?: string | null; artist?: string | null; tags?: Tags; pregapFrame?: number; pregap?: number; postgap?: number; index00?: number; index01?: number }>;

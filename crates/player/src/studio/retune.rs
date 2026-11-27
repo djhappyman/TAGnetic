@@ -1,7 +1,9 @@
 //! An EQ parameter edit can reuse the decoder and its dry history. It is
 //! applied by the producer before the next packet reaches the speaker.
 use std::{collections::VecDeque, sync::Mutex};
-use tagrex_audio_workbench::{PlaybackReadings, PreparedTreatment, SourceInfo, TreatmentProcessor};
+use tagrex_audio_workbench::{
+    PlaybackReadings, PreparedTreatment, RepairBlock, SourceInfo, TreatmentProcessor,
+};
 
 const MAX_PREROLL_SAMPLES: usize = 96_000;
 const FADE_MILLISECONDS: u32 = 12;
@@ -88,8 +90,8 @@ impl LiveProcessor {
         self.active.output_info()
     }
 
-    pub(super) fn prepared(&self) -> PreparedTreatment {
-        self.prepared
+    pub(super) fn prepared(&self) -> &PreparedTreatment {
+        &self.prepared
     }
 
     pub(super) fn retune(
@@ -121,7 +123,27 @@ impl LiveProcessor {
         self.fade_left = self.fade_frames;
     }
 
-    pub(super) fn process(
+    pub(super) fn process_source(
+        &mut self,
+        block: RepairBlock<'_>,
+        output: &mut Vec<i32>,
+        meter: bool,
+    ) -> Option<PlaybackReadings> {
+        let Some(repaired) = block.repaired else {
+            return self.process(block.dry, output, meter);
+        };
+        if meter {
+            Some(
+                self.active
+                    .process_repaired_for_playback(block.dry, repaired, output),
+            )
+        } else {
+            self.active.process_aligned(block.dry, repaired, output);
+            None
+        }
+    }
+
+    fn process(
         &mut self,
         input: &[i32],
         output: &mut Vec<i32>,
@@ -187,15 +209,20 @@ mod tests {
             source,
         )
         .unwrap();
-        assert!(before.can_retune_eq(after, source.sample_rate));
+        assert!(before.can_retune_eq(&after, source.sample_rate));
         let slot = RetuneSlot::default();
         slot.enable();
-        let mut live = LiveProcessor::new(before.processor(source).unwrap(), before, source, true);
+        let mut live = LiveProcessor::new(
+            before.processor(source).unwrap(),
+            before.clone(),
+            source,
+            true,
+        );
         let input = vec![120_000_000; 4096];
         let mut output = Vec::new();
         live.process(&input, &mut output, false);
         assert_eq!(input, output);
-        assert!(slot.submit(after));
+        assert!(slot.submit(after.clone()));
         live.retune(&slot, source, (input.len() / 2) as u64, false);
         live.process(&input, &mut output, false);
         assert_eq!(output.len(), input.len());
@@ -206,7 +233,7 @@ mod tests {
             .0
             .iter()
             .all(|frame| frame[0] == frame[1]));
-        assert!(live.prepared().same_preview(after));
+        assert!(live.prepared().same_preview(&after));
         assert!(live.previous.is_none());
         live.retune(&slot, source, input.len() as u64, true);
         assert!(!slot.submit(before));
@@ -251,7 +278,7 @@ mod tests {
             .collect();
         let mut output = Vec::new();
         live.process(&input, &mut output, false);
-        assert!(slot.submit(after));
+        assert!(slot.submit(after.clone()));
         live.retune(&slot, source, input.len() as u64, false);
         live.process(&input, &mut output, false);
         let energy = |samples: &[i32]| {
@@ -306,29 +333,34 @@ mod tests {
         let after = PreparedTreatment::preview(settings(1.0, 7.0), source).unwrap();
         let slot = RetuneSlot::default();
         slot.enable();
-        let mut live = LiveProcessor::new(before.processor(source).unwrap(), before, source, true);
+        let mut live = LiveProcessor::new(
+            before.processor(source).unwrap(),
+            before.clone(),
+            source,
+            true,
+        );
         let input = vec![40_000_000; 4096];
         let mut output = Vec::new();
         live.process(&input, &mut output, false);
-        assert!(before.can_retune_eq(after, source.sample_rate));
-        assert!(slot.submit(after));
+        assert!(before.can_retune_eq(&after, source.sample_rate));
+        assert!(slot.submit(after.clone()));
         live.retune(&slot, source, (input.len() / 2) as u64, false);
         assert!(live.previous.is_none());
-        assert!(live.prepared().same_preview(after));
+        assert!(live.prepared().same_preview(&after));
         live.process(&input, &mut output, false);
         assert_eq!(output.len(), input.len());
         let zero_strength = PreparedTreatment::preview(
             AudioTreatment {
                 eq_strength: Some(0.0),
-                ..after.settings()
+                ..after.settings().clone()
             },
             source,
         )
         .unwrap();
-        assert!(after.can_retune_eq(zero_strength, source.sample_rate));
-        assert!(slot.submit(zero_strength));
+        assert!(after.can_retune_eq(&zero_strength, source.sample_rate));
+        assert!(slot.submit(zero_strength.clone()));
         live.retune(&slot, source, input.len() as u64, false);
         assert!(live.previous.is_none());
-        assert!(live.prepared().same_preview(zero_strength));
+        assert!(live.prepared().same_preview(&zero_strength));
     }
 }

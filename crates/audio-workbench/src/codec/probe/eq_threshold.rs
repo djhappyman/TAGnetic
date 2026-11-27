@@ -1,7 +1,5 @@
-use super::{
-    check_cancelled, MediaError, PreparedTreatment, PreviewDecoder, SeekIndex, SourceInfo,
-};
-use crate::FrameRange;
+use super::{check_cancelled, MediaError, PreparedTreatment, SeekIndex, SourceInfo};
+use crate::{FrameRange, RepairSource};
 use std::fs::File;
 use std::io::{Seek, SeekFrom};
 use std::time::{Duration, Instant};
@@ -53,8 +51,13 @@ pub fn learn_eq_threshold(
         let end = start + width;
         let warmup = prepared.preview_start(start, info.sample_rate);
         source.seek(SeekFrom::Start(0))?;
-        let mut decoder =
-            PreviewDecoder::open_indexed(source.try_clone()?, warmup, index, &mut stop)?;
+        let mut decoder = RepairSource::open(
+            source.try_clone()?,
+            warmup,
+            index,
+            prepared.settings(),
+            &mut stop,
+        )?;
         if decoder.source_info().channels != info.channels
             || decoder.source_info().sample_rate != info.sample_rate
         {
@@ -68,6 +71,7 @@ pub fn learn_eq_threshold(
             let Some(samples) = decoder.next_block(&mut stop)? else {
                 break;
             };
+            let samples = samples.samples();
             let block_end = (cursor + (samples.len() / channels) as u64).min(end);
             let mut next = cursor;
             while next < block_end {

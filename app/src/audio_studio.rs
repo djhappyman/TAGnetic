@@ -9,8 +9,9 @@ use std::sync::{
 use tagrex_commands::audio_studio::{
     AudioTreatment, CueEncoding, DiscogsProposal, DraftSegment, EqBand, ExportResult, ImportedCue,
     OpenedRecording, PreviewComparison, PreviewMonitor, Progress, ProviderAnchor,
-    RecordingProgress, RestoreResult, Review, ReviewRequest, SpectrogramChannel, SpectrumView,
-    Studio, StudioError, TreatmentAnalysis, TreatmentProbe, TreatmentProbeOptions,
+    RecordingProgress, RestoreResult, Review, ReviewRequest, SpectralRepair, SpectrogramChannel,
+    SpectrogramDetail, SpectrogramFocus, SpectrumView, Studio, StudioError, TreatmentAnalysis,
+    TreatmentProbe, TreatmentProbeOptions,
 };
 use tagrex_commands::ErrorDto;
 use tauri::{
@@ -400,6 +401,9 @@ pub(super) async fn audio_split_probe(
     viewport: Option<tagrex_commands::audio_studio::FrameRange>,
     spectrogram_channel: Option<SpectrogramChannel>,
     spectrogram_treated: Option<bool>,
+    spectrogram_difference: Option<bool>,
+    spectrogram_detail: Option<SpectrogramDetail>,
+    spectrogram_focus: Option<SpectrogramFocus>,
 ) -> Result<Option<TreatmentProbe>, ErrorDto> {
     let studio = studio.inner().clone();
     let options = TreatmentProbeOptions {
@@ -409,9 +413,12 @@ pub(super) async fn audio_split_probe(
         viewport,
         spectrogram_channel: spectrogram_channel.unwrap_or_default(),
         spectrogram_treated: spectrogram_treated.unwrap_or_default(),
+        spectrogram_difference: spectrogram_difference.unwrap_or_default(),
+        spectrogram_detail: spectrogram_detail.unwrap_or_default(),
+        spectrogram_focus,
     };
     let (producing, window) = if playback.unwrap_or_default() && !options.spectrogram {
-        player.studio_playback_window(&id, frame, treatment)
+        player.studio_playback_window(&id, frame, treatment.clone())
     } else {
         (false, None)
     };
@@ -709,7 +716,10 @@ pub(super) async fn audio_split_discogs(
 }
 
 use std::time::Duration;
-use tagrex_player::{Player, StudioAudition, StudioPlayback, StudioPreviewState};
+use tagrex_player::{
+    Player, StudioAudition, StudioMonitorChannel, StudioPlayback, StudioPreviewRange,
+    StudioPreviewState,
+};
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -729,6 +739,8 @@ pub(super) struct TransportStatus {
     sequence: u64,
     #[serde(rename = "retuneFailed", skip_serializing_if = "Option::is_none")]
     retune_failed: Option<u64>,
+    #[serde(rename = "retunePending", skip_serializing_if = "Option::is_none")]
+    retune_pending: Option<u64>,
 }
 
 fn frame_time(frame: u64, rate: u32) -> Duration {
@@ -746,23 +758,48 @@ pub(super) async fn audio_split_transport(
     action: TransportAction,
     frame: Option<u64>,
     end_frame: Option<u64>,
+    loop_start_frame: Option<u64>,
+    smooth_loop: Option<bool>,
+    repeat: Option<bool>,
     sequence: Option<u64>,
     treatment: Option<AudioTreatment>,
     revision: Option<u64>,
     monitor: Option<PreviewMonitor>,
+    preview_selection: Option<SpectralRepair>,
     preview_gain_db: Option<f32>,
+    monitor_channel: Option<StudioMonitorChannel>,
 ) -> Result<(), ErrorDto> {
     if matches!(action, TransportAction::Retune) {
+        let range = if let Some(end) = end_frame {
+            let (rate, total) = studio.cue_geometry(&id).map_err(shell_error)?;
+            let start = loop_start_frame.unwrap_or_default();
+            if start >= end || end > total {
+                return Err(shell_error(
+                    "Choose an audition range inside the recording.",
+                ));
+            }
+            Some(StudioPreviewRange {
+                start: frame_time(start, rate),
+                end: frame_time(end, rate),
+                repeat: repeat.unwrap_or(false),
+                smooth: smooth_loop.unwrap_or(false),
+            })
+        } else {
+            None
+        };
         let (file, prepared) = studio
             .playback_treatment(&id, treatment.unwrap_or_default())
             .map_err(shell_error)?;
         return player
-            .studio_retune(
+            .studio_retune_range(
                 id,
                 sequence.unwrap_or_default(),
                 revision.unwrap_or_default(),
                 file,
-                prepared.with_preview_monitor(monitor, preview_gain_db),
+                prepared
+                    .with_preview_monitor(monitor, preview_gain_db)
+                    .with_preview_selection(preview_selection),
+                range,
             )
             .map_err(shell_error);
     }
@@ -782,40 +819,53 @@ pub(super) async fn audio_split_transport(
                     ));
                 }
                 let start = frame_time(frame, rate);
-                let end = frame_time(total, rate);
                 let owner = id.clone();
                 let sequence = sequence.unwrap_or_default();
-                let play = |audition| {
-                    player.studio_play_request(
+                let play = |audition, end_frame| {
+                    player.studio_play_monitored(
                         owner.clone(),
                         sequence,
                         StudioPlayback {
                             file,
                             start,
-                            end,
+                            end: frame_time(end_frame, rate),
                             audition,
                             sample_rate: rate,
                             seek_index,
-                            treatment: treatment.with_preview_monitor(monitor, preview_gain_db),
+                            treatment: treatment
+                                .with_preview_monitor(monitor, preview_gain_db)
+                                .with_preview_selection(preview_selection),
                         },
+                        monitor_channel.unwrap_or_default(),
                     )
                 };
                 match action {
                     TransportAction::Seek => player.studio_seek_sequenced(owner, sequence, start),
-                    TransportAction::Play => play(None),
+                    TransportAction::Play => play(None, total),
                     TransportAction::Pause => player.studio_pause_sequenced(owner, sequence),
                     TransportAction::Retune => unreachable!("retune has no source transport"),
                     TransportAction::Audition => {
+                        let loop_start = loop_start_frame.unwrap_or(frame);
+                        if loop_start > frame {
+                            return Err(StudioError::new(
+                                "Choose a play position inside the loop.",
+                            ));
+                        }
                         let cut_end = end_frame
                             .filter(|end| *end > frame && *end <= total)
                             .ok_or_else(|| {
                                 StudioError::new("Choose an audition range inside the recording.")
                             })?;
                         let audition = StudioAudition {
-                            start,
+                            start: frame_time(loop_start, rate),
                             end: frame_time(cut_end, rate),
+                            smooth: smooth_loop.unwrap_or(false),
                         };
-                        play(Some(audition))
+                        let repeat = repeat.unwrap_or(true);
+                        play(
+                            repeat.then_some(audition),
+                            if repeat { total } else { cut_end },
+                        )
                     }
                 }
                 .map_err(StudioError::new)
@@ -865,6 +915,16 @@ pub(super) fn audio_split_audition_output(
 }
 
 #[tauri::command]
+pub(super) fn audio_split_meter(
+    player: State<'_, Player>,
+    id: String,
+    sequence: u64,
+    channel: Option<StudioMonitorChannel>,
+) -> Option<[f32; 2]> {
+    player.studio_meter(&id, sequence, channel)
+}
+
+#[tauri::command]
 pub(super) fn audio_split_status(
     studio: State<'_, StudioState>,
     player: State<'_, Player>,
@@ -886,6 +946,7 @@ pub(super) fn audio_split_status(
         loading: status.state == StudioPreviewState::Loading,
         sequence: status.sequence,
         retune_failed: status.retune_failed,
+        retune_pending: status.retune_pending,
     };
     if sequence.is_some_and(|expected| expected != status.sequence)
         && !(status.sequence == 0 && status.state == StudioPreviewState::Refused)

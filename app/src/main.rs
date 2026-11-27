@@ -2949,6 +2949,7 @@ fn main() {
             audio_studio::audio_split_transport,
             audio_studio::audio_split_audition_output,
             audio_studio::audio_split_status,
+            audio_studio::audio_split_meter,
             audio_studio::audio_split_preview,
             audio_studio::audio_split_export,
             audio_studio::audio_split_undo_replacement,

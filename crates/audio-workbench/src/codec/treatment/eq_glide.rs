@@ -21,11 +21,11 @@ impl TreatmentProcessor {
         let unchanged_dynamics = self
             .prepared
             .settings
-            .ordinary_eq_dynamics_match(target.prepared.settings);
+            .ordinary_eq_dynamics_match(&target.prepared.settings);
         if frames == 0
             || !self
                 .prepared
-                .can_retune_eq(target.prepared, self.output.sample_rate)
+                .can_retune_eq(&target.prepared, self.output.sample_rate)
             || self.prepared.gain != target.prepared.gain
             || self.prepared.monitor_gain != target.prepared.monitor_gain
             || self.prepared.preview_ceiling != target.prepared.preview_ceiling
@@ -65,7 +65,7 @@ impl TreatmentProcessor {
             level_gain: target.level_gain,
             frames_left: frames,
         });
-        self.prepared = target.prepared;
+        self.prepared = target.prepared.clone();
         true
     }
 

@@ -11,6 +11,8 @@ mod decode;
 mod encode;
 mod peaks;
 mod probe;
+mod repair_source;
+mod restoration;
 mod seek;
 mod treatment;
 
@@ -20,14 +22,16 @@ pub use peaks::{Peak, WaveformIndex, WaveformPeaks};
 pub use probe::{
     compare_preview_levels, learn_eq_threshold, match_reference, probe_treatment,
     probe_treatment_with_options, PlaybackHistory, PlaybackProbeWindow, PlaybackReadings,
-    PreviewComparison, SpectralEqResponse, SpectrogramChannel, SpectrumView, TreatmentProbe,
-    TreatmentProbeOptions,
+    PreviewComparison, SpectralEqResponse, SpectrogramChannel, SpectrogramDetail, SpectrogramFocus,
+    SpectrumView, TreatmentProbe, TreatmentProbeOptions,
 };
+pub use repair_source::{RepairBlock, RepairSource, SelectionPcm};
 pub use seek::SeekIndex;
 pub use treatment::{
     prepare_treatment, AudioTreatment, DynamicEq, EqBand, EqBandKind, EqChannel, HumFilter,
-    MonoMode, Polarity, PreparedTreatment, PreviewMonitor, RepairChannel, SpectralRepair,
-    TreatmentProcessor, MAX_EQ_BANDS, MAX_SPECTRAL_REPAIRS,
+    MaskOperation, MonoMode, Polarity, PreparedTreatment, PreviewMonitor, RepairChannel,
+    RepairMask, RepairMaskPoint, RepairMaskRegion, SpectralRepair, TreatmentProcessor,
+    MAX_EQ_BANDS, MAX_SPECTRAL_REPAIRS,
 };
 
 const MAX_SEGMENTS: usize = 1_000;
@@ -473,8 +477,9 @@ pub fn render_treated_file(
     }
 
     check_cancelled(&mut cancelled)?;
-    let mut recording = Recording::open(source)?;
-    let mut processor = treatment.processor(recording.info())?;
+    let mut recording =
+        RepairSource::from_recording(Recording::open(source)?, treatment.settings())?;
+    let mut processor = treatment.processor(recording.source_info())?;
     let info = processor.output_info();
     check_output(&info, format)?;
     let channels = info.channels as usize;
@@ -487,8 +492,9 @@ pub fn render_treated_file(
     while next < segments.len() {
         let start = recording.position();
         let packet = recording
-            .next(&mut cancelled)?
+            .next_block(&mut cancelled)?
             .ok_or(MediaError::Range("An output extends past the recording"))?;
+        let packet = packet.samples();
         let packet = if treatment.settings().is_active() {
             processor.process(packet, &mut processed);
             &processed

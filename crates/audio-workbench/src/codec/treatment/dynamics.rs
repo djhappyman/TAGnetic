@@ -88,7 +88,7 @@ pub(super) struct Dynamics {
 }
 
 impl Dynamics {
-    pub(super) fn new(settings: AudioTreatment, rate: f64) -> Option<Self> {
+    pub(super) fn new(settings: &AudioTreatment, rate: f64) -> Option<Self> {
         const DEFAULT_ATTACK: u16 = 8;
         const DEFAULT_RELEASE: u16 = 160;
         settings.has_dynamics().then(|| Self {
@@ -198,9 +198,9 @@ mod tests {
 
     #[test]
     fn compressor_controls_leave_gate_timing_unchanged() {
-        let mut original = Dynamics::new(recipe(), RATE).unwrap();
+        let mut original = Dynamics::new(&recipe(), RATE).unwrap();
         let mut custom = Dynamics::new(
-            AudioTreatment {
+            &AudioTreatment {
                 compressor_attack_ms: 100,
                 compressor_release_ms: 300,
                 ..recipe()
@@ -221,9 +221,9 @@ mod tests {
 
     #[test]
     fn soft_knee_blends_into_the_hard_knee_response() {
-        let mut hard = Dynamics::new(recipe(), RATE).unwrap();
+        let mut hard = Dynamics::new(&recipe(), RATE).unwrap();
         let mut soft = Dynamics::new(
-            AudioTreatment {
+            &AudioTreatment {
                 compressor_knee_db: 12,
                 ..recipe()
             },
@@ -250,10 +250,10 @@ mod tests {
             compressor_knee_db: 8,
             ..recipe()
         };
-        let mut treated = Dynamics::new(configured, RATE).unwrap();
-        let mut difference = Dynamics::new(configured, RATE).unwrap();
+        let mut treated = Dynamics::new(&configured, RATE).unwrap();
+        let mut difference = Dynamics::new(&configured, RATE).unwrap();
         let mut bypassed = Dynamics::new(
-            AudioTreatment {
+            &AudioTreatment {
                 compressor_db: 0,
                 ..configured
             },
