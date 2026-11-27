@@ -8,7 +8,10 @@ use std::sync::{
 };
 use std::time::Duration;
 type Output = UniformSourceIterator<SourcesQueueOutput>;
-type Handoff = Box<dyn FnOnce() -> bool + Send>;
+struct Handoff {
+    align: Box<dyn FnOnce() -> bool + Send>,
+    finish: Box<dyn FnOnce() + Send>,
+}
 
 struct Replacement {
     output: Output,
@@ -36,9 +39,16 @@ impl Handle {
     pub fn replace_if(
         &self,
         output: SourcesQueueOutput,
-        handoff: impl FnOnce() -> bool + Send + 'static,
+        align: impl FnOnce() -> bool + Send + 'static,
+        finish: impl FnOnce() + Send + 'static,
     ) {
-        self.queue(output, Some(Box::new(handoff)));
+        self.queue(
+            output,
+            Some(Handoff {
+                align: Box::new(align),
+                finish: Box::new(finish),
+            }),
+        );
     }
 
     fn queue(&self, output: SourcesQueueOutput, handoff: Option<Handoff>) {
@@ -57,7 +67,15 @@ impl Handle {
 pub(super) struct Router {
     shared: Arc<Shared>,
     current: Option<Output>,
+    fade: Option<Fade>,
     frame_remaining: usize,
+}
+
+struct Fade {
+    outgoing: Output,
+    remaining: u32,
+    length: u32,
+    finish: Box<dyn FnOnce() + Send>,
 }
 impl Router {
     pub fn new(channels: rodio::ChannelCount, rate: rodio::SampleRate) -> (Handle, Self) {
@@ -72,6 +90,7 @@ impl Router {
             Self {
                 shared,
                 current: None,
+                fade: None,
                 frame_remaining: 0,
             },
         )
@@ -94,9 +113,23 @@ impl Iterator for Router {
                 Err(TryLockError::WouldBlock) => None,
             };
             if let Some(Replacement { output, handoff }) = next {
-                if handoff.is_none_or(|handoff| handoff()) {
-                    let previous = self.current.replace(output);
-                    drop(previous);
+                if let Some(Handoff { align, finish }) = handoff {
+                    if align() {
+                        if let Some(outgoing) = self.current.replace(output) {
+                            let length = (self.shared.rate.get() / 250).max(1);
+                            self.fade = Some(Fade {
+                                outgoing,
+                                length,
+                                remaining: length,
+                                finish,
+                            });
+                        } else {
+                            finish();
+                        }
+                    }
+                } else {
+                    self.current = Some(output);
+                    self.fade = None;
                 }
             }
         }
@@ -104,12 +137,24 @@ impl Iterator for Router {
             self.frame_remaining = usize::from(self.shared.channels.get());
         }
         self.frame_remaining -= 1;
-        Some(
-            self.current
-                .as_mut()
-                .and_then(Iterator::next)
-                .unwrap_or(0.0),
-        )
+        let mut sample = self
+            .current
+            .as_mut()
+            .and_then(Iterator::next)
+            .unwrap_or(0.0);
+        if let Some(fade) = &mut self.fade {
+            let mix = (fade.length - fade.remaining + 1) as f32 / fade.length as f32;
+            let outgoing = fade.outgoing.next().unwrap_or(0.0);
+            sample = outgoing * (1.0 - mix) + sample * mix;
+            if self.frame_remaining == 0 {
+                fade.remaining -= 1;
+                if fade.remaining == 0 {
+                    let fade = self.fade.take().expect("completed fade");
+                    (fade.finish)();
+                }
+            }
+        }
+        Some(sample)
     }
 }
 impl Source for Router {
@@ -179,10 +224,14 @@ mod tests {
         let (_stale, output) = source(0.75);
         let checks = Arc::new(AtomicUsize::new(0));
         let checks_at_swap = checks.clone();
-        handle.replace_if(output, move || {
-            checks_at_swap.fetch_add(1, Ordering::SeqCst);
-            false
-        });
+        handle.replace_if(
+            output,
+            move || {
+                checks_at_swap.fetch_add(1, Ordering::SeqCst);
+                false
+            },
+            || panic!("a stale replacement must never finish"),
+        );
         assert_eq!(router.next(), Some(0.25));
         assert_eq!(checks.load(Ordering::SeqCst), 0);
         assert_eq!(router.next(), Some(0.25));

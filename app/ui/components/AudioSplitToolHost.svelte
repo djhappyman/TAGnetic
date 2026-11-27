@@ -7,7 +7,7 @@
   import type { AnalyzerView, TreatmentPlotMode, TreatmentProbe } from '../js/audio-treatment-plot';
   import {
     applyToolTheme, listenToolFlush, listenToolProbe, listenToolState, sendToolRequest, toolPatch,
-    type PreviewBand, type SpectrogramViewOptions, type ToolAction, type ToolProbeUpdate, type ToolRequest, type ToolSnapshot,
+    type PreviewBand, type RepairListenCommand, type SpectrogramViewOptions, type ToolAction, type ToolProbeUpdate, type ToolRequest, type ToolSnapshot, type ToolStateUpdate,
   } from '../js/audio-tools-window';
 
   let { kind }: { kind: TreatmentPlotMode } = $props();
@@ -98,6 +98,13 @@
     flush();
   }
 
+  function listen(command: RepairListenCommand) {
+    if (snapshot && kind === 'repair') {
+      void send({ kind, sourceId: snapshot.sourceId, action: 'repair-listen', command })
+        ?.catch(reason => { connectionError = String(reason); });
+    }
+  }
+
   function analyzer(view: AnalyzerView) {
     if (snapshot) void send({ kind, action: 'analyzer', sourceId: snapshot.sourceId, enabled: view !== 'off', view })?.catch(reason => { connectionError = String(reason); });
   }
@@ -117,8 +124,11 @@
     probeError = update.error ?? '';
   }
 
-  function accept(state: ToolSnapshot | null) {
+  function accept(update: ToolStateUpdate | null) {
     if (!active) return;
+    const settingsUpdate = update?.settings ?? (update?.sourceId === received?.sourceId ? received?.settings : undefined);
+    if (update && !settingsUpdate) return;
+    const state = update && settingsUpdate ? { ...update, settings: settingsUpdate } : null;
     if (state?.sourceId !== received?.sourceId) {
       sending = undefined;
       queued.length = 0;
@@ -153,7 +163,7 @@
       overview: state.overview ?? (snapshot?.sourceId === state.sourceId ? snapshot.overview : undefined),
       stereoOverview: state.stereoOverview ?? (snapshot?.sourceId === state.sourceId ? snapshot.stereoOverview : undefined),
       cuts: state.cuts ?? (snapshot?.sourceId === state.sourceId ? snapshot.cuts : undefined),
-      settings: snapshot && sameTreatment(snapshot.settings, settings) ? snapshot.settings : settings,
+      settings: snapshot && (snapshot.settings === settings || sameTreatment(snapshot.settings, settings)) ? snapshot.settings : settings,
       theme: appearanceChanged ? state.theme : snapshot?.theme || state.theme,
     };
   }
@@ -190,7 +200,7 @@
     <p class="problem" role="status">{connectionError || probeError}</p>
   {/if}
   {#key snapshot?.sourceId}
-    <AudioSplitToolWindow {kind} {snapshot} {probe} onedit={edit} onaction={action} onviewport={viewport} onanalyzer={analyzer} onlearn={learnThreshold}/>
+    <AudioSplitToolWindow {kind} {snapshot} {probe} onedit={edit} onaction={action} onviewport={viewport} onanalyzer={analyzer} onlearn={learnThreshold} onlisten={listen}/>
   {/key}
 </main>
 

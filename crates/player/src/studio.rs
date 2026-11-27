@@ -17,6 +17,7 @@ use tagrex_audio_workbench::{
 pub struct StudioAudition {
     pub start: Duration,
     pub end: Duration,
+    pub smooth: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -36,6 +37,7 @@ pub struct StudioStatus {
     pub state: StudioPreviewState,
     pub sequence: u64,
     pub retune_failed: Option<u64>,
+    pub retune_pending: Option<u64>,
 }
 
 pub(super) enum Command {
@@ -261,6 +263,7 @@ impl Actor {
                     state: StudioPreviewState::Loading,
                     sequence: 0,
                     retune_failed: None,
+                    retune_pending: None,
                 };
                 if let Some(router) = output.and_then(Output::studio_router) {
                     if self.worker.is_none() {
@@ -301,6 +304,7 @@ impl Actor {
                             state: StudioPreviewState::Ready,
                             sequence: 0,
                             retune_failed: None,
+                            retune_pending: None,
                         };
                     } else {
                         let worker = self
@@ -328,6 +332,7 @@ impl Actor {
                         state: StudioPreviewState::Idle,
                         sequence: 0,
                         retune_failed: None,
+                        retune_pending: None,
                     };
                 }
             }
@@ -426,17 +431,22 @@ impl Actor {
 
     fn publish(&mut self) {
         let owns_output = self.owns_output();
+        let retune_pending = self.lease.as_ref().and_then(|lease| {
+            (lease.playing && (lease.pending.is_some() || lease.queued.is_some()))
+                .then_some(lease.revision)
+        });
+        let current = StudioStatus {
+            retune_pending,
+            ..self.state
+        };
         let mut state = self.shared.0.lock().unwrap_or_else(|p| p.into_inner());
         state.analysis = self
             .lease
             .as_ref()
             .map(|lease| lease.voice.playback_history());
-        if state.value != self.state
-            || state.owns_output != owns_output
-            || state.owner != self.owner
-        {
+        if state.value != current || state.owns_output != owns_output || state.owner != self.owner {
             state.owner.clone_from(&self.owner);
-            state.value = self.state;
+            state.value = current;
             state.owns_output = owns_output;
         }
     }
@@ -466,11 +476,11 @@ struct RetuneTarget {
     treatment: PreparedTreatment,
 }
 
-fn same_treatment(a: PreparedTreatment, b: PreparedTreatment) -> bool {
+fn same_treatment(a: &PreparedTreatment, b: &PreparedTreatment) -> bool {
     a.same_preview(b)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Geometry {
     sample_rate: u32,
     end: Duration,
@@ -521,15 +531,15 @@ impl Lease {
         if let Some(pending) = self.pending.as_ref().filter(|pending| pending.submitted) {
             // A device handoff can already have taken effect. Keep the old
             // and new voices alive until the device acknowledges it.
-            if !same_treatment(pending.target.treatment, target.treatment) {
+            if !same_treatment(&pending.target.treatment, &target.treatment) {
                 self.queued = Some(target);
             }
-        } else if same_treatment(self.geometry.treatment, target.treatment) {
+        } else if same_treatment(&self.geometry.treatment, &target.treatment) {
             self.pending = None;
         } else if !self
             .pending
             .as_ref()
-            .is_some_and(|job| same_treatment(job.target.treatment, target.treatment))
+            .is_some_and(|job| same_treatment(&job.target.treatment, &target.treatment))
         {
             // Let the prepared voice reach the playhead even during a drag.
             // Only the latest edit waits behind it.
@@ -547,8 +557,8 @@ impl Lease {
         if self
             .geometry
             .treatment
-            .can_retune_eq(target.treatment, self.geometry.sample_rate)
-            && self.voice.retune_eq(target.treatment)
+            .can_retune_eq(&target.treatment, self.geometry.sample_rate)
+            && self.voice.retune_eq(target.treatment.clone())
         {
             self.file = target.file;
             self.geometry.treatment = target.treatment;
@@ -568,8 +578,8 @@ impl Lease {
         target: RetuneTarget,
     ) -> Result<(), String> {
         let geometry = Geometry {
-            treatment: target.treatment,
-            ..self.geometry
+            treatment: target.treatment.clone(),
+            ..self.geometry.clone()
         };
         let request = geometry.request(&target.file, position, self.seek_index.clone())?;
         self.pending = Some(Retune {
@@ -640,6 +650,12 @@ impl Lease {
             ..
         } = self.pending.take().expect("a prepared preview");
         drop(voice);
+        // A prepared voice that can still meet the playhead may become
+        // audible during a drag. Once it misses, a queued newer edit gets
+        // the decoder instead of waiting behind retries of the old sound.
+        if self.queued.is_some() {
+            return Ok(false);
+        }
         if retries >= 2 {
             return Err(format!(
                 "The updated preview could not catch the playhead ({start:?} to {position:?})"
@@ -701,8 +717,9 @@ impl Geometry {
             start,
             end,
             loop_start,
+            smooth_loop: self.audition.is_some_and(|audition| audition.smooth),
             seek_index,
-            treatment: self.treatment,
+            treatment: self.treatment.clone(),
         })
     }
 }

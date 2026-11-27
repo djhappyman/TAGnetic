@@ -6,7 +6,13 @@ export type RepairViewport = { time: FrameRange; frequency: FrequencyRange };
 export type RepairTexture = { bitmap: HTMLCanvasElement; time: FrameRange; frequency: FrequencyRange };
 export type RepairChannel = 'combined' | 'left' | 'right';
 export type RepairContrast = 'balanced' | 'detail' | 'strong';
-export type RepairWaveform = { values: readonly number[]; time: FrameRange; stereo?: boolean; channel?: RepairChannel };
+export type RepairWaveform = { values: readonly number[]; time: FrameRange; stereo?: boolean; channel?: RepairChannel; opacity?: number; clipping?: boolean };
+export const repairPalettes = {
+  warm: { background: '#1a1015', gradient: '#271619, #aa4822, #eeb358, #fff0cb', colours: [[39, 22, 25], [170, 72, 34], [238, 179, 88], [255, 240, 203]] },
+  neutral: { background: '#141619', gradient: '#23272b, #737e85, #b6c1c6, #f4f8f8', colours: [[35, 39, 43], [115, 126, 133], [182, 193, 198], [244, 248, 248]] },
+  blue: { background: '#111621', gradient: '#172539, #34699b, #78c2cb, #f4f9d3', colours: [[23, 37, 57], [52, 105, 155], [120, 194, 203], [244, 249, 211]] },
+};
+export type RepairPaletteName = keyof typeof repairPalettes;
 const frequencyLabel = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
 
 export function clampRepair(value: number, minimum: number, maximum: number): number {
@@ -42,9 +48,25 @@ export function frequencyY(hz: number, bounds: PlotBounds, frequency: FrequencyR
 }
 
 export function boundedTime(start: number, size: number, rate: number, frames: number): FrameRange {
-  const span = clampRepair(size, Math.min(frames, rate / 4), Math.min(frames, rate * 12));
+  const span = clampRepair(size, Math.min(frames, rate / 4), frames);
   const first = clampRepair(start, 0, frames - span);
   return { start: first, end: first + span };
+}
+
+export function spectralWindowLimit(rate: number, stereo: boolean): number {
+  // Keep viewport probes inside Rust's decoded sample and duration budgets.
+  return Math.min(rate * 12, stereo ? 2_000_000 : 4_000_000);
+}
+
+export function interpolateRepairTime(from: FrameRange, to: FrameRange, progress: number): FrameRange {
+  const fromSpan = from.end - from.start;
+  const toSpan = to.end - to.start;
+  const span = fromSpan * (toSpan / fromSpan) ** progress;
+  // Move the window by the same proportion as its span, keeping the
+  // pointer's source frame fixed when the endpoints share an anchor.
+  const fraction = fromSpan === toSpan ? progress : (span - fromSpan) / (toSpan - fromSpan);
+  const start = from.start + (to.start - from.start) * fraction;
+  return { start, end: start + span };
 }
 
 export function repairTimeLabel(frame: number, rate: number, precise = false): string {
@@ -58,7 +80,25 @@ function hertzLabel(hz: number): string {
   return hz >= 1000 ? frequencyLabel.format(hz / 1000) + 'k' : String(Math.round(hz));
 }
 
-export function buildRepairTexture(probe: TreatmentProbe, rate: number, accent: string, contrast: RepairContrast = 'balanced'): RepairTexture | null {
+export function repairDbScale(contrast: RepairContrast, offset = 0) {
+  const floor = contrast === 'detail' ? -112 : contrast === 'strong' ? -72 : -94;
+  const ceiling = contrast === 'detail' ? -28 : -22;
+  return { floor: floor + offset, ceiling: ceiling + offset };
+}
+
+export function repairLevelAt(probe: TreatmentProbe, frame: number, hz: number): number | undefined {
+  const range = spectrogramRange(probe);
+  const columns = probe.spectrogram;
+  if (!range || !columns?.length || frame < range.start || frame > range.end || hz <= 0) return;
+  const column = clampRepair(Math.floor((frame - range.start) * columns.length / (range.end - range.start)), 0, columns.length - 1);
+  const bin = probe.frequencies.findIndex((frequency, index, all) =>
+    index === all.length - 1 || hz < Math.sqrt(frequency * all[index + 1]));
+  return columns[column][bin];
+}
+
+export function buildRepairTexture(
+  probe: TreatmentProbe, rate: number, palette: RepairPaletteName, contrast: RepairContrast = 'balanced', offset = 0,
+): RepairTexture | null {
   const time = spectrogramRange(probe);
   const columns = probe.spectrogram;
   const frequencies = probe.frequencies;
@@ -69,21 +109,28 @@ export function buildRepairTexture(probe: TreatmentProbe, rate: number, accent: 
   bitmap.height = 240;
   const ctx = bitmap.getContext('2d');
   if (!ctx) return null;
-  ctx.fillStyle = accent;
   const bounds = { left: 0, top: 0, right: bitmap.width, bottom: bitmap.height };
   const rows = frequencies.map((hz, index) => {
     const upper = index + 1 === frequencies.length ? frequency.highHz : Math.sqrt(hz * frequencies[index + 1]);
     return frequencyY(clampRepair(upper, frequency.lowHz, frequency.highHz), bounds, frequency);
   });
-  const floor = contrast === 'detail' ? -112 : contrast === 'strong' ? -72 : -94;
-  const ceiling = contrast === 'detail' ? -28 : -22;
+  const { floor, ceiling } = repairDbScale(contrast, offset);
+  const { colours } = repairPalettes[palette];
+  const steps = 64;
+  const lookup = Array.from({ length: steps }, (_, index) => {
+    const fraction = index / (steps - 1) * (colours.length - 1);
+    const from = Math.min(colours.length - 2, Math.floor(fraction));
+    const colour = colours[from].map((value, channel) => Math.round(value + (fraction - from) * (colours[from + 1][channel] - value)));
+    return 'rgb(' + colour.join(' ') + ')';
+  });
   for (const [x, levels] of columns.entries()) {
     for (let bin = 0; bin < Math.min(levels.length, rows.length); bin++) {
       const strength = clampRepair((levels[bin] - floor) / (ceiling - floor), 0, 1);
       if (strength <= 0) continue;
       const top = rows[bin];
       const bottom = rows[bin - 1] ?? bitmap.height;
-      ctx.globalAlpha = strength ** 1.65 * .84;
+      ctx.fillStyle = lookup[Math.round(strength * (steps - 1))];
+      ctx.globalAlpha = strength ** 1.42 * .88;
       ctx.fillRect(x, top, 1, Math.max(0, bottom - top) + .5);
     }
   }
@@ -96,7 +143,7 @@ export function drawRepairViewport(
   canvas: HTMLCanvasElement, width: number, height: number, viewport: RepairViewport,
   textures: readonly RepairTexture[], rate: number, palette: RepairPalette,
   guides: readonly number[], scale = 1,
-  waveform?: RepairWaveform,
+  waveform?: RepairWaveform, waveformOnly = false,
 ): void {
   if (width <= 0 || height <= 0) return;
   const ctx = canvas.getContext('2d');
@@ -133,13 +180,13 @@ export function drawRepairViewport(
     ctx.clearRect(x, y, w, h);
     ctx.drawImage(texture.bitmap, tx, ty, tw, th, x, y, w, h);
   }
-  if (waveform) drawWaveform(ctx, waveform, bounds, time, palette.ink, .52);
+  if (waveform) drawWaveform(ctx, waveform, bounds, time, palette.ink, waveform.opacity ?? .52);
 
   ctx.strokeStyle = palette.guide;
   ctx.globalAlpha = .56;
   ctx.setLineDash([4, 4]);
   for (const hz of guides) {
-    if (hz < frequency.lowHz || hz > frequency.highHz) continue;
+    if (waveformOnly || hz < frequency.lowHz || hz > frequency.highHz) continue;
     const y = frequencyY(hz, bounds, frequency);
     strokeLine(ctx, bounds.left, y, bounds.right, y);
   }
@@ -151,18 +198,19 @@ export function drawRepairViewport(
   ctx.font = '10px ' + palette.font;
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'right';
-  const ticks = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10_000, 20_000]
+  const ticks = waveformOnly ? [-1, -.5, 0, .5, 1] : [20, 50, 100, 200, 500, 1000, 2000, 5000, 10_000, 20_000]
     .filter(hz => hz >= frequency.lowHz && hz <= frequency.highHz);
-  if (ticks.length < 2) {
+  if (!waveformOnly && ticks.length < 2) {
     ticks.length = 0;
     for (let i = 0; i < 3; i++) ticks.push(frequency.lowHz * (frequency.highHz / frequency.lowHz) ** (i / 2));
   }
-  for (const hz of ticks) {
-    const y = frequencyY(hz, bounds, frequency);
+  for (const tick of ticks) {
+    const y = waveformOnly ? (bounds.top + bounds.bottom) / 2 - (bounds.bottom - bounds.top) * .47 * tick
+      : frequencyY(tick, bounds, frequency);
     ctx.globalAlpha = .45;
     strokeLine(ctx, bounds.left, y, bounds.right, y);
     ctx.globalAlpha = .9;
-    ctx.fillText(hertzLabel(hz), bounds.left - 6, y);
+    ctx.fillText(waveformOnly ? String(tick) : hertzLabel(tick), bounds.left - 6, y);
   }
   ctx.textAlign = 'center';
   for (const fraction of [0, .25, .5, .75, 1]) {
@@ -171,6 +219,7 @@ export function drawRepairViewport(
     ctx.globalAlpha = .45;
     strokeLine(ctx, x, bounds.top, x, bounds.bottom);
     ctx.globalAlpha = .9;
+    ctx.textAlign = fraction === 0 ? 'left' : fraction === 1 ? 'right' : 'center';
     ctx.fillText(repairTimeLabel(frame, rate, time.end - time.start < rate), x, bounds.bottom + 13);
   }
   ctx.globalAlpha = 1;
@@ -234,6 +283,18 @@ function drawWaveform(
   }
   ctx.closePath();
   ctx.fill();
+  if (waveform.clipping) {
+    ctx.strokeStyle = '#ffaba0';
+    ctx.globalAlpha = .9;
+    for (let index = 0; index < points; index++) {
+      const first = left + index * (right - left) / points;
+      const last = left + (index + 1) * (right - left) / points;
+      for (const side of [0, 1]) {
+        const y = peak(index, side);
+        if (Math.abs(y - center) >= height * .99999) strokeLine(ctx, first, y, last, y);
+      }
+    }
+  }
   ctx.restore();
 }
 

@@ -626,7 +626,7 @@ fn stereo_peaks_and_right_channel_export_use_the_original_channel_order() {
     draft.segments = vec![segment(0, "Opening"), segment(CUT as u64, "Second track")];
     draft.treatment.mono = audio::MonoMode::Right;
     let treatment = studio
-        .prepare_treatment(&opened.id, draft.treatment, || false)
+        .prepare_treatment(&opened.id, draft.treatment.clone(), || false)
         .unwrap();
     assert_eq!(treatment.output_channels, 1);
     let review = studio.preview(draft).unwrap();
@@ -695,7 +695,7 @@ fn treated_mp3_splits_reencode_as_mono_and_leave_the_source_untouched() {
 
     let draft = draft(None);
     let prepared = studio
-        .prepare_treatment(&opened.id, draft.treatment, || false)
+        .prepare_treatment(&opened.id, draft.treatment.clone(), || false)
         .unwrap();
     assert_eq!(prepared.output_channels, 1);
     assert!(prepared.loudness_lufs.is_some());
@@ -731,9 +731,9 @@ fn adjustable_treatments_preview_before_analysis_and_bound_cached_recipes() {
         ..AudioTreatment::default()
     };
     studio
-        .with_playback_source(&opened.id, treatment, |_, rate, _, _, prepared| {
+        .with_playback_source(&opened.id, treatment.clone(), |_, rate, _, _, prepared| {
             assert_eq!(rate, 44_100);
-            assert_eq!(prepared.settings(), treatment);
+            assert_eq!(prepared.settings(), &treatment);
             assert_eq!(prepared.loudness_lufs(), None);
             Ok(())
         })
@@ -745,7 +745,7 @@ fn adjustable_treatments_preview_before_analysis_and_bound_cached_recipes() {
                 &opened.id,
                 AudioTreatment {
                     high_cut_hz: 8_000 + offset as u16,
-                    ..treatment
+                    ..treatment.clone()
                 },
                 || false,
             )
@@ -756,13 +756,65 @@ fn adjustable_treatments_preview_before_analysis_and_bound_cached_recipes() {
         source.treatments.lock().unwrap().len(),
         MAX_TREATMENT_RECIPES
     );
-    assert!(source.cached_treatment(treatment).unwrap().is_none());
+    assert!(source.cached_treatment(&treatment).unwrap().is_none());
     assert_eq!(
         studio
-            .playback_treatment(&opened.id, treatment)
+            .playback_treatment(&opened.id, treatment.clone())
             .unwrap()
             .1
             .settings(),
-        treatment
+        &treatment
     );
+}
+
+#[test]
+fn repair_recipes_round_trip_masks_and_keep_legacy_rectangles() {
+    use serde_json::json;
+
+    let source = audio::SourceInfo {
+        sample_rate: 48_000,
+        channels: 2,
+        frames: 48_000,
+        bits_per_sample: Some(16),
+    };
+    let legacy_edit = json!({
+        "startFrame": 5000, "endFrame": 30000, "lowHz": 800, "highHz": 2400,
+        "amountDb": 18,
+    });
+    let legacy: AudioTreatment =
+        serde_json::from_value(json!({ "spectralRepairs": [legacy_edit.clone()] })).unwrap();
+    assert!(legacy.is_active());
+    assert!(legacy.output_info(source).is_ok());
+    let old_round_trip = serde_json::to_value(&legacy).unwrap();
+    assert_eq!(old_round_trip["spectralRepairs"][0], legacy_edit);
+
+    let edit = json!({
+        "startFrame": 5000, "endFrame": 30000, "lowHz": 800, "highHz": 2400,
+        "amountDb": 18, "name": "Room whistle", "bypassed": true, "channel": "right",
+        "mask": {
+            "version": 1, "featherFrames": 240, "featherHz": 30,
+            "regions": [
+                { "kind": "brush", "operation": "add", "radiusFrames": 480, "radiusHz": 80,
+                  "points": [{ "frame": 6000, "hz": 1000 }, { "frame": 8000, "hz": 2000 }] },
+                { "kind": "lasso", "operation": "subtract",
+                  "points": [{ "frame": 3000, "hz": 840 }, { "frame": 7000, "hz": 930 }, { "frame": 6000, "hz": 750 }] }
+            ]
+        }
+    });
+    let mut draft = json!({ "spectralRepairs": [edit] });
+    let accepted: AudioTreatment = serde_json::from_value(draft.clone()).unwrap();
+    assert!(!accepted.is_active());
+    assert_eq!(accepted.output_info(source).unwrap(), source);
+    assert_eq!(
+        serde_json::to_value(accepted).unwrap()["spectralRepairs"][0],
+        edit
+    );
+
+    draft["spectralRepairs"][0]["mask"]["version"] = json!(2);
+    let unsupported: AudioTreatment = serde_json::from_value(draft.clone()).unwrap();
+    assert!(unsupported.output_info(source).is_err());
+    draft["spectralRepairs"][0]["mask"]["version"] = json!(1);
+    draft["spectralRepairs"][0]["mask"]["regions"][0]["points"] =
+        json!(vec![json!({ "frame": 6000, "hz": 1000 }); 257]);
+    assert!(serde_json::from_value::<AudioTreatment>(draft).is_err());
 }

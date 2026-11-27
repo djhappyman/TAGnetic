@@ -8,23 +8,25 @@
   import * as Dialog from '$lib/components/ui/dialog/index.js';
   import AudioSplitDynamicsPanel from './AudioSplitDynamicsPanel.svelte';
   import AudioSplitEqPanel from './AudioSplitEqPanel.svelte';
+  import AudioSplitRepairListen from './AudioSplitRepairListen.svelte';
   import AudioSplitRepairPlot from './AudioSplitRepairPlot.svelte';
   import AudioSplitToolModes, { isToolMode } from './AudioSplitToolModes.svelte';
   import Button from './AudioSplitButton.svelte';
   import { findEqNode, legacyEqBands, visibleEqNodes } from '../js/audio-eq';
   import { dynamicsMode, dynamicsPresets } from '../js/audio-dynamics';
   import type { FrameRange } from '../js/audio-split';
-  import { noTreatment, readTreatment, sameTreatment, treatmentNumbers, type AudioTreatment, type TreatmentNumber } from '../js/audio-treatment';
+  import { noTreatment, readTreatment, sameTreatment, treatmentNumbers, type AudioTreatment, type SpectralRepair, type TreatmentNumber } from '../js/audio-treatment';
   import type { AnalyzerView, TreatmentPlotMode, TreatmentProbe } from '../js/audio-treatment-plot';
   import { readEqPresets, saveEqPresets, treatmentForRecording, type SavedEqPreset } from '../js/audio-treatment-recipes';
-  import { toolPatch, type PreviewBand, type SpectrogramViewOptions, type ToolAction, type ToolSnapshot } from '../js/audio-tools-window';
+  import { toolPatch, type PreviewBand, type RepairListenCommand, type SpectrogramViewOptions, type ToolAction, type ToolSnapshot } from '../js/audio-tools-window';
 
-  let { kind, snapshot, probe, onedit, onaction, onviewport, onanalyzer, onlearn }: {
+  let { kind, snapshot, probe, onedit, onaction, onviewport, onanalyzer, onlearn, onlisten }: {
     kind: TreatmentPlotMode;
     snapshot: ToolSnapshot | null;
     probe: TreatmentProbe | null;
     onanalyzer: (view: AnalyzerView) => void;
     onlearn: (index: number) => void;
+    onlisten: (command: RepairListenCommand) => void;
     onedit: (patch: Partial<AudioTreatment>, gesture?: string, compareEq?: Partial<AudioTreatment> | null) => void;
     onaction: (action: ToolAction, range?: FrameRange, band?: PreviewBand) => void;
     onviewport: (range: FrameRange | null, options?: SpectrogramViewOptions) => void;
@@ -67,6 +69,8 @@
   let eqComparison = $state.raw<{ sourceId: string; slot: CompareSlot; A: Partial<AudioTreatment>; B: Partial<AudioTreatment> }>();
   let restoreDc = 0;
   const settings = $derived(snapshot?.settings ?? noTreatment);
+  const repairSignal = $derived(snapshot?.monitor === 'band' ? undefined
+    : snapshot?.repairListen?.signal ?? (snapshot?.original ? 'original' : 'repaired'));
   const selectedShape = $derived(kind === 'eq' ? findEqNode(settings, mode)?.shape ?? '' : '');
   function chooseEqShape(value: string) {
     setMode(visibleEqNodes(settings, null).find(node => node.shape === value)?.key ?? value);
@@ -84,13 +88,14 @@
   const eqPresetName = $derived(presets[eqPresetIndex]?.label ?? 'Custom EQ');
   const compareSlots = $derived(eqComparison?.sourceId === snapshot?.sourceId ? eqComparison : undefined);
   const modKey = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
-  const commonKeys = [['Space', 'Play or pause'], ['L', 'Toggle loop'], ['B', 'Compare Original and Treated'],
+  const commonKeys = [['Space', 'Play or pause'], ['L', 'Toggle loop'], ['B', 'Compare the preview with Original'],
     [modKey + '+Z', 'Undo'], [modKey + '+Shift+Z', 'Redo'], ['?', 'Show keyboard shortcuts']];
   const details = {
     eq: [['Enter', 'Add a band or edit its exact values'], ['Arrows', 'Move the focused band'], ['Shift+arrows', 'Move in finer steps'], [modKey === '⌘' ? 'Option+drag' : 'Alt+drag', 'Lock the drag to one axis'], ['Delete', 'Remove the focused band']],
     dynamics: [['Arrows', 'Adjust the focused handle'], ['Shift+arrows', 'Adjust in finer steps']],
-    repair: [['Enter', 'Audition the selection'], [modKey + '+Enter', 'Apply the repair'], ['Delete', 'Remove a selected repair'],
-      ['F', 'Fit the selection'], ['0', 'Reset zoom'], ['Shift+scroll', 'Zoom frequencies']],
+    repair: [['1–5', 'Rectangle, Time, Frequency, Brush, Lasso'], ['Enter', 'Audition the selection'],
+      ['Shift+Enter', 'Audition the selected frequencies'], [modKey + '+Enter', 'Apply the repair'], ['Delete', 'Remove a selected repair'],
+      ['F', 'Fit the selection'], ['0', 'Fit the recording'], ['Shift+scroll', 'Zoom frequencies']],
   };
 
   function readMode() {
@@ -252,9 +257,10 @@
       onaction(key === 'y' || event.shiftKey ? 'redo' : 'undo');
     } else if (key === 'b' || key === 'l') {
       event.preventDefault();
-      if (!event.repeat) onaction(key === 'l' ? 'loop' : snapshot.original ? 'treated' : 'original');
+      const original = kind === 'repair' ? repairSignal === 'original' : snapshot.original;
+      if (!event.repeat) onaction(key === 'l' ? 'loop' : original ? 'treated' : 'original');
     } else if (key === ' ' && !event.repeat && !(target instanceof Element
-      && target.closest('button:not(.plot-hit):not(.marker):not(.repair-hit):not([data-transport-space]), [role=option], [role=menuitem]'))) {
+      && target.closest('button:not(.plot-hit):not(.marker):not(.repair-hit):not([data-transport-space]), summary, [role=option], [role=menuitem]'))) {
       event.preventDefault();
       onaction('play');
     }
@@ -309,14 +315,26 @@
           aria-label="Bypass treatment" aria-pressed={snapshot?.original ?? false} aria-keyshortcuts="B"
           title={snapshot?.original ? 'Resume treated playback (B)' : 'Bypass treatment (B)'}
           onclick={() => onaction(snapshot?.original ? 'treated' : 'original')}><Power size={15} aria-hidden="true"/></Button>
+      {:else if kind === 'repair'}
+        <div class="comparison" role="group" aria-label="Compare repair audio">
+          <span class="comparison-label" aria-hidden="true">Audio</span>
+          <Button variant="ghost" size="sm" disabled={!snapshot} aria-pressed={repairSignal === 'original'}
+            title="Hear the unprocessed recording (B)" onclick={() => onlisten({ type: 'signal', signal: 'original' })}>Original</Button>
+          <Button variant="ghost" size="sm" disabled={!snapshot} aria-pressed={repairSignal === 'repaired'}
+            title="Hear the processed recording (B)" onclick={() => onlisten({ type: 'signal', signal: 'repaired' })}>Repaired</Button>
+          <Button variant="ghost" size="sm" disabled={!snapshot} aria-pressed={repairSignal === 'removed'}
+            title="Hear the time-aligned difference" onclick={() => onlisten({ type: 'signal', signal: 'removed' })}>Removed</Button>
+        </div>
       {:else}
         <div class="comparison" role="group" aria-label="Preview sound">
           <Button variant="ghost" size="sm" disabled={!snapshot} title="Compare Original and Treated (B)" aria-pressed={snapshot?.original ?? false} onclick={() => onaction('original')}>Original</Button>
           <Button variant="ghost" size="sm" disabled={!snapshot} title="Compare Original and Treated (B)" aria-pressed={!!snapshot && !snapshot.original} onclick={() => onaction('treated')}>Treated</Button>
         </div>
       {/if}
-      <Button variant="ghost" size="icon-sm" class="tool-power" disabled={!snapshot} aria-label="Match preview levels" title="Match Original and Treated volume"
-        aria-pressed={snapshot?.levelMatch ?? false} onclick={() => onaction('level-match')}><Scale size={15} aria-hidden="true"/></Button>
+      {#if kind !== 'repair'}
+        <Button variant="ghost" size="icon-sm" class="tool-power" disabled={!snapshot} aria-label="Match preview levels" title="Match Original and Treated volume"
+          aria-pressed={snapshot?.levelMatch ?? false} onclick={() => onaction('level-match')}><Scale size={15} aria-hidden="true"/></Button>
+      {/if}
       {#if kind === 'eq'}
         <Button variant="ghost" size="sm" class="ab-toggle" disabled={!snapshot?.eqLevelComparison || !!snapshot.reference?.preview}
           aria-label={compareSlots ? 'Switch to EQ ' + (compareSlots.slot === 'A' ? 'B' : 'A') : 'Start EQ A/B comparison'}
@@ -406,7 +424,10 @@
   {:else if kind === 'dynamics'}
     <AudioSplitDynamicsPanel {snapshot} {probe} mode={mode ?? 'compressor'} {onedit} {onaction}/>
   {:else}
-    <AudioSplitRepairPlot {snapshot} {probe} {onviewport} {onedit} {onaction} {modeRail}/>
+    {#snippet listen(range: FrameRange | undefined, band: PreviewBand | undefined, candidate: SpectralRepair | undefined, repairSlot: number | undefined)}
+      <AudioSplitRepairListen {snapshot} {range} {band} {candidate} {repairSlot} {onlisten}/>
+    {/snippet}
+    <AudioSplitRepairPlot {snapshot} {probe} {onviewport} {onedit} {onaction} {modeRail} {listen}/>
     {#if mode !== 'selection'}
     <div class="tool-controls">
       {#if mode === 'hum'}
@@ -510,6 +531,10 @@
   .comparison { gap:2px; }
   .comparison :global(button) { block-size:24px; border:0; border-radius:var(--r-compact); background:transparent; }
   .comparison :global([aria-pressed=true]) { background:var(--sel-tint); color:var(--accent-ink,var(--text)); }
+  .comparison-label { padding-inline-end:var(--sp-1); font-size:var(--text-xs); color:var(--muted); }
+  .repair .comparison :global(button:not(:disabled)) { color:var(--text); }
+  .repair .comparison :global(button[aria-pressed=false]:hover:not(:disabled)) { background:var(--row-hover); }
+  .repair .comparison :global(button:focus-visible) { outline:2px solid var(--accent); outline-offset:1px; }
   .eq :global(.ab-toggle) {
     gap:2px; padding-inline:6px; block-size:24px; min-inline-size:36px; border:0; background:transparent; color:var(--muted);
   }
@@ -555,4 +580,11 @@
   .shortcut-help dl { display:grid; grid-template-columns:max-content 1fr; gap:6px 12px; margin:8px 0 0; font-size:.75rem; }
   .shortcut-help dd { margin:0; color:var(--muted); }
   :global(.app-select-menu.audio-tool-popup) { background:var(--panel); }
+  @media (max-width: 480px) {
+    .repair .tool-header { flex-wrap: wrap; gap: var(--sp-1); }
+    .repair .transport { gap: 2px; }
+    .repair .preset-controls { margin-inline-start: auto; }
+    .repair .comparison-label { padding-inline-end: 2px; }
+    .repair .comparison :global(button) { padding-inline: 5px; font-size: var(--text-xs); }
+  }
 </style>

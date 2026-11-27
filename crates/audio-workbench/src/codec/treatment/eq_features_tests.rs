@@ -176,7 +176,7 @@ fn spectral_lift_and_linked_detection_do_not_generate_output_for_silence() {
         .collect();
     let band = spectral_band(EqChannel::Stereo, EqBandKind::Bell, 1200, -12.0);
     let settings = treatment(&[band]);
-    let processed = render(&input, source, settings);
+    let processed = render(&input, source, settings.clone());
     let ratio = |hz| amplitude(&processed, source, hz, 0) / amplitude(&input, source, hz, 0);
     assert!((0.92..1.08).contains(&ratio(loud)), "loud {}", ratio(loud));
     assert!(ratio(quiet) > 1.7, "quiet {}", ratio(quiet));
@@ -211,7 +211,7 @@ fn matrix_eq_isolates_mid_and_side_and_composes_after_source_eq() {
         side
     );
     let mid_settings = treatment(&[band(EqChannel::Mid)]);
-    let boosted = render(&mid, source, mid_settings);
+    let boosted = render(&mid, source, mid_settings.clone());
     assert!((1.98..2.01).contains(&(amplitude(&boosted, source, 1000.0, 0) / 0.045)));
     let left_then_mid = render(
         &mid,
@@ -221,7 +221,7 @@ fn matrix_eq_isolates_mid_and_side_and_composes_after_source_eq() {
     let sequential = render(
         &render(&mid, source, treatment(&[band(EqChannel::Left)])),
         source,
-        mid_settings,
+        mid_settings.clone(),
     );
     assert!(left_then_mid
         .iter()
@@ -292,9 +292,9 @@ fn eq_strength_scales_only_static_bell_and_shelf_gains() {
     for strength in [0.0, 50.0, 100.0] {
         let scaled = AudioTreatment {
             eq_strength: Some(strength),
-            ..settings
+            ..settings.clone()
         };
-        let mut expected = settings;
+        let mut expected = settings.clone();
         expected.bass_db *= strength / 100.0;
         expected.presence_db *= strength / 100.0;
         expected.treble_db *= strength / 100.0;
@@ -339,7 +339,7 @@ fn spectral_output_is_invariant_to_blocks_and_source_aligned_seeks() {
         spectral_band(EqChannel::Side, EqBandKind::Bell, 1125, 9.0),
         spectral_band(EqChannel::Stereo, EqBandKind::Treble, 2000, -8.0),
     ]);
-    let prepared = PreparedTreatment::preview(settings, source).unwrap();
+    let prepared = PreparedTreatment::preview(settings.clone(), source).unwrap();
     let whole = render(&input, source, settings);
     let mut output = Vec::new();
     let mut processor = prepared.processor(source).unwrap();
@@ -424,7 +424,7 @@ fn spectral_preview_probe_and_flac_export_share_the_processed_audio() {
     };
 
     let settings = treatment(&[spectral_band(EqChannel::Mid, EqBandKind::Bell, 1200, 12.0)]);
-    let prepared = prepare_treatment(copy(), settings, || false).unwrap();
+    let prepared = prepare_treatment(copy(), settings.clone(), || false).unwrap();
     assert_eq!(prepared.gain_db(), 0.0);
     let range = FrameRange {
         start: 148_002,
@@ -578,10 +578,10 @@ fn spectral_live_retune_carries_detector_state_and_keeps_the_source_grid() {
     next.dynamic.as_mut().unwrap().threshold_db = -33.0;
     let initial = PreparedTreatment::preview(treatment(&[original]), source).unwrap();
     let target = PreparedTreatment::preview(treatment(&[next]), source).unwrap();
-    assert!(initial.can_retune_eq(target, rate));
+    assert!(initial.can_retune_eq(&target, rate));
     next.dynamic.as_mut().unwrap().spectral = false;
     let envelope_target = PreparedTreatment::preview(treatment(&[next]), source).unwrap();
-    assert!(!initial.can_retune_eq(envelope_target, rate));
+    assert!(!initial.can_retune_eq(&envelope_target, rate));
 
     let input: Vec<_> = (0..frames)
         .map(|frame| {
@@ -621,14 +621,14 @@ fn eq_input_drives_band_detection_independently_of_output_gain() {
     )]);
     let before_eq = AudioTreatment {
         eq_input_db: 6.0,
-        ..settings
+        ..settings.clone()
     };
     let after_eq = AudioTreatment {
         eq_output_db: 6.0,
-        ..settings
+        ..settings.clone()
     };
     let level = |settings| amplitude(&render(&input, source, settings), source, 1_000.0, 0);
-    assert!(level(before_eq) < level(after_eq) * 0.85);
+    assert!(level(before_eq) < level(after_eq.clone()) * 0.85);
     assert!((level(after_eq) / level(settings) - db_gain(6.0)).abs() < 0.01);
 }
 

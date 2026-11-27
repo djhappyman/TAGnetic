@@ -9,8 +9,8 @@ use std::sync::{
 use tagrex_commands::audio_studio::{
     AudioTreatment, CueEncoding, DiscogsProposal, DraftSegment, EqBand, ExportResult, ImportedCue,
     OpenedRecording, PreviewComparison, PreviewMonitor, Progress, ProviderAnchor,
-    RecordingProgress, RestoreResult, Review, ReviewRequest, SpectrogramChannel, SpectrumView,
-    Studio, StudioError, TreatmentAnalysis, TreatmentProbe, TreatmentProbeOptions,
+    RecordingProgress, RestoreResult, Review, ReviewRequest, SpectrogramChannel, SpectrogramDetail,
+    SpectrumView, Studio, StudioError, TreatmentAnalysis, TreatmentProbe, TreatmentProbeOptions,
 };
 use tagrex_commands::ErrorDto;
 use tauri::{
@@ -400,6 +400,8 @@ pub(super) async fn audio_split_probe(
     viewport: Option<tagrex_commands::audio_studio::FrameRange>,
     spectrogram_channel: Option<SpectrogramChannel>,
     spectrogram_treated: Option<bool>,
+    spectrogram_difference: Option<bool>,
+    spectrogram_detail: Option<SpectrogramDetail>,
 ) -> Result<Option<TreatmentProbe>, ErrorDto> {
     let studio = studio.inner().clone();
     let options = TreatmentProbeOptions {
@@ -409,9 +411,11 @@ pub(super) async fn audio_split_probe(
         viewport,
         spectrogram_channel: spectrogram_channel.unwrap_or_default(),
         spectrogram_treated: spectrogram_treated.unwrap_or_default(),
+        spectrogram_difference: spectrogram_difference.unwrap_or_default(),
+        spectrogram_detail: spectrogram_detail.unwrap_or_default(),
     };
     let (producing, window) = if playback.unwrap_or_default() && !options.spectrogram {
-        player.studio_playback_window(&id, frame, treatment)
+        player.studio_playback_window(&id, frame, treatment.clone())
     } else {
         (false, None)
     };
@@ -729,6 +733,8 @@ pub(super) struct TransportStatus {
     sequence: u64,
     #[serde(rename = "retuneFailed", skip_serializing_if = "Option::is_none")]
     retune_failed: Option<u64>,
+    #[serde(rename = "retunePending", skip_serializing_if = "Option::is_none")]
+    retune_pending: Option<u64>,
 }
 
 fn frame_time(frame: u64, rate: u32) -> Duration {
@@ -746,6 +752,8 @@ pub(super) async fn audio_split_transport(
     action: TransportAction,
     frame: Option<u64>,
     end_frame: Option<u64>,
+    loop_start_frame: Option<u64>,
+    smooth_loop: Option<bool>,
     sequence: Option<u64>,
     treatment: Option<AudioTreatment>,
     revision: Option<u64>,
@@ -806,14 +814,21 @@ pub(super) async fn audio_split_transport(
                     TransportAction::Pause => player.studio_pause_sequenced(owner, sequence),
                     TransportAction::Retune => unreachable!("retune has no source transport"),
                     TransportAction::Audition => {
+                        let loop_start = loop_start_frame.unwrap_or(frame);
+                        if loop_start > frame {
+                            return Err(StudioError::new(
+                                "Choose a play position inside the loop.",
+                            ));
+                        }
                         let cut_end = end_frame
                             .filter(|end| *end > frame && *end <= total)
                             .ok_or_else(|| {
                                 StudioError::new("Choose an audition range inside the recording.")
                             })?;
                         let audition = StudioAudition {
-                            start,
+                            start: frame_time(loop_start, rate),
                             end: frame_time(cut_end, rate),
+                            smooth: smooth_loop.unwrap_or(false),
                         };
                         play(Some(audition))
                     }
@@ -886,6 +901,7 @@ pub(super) fn audio_split_status(
         loading: status.state == StudioPreviewState::Loading,
         sequence: status.sequence,
         retune_failed: status.retune_failed,
+        retune_pending: status.retune_pending,
     };
     if sequence.is_some_and(|expected| expected != status.sequence)
         && !(status.sequence == 0 && status.state == StudioPreviewState::Refused)

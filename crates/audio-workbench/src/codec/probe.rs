@@ -7,6 +7,8 @@ pub use eq_threshold::learn_eq_threshold;
 pub use playback::{PlaybackHistory, PlaybackProbeWindow, PlaybackReadings};
 pub use reference::match_reference;
 
+use super::restoration::suggest_clicks;
+use super::treatment::dry_monitor_sample;
 use super::{
     check_cancelled, MediaError, PreparedTreatment, PreviewDecoder, SeekIndex, SourceInfo,
 };
@@ -34,16 +36,26 @@ pub enum SpectrogramChannel {
     Combined,
     Left,
     Right,
+    Stereo,
 }
 
 impl SpectrogramChannel {
     fn index(self, channels: usize) -> Option<usize> {
         match self {
-            Self::Combined => None,
+            Self::Combined | Self::Stereo => None,
             Self::Left => Some(0),
             Self::Right => Some(1.min(channels - 1)),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SpectrogramDetail {
+    #[default]
+    Balanced,
+    Transients,
+    Tones,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -63,6 +75,8 @@ pub struct TreatmentProbeOptions {
     pub viewport: Option<FrameRange>,
     pub spectrogram_channel: SpectrogramChannel,
     pub spectrogram_treated: bool,
+    pub spectrogram_difference: bool,
+    pub spectrogram_detail: SpectrogramDetail,
 }
 
 impl TreatmentProbeOptions {
@@ -71,7 +85,7 @@ impl TreatmentProbeOptions {
     }
 
     pub fn dry_spectrogram(self) -> bool {
-        self.spectrogram_only() && !self.spectrogram_treated
+        self.spectrogram_only() && !self.spectrogram_treated && !self.spectrogram_difference
     }
 }
 
@@ -130,6 +144,22 @@ pub struct TreatmentProbe {
     pub spectrogram_treated: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spectrogram_waveform: Option<Vec<f32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spectrogram_difference: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spectrogram_detail: Option<SpectrogramDetail>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spectrogram_window_frames: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spectrogram_left: Option<Vec<Vec<f32>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spectrogram_right: Option<Vec<Vec<f32>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spectrogram_left_waveform: Option<Vec<f32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spectrogram_right_waveform: Option<Vec<f32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spectrogram_clicks: Option<Vec<super::restoration::ClickSuggestion>>,
 }
 
 /// Read a bounded local window. The treatment uses the same recipe and
@@ -186,11 +216,22 @@ pub fn probe_treatment_with_options(
             "Spectrogram view is outside the supported range",
         ));
     }
-    let fft_size = viewport.map_or(base_fft_size, |range| {
+    let balanced_size = viewport.map_or(base_fft_size, |range| {
         (((range.end - range.start) / 8).max(2_048) as u32)
             .next_power_of_two()
             .min(base_fft_size)
     });
+    let fft_size = if options.spectrogram_only() {
+        match options.spectrogram_detail {
+            SpectrogramDetail::Balanced => balanced_size,
+            SpectrogramDetail::Transients => {
+                (info.sample_rate / 48).next_power_of_two().clamp(256, 4096)
+            }
+            SpectrogramDetail::Tones => base_fft_size.saturating_mul(4).min(32_768),
+        }
+    } else {
+        balanced_size
+    };
     let center = viewport.map_or(frame, |range| range.start + (range.end - range.start) / 2);
     let spectrum = centered(center, u64::from(fft_size), info.frames);
     let history = FrameRange {
@@ -221,7 +262,8 @@ pub fn probe_treatment_with_options(
     } else {
         spectrum
     };
-    let keep_wet = if options.spectrogram && options.spectrogram_treated {
+    let show_wet = options.spectrogram_treated || options.spectrogram_difference;
+    let keep_wet = if options.spectrogram && show_wet {
         keep_raw
     } else {
         spectrum
@@ -247,13 +289,20 @@ pub fn probe_treatment_with_options(
     // Off-transport probes replay DSP history. A high-rate spectral chain
     // may need longer than the ordinary interactive decode budget.
     let budget = if prepared.settings().has_spectral_eq() {
-        Duration::from_secs(if options.spectrogram_treated { 8 } else { 3 })
+        Duration::from_secs(if show_wet { 8 } else { 3 })
     } else {
         DECODE_BUDGET
     };
     let deadline = Instant::now() + budget;
     let mut stop_decoding = || cancelled() || Instant::now() >= deadline;
-    let mut decoder = PreviewDecoder::open_indexed(source, cursor, index, &mut stop_decoding)?;
+    let dry_settings = super::AudioTreatment::default();
+    let mask_settings = if options.dry_spectrogram() {
+        &dry_settings
+    } else {
+        prepared.settings()
+    };
+    let mut decoder =
+        super::RepairSource::open(source, cursor, index, mask_settings, &mut stop_decoding)?;
     if decoder.source_info().sample_rate != info.sample_rate
         || decoder.source_info().channels != info.channels
     {
@@ -283,9 +332,9 @@ pub fn probe_treatment_with_options(
         let Some(block) = decoder.next_block(&mut stop_decoding)? else {
             break;
         };
-        let next = (cursor + (block.len() / channels) as u64).min(end);
+        let next = (cursor + (block.dry.len() / channels) as u64).min(end);
         if let Some(span) = overlap(cursor, next, keep_raw) {
-            original_pcm.extend_from_slice(&block[interleaved(span, cursor, channels)]);
+            original_pcm.extend_from_slice(&block.dry[interleaved(span, cursor, channels)]);
         }
         // A dry spectrogram can begin before the treatment's priming window.
         let mut first = cursor.max(warmup);
@@ -317,7 +366,7 @@ pub fn probe_treatment_with_options(
                 start: first,
                 end: last,
             };
-            let input = &block[interleaved(span, cursor, channels)];
+            let input = &block.samples()[interleaved(span, cursor, channels)];
             if track_peaks && (spectrum.start..spectrum.end).contains(&first) {
                 unclipped_peak =
                     unclipped_peak.max(processor.process_with_peak(input, &mut processed));
@@ -360,6 +409,27 @@ pub fn probe_treatment_with_options(
     let mut treated = Vec::new();
     let mut spectrogram = None;
     let mut spectrogram_waveform = None;
+    let mut spectrogram_left = None;
+    let mut spectrogram_right = None;
+    let mut spectrogram_left_waveform = None;
+    let mut spectrogram_right_waveform = None;
+    let difference = options.spectrogram_difference.then(|| {
+        if active {
+            let mono = prepared.settings().mono;
+            let swapped = prepared.settings().swap_channels;
+            original_pcm
+                .chunks_exact(channels)
+                .zip(treated_pcm.chunks_exact(treated_channels))
+                .flat_map(|(dry, wet)| {
+                    wet.iter().enumerate().map(move |(lane, sample)| {
+                        dry_monitor_sample(dry, lane, mono, swapped).saturating_sub(*sample)
+                    })
+                })
+                .collect::<Vec<_>>()
+        } else {
+            vec![0; original_pcm.len()]
+        }
+    });
     if options.spectrum || options.spectrogram {
         with_spectrum(fft_size as usize, info.sample_rate, |analyzer| {
             if options.spectrum {
@@ -373,45 +443,82 @@ pub fn probe_treatment_with_options(
                 )?;
             }
             if options.spectrogram {
-                let (visual_pcm, visual_channels) = if active && options.spectrogram_treated {
+                let (visual_pcm, visual_channels) = if let Some(pcm) = &difference {
+                    (&pcm[..], treated_channels)
+                } else if active && show_wet {
                     (&treated_pcm[..], treated_channels)
                 } else {
                     (&original_pcm[..], channels)
                 };
                 let span = (visual_pcm.len() / visual_channels) as u64;
                 let mut channel = options.spectrogram_channel.index(visual_channels);
-                if options.spectrogram_treated
-                    && visual_channels == 2
-                    && prepared.settings().swap_channels
-                {
+                let swapped = show_wet && visual_channels == 2 && prepared.settings().swap_channels;
+                if swapped {
                     // Repair selections refer to a source channel, even when the output swaps it.
                     channel = channel.map(|index| 1 - index);
                 }
-                let max_columns = if viewport.is_some() {
+                let max_columns = if options.spectrogram_detail == SpectrogramDetail::Transients {
+                    128
+                } else if viewport.is_some() {
                     64
                 } else {
                     SPECTROGRAM_COLUMNS
                 };
-                let stride = if viewport.is_some() {
+                let stride = if options.spectrogram_detail == SpectrogramDetail::Transients {
+                    u64::from(fft_size / 4)
+                } else if viewport.is_some() {
                     256
                 } else {
                     u64::from(fft_size) / 2
                 };
                 let columns = max_columns.min(span.div_ceil(stride));
                 let mut values = Vec::with_capacity(columns as usize);
+                let stereo = (options.spectrogram_channel == SpectrogramChannel::Stereo
+                    && visual_channels == 2)
+                    .then(|| {
+                        [
+                            Vec::with_capacity(columns as usize),
+                            Vec::with_capacity(columns as usize),
+                        ]
+                    });
+                let mut lanes = stereo;
                 for column in 0..columns {
                     let at = (2 * column + 1) * span / (2 * columns);
                     let relative = centered(at, u64::from(fft_size), span);
                     let region = interleaved(relative, 0, visual_channels);
                     values.push(analyzer.measure_channel(
-                        &visual_pcm[region],
+                        &visual_pcm[region.clone()],
                         visual_channels,
                         channel,
                         &mut cancelled,
                     )?);
+                    if let Some(lanes) = &mut lanes {
+                        for (lane, values) in lanes.iter_mut().enumerate() {
+                            values.push(analyzer.measure_channel(
+                                &visual_pcm[region.clone()],
+                                visual_channels,
+                                Some(lane ^ usize::from(swapped)),
+                                &mut cancelled,
+                            )?);
+                        }
+                    }
                 }
                 spectrogram = Some(values);
                 spectrogram_waveform = Some(waveform_samples(visual_pcm, visual_channels, channel));
+                if let Some([left, right]) = lanes {
+                    spectrogram_left = Some(left);
+                    spectrogram_right = Some(right);
+                    spectrogram_left_waveform = Some(waveform_samples(
+                        visual_pcm,
+                        visual_channels,
+                        Some(usize::from(swapped)),
+                    ));
+                    spectrogram_right_waveform = Some(waveform_samples(
+                        visual_pcm,
+                        visual_channels,
+                        Some(usize::from(!swapped)),
+                    ));
+                }
             }
             frequencies = analyzer.frequencies.clone();
             Ok::<(), MediaError>(())
@@ -430,6 +537,18 @@ pub fn probe_treatment_with_options(
     } else {
         (input, input_peak)
     };
+    let spectrogram_clicks = (options.spectrogram
+        && !show_wet
+        && options.spectrogram_detail == SpectrogramDetail::Transients)
+        .then(|| {
+            suggest_clicks(
+                &original_pcm,
+                channels,
+                options.spectrogram_channel.index(channels),
+                keep_raw.start,
+            )
+        });
+    check_cancelled(&mut cancelled)?;
     Ok(TreatmentProbe {
         frequencies,
         original,
@@ -467,6 +586,18 @@ pub fn probe_treatment_with_options(
         spectrogram_channel: options.spectrogram.then_some(options.spectrogram_channel),
         spectrogram_treated: options.spectrogram.then_some(options.spectrogram_treated),
         spectrogram_waveform,
+        spectrogram_difference: options
+            .spectrogram
+            .then_some(options.spectrogram_difference),
+        spectrogram_detail: options.spectrogram.then_some(options.spectrogram_detail),
+        spectrogram_window_frames: options
+            .spectrogram
+            .then_some(fft_size.min((visual_end - keep_raw.start) as u32)),
+        spectrogram_left,
+        spectrogram_right,
+        spectrogram_left_waveform,
+        spectrogram_right_waveform,
+        spectrogram_clicks,
     })
 }
 
@@ -826,7 +957,7 @@ mod tests {
             INFO,
             INFO.frames / 4,
             None,
-            prepared,
+            prepared.clone(),
             false,
             || false,
         )
@@ -865,8 +996,15 @@ mod tests {
         )
         .unwrap();
         let frame = INFO.frames / 3;
-        let shared =
-            compare_preview_levels(recording(), INFO, frame, None, [a, b], || false).unwrap();
+        let shared = compare_preview_levels(
+            recording(),
+            INFO,
+            frame,
+            None,
+            [a.clone(), b.clone()],
+            || false,
+        )
+        .unwrap();
         let first = probe_treatment(recording(), INFO, frame, None, a, false, || false).unwrap();
         let second = probe_treatment(recording(), INFO, frame, None, b, false, || false).unwrap();
         assert!((shared.input - first.input).abs() < 0.0001);
@@ -934,21 +1072,33 @@ mod tests {
             end: INFO.frames / 3,
         };
         let right = prepare(EqChannel::Right);
-        let louder_threshold =
-            learn_eq_threshold(stereo_recording(0.4), INFO, range, None, right, 0, || false)
-                .unwrap();
-        let right_threshold =
-            learn_eq_threshold(stereo_recording(0.08), INFO, range, None, right, 0, || {
-                false
-            })
-            .unwrap();
+        let louder_threshold = learn_eq_threshold(
+            stereo_recording(0.4),
+            INFO,
+            range,
+            None,
+            right.clone(),
+            0,
+            || false,
+        )
+        .unwrap();
+        let right_threshold = learn_eq_threshold(
+            stereo_recording(0.08),
+            INFO,
+            range,
+            None,
+            right.clone(),
+            0,
+            || false,
+        )
+        .unwrap();
         assert!((louder_threshold - right_threshold - 14.0).abs() < 0.3);
         let probe = probe_treatment(
             stereo_recording(0.08),
             INFO,
             INFO.frames / 4,
             None,
-            right,
+            right.clone(),
             false,
             || false,
         )
@@ -992,14 +1142,22 @@ mod tests {
         };
         let prepared = PreparedTreatment::preview(settings, INFO).unwrap();
         let frame = INFO.frames / 2;
-        let combined =
-            probe_treatment(recording(), INFO, frame, None, prepared, true, || false).unwrap();
+        let combined = probe_treatment(
+            recording(),
+            INFO,
+            frame,
+            None,
+            prepared.clone(),
+            true,
+            || false,
+        )
+        .unwrap();
         let meter_only = probe_treatment_with_options(
             recording(),
             INFO,
             frame,
             None,
-            prepared,
+            prepared.clone(),
             TreatmentProbeOptions {
                 spectrum: false,
                 spectrogram: false,
@@ -1086,6 +1244,85 @@ mod tests {
     }
 
     #[test]
+    fn difference_and_linked_stereo_probes_keep_coordinates_and_detail() {
+        let viewport = FrameRange {
+            start: 24_000,
+            end: 48_000,
+        };
+        let detail = SpectrogramDetail::Transients;
+        let options = TreatmentProbeOptions {
+            spectrogram: true,
+            viewport: Some(viewport),
+            spectrogram_channel: SpectrogramChannel::Stereo,
+            spectrogram_detail: detail,
+            ..TreatmentProbeOptions::default()
+        };
+        let probe = |treatment, options| {
+            probe_treatment_with_options(
+                stereo_recording(0.0),
+                INFO,
+                0,
+                None,
+                PreparedTreatment::preview(treatment, INFO).unwrap(),
+                options,
+                || false,
+            )
+            .unwrap()
+        };
+        let original = probe(AudioTreatment::default(), options);
+        let difference = TreatmentProbeOptions {
+            spectrogram_treated: true,
+            spectrogram_difference: true,
+            ..options
+        };
+        let silent = probe(AudioTreatment::default(), difference);
+        let removed = probe(
+            AudioTreatment {
+                gain_db: -6,
+                ..AudioTreatment::default()
+            },
+            difference,
+        );
+        let swapped = probe(
+            AudioTreatment {
+                gain_db: -6,
+                swap_channels: true,
+                ..AudioTreatment::default()
+            },
+            difference,
+        );
+        for reading in [&original, &removed, &silent, &swapped] {
+            assert_eq!(reading.spectrogram_start, Some(viewport.start));
+            assert_eq!(reading.spectrogram_end, Some(viewport.end));
+            assert_eq!(reading.spectrogram_detail, Some(detail));
+            assert_eq!(reading.spectrogram_window_frames, Some(1024));
+            assert_eq!(reading.frequencies, original.frequencies);
+            let left = reading.spectrogram_left.as_ref().unwrap();
+            let right = reading.spectrogram_right.as_ref().unwrap();
+            assert_eq!(left.len(), right.len());
+            assert!(left.len() > 64);
+            assert!(right.iter().flatten().all(|value| *value == FLOOR_DB));
+        }
+        let peak_db = |reading: &TreatmentProbe| {
+            reading
+                .spectrogram_left
+                .as_ref()
+                .unwrap()
+                .iter()
+                .flatten()
+                .copied()
+                .fold(FLOOR_DB, f32::max)
+        };
+        assert_eq!(peak_db(&silent), FLOOR_DB);
+        assert!((peak_db(&original) - peak_db(&removed) - 6.04).abs() < 0.2);
+        assert_eq!(removed.spectrogram_left, swapped.spectrogram_left);
+        assert_eq!(
+            removed.spectrogram_left_waveform,
+            swapped.spectrogram_left_waveform
+        );
+    }
+
+    #[test]
     fn treated_spectrogram_and_waveform_use_the_same_processed_channel() {
         let options = TreatmentProbeOptions {
             spectrogram: true,
@@ -1107,7 +1344,7 @@ mod tests {
             INFO,
             24_000,
             None,
-            prepared,
+            prepared.clone(),
             options,
             || false,
         )
@@ -1150,7 +1387,7 @@ mod tests {
                 INFO,
                 INFO.frames,
                 None,
-                prepared,
+                prepared.clone(),
                 false,
                 || false
             ),

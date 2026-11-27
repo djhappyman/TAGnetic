@@ -37,8 +37,16 @@ export type TreatmentProbe = {
   spectrogram?: readonly (readonly number[])[];
   spectrogramStart?: number;
   spectrogramEnd?: number;
-  spectrogramChannel?: 'combined' | 'left' | 'right';
+  spectrogramChannel?: 'combined' | 'left' | 'right' | 'stereo';
   spectrogramTreated?: boolean;
+  spectrogramDifference?: boolean;
+  spectrogramDetail?: 'balanced' | 'transients' | 'tones';
+  spectrogramWindowFrames?: number;
+  spectrogramLeft?: readonly (readonly number[])[];
+  spectrogramRight?: readonly (readonly number[])[];
+  spectrogramLeftWaveform?: readonly number[];
+  spectrogramRightWaveform?: readonly number[];
+  spectrogramClicks?: readonly { frame: number; sensitivity: number; channel?: 'left' | 'right' }[];
   spectrogramWaveform?: readonly number[];
 };
 

@@ -322,6 +322,14 @@ impl PlaybackProbeWindow {
             spectrogram_channel: None,
             spectrogram_treated: None,
             spectrogram_waveform: None,
+            spectrogram_difference: None,
+            spectrogram_detail: None,
+            spectrogram_window_frames: None,
+            spectrogram_left: None,
+            spectrogram_right: None,
+            spectrogram_left_waveform: None,
+            spectrogram_right_waveform: None,
+            spectrogram_clicks: None,
         })
     }
 }
@@ -342,7 +350,7 @@ mod tests {
             eq_input_db: -18.0,
             ..AudioTreatment::default()
         };
-        let mut processor = crate::PreparedTreatment::preview(settings, source)
+        let mut processor = crate::PreparedTreatment::preview(settings.clone(), source)
             .unwrap()
             .processor(source)
             .unwrap();
@@ -352,11 +360,18 @@ mod tests {
         let mut output = Vec::new();
         for frame in (0..146_000).step_by(2_000) {
             let readings = processor.process_for_playback(&input, &mut output);
-            history.push(frame, (source, source), settings, &input, &output, readings);
+            history.push(
+                frame,
+                (source, source),
+                settings.clone(),
+                &input,
+                &output,
+                readings,
+            );
         }
         for frame in [144_000, 1_000] {
             let probe = history
-                .take(frame, settings)
+                .take(frame, settings.clone())
                 .unwrap()
                 .analyze(TreatmentProbeOptions::default(), || false)
                 .unwrap();
@@ -379,13 +394,13 @@ mod tests {
         let recipe = AudioTreatment::default();
         let changed = AudioTreatment {
             eq_output_db: -6.0,
-            ..recipe
+            ..recipe.clone()
         };
-        assert!(history.take(0, recipe).is_none());
+        assert!(history.take(0, recipe.clone()).is_none());
         history.push(
             0,
             (input, input),
-            recipe,
+            recipe.clone(),
             &dry,
             &wet,
             PlaybackReadings {
@@ -397,7 +412,7 @@ mod tests {
         history.push(
             4096,
             (input, input),
-            changed,
+            changed.clone(),
             &dry,
             &wet,
             PlaybackReadings {
@@ -407,9 +422,9 @@ mod tests {
                 ..PlaybackReadings::default()
             },
         );
-        for (frame, settings) in [(3000, changed), (5000, recipe)] {
+        for (frame, settings) in [(3000, changed.clone()), (5000, recipe)] {
             let older = history
-                .take(frame, settings)
+                .take(frame, settings.clone())
                 .unwrap()
                 .analyze(
                     TreatmentProbeOptions {
@@ -424,7 +439,7 @@ mod tests {
             assert!((older.input - older.output - 6.0206).abs() < 0.001);
         }
         let result = history
-            .take(5000, changed)
+            .take(5000, changed.clone())
             .unwrap()
             .analyze(
                 TreatmentProbeOptions {
@@ -444,7 +459,7 @@ mod tests {
         history.push(
             12_288,
             (input, input),
-            changed,
+            changed.clone(),
             &dry,
             &wet,
             PlaybackReadings::default(),

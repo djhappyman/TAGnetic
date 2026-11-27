@@ -177,6 +177,7 @@ fn live_treatment_preserves_loop_and_ignores_older_settings_or_owners() {
     let audition = StudioAudition {
         start: point(100),
         end: point(108),
+        smooth: false,
     };
     let owner = "editor".to_owned();
     f.player
@@ -232,9 +233,10 @@ fn live_treatment_preserves_loop_and_ignores_older_settings_or_owners() {
         || {
             let (left, right) = pcm(&mut f.studio);
             assert_eq!(left, -right);
-            assert_eq!(left.abs(), next);
+            assert!(left.abs() <= next);
+            let fully_treated = left == -next;
             next = 4_100 + (next - 4_100 + 1) % 8;
-            if left < 0 {
+            if fully_treated {
                 first_treated = right;
                 true
             } else {
@@ -330,9 +332,9 @@ fn live_treatment_continues_streaming_and_keeps_current_sound_on_failure() {
     crate::test_support::wait_until("separate decoder catches the live playhead", || {
         let (left, right) = pcm(&mut f.studio);
         assert_eq!(left, -right);
-        assert_eq!(left.abs(), previous + 1);
-        previous = left.abs();
-        left < 0
+        previous += 1;
+        assert!(left.abs() <= previous);
+        left == -previous
     });
     let broken = Recording::ramp("retune-broken", 1, 4_000);
     std::fs::write(&broken.0, b"invalid recording").unwrap();
@@ -350,6 +352,7 @@ fn live_treatment_continues_streaming_and_keeps_current_sound_on_failure() {
         |p| p.studio_status("editor").retune_failed == Some(2),
     );
     assert!(f.player.studio_status("editor").playing);
+    assert_eq!(f.player.studio_status("editor").retune_pending, None);
     assert!(pcm(&mut f.studio).0 < 0);
     f.drain();
 }
@@ -394,16 +397,16 @@ fn retune_handoff_accounts_for_a_frame_rendered_after_the_control_snapshot() {
         },
     )
     .unwrap();
-    let geometry = Geometry {
-        treatment: wet,
-        ..geometry
+    let wet_geometry = Geometry {
+        treatment: wet.clone(),
+        ..geometry.clone()
     };
     let prepare = |position| {
         let pending = Voice::prepare(
             &router,
             1.0,
             &pending_worker,
-            geometry.request(&file, position, None).unwrap(),
+            wet_geometry.request(&file, position, None).unwrap(),
         );
         crate::test_support::wait_until("treated decoder ready", || pending.ready());
         assert!(pending.covers(position));
@@ -424,7 +427,35 @@ fn retune_handoff_accounts_for_a_frame_rendered_after_the_control_snapshot() {
     let dry = (dry.0 + 1, dry.1 - 1);
     assert_eq!(pcm(&mut output), dry);
     assert!(matches!(expired.handoff(), Handoff::Missed));
-    drop(expired);
+    let mut lease = Lease {
+        voice: active,
+        file: file.try_clone().unwrap(),
+        router: router.clone(),
+        geometry,
+        playing: true,
+        seek_index: None,
+        pending: Some(Retune {
+            voice: expired,
+            target: RetuneTarget {
+                file: file.try_clone().unwrap(),
+                treatment: wet,
+            },
+            retries: 0,
+            submitted: true,
+        }),
+        queued: Some(RetuneTarget {
+            file: file.try_clone().unwrap(),
+            treatment: PreparedTreatment::default(),
+        }),
+        revision: 2,
+    };
+    assert!(!lease.advance_retune(&pending_worker).unwrap());
+    assert!(
+        lease.pending.is_none(),
+        "an expired preview must leave the worker for the latest edit"
+    );
+    assert!(lease.queued.is_some());
+    let active = lease.voice;
 
     // The device completes a full stereo frame while the controller still
     // has the earlier position.
@@ -438,7 +469,16 @@ fn retune_handoff_accounts_for_a_frame_rendered_after_the_control_snapshot() {
     assert_eq!(convert(output.next().unwrap()), last_dry.0 + 1);
     pending.submit_handoff(&router, snapshot, &active, None);
     assert_eq!(convert(output.next().unwrap()), last_dry.1 - 1);
-    assert_eq!(pcm(&mut output), (last_dry.1 - 2, last_dry.0 + 2));
+    // The replacement starts at the same source frame and blends both
+    // channels together for the fade. A hard swap starts with opposite polarity.
+    let blend_frames = RATE / 250;
+    for offset in 0..blend_frames {
+        let dry = last_dry.0 + 2 + offset as i32;
+        let mix = (offset + 1) as f32 / blend_frames as f32;
+        let expected = (dry as f32 * (1.0 - 2.0 * mix)).round() as i32;
+        let (left, right) = pcm(&mut output);
+        assert!((left - expected).abs() <= 1 && (right + expected).abs() <= 1);
+    }
     assert!(matches!(pending.handoff(), Handoff::Switched));
 }
 
@@ -489,7 +529,7 @@ fn sustained_retunes_hand_off_an_intermediate_voice_and_the_last_edit() {
             audition: None,
             sample_rate: RATE,
             seek_index: None,
-            treatment: Box::new(dry),
+            treatment: Box::new(dry.clone()),
         },
         Some(&routed),
         1.0,
@@ -506,7 +546,7 @@ fn sustained_retunes_hand_off_an_intermediate_voice_and_the_last_edit() {
         file: File::open(&recording.0).unwrap(),
         treatment: Box::new(treatment),
     };
-    actor.handle(retune(1, first), Some(&routed), 1.0);
+    actor.handle(retune(1, first.clone()), Some(&routed), 1.0);
     for revision in 2..=12 {
         actor.handle(
             retune(revision, gain(-(revision as i8))),
@@ -514,39 +554,43 @@ fn sustained_retunes_hand_off_an_intermediate_voice_and_the_last_edit() {
             1.0,
         );
     }
-    let current = |actor: &Actor| actor.lease.as_ref().unwrap().geometry.treatment;
+    assert_eq!(actor.shared.for_owner("editor").retune_pending, Some(12));
+    fn current(actor: &Actor) -> &PreparedTreatment {
+        &actor.lease.as_ref().unwrap().geometry.treatment
+    }
     crate::test_support::wait_until("the prepared edit hands off despite newer requests", || {
         actor.tick();
-        if same_treatment(current(&actor), dry) {
+        if same_treatment(current(&actor), &dry) {
             let _ = pcm(&mut output);
             false
         } else {
             true
         }
     });
-    assert!(same_treatment(current(&actor), first));
+    assert!(same_treatment(current(&actor), &first));
     assert!(pcm(&mut output).0 < 0);
 
     let latest = gain(-12);
     crate::test_support::wait_until("the latest edit alone follows the handoff", || {
         actor.tick();
-        if same_treatment(current(&actor), first) {
+        if same_treatment(current(&actor), &first) {
             let _ = pcm(&mut output);
             false
         } else {
             true
         }
     });
-    assert!(same_treatment(current(&actor), latest));
+    assert!(same_treatment(current(&actor), &latest));
+    assert_eq!(actor.shared.for_owner("editor").retune_pending, None);
     assert!((1..dry_sample / 2).contains(&pcm(&mut output).0));
 
     actor.handle(retune(13, first), Some(&routed), 1.0);
-    actor.handle(retune(14, dry), Some(&routed), 1.0);
+    actor.handle(retune(14, dry.clone()), Some(&routed), 1.0);
     crate::test_support::wait_until(
         "the final bypass request restores the original sound",
         || {
             actor.tick();
-            if same_treatment(current(&actor), dry) {
+            if same_treatment(current(&actor), &dry) {
                 true
             } else {
                 let _ = pcm(&mut output);
@@ -626,6 +670,7 @@ fn audition_repeats_selected_frames_and_latest_paused_seek_is_owner_bound() {
     let audition = StudioAudition {
         start: point(18),
         end: point(24),
+        smooth: false,
     };
     f.player
         .studio_play(
@@ -663,6 +708,7 @@ fn audition_repeats_selected_frames_and_latest_paused_seek_is_owner_bound() {
                     state: StudioPreviewState::Ready,
                     sequence: 0,
                     retune_failed: None,
+                    retune_pending: None,
                 }
         },
     );
@@ -814,6 +860,7 @@ fn paused_seek_cancels_a_full_decoder_queue_and_keeps_exact_native_time() {
                 state: StudioPreviewState::Ready,
                 sequence: 0,
                 retune_failed: None,
+                retune_pending: None,
             }
     });
     for position in 100..255 {
@@ -829,6 +876,7 @@ fn paused_seek_cancels_a_full_decoder_queue_and_keeps_exact_native_time() {
                 state: StudioPreviewState::Ready,
                 sequence: 0,
                 retune_failed: None,
+                retune_pending: None,
             }
     });
     f.player.studio_seek("editor".into(), point(255)).unwrap();
@@ -840,6 +888,7 @@ fn paused_seek_cancels_a_full_decoder_queue_and_keeps_exact_native_time() {
                 state: StudioPreviewState::Ready,
                 sequence: 0,
                 retune_failed: None,
+                retune_pending: None,
             }
     });
     f.player.studio_close("editor".into()).unwrap();
@@ -893,7 +942,11 @@ fn native_cbr_and_vbr_mp3_seek_and_loop_at_the_recorded_section() {
         let duration = frame_time(info.frames, info.sample_rate);
         let start = duration - Duration::from_millis(170);
         let end = duration - Duration::from_millis(70);
-        let audition = StudioAudition { start, end };
+        let audition = StudioAudition {
+            start,
+            end,
+            smooth: false,
+        };
         f.player
             .studio_play(
                 "editor".into(),

@@ -1,6 +1,6 @@
 import type { FrameRange } from './audio-split';
 import type { AnalyzerView, TreatmentPlotMode, TreatmentProbe } from './audio-treatment-plot';
-import { effectIsActive, eqBandIsActive, type AudioTreatment, type EqChannel } from './audio-treatment';
+import { effectIsActive, eqBandIsActive, type AudioTreatment, type EqChannel, type SpectralRepair } from './audio-treatment';
 
 export const toolModes = ['eq', 'dynamics', 'repair'] as const satisfies readonly TreatmentPlotMode[];
 export const toolNames = { eq: 'EQ', dynamics: 'Dynamics', repair: 'Repair' } as const;
@@ -28,7 +28,11 @@ const toolEffects = {
 export function toolEffectCount(kind: TreatmentPlotMode, settings: AudioTreatment) {
   const preset = toolEffects[kind].filter(key => effectIsActive(settings, key)).length;
   if (kind === 'eq') return preset + (settings.eqBands?.filter(band => eqBandIsActive(band, settings.eqStrength)).length ?? 0);
-  return kind === 'repair' ? preset + (settings.spectralRepairs?.filter(Boolean).length ?? 0) : preset;
+  return kind === 'repair' ? preset + activeRepairCount(settings) : preset;
+}
+
+export function activeRepairCount(settings: AudioTreatment) {
+  return settings.spectralRepairs?.filter(repair => repair && !repair.bypassed).length ?? 0;
 }
 
 export function toolPatch(kind: TreatmentPlotMode, patch: Partial<AudioTreatment>) {
@@ -66,6 +70,8 @@ export type ToolSnapshot = {
   settings: AudioTreatment;
   stereo: boolean;
   playing: boolean;
+  clockRunning?: boolean;
+  repairPlayback?: 'buffering' | 'updating' | 'failed';
   original: boolean;
   loop: boolean;
   loopRange?: FrameRange;
@@ -77,6 +83,7 @@ export type ToolSnapshot = {
   eqLevelComparison?: boolean;
   eqLearning?: { index: number; status: 'learning' | 'error'; message?: string };
   monitor?: 'band' | 'bypass-compressor' | 'difference-compressor';
+  repairListen?: RepairListenState;
   undoLabel?: string;
   redoLabel?: string;
   reference?: EqReference;
@@ -84,15 +91,37 @@ export type ToolSnapshot = {
   revision?: string;
   theme: ToolTheme;
 };
+export type ToolStateUpdate = Omit<ToolSnapshot, 'settings'> & { settings?: AudioTreatment };
 
-export type SpectrogramViewOptions = { treated?: boolean; channel?: 'combined' | 'left' | 'right' };
+export type SpectrogramViewOptions = {
+  overview?: boolean;
+  treated?: boolean;
+  difference?: boolean;
+  channel?: 'combined' | 'left' | 'right' | 'stereo';
+  detail?: 'balanced' | 'transients' | 'tones';
+};
 export type PreviewBand = { lowHz: number; highHz: number; channel?: Exclude<EqChannel, 'stereo'> };
+export type RepairListenState = {
+  signal: 'original' | 'repaired' | 'removed';
+  channel: 'stereo' | 'left' | 'right';
+  trial?: 'light' | 'full';
+};
+export type RepairLoopPreferences = { smooth: boolean; returnTo: 'hold' | 'loop' | 'start' };
+export type RepairListenCommand =
+  | (RepairLoopPreferences & { type: 'loop'; range: FrameRange; band?: PreviewBand; preservePosition?: boolean; play?: boolean })
+  | (RepairLoopPreferences & { type: 'preferences' })
+  | { type: 'signal'; signal: RepairListenState['signal'] }
+  | { type: 'channel'; channel: RepairListenState['channel'] }
+  | { type: 'trial'; strength: NonNullable<RepairListenState['trial']>; candidate: SpectralRepair; slot?: number }
+  | { type: 'stop'; returnTo?: RepairLoopPreferences['returnTo'] }
+  | { type: 'all' };
 type DirectToolAction = 'play' | 'hide' | 'pin' | 'level-match' | 'seek' | 'solo-band' | 'retune-solo-band' | 'audition-band'
   | 'bypass-compressor' | 'difference-compressor' | 'stop-audition'
   | 'reference-start' | 'reference-preview' | 'reference-keep' | 'reference-cancel';
 export type ToolRequest = { kind: TreatmentPlotMode } & (
   | { action: 'sync' }
   | { action: 'learn-threshold'; sourceId: string; index: number }
+  | { action: 'repair-listen'; sourceId: string; command: RepairListenCommand }
   | { action: 'analyzer'; sourceId: string; enabled: boolean; view?: AnalyzerView }
   | { action: DirectToolAction; sourceId: string; range?: FrameRange; band?: PreviewBand }
   | { action: 'undo' | 'redo'; sourceId: string; revision: string; trial?: number }
@@ -121,8 +150,8 @@ export function listenToolRequests(handler: (request: ToolRequest) => void) {
   return events()?.listen<ToolRequest>(commandEvent, ({ payload }) => handler(payload));
 }
 
-export function listenToolState(handler: (state: ToolSnapshot | null) => void) {
-  return events()?.listen<ToolSnapshot | null>(stateEvent, ({ payload }) => handler(payload));
+export function listenToolState(handler: (state: ToolStateUpdate | null) => void) {
+  return events()?.listen<ToolStateUpdate | null>(stateEvent, ({ payload }) => handler(payload));
 }
 
 export function listenToolVisibility(handler: (visibility: ToolVisibility) => void) {
@@ -141,7 +170,7 @@ export function sendToolRequest(request: ToolRequest) {
   return events()?.emitTo('main', commandEvent, request);
 }
 
-export function sendToolState(kind: TreatmentPlotMode, state: ToolSnapshot | null) {
+export function sendToolState(kind: TreatmentPlotMode, state: ToolStateUpdate | null) {
   return events()?.emitTo(toolLabel(kind), stateEvent, state);
 }
 
