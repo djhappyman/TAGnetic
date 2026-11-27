@@ -1182,7 +1182,65 @@ test('Repair plot shortcuts use the configured audition seam, return point and m
     smoothLoop: true, monitor: { kind: 'band', channel: 'right', lowHz: 400, highHz: 1_700 },
   });
   await send({ action: 'play' });
+  await expect.poll(lastTransport).toMatchObject({ action: 'pause' });
+  expect((await lastTransport()).frame).toBeGreaterThanOrEqual(range.start);
+  await send({ action: 'play' });
+  await expect.poll(lastTransport).toMatchObject({
+    action: 'audition', endFrame: range.end, loopStartFrame: range.start,
+    monitor: { kind: 'band', channel: 'right', lowHz: 400, highHz: 1_700 },
+  });
+  await send({ action: 'repair-listen', command: { type: 'stop' } });
   await expect.poll(lastTransport).toMatchObject({ action: 'pause', frame: 0 });
+});
+
+test('Repair selection arms a filtered loop and changes its boundaries on the running transport', async ({ page }) => {
+  await page.evaluate(() => {
+    window.studioFixture.statusProbe = ({ sequence }) => ({ sequence, frame: 120_000, playing: true });
+  });
+  await page.getByRole('button', { name: 'Split recording', exact: true }).click();
+  const studio = page.getByRole('dialog', { name: 'Split recording' });
+  await studio.getByRole('button', { name: 'Repair', exact: true }).click();
+  const send = request => page.evaluate(request => window.__TAURI__.event.emitTo('main', 'tagnetic:audio-tools-command', {
+    kind: 'repair', sourceId: 'recording', ...request,
+  }), request);
+  const listen = command => send({ action: 'repair-listen', command });
+  const transport = () => calls(page, 'transport');
+  const lastTransport = async () => (await transport()).at(-1)?.args;
+  const selection = { startFrame: 96_000, endFrame: 144_000, lowHz: 400, highHz: 1_700, amountDb: 1 };
+  await listen({ type: 'set-selection', selection });
+  await expect.poll(lastTransport).toMatchObject({ action: 'seek', frame: selection.startFrame });
+  await send({ action: 'play' });
+  await expect.poll(lastTransport).toMatchObject({ action: 'audition', frame: selection.startFrame, repeat: true,
+    loopStartFrame: selection.startFrame, endFrame: selection.endFrame, previewSelection: selection });
+  const { sequence } = await lastTransport();
+  const adjustment = { ...selection, startFrame: 110_000, endFrame: 160_000, highHz: 900 };
+  await listen({ type: 'set-selection', selection: adjustment, adjust: true });
+  await expect.poll(lastTransport).toMatchObject({ action: 'retune', sequence, repeat: true,
+    loopStartFrame: adjustment.startFrame, endFrame: adjustment.endFrame, previewSelection: adjustment });
+  await listen({ type: 'clear-selection' });
+  await expect.poll(lastTransport).toMatchObject({ action: 'retune', sequence, repeat: false,
+    loopStartFrame: 0, endFrame: 480_000 });
+  expect(await lastTransport()).not.toHaveProperty('previewSelection');
+  expect((await transport()).map(call => call.args.action)).toEqual(['seek', 'audition', 'retune', 'retune']);
+
+  await listen({ type: 'set-selection', selection: adjustment });
+  await expect.poll(lastTransport).toMatchObject({ action: 'audition', frame: adjustment.startFrame, repeat: true });
+  await send({ action: 'seek', range: { start: 125_000, end: 125_001 } });
+  await expect.poll(async () => (await transport()).findLast(call => call.args.action === 'seek')?.args)
+    .toMatchObject({ frame: 125_000 });
+  expect((await transport()).filter(call => call.args.action === 'audition')).toHaveLength(2);
+  await send({ action: 'play' });
+  await expect.poll(lastTransport).toMatchObject({ action: 'pause' });
+  expect((await lastTransport()).frame).toBeGreaterThan(adjustment.startFrame);
+  await send({ action: 'play' });
+  await expect.poll(lastTransport).toMatchObject({
+    action: 'audition', repeat: true, loopStartFrame: adjustment.startFrame,
+    endFrame: adjustment.endFrame, previewSelection: adjustment,
+  });
+  expect((await lastTransport()).frame).toBeGreaterThan(adjustment.startFrame);
+  await listen({ type: 'clear-selection', frame: 88_000 });
+  await expect.poll(lastTransport).toMatchObject({ action: 'play', frame: 88_000 });
+  expect(await lastTransport()).not.toHaveProperty('previewSelection');
 });
 
 test('track and Shift-drag loops share playback and the waveform handles', async ({ page }) => {
@@ -1782,24 +1840,30 @@ test('reference EQ auditions without changing edits, then keeps the fit as one u
   await expect.poll(async () => (await snapshot()).settings.rumble).toBe(true);
 });
 
-test('suspends periodic spectral probes while the Repair camera shows its overview', async ({ page }) => {
+test('requests the full spectrogram once and reuses it through transport seeks', async ({ page }) => {
   await page.evaluate(() => { window.studioFixture.sampleRate = 16_000; });
   await page.getByRole('button', { name: 'Split recording', exact: true }).click();
   const studio = page.getByRole('dialog', { name: 'Split recording' });
   await studio.getByRole('button', { name: 'Repair', exact: true }).click();
 
   const probes = async () => (await calls(page, 'probe')).filter(({ args }) => args.spectrogram);
-  await expect.poll(async () => (await probes()).length).toBeGreaterThan(0);
+  const wholeRecording = { start: 0, end: 480_000 };
+  await expect.poll(async () => (await probes())[0]?.args).toMatchObject({
+    viewport: wholeRecording, spectrogram: true, spectrogramTreated: true, spectrogramDifference: false,
+  });
   const viewport = (range, options) => page.evaluate(({ range, options }) =>
     window.__TAURI__.event.emitTo('main', 'tagnetic:audio-tools-command', {
       sourceId: 'recording', kind: 'repair', action: 'viewport', range, options,
     }), { range, options });
-  await viewport(null, { overview: true, treated: true, difference: true });
-  const suspended = (await probes()).length;
+  await viewport(wholeRecording, { overview: true, treated: true, difference: true });
+  await expect.poll(async () => (await probes()).at(-1)?.args).toMatchObject({
+    viewport: wholeRecording, spectrogram: true, spectrogramTreated: true, spectrogramDifference: true,
+  });
+  const count = (await probes()).length;
   await studio.getByRole('slider', { name: 'Waveform playhead' }).press('End');
   // Give the 125 ms tool timer multiple opportunities to run after the seek.
   await page.waitForTimeout(340);
-  expect(await probes()).toHaveLength(suspended);
+  expect(await probes()).toHaveLength(count);
 
   const local = { start: 28_000, end: 72_000 };
   await viewport(local, { channel: 'combined', treated: true, difference: true });

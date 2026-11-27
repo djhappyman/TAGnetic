@@ -1,15 +1,15 @@
 <script lang="ts">
-  import { Headphones, Play, Repeat2, Square } from '@lucide/svelte';
+  import { Play, Repeat2, SlidersHorizontal, Square } from '@lucide/svelte';
   import { Input } from '@ui-sdk/svelte/input';
   import Button from './AudioSplitButton.svelte';
+  import RepairPopup from './AudioSplitRepairPopup.svelte';
   import { frameAtTime, timeLabel, type FrameRange } from '../js/audio-split';
   import type { SpectralRepair } from '../js/audio-treatment';
-  import type { PreviewBand, RepairListenCommand, RepairListenState, RepairLoopPreferences, ToolSnapshot } from '../js/audio-tools-window';
+  import type { RepairListenCommand, RepairListenState, RepairLoopPreferences, ToolSnapshot } from '../js/audio-tools-window';
 
-  let { snapshot, range, band, candidate, repairSlot, onlisten }: {
+  let { snapshot, selection, candidate, repairSlot, onlisten }: {
     snapshot: ToolSnapshot | null;
-    range?: FrameRange;
-    band?: PreviewBand;
+    selection?: SpectralRepair;
     candidate?: SpectralRepair;
     repairSlot?: number;
     onlisten: (command: RepairListenCommand) => void;
@@ -28,8 +28,8 @@
   let rangeError = $state('');
   const rate = $derived(snapshot?.sampleRate ?? 48_000);
   const total = $derived(snapshot?.frames ?? 0);
-  const signal = $derived(snapshot?.repairListen?.signal ?? (snapshot?.original ? 'original' : 'repaired'));
   const channel = $derived(snapshot?.repairListen?.channel ?? 'stereo');
+  const range = $derived(selection ? { start: selection.startFrame, end: selection.endFrame } : undefined);
   const contextual = $derived(range && {
     start: Math.max(0, range.start - Math.round(.75 * rate)),
     end: Math.min(total, range.end + Math.round(.75 * rate)),
@@ -38,15 +38,17 @@
     ?? (loopMode === 'context' ? contextual : range) ?? snapshot?.loopRange);
   const canListen = $derived(!!snapshot && !!auditionRange);
 
-  function loop(region: FrameRange | undefined, selectedBand?: PreviewBand, preservePosition = false, play = true) {
-    if (region) onlisten({ type: 'loop', range: region, band: selectedBand, smooth, returnTo, preservePosition, play });
+  function loop(region: FrameRange | undefined, pick?: SpectralRepair, preservePosition = false, play = true) {
+    if (region) onlisten({ type: 'loop', range: region, selection: pick, smooth, returnTo, preservePosition, play });
   }
 
   function listen(mode: 'exact' | 'context') {
     loopMode = mode;
     manualRange = undefined;
     rangeError = '';
-    loop(mode === 'context' ? contextual : range);
+    if (mode === 'context') loop(contextual);
+    else if (snapshot?.selectionPlaying) onlisten({ type: 'stop', returnTo });
+    else if (selection) onlisten({ type: 'selection', selection });
   }
 
   function sendPreferences() {
@@ -65,7 +67,7 @@
     field.value = timeLabel(updated[edge], rate, 6);
     if (auditionRange[edge] === updated[edge]) return;
     manualRange = updated;
-    if (snapshot?.loop) loop(updated, snapshot.monitor === 'band' ? band : undefined, true, snapshot.playing);
+    if (snapshot?.loop || snapshot?.selectionPlaying) loop(updated, snapshot.selectionPlaying ? selection : undefined, true, snapshot.playing);
   }
 
   function loopKeys(edge: keyof FrameRange, event: KeyboardEvent & { currentTarget: HTMLInputElement }) {
@@ -82,21 +84,19 @@
 
 <div class="listen" role="group" aria-label="Listen to repair">
   <div class="listen-main">
-    <Button variant="ghost" size="sm" disabled={!range} aria-label="Audition selected area" title="Loop the selection exactly"
-      onclick={() => listen('exact')}><Play size={13} aria-hidden="true"/>Listen</Button>
-    <Button variant="ghost" size="sm" disabled={!range} title="Include 750 ms before and after the selection"
-      onclick={() => listen('context')}><Repeat2 size={13} aria-hidden="true"/>With context</Button>
-    <Button variant="ghost" size="sm" disabled={!band || !canListen} aria-label="Audition selected frequencies only"
-      aria-pressed={snapshot?.monitor === 'band'} onclick={() => {
-        if (snapshot?.monitor === 'band') onlisten({ type: 'signal', signal });
-        else loop(auditionRange, band);
-      }}><Headphones size={14} aria-hidden="true"/>Band only</Button>
+    <Button variant="ghost" size="sm" disabled={!range} title="Audition only the selected time and frequencies (Enter)"
+      aria-keyshortcuts="Enter" aria-pressed={snapshot?.selectionPlaying ?? false} onclick={() => listen('exact')}>
+      {#if snapshot?.selectionPlaying}<Square size={12} aria-hidden="true"/>{:else}<Play size={13} aria-hidden="true"/>{/if}
+      Play Selection
+    </Button>
+    <Button variant="ghost" size="icon-sm" disabled={!range} aria-label="With context" title="Audition the surrounding mix (Shift+Enter)"
+      onclick={() => listen('context')}><Repeat2 size={15} aria-hidden="true"/></Button>
   </div>
   {#if snapshot?.repairPlayback}
     <p class="listen-status" role="status">{playbackMessage[snapshot.repairPlayback]}</p>
   {/if}
-  <details>
-    <summary>Loop and comparison</summary>
+  <RepairPopup label="Loop and comparison" side="top" disabled={!snapshot}>
+    {#snippet icon()}<SlidersHorizontal size={15} aria-hidden="true"/>{/snippet}
     <div class="listen-options">
       <div class="listen-main">
         <Button variant="ghost" size="sm" disabled={!snapshot} onclick={() => onlisten({ type: 'all' })}>Whole mix</Button>
@@ -132,7 +132,7 @@
               aria-invalid={!!rangeError} onblur={event => editLoop('end', event.currentTarget)}
               onkeydown={event => loopKeys('end', event)}/>
           </label>
-          <Button variant="ghost" size="sm" onclick={() => loop(auditionRange)} disabled={!canListen}>Play loop</Button>
+          <Button variant="ghost" size="sm" onclick={() => loop(auditionRange, selection)} disabled={!canListen}>Play range</Button>
         </div>
       {/if}
       <div class="listen-main">
@@ -153,14 +153,11 @@
       </div>
       {#if rangeError}<p role="status">{rangeError}</p>{/if}
     </div>
-  </details>
+  </RepairPopup>
 </div>
 
 <style>
   .listen, .listen-main { display:flex; flex-wrap:wrap; align-items:center; gap:var(--sp-1); }
-  details { color:var(--muted); }
-  details[open] { flex-basis:100%; }
-  summary { padding:var(--sp-1); cursor:pointer; }
   .listen-options { display:grid; gap:var(--sp-1); margin-block:var(--sp-1); }
   label { display:inline-flex; align-items:center; gap:var(--sp-1); font-size:var(--text-xs); }
   label :global(input[type="text"]), select { width:auto; min-width:0; padding-inline:var(--sp-2); }

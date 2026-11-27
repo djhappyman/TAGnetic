@@ -7,13 +7,39 @@ export type RepairTexture = { bitmap: HTMLCanvasElement; time: FrameRange; frequ
 export type RepairChannel = 'combined' | 'left' | 'right';
 export type RepairContrast = 'balanced' | 'detail' | 'strong';
 export type RepairWaveform = { values: readonly number[]; time: FrameRange; stereo?: boolean; channel?: RepairChannel; opacity?: number; clipping?: boolean };
-export const repairPalettes = {
-  warm: { background: '#1a1015', gradient: '#271619, #aa4822, #eeb358, #fff0cb', colours: [[39, 22, 25], [170, 72, 34], [238, 179, 88], [255, 240, 203]] },
-  neutral: { background: '#141619', gradient: '#23272b, #737e85, #b6c1c6, #f4f8f8', colours: [[35, 39, 43], [115, 126, 133], [182, 193, 198], [244, 248, 248]] },
-  blue: { background: '#111621', gradient: '#172539, #34699b, #78c2cb, #f4f9d3', colours: [[23, 37, 57], [52, 105, 155], [120, 194, 203], [244, 249, 211]] },
+const repairPalettes = {
+  theme: [[37, 37, 37], [102, 102, 102], [177, 177, 177], [251, 251, 251]],
+  warm: [[39, 22, 25], [170, 72, 34], [238, 179, 88], [255, 240, 203]],
+  neutral: [[35, 39, 43], [115, 126, 133], [182, 193, 198], [244, 248, 248]],
+  blue: [[23, 37, 57], [52, 105, 155], [120, 194, 203], [244, 249, 211]],
 };
 export type RepairPaletteName = keyof typeof repairPalettes;
 const frequencyLabel = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
+
+const themeStops = {
+  dark: [[.29, .04, 0], [.53, .085, 15], [.73, .115, 34], [.89, .065, 42]],
+  light: [[.92, .025, 0], [.74, .075, 15], [.55, .115, 34], [.33, .085, 42]],
+};
+
+function paletteStops(palette: RepairPaletteName, light: boolean, accent: string) {
+  if (palette === 'theme' && CSS.supports('color', 'oklch(from blue .5 .1 calc(h + 15))')) {
+    // Lightness orders signal level. The neighbouring hues give that ramp
+    // more separation without borrowing the waveform's primary hue.
+    return themeStops[light ? 'light' : 'dark'].map(([brightness, chroma, hue]) =>
+      `oklch(from ${accent} ${brightness} ${chroma} calc(h + ${hue}))`);
+  }
+  const share = light ? [.14, .38, .37, .31] : palette === 'theme' ? [.48, .76, .62, .32] : [.34, .58, .36, .14];
+  const lightness = [226, 166, 104, 26];
+  return repairPalettes[palette].map((colour, index) => {
+    const luma = colour[0] * .2126 + colour[1] * .7152 + colour[2] * .0722;
+    const base = light ? colour.map(channel => Math.round(clampRepair(lightness[index] + (channel - luma) * .5, 0, 255))) : colour;
+    return `color-mix(in srgb, rgb(${base.join(' ')}), ${accent} ${Math.round(share[index] * 100)}%)`;
+  });
+}
+
+export function repairPaletteGradient(palette: RepairPaletteName, light: boolean): string {
+  return paletteStops(palette, light, 'var(--accent)').join(', ');
+}
 
 export function clampRepair(value: number, minimum: number, maximum: number): number {
   return Math.max(minimum, Math.min(maximum, value));
@@ -97,7 +123,7 @@ export function repairLevelAt(probe: TreatmentProbe, frame: number, hz: number):
 }
 
 export function buildRepairTexture(
-  probe: TreatmentProbe, rate: number, palette: RepairPaletteName, contrast: RepairContrast = 'balanced', offset = 0,
+  probe: TreatmentProbe, rate: number, palette: RepairPaletteName, contrast: RepairContrast, offset: number, accent: string, light: boolean,
 ): RepairTexture | null {
   const time = spectrogramRange(probe);
   const columns = probe.spectrogram;
@@ -115,7 +141,16 @@ export function buildRepairTexture(
     return frequencyY(clampRepair(upper, frequency.lowHz, frequency.highHz), bounds, frequency);
   });
   const { floor, ceiling } = repairDbScale(contrast, offset);
-  const { colours } = repairPalettes[palette];
+  // Read the few CSS swatches once. Interpolate a small sRGB lookup table
+  // so rendering cells and cached tiles never requires CSS colour parsing.
+  const swatches = paletteStops(palette, light, accent);
+  for (const [row, swatch] of swatches.entries()) {
+    ctx.fillStyle = swatch;
+    ctx.fillRect(0, row, 1, 1);
+  }
+  const pixels = ctx.getImageData(0, 0, 1, swatches.length).data;
+  ctx.clearRect(0, 0, 1, swatches.length);
+  const colours = swatches.map((_, index) => pixels.slice(index * 4, index * 4 + 3));
   const steps = 64;
   const lookup = Array.from({ length: steps }, (_, index) => {
     const fraction = index / (steps - 1) * (colours.length - 1);
@@ -137,7 +172,7 @@ export function buildRepairTexture(
   return { bitmap, time, frequency };
 }
 
-type RepairPalette = { grid: string; ink: string; guide: string; font: string };
+type RepairPalette = { grid: string; ink: string; waveform: string; guide: string; font: string };
 
 export function drawRepairViewport(
   canvas: HTMLCanvasElement, width: number, height: number, viewport: RepairViewport,
@@ -180,7 +215,26 @@ export function drawRepairViewport(
     ctx.clearRect(x, y, w, h);
     ctx.drawImage(texture.bitmap, tx, ty, tw, th, x, y, w, h);
   }
-  if (waveform) drawWaveform(ctx, waveform, bounds, time, palette.ink, waveform.opacity ?? .52);
+  if (waveform) {
+    const inset = waveformOnly ? 0 : (bounds.bottom - bounds.top) * .34;
+    drawWaveform(ctx, waveform, { ...bounds, top: bounds.top + inset, bottom: bounds.bottom - inset },
+      time, palette.waveform, waveform.opacity ?? .16);
+  }
+
+  // Fade the painted signal into the surface while leaving the axes crisp.
+  const fade = Math.min(12, (bounds.right - bounds.left) / 4);
+  const leftFade = ctx.createLinearGradient(bounds.left, 0, bounds.left + fade, 0);
+  leftFade.addColorStop(0, '#000');
+  leftFade.addColorStop(1, '#0000');
+  const rightFade = ctx.createLinearGradient(bounds.right - fade, 0, bounds.right, 0);
+  rightFade.addColorStop(0, '#0000');
+  rightFade.addColorStop(1, '#000');
+  ctx.globalCompositeOperation = 'destination-out';
+  ctx.fillStyle = leftFade;
+  ctx.fillRect(bounds.left, bounds.top, fade, bounds.bottom - bounds.top);
+  ctx.fillStyle = rightFade;
+  ctx.fillRect(bounds.right - fade, bounds.top, fade, bounds.bottom - bounds.top);
+  ctx.globalCompositeOperation = 'source-over';
 
   ctx.strokeStyle = palette.guide;
   ctx.globalAlpha = .56;

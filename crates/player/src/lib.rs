@@ -27,7 +27,7 @@ mod mp4;
 mod router;
 mod studio;
 pub use mailbox::PlayerError;
-pub use studio::{StudioAudition, StudioPreviewState, StudioStatus};
+pub use studio::{StudioAudition, StudioPreviewRange, StudioPreviewState, StudioStatus};
 pub mod tempo;
 
 use controlled::{Control, Controlled, Ticket};
@@ -218,12 +218,25 @@ impl Player {
         file: std::fs::File,
         treatment: tagrex_audio_workbench::PreparedTreatment,
     ) -> Result<(), PlayerError> {
+        self.studio_retune_range(owner, sequence, revision, file, treatment, None)
+    }
+
+    pub fn studio_retune_range(
+        &self,
+        owner: String,
+        sequence: u64,
+        revision: u64,
+        file: std::fs::File,
+        treatment: tagrex_audio_workbench::PreparedTreatment,
+        range: Option<StudioPreviewRange>,
+    ) -> Result<(), PlayerError> {
         self.tx.send(Cmd::Studio(studio::Command::Retune {
             owner,
             sequence,
             revision,
             file,
             treatment: Box::new(treatment),
+            range,
         }))
     }
 

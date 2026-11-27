@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { ScanSearch } from '@lucide/svelte';
   import Button from './AudioSplitButton.svelte';
+  import RepairPopup from './AudioSplitRepairPopup.svelte';
   import { analyseRepair, type RepairAnalysisBounds, type RepairAnalysisKind, type RepairTarget } from '../js/audio-repair-analysis';
   import type { RepairChannel } from '../js/audio-repair-plot';
   import type { TreatmentProbe } from '../js/audio-treatment-plot';
@@ -64,14 +66,15 @@
   }
 
   function canReviewSelection() {
-    return !!selection && !!probe && (probe.spectrogramChannel ?? 'combined') === channel
+    return !!selection && selection.endFrame - selection.startFrame <= maxFrames && !!probe && (probe.spectrogramChannel ?? 'combined') === channel
       && sourceStart !== undefined && sourceEnd !== undefined
       && selection.startFrame >= sourceStart - 1 && selection.endFrame <= sourceEnd + 1;
   }
 </script>
 
-<details class="analysis">
-  <summary>Find and review</summary>
+<RepairPopup label="Find and review" side="top">
+  {#snippet icon()}<ScanSearch size={15} aria-hidden="true"/>{/snippet}
+  <div class="analysis">
   <div class="analysis-controls">
     <label>
       Find
@@ -101,10 +104,10 @@
       <p>Select up to {Math.floor(maxFrames / rate * 10) / 10} seconds to analyse.</p>
     {:else if needsTransients || !canReviewSelection()}
       <div class="analysis-controls">
-        <p>{needsTransients ? 'Short events need the Source view with Transients detail.' : 'Fit the selection in the source spectrogram to analyse it.'}</p>
+        <p>{needsTransients ? 'Short events need Original audio with Transients detail.' : 'Fit the selection in the Original spectrogram to analyse it.'}</p>
         {#if onsource}
           <Button size="sm" variant="ghost" onclick={() => onsource?.(needsTransients)}>
-            {needsTransients ? 'Show transients' : 'Fit source selection'}
+            {needsTransients ? 'Show transients' : 'Fit original selection'}
           </Button>
         {/if}
       </div>
@@ -132,12 +135,11 @@
       <Button size="sm" variant="secondary" disabled={checked.length === 0} onclick={applyGroup}>Select checked bands</Button>
     {/if}
   {/if}
-</details>
+  </div>
+</RepairPopup>
 
 <style>
   .analysis { font-size: var(--text-xs); min-width: 0; }
-  summary { color: var(--muted); cursor: pointer; width: fit-content; min-height: 24px; align-content: center; }
-  summary:hover { color: var(--text); }
   .analysis-controls, .candidate-list, .review-actions { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
   .review-actions { margin-block: var(--sp-2); }
   .review-actions > span { font-variant-numeric: tabular-nums; }

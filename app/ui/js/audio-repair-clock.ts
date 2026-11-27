@@ -7,6 +7,7 @@ export type RepairClock = {
   frames: number;
   running: boolean;
   loop?: FrameRange;
+  endFrame?: number;
 };
 
 // Repair receives authoritative positions at about 8 Hz. Holding after two
@@ -20,5 +21,5 @@ export function projectRepairFrame(clock: RepairClock, now: number): number {
   if (loop && loop.end > loop.start && clock.frame >= loop.start && clock.frame < loop.end && frame >= loop.end) {
     return loop.start + (frame - loop.start) % (loop.end - loop.start);
   }
-  return Math.max(0, Math.min(clock.frames - 1, frame));
+  return Math.max(0, Math.min(clock.frames - 1, clock.endFrame ?? Infinity, frame));
 }

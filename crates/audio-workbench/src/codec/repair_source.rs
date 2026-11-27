@@ -5,6 +5,7 @@ use super::{
     AudioTreatment, MediaError, PreviewDecoder, Recording, RepairChannel, SeekIndex, SourceInfo,
     SpectralRepair,
 };
+use crate::{MaskOperation, RepairMask, RepairMaskRegion};
 use std::{collections::VecDeque, fs::File};
 
 const MAX_MASK_WINDOW: u64 = 4096;
@@ -133,6 +134,151 @@ impl RepairSource {
 struct WindowDelta {
     start: i64,
     samples: Vec<f64>,
+}
+
+/// Project already-processed PCM onto a time-frequency selection. Access is
+/// sequential and keeps only the overlapping FFT windows around the playhead.
+pub struct SelectionPcm {
+    spectra: RepairSpectra,
+    channels: usize,
+    stock: Vec<i32>,
+    stock_start: u64,
+    position: u64,
+    next_center: i64,
+    windows: VecDeque<WindowDelta>,
+    output: Vec<f32>,
+    index: usize,
+}
+
+impl SelectionPcm {
+    pub fn new(
+        source: SourceInfo,
+        mut pick: SpectralRepair,
+        input_start: u64,
+        start: u64,
+    ) -> Result<Self, MediaError> {
+        if pick.mask.is_none() {
+            pick.mask = Some(
+                RepairMask {
+                    version: 1,
+                    feather_frames: 0,
+                    feather_hz: 0,
+                    regions: vec![RepairMaskRegion::Rectangle {
+                        operation: MaskOperation::Add,
+                        start_frame: pick.start_frame,
+                        end_frame: pick.end_frame,
+                        low_hz: pick.low_hz,
+                        high_hz: pick.high_hz,
+                    }],
+                }
+                .into(),
+            );
+        }
+        if pick.start_frame >= pick.end_frame
+            || pick.low_hz >= pick.high_hz
+            || pick.high_hz > source.sample_rate.div_ceil(2)
+            || input_start > start
+        {
+            return Err(MediaError::Range("Choose a valid selection to audition"));
+        }
+        pick.mask.as_ref().expect("selection has a mask").validate(
+            &pick,
+            source,
+            pick.end_frame.max(source.frames),
+        )?;
+        let spectra = RepairSpectra::audition(source, pick);
+        let hop = spectra.size() as u64 / 4;
+        let channels = usize::from(source.channels);
+        Ok(Self {
+            spectra,
+            channels,
+            stock: Vec::new(),
+            stock_start: input_start,
+            position: start,
+            next_center: (start / hop * hop) as i64 - hop as i64,
+            windows: VecDeque::with_capacity(4),
+            output: Vec::with_capacity(hop as usize * channels),
+            index: 0,
+        })
+    }
+
+    pub fn next_sample(&mut self, input: &mut impl Iterator<Item = f32>) -> Option<f32> {
+        if self.index == self.output.len() && !self.fill(input) {
+            return None;
+        }
+        let sample = self.output[self.index];
+        self.index += 1;
+        Some(sample)
+    }
+
+    fn fill(&mut self, input: &mut impl Iterator<Item = f32>) -> bool {
+        const SCALE: f64 = 2_147_483_648.0;
+        let size = self.spectra.size() as u64;
+        let hop = size / 4;
+        let boundary = (self.position / hop + 1) * hop;
+        let removable = (self
+            .position
+            .saturating_sub(size)
+            .saturating_sub(self.stock_start) as usize
+            * self.channels)
+            .min(self.stock.len());
+        if removable >= COMPACT_AT {
+            self.stock.drain(..removable);
+            self.stock_start += (removable / self.channels) as u64;
+        }
+        let wanted = ((boundary + 3 * hop - self.stock_start) as usize * self.channels)
+            .saturating_sub(self.stock.len());
+        self.stock.extend(
+            input
+                .take(wanted)
+                .map(|sample| (f64::from(sample) * SCALE).round() as i32),
+        );
+        let end = boundary.min(self.stock_start + (self.stock.len() / self.channels) as u64);
+        if end <= self.position {
+            return false;
+        }
+        let half = size as i64 / 2;
+        let mut recycled = Vec::new();
+        while self
+            .windows
+            .front()
+            .is_some_and(|window| window.start + size as i64 <= self.position as i64)
+        {
+            recycled = self.windows.pop_front().expect("expired window").samples;
+        }
+        while self.next_center - half < boundary as i64 {
+            self.spectra.window_delta(
+                self.next_center,
+                self.stock_start,
+                &self.stock,
+                &mut recycled,
+            );
+            if !recycled.is_empty() {
+                self.windows.push_back(WindowDelta {
+                    start: self.next_center - half,
+                    samples: std::mem::take(&mut recycled),
+                });
+            }
+            self.next_center += hop as i64;
+        }
+        self.output.clear();
+        for frame in self.position..end {
+            for channel in 0..self.channels {
+                let sample = self
+                    .windows
+                    .iter()
+                    .filter_map(|window| {
+                        let offset = usize::try_from(frame as i64 - window.start).ok()?;
+                        window.samples.get(offset * self.channels + channel)
+                    })
+                    .sum::<f64>();
+                self.output.push((sample / SCALE).clamp(-1.0, 1.0) as f32);
+            }
+        }
+        self.index = 0;
+        self.position = end;
+        true
+    }
 }
 
 struct BufferedRepairs {
@@ -336,6 +482,63 @@ mod tests {
         frames: FRAMES,
         bits_per_sample: Some(32),
     };
+
+    #[test]
+    fn selection_auditions_the_mask_after_processing_without_leaking_other_channels_or_bands() {
+        let frames = 24_000;
+        let start = 3_000;
+        let rectangle = |operation, low_hz, high_hz| RepairMaskRegion::Rectangle {
+            operation,
+            start_frame: start,
+            end_frame: frames,
+            low_hz,
+            high_hz,
+        };
+        let pick = SpectralRepair {
+            start_frame: start,
+            end_frame: frames,
+            low_hz: 600,
+            high_hz: 2_600,
+            amount_db: 1,
+            channel: Some(RepairChannel::Left),
+            mask: Some(Arc::new(RepairMask {
+                version: 1,
+                feather_frames: 0,
+                feather_hz: 0,
+                regions: vec![
+                    rectangle(MaskOperation::Add, 600, 2_600),
+                    rectangle(MaskOperation::Subtract, 1_500, 2_600),
+                ],
+            })),
+            ..SpectralRepair::default()
+        };
+        let tone = |frame: u64, hz: f64| (TAU * frame as f64 * hz / f64::from(RATE)).sin();
+        let mut input = (0..frames).flat_map(|frame| {
+            [
+                (0.2 * (tone(frame, 900.0) + tone(frame, 2_100.0) + tone(frame, 5_000.0))) as f32,
+                (0.3 * tone(frame, 900.0)) as f32,
+            ]
+        });
+        let mut selection = SelectionPcm::new(SOURCE, pick, 0, start).unwrap();
+        let samples: Vec<_> = std::iter::from_fn(|| selection.next_sample(&mut input)).collect();
+        assert_eq!(samples.len(), ((frames - start) * 2) as usize);
+        assert!(samples
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .all(|&sample| sample == 0.0));
+        let level = |hz| {
+            (5_000..19_000)
+                .map(|frame| f64::from(samples[((frame - start) * 2) as usize]) * tone(frame, hz))
+                .sum::<f64>()
+                .abs()
+                * 2.0
+                / 14_000.0
+        };
+        assert!(level(900.0) > 0.19);
+        assert!(level(2_100.0) < 0.001);
+        assert!(level(5_000.0) < 0.001);
+    }
 
     fn signal_file() -> File {
         let length = FRAMES as u32 * 8;

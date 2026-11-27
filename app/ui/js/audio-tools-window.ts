@@ -84,6 +84,8 @@ export type ToolSnapshot = {
   eqLearning?: { index: number; status: 'learning' | 'error'; message?: string };
   monitor?: 'band' | 'bypass-compressor' | 'difference-compressor';
   repairListen?: RepairListenState;
+  selectionPlaying?: boolean;
+  repeatSelection?: boolean;
   undoLabel?: string;
   redoLabel?: string;
   reference?: EqReference;
@@ -108,8 +110,11 @@ export type RepairListenState = {
 };
 export type RepairLoopPreferences = { smooth: boolean; returnTo: 'hold' | 'loop' | 'start' };
 export type RepairListenCommand =
-  | (RepairLoopPreferences & { type: 'loop'; range: FrameRange; band?: PreviewBand; preservePosition?: boolean; play?: boolean })
+  | (RepairLoopPreferences & { type: 'loop'; range: FrameRange; band?: PreviewBand; selection?: SpectralRepair; preservePosition?: boolean; play?: boolean })
   | (RepairLoopPreferences & { type: 'preferences' })
+  | { type: 'selection'; selection: SpectralRepair; restart?: boolean }
+  | { type: 'set-selection'; selection: SpectralRepair; adjust?: boolean }
+  | { type: 'clear-selection'; frame?: number }
   | { type: 'signal'; signal: RepairListenState['signal'] }
   | { type: 'channel'; channel: RepairListenState['channel'] }
   | { type: 'trial'; strength: NonNullable<RepairListenState['trial']>; candidate: SpectralRepair; slot?: number }

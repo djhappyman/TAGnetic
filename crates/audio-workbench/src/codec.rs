@@ -25,7 +25,7 @@ pub use probe::{
     PreviewComparison, SpectralEqResponse, SpectrogramChannel, SpectrogramDetail, SpectrumView,
     TreatmentProbe, TreatmentProbeOptions,
 };
-pub use repair_source::{RepairBlock, RepairSource};
+pub use repair_source::{RepairBlock, RepairSource, SelectionPcm};
 pub use seek::SeekIndex;
 pub use treatment::{
     prepare_treatment, AudioTreatment, DynamicEq, EqBand, EqBandKind, EqChannel, HumFilter,

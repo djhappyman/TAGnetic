@@ -74,7 +74,7 @@ impl RepairMaskRegion {
 }
 
 impl RepairMask {
-    pub(super) fn validate(
+    pub(in crate::codec) fn validate(
         &self,
         repair: &SpectralRepair,
         source: SourceInfo,
@@ -176,6 +176,7 @@ where
 }
 
 pub(in crate::codec) struct RepairSpectra {
+    audition: bool,
     channels: usize,
     step_hz: f64,
     fft: Arc<dyn Fft<f64>>,
@@ -320,6 +321,7 @@ impl RepairSpectra {
             })
             .collect();
         Self {
+            audition: false,
             channels,
             step_hz: f64::from(source.sample_rate) / size as f64,
             fft,
@@ -337,6 +339,14 @@ impl RepairSpectra {
             region: vec![0.0; bins],
             edits,
         }
+    }
+
+    pub(in crate::codec) fn audition(source: SourceInfo, edit: SpectralRepair) -> Self {
+        let mut spectra = Self::new(source, std::iter::once(edit));
+        spectra.audition = true;
+        // Even a full-band stripe can contain subtracted regions or exclude a channel.
+        spectra.edits[0].broadband = false;
+        spectra
     }
 
     pub(in crate::codec) fn size(&self) -> usize {
@@ -431,6 +441,10 @@ impl RepairSpectra {
                     .zip(&mut self.differences)
                     .zip(&self.weights)
                 {
+                    if self.audition {
+                        *difference = weight;
+                        continue;
+                    }
                     let change = if weight == 0.0 {
                         1.0
                     } else if weight == 1.0 {

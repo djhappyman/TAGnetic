@@ -679,6 +679,7 @@ pub struct PreparedTreatment {
     loudness: Option<f64>,
     preview_ceiling: bool,
     monitor: PreviewMonitor,
+    preview_selection: Option<SpectralRepair>,
 }
 
 impl Default for PreparedTreatment {
@@ -690,6 +691,7 @@ impl Default for PreparedTreatment {
             loudness: None,
             preview_ceiling: false,
             monitor: PreviewMonitor::Normal,
+            preview_selection: None,
         }
     }
 }
@@ -770,7 +772,28 @@ impl PreparedTreatment {
             && self.gain == other.gain
             && self.monitor_gain == other.monitor_gain
             && self.monitor == other.monitor
+            && self.preview_selection == other.preview_selection
             && self.preview_ceiling == other.preview_ceiling
+    }
+
+    pub fn with_preview_selection(mut self, mut selection: Option<SpectralRepair>) -> Self {
+        if let Some(pick) = &mut selection {
+            if self.settings.swap_channels {
+                pick.channel = pick.channel.map(|channel| match channel {
+                    RepairChannel::Left => RepairChannel::Right,
+                    RepairChannel::Right => RepairChannel::Left,
+                });
+            }
+            if self.settings.mono != MonoMode::Off {
+                pick.channel = None;
+            }
+        }
+        self.preview_selection = selection;
+        self
+    }
+
+    pub fn preview_selection(&self) -> Option<&SpectralRepair> {
+        self.preview_selection.as_ref()
     }
 
     /// Fast preview updates can keep decoding the same source and crossfade
@@ -863,6 +886,7 @@ impl PreparedTreatment {
 
     pub fn can_stream_eq(&self) -> bool {
         self.monitor == PreviewMonitor::Normal
+            && self.preview_selection.is_none()
             && !self.settings.normalize
             && !self.settings.has_dynamics()
             && self.settings.active_repairs().next().is_none()

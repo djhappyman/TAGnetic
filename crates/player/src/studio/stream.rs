@@ -2,7 +2,7 @@
 //! voice and leaves only one pending decoder request on the worker.
 use super::{
     retune::{LiveProcessor, RetuneSlot},
-    StudioAudition,
+    StudioAudition, StudioPreviewRange,
 };
 use crate::{fixed::Fixed, router, RodioSink};
 use rodio::{ChannelCount, SampleRate, Source};
@@ -16,7 +16,9 @@ use std::{
     },
     time::Duration,
 };
-use tagrex_audio_workbench::{PlaybackHistory, PreparedTreatment, RepairSource, SeekIndex};
+use tagrex_audio_workbench::{
+    PlaybackHistory, PreparedTreatment, RepairSource, SeekIndex, SelectionPcm,
+};
 
 const CHUNK_FRAMES: usize = 256;
 const BUFFERED_CHUNKS: usize = 12;
@@ -208,6 +210,7 @@ impl Voice {
         position: Duration,
         active: &Voice,
         audition: Option<StudioAudition>,
+        target: Option<StudioPreviewRange>,
     ) {
         let Some((mut source, output)) = self.preload(position) else {
             self.shared
@@ -241,6 +244,9 @@ impl Voice {
                     if position >= audition.end.as_nanos() as u64 {
                         position = audition.start.as_nanos() as u64;
                     }
+                }
+                if let Some(target) = target {
+                    position = target.position(Duration::from_nanos(position)).as_nanos() as u64;
                 }
                 let frame = output_frames(position.saturating_sub(origin), rate);
                 let half_frame = 500_000_000 / u64::from(rate) + 1;
@@ -564,7 +570,12 @@ impl Job {
         cache: bool,
     ) -> Result<Option<Arc<Vec<f32>>>, String> {
         let treatment = &self.decode.treatment;
-        let decode_start = treatment.preview_start(start, self.decode.source_rate);
+        let input_start = if treatment.preview_selection().is_some() {
+            start.saturating_sub(4096)
+        } else {
+            start
+        };
+        let decode_start = treatment.preview_start(input_start, self.decode.source_rate);
         let decoder = RepairSource::open(
             self.decode.file.try_clone().map_err(|e| e.to_string())?,
             decode_start,
@@ -576,8 +587,13 @@ impl Job {
         let processor = treatment
             .processor_at(decoder.source_info(), decode_start)
             .map_err(|e| e.to_string())?;
-        let channels = u64::from(processor.output_info().channels);
-        let mut remaining = (self.decode.end - start) * channels;
+        let info = processor.output_info();
+        let selection = treatment
+            .preview_selection()
+            .map(|pick| SelectionPcm::new(info, pick.clone(), input_start, start))
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        let mut remaining = (self.decode.end - input_start) * u64::from(info.channels);
         if decoder.source_info().sample_rate != self.decode.source_rate {
             return Err("The recording sample rate changed".into());
         }
@@ -595,13 +611,17 @@ impl Job {
         let native = Native::new(
             decoder,
             processor,
-            start..self.decode.end,
+            input_start..self.decode.end,
             decode_start,
             &self.shared,
             &mut remaining,
             &mut failure,
         )?;
-        let mut fixed = Fixed::new(native, self.channels, self.rate);
+        let mut fixed = Fixed::new(
+            SelectedSource { native, selection },
+            self.channels,
+            self.rate,
+        );
         let mut cache = cache.then(Vec::new);
         let channels = usize::from(self.channels.get());
         let seam = self
@@ -809,6 +829,37 @@ impl Source for Native<'_> {
     }
     fn sample_rate(&self) -> SampleRate {
         self.rate
+    }
+    fn total_duration(&self) -> Option<Duration> {
+        None
+    }
+}
+
+struct SelectedSource<'a> {
+    native: Native<'a>,
+    selection: Option<SelectionPcm>,
+}
+
+impl Iterator for SelectedSource<'_> {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        match &mut self.selection {
+            Some(selection) => selection.next_sample(&mut self.native),
+            None => self.native.next(),
+        }
+    }
+}
+
+impl Source for SelectedSource<'_> {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+    fn channels(&self) -> ChannelCount {
+        self.native.channels
+    }
+    fn sample_rate(&self) -> SampleRate {
+        self.native.rate
     }
     fn total_duration(&self) -> Option<Duration> {
         None

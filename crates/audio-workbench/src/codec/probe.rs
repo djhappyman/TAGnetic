@@ -203,19 +203,136 @@ pub fn probe_treatment_with_options(
         ));
     }
     let rate = u64::from(info.sample_rate);
+    let viewport = options.viewport.filter(|_| options.spectrogram_only());
+    if let Some(range) = viewport {
+        if range.start >= range.end || range.end > info.frames {
+            return Err(MediaError::Range(
+                "Spectrogram view is outside the recording",
+            ));
+        }
+        if range.end - range.start > (rate * 12).min(MAX_VISUAL_SAMPLES / u64::from(info.channels))
+        {
+            return probe_overview(
+                source,
+                info,
+                index,
+                prepared,
+                options,
+                range,
+                &mut cancelled,
+            );
+        }
+    }
+    probe_window(
+        source, info, frame, index, prepared, options, false, cancelled,
+    )
+}
+
+fn probe_overview(
+    source: File,
+    info: SourceInfo,
+    index: Option<&SeekIndex>,
+    prepared: PreparedTreatment,
+    options: TreatmentProbeOptions,
+    range: FrameRange,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<TreatmentProbe, MediaError> {
+    // Uniform short windows keep decode and DSP work proportional to display
+    // resolution. They use the same seek, priming and channel mapping as detail.
+    let detailed = prepared.settings().is_active() && !options.dry_spectrogram();
+    let count = if detailed { 96 } else { 192 };
+    let width = u64::from(match options.spectrogram_detail {
+        SpectrogramDetail::Balanced => probe_fft_size(info.sample_rate),
+        SpectrogramDetail::Tones => probe_fft_size(info.sample_rate)
+            .saturating_mul(4)
+            .min(32_768),
+        SpectrogramDetail::Transients => {
+            (info.sample_rate / 48).next_power_of_two().clamp(256, 4096)
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let span = range.end - range.start;
+    let mut combined = Vec::with_capacity(count as usize);
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    let mut waveform = Vec::with_capacity(count as usize * 2);
+    let mut left_waveform = Vec::new();
+    let mut right_waveform = Vec::new();
+    let mut result = None;
+    for column in 0..count {
+        check_cancelled(&mut cancelled)?;
+        if Instant::now() >= deadline {
+            return Err(MediaError::Range(
+                "Spectrogram overview exceeded its analysis budget",
+            ));
+        }
+        let frame = range.start + (2 * column + 1) * span / (2 * count);
+        let sample = centered(frame, width, info.frames);
+        let mut reading = probe_window(
+            source.try_clone()?,
+            info,
+            frame,
+            index,
+            prepared.clone(),
+            TreatmentProbeOptions {
+                viewport: Some(sample),
+                ..options
+            },
+            true,
+            || cancelled() || Instant::now() >= deadline,
+        )?;
+        combined.extend(reading.spectrogram.take().into_iter().flatten());
+        left.extend(reading.spectrogram_left.take().into_iter().flatten());
+        right.extend(reading.spectrogram_right.take().into_iter().flatten());
+        for (output, peaks) in [
+            (&mut waveform, reading.spectrogram_waveform.take()),
+            (&mut left_waveform, reading.spectrogram_left_waveform.take()),
+            (
+                &mut right_waveform,
+                reading.spectrogram_right_waveform.take(),
+            ),
+        ] {
+            if let Some(peaks) = peaks {
+                output.extend([
+                    peaks.iter().step_by(2).copied().fold(0.0_f32, f32::min),
+                    peaks
+                        .iter()
+                        .skip(1)
+                        .step_by(2)
+                        .copied()
+                        .fold(0.0_f32, f32::max),
+                ]);
+            }
+        }
+        result = Some(reading);
+    }
+    let mut result = result.ok_or(MediaError::Range("No spectrogram overview data"))?;
+    result.spectrogram = Some(combined);
+    result.spectrogram_left = (!left.is_empty()).then_some(left);
+    result.spectrogram_right = (!right.is_empty()).then_some(right);
+    result.spectrogram_waveform = Some(waveform);
+    result.spectrogram_left_waveform = (!left_waveform.is_empty()).then_some(left_waveform);
+    result.spectrogram_right_waveform = (!right_waveform.is_empty()).then_some(right_waveform);
+    result.spectrogram_start = Some(range.start);
+    result.spectrogram_end = Some(range.end);
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn probe_window(
+    source: File,
+    info: SourceInfo,
+    frame: u64,
+    index: Option<&SeekIndex>,
+    prepared: PreparedTreatment,
+    options: TreatmentProbeOptions,
+    overview_column: bool,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<TreatmentProbe, MediaError> {
+    let rate = u64::from(info.sample_rate);
     let channels = usize::from(info.channels);
     let base_fft_size = probe_fft_size(info.sample_rate);
     let viewport = options.viewport.filter(|_| options.spectrogram_only());
-    if viewport.is_some_and(|range| {
-        range.start >= range.end
-            || range.end > info.frames
-            || range.end - range.start
-                > (rate * 12).min(MAX_VISUAL_SAMPLES / u64::from(info.channels))
-    }) {
-        return Err(MediaError::Range(
-            "Spectrogram view is outside the supported range",
-        ));
-    }
     let balanced_size = viewport.map_or(base_fft_size, |range| {
         (((range.end - range.start) / 8).max(2_048) as u32)
             .next_power_of_two()
@@ -223,6 +340,7 @@ pub fn probe_treatment_with_options(
     });
     let fft_size = if options.spectrogram_only() {
         match options.spectrogram_detail {
+            SpectrogramDetail::Balanced if overview_column => base_fft_size,
             SpectrogramDetail::Balanced => balanced_size,
             SpectrogramDetail::Transients => {
                 (info.sample_rate / 48).next_power_of_two().clamp(256, 4096)
@@ -457,7 +575,9 @@ pub fn probe_treatment_with_options(
                     // Repair selections refer to a source channel, even when the output swaps it.
                     channel = channel.map(|index| 1 - index);
                 }
-                let max_columns = if options.spectrogram_detail == SpectrogramDetail::Transients {
+                let max_columns = if overview_column {
+                    1
+                } else if options.spectrogram_detail == SpectrogramDetail::Transients {
                     128
                 } else if viewport.is_some() {
                     64
@@ -538,6 +658,7 @@ pub fn probe_treatment_with_options(
         (input, input_peak)
     };
     let spectrogram_clicks = (options.spectrogram
+        && !overview_column
         && !show_wet
         && options.spectrogram_detail == SpectrogramDetail::Transients)
         .then(|| {
@@ -852,8 +973,12 @@ mod tests {
     }
 
     fn stereo_recording(right_gain: f64) -> File {
+        stereo_recording_with_frames(right_gain, INFO.frames)
+    }
+
+    fn stereo_recording_with_frames(right_gain: f64, frames: u64) -> File {
         let mut file = tempfile::tempfile().unwrap();
-        let bytes = INFO.frames as u32 * 4;
+        let bytes = frames as u32 * 4;
         file.write_all(b"RIFF").unwrap();
         file.write_all(&(36 + bytes).to_le_bytes()).unwrap();
         file.write_all(b"WAVEfmt ").unwrap();
@@ -863,13 +988,9 @@ mod tests {
         file.write_all(&[4, 0, 16, 0]).unwrap();
         file.write_all(b"data").unwrap();
         file.write_all(&bytes.to_le_bytes()).unwrap();
-        let pcm: Vec<_> = (0..INFO.frames)
+        let pcm: Vec<_> = (0..frames)
             .flat_map(|frame| {
-                let frequency = if frame < INFO.frames / 2 {
-                    92.0
-                } else {
-                    10_500.0
-                };
+                let frequency = if frame < frames / 2 { 92.0 } else { 10_500.0 };
                 let phase = frame as f64 * std::f64::consts::TAU * frequency / f64::from(RATE);
                 let sample = (phase.sin() * 24_576.0) as i16;
                 [sample, (f64::from(sample) * right_gain) as i16]
@@ -880,6 +1001,68 @@ mod tests {
         file.write_all(&pcm).unwrap();
         file.rewind().unwrap();
         file
+    }
+
+    #[test]
+    fn full_recording_spectrogram_tracks_time_and_processed_channels() {
+        let info = SourceInfo {
+            frames: u64::from(RATE) * 14,
+            ..INFO
+        };
+        let source = stereo_recording_with_frames(0.5, info.frames);
+        let range = FrameRange {
+            start: 0,
+            end: info.frames,
+        };
+        let options = TreatmentProbeOptions {
+            spectrogram: true,
+            viewport: Some(range),
+            spectrogram_channel: SpectrogramChannel::Stereo,
+            ..TreatmentProbeOptions::default()
+        };
+        let read = |settings, options| {
+            probe_treatment_with_options(
+                source.try_clone().unwrap(),
+                info,
+                0,
+                None,
+                PreparedTreatment::preview(settings, info).unwrap(),
+                options,
+                || false,
+            )
+            .unwrap()
+        };
+        let dry = read(AudioTreatment::default(), options);
+        let wet = read(
+            AudioTreatment {
+                gain_db: -12,
+                ..AudioTreatment::default()
+            },
+            TreatmentProbeOptions {
+                spectrogram_treated: true,
+                ..options
+            },
+        );
+        for probe in [&dry, &wet] {
+            assert_eq!(probe.spectrogram_start, Some(range.start));
+            assert_eq!(probe.spectrogram_end, Some(range.end));
+            let left = probe.spectrogram_left.as_ref().unwrap();
+            let right = probe.spectrogram_right.as_ref().unwrap();
+            assert_eq!(left.len(), right.len());
+            assert!((64..=192).contains(&left.len()));
+            assert!((70.0..110.0).contains(&strongest_band(&probe.frequencies, &left[0])));
+            assert!((10_000.0..11_000.0)
+                .contains(&strongest_band(&probe.frequencies, left.last().unwrap())));
+            let peak = |column: &[f32]| column.iter().copied().fold(FLOOR_DB, f32::max);
+            assert!((peak(&left[0]) - peak(&right[0]) - 6.0).abs() < 0.3);
+        }
+        let peak = |probe: &TreatmentProbe| {
+            probe.spectrogram_left.as_ref().unwrap()[0]
+                .iter()
+                .copied()
+                .fold(FLOOR_DB, f32::max)
+        };
+        assert!((peak(&dry) - peak(&wet) - 12.0).abs() < 0.5);
     }
 
     fn strongest_band(frequencies: &[f32], values: &[f32]) -> f32 {

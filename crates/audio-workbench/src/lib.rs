@@ -14,9 +14,10 @@ pub use codec::{
     OutputFormat, Peak, PlaybackHistory, PlaybackProbeWindow, PlaybackReadings, Polarity,
     PreparedTreatment, PreviewComparison, PreviewDecoder, PreviewMonitor, ProbedSource,
     RenderProgress, RenderSegment, RepairBlock, RepairChannel, RepairMask, RepairMaskPoint,
-    RepairMaskRegion, RepairSource, SeekIndex, SourceInfo, SpectralEqResponse, SpectralRepair,
-    SpectrogramChannel, SpectrogramDetail, SpectrumView, TreatmentProbe, TreatmentProbeOptions,
-    TreatmentProcessor, WaveformIndex, WaveformPeaks, MAX_EQ_BANDS, MAX_SPECTRAL_REPAIRS,
+    RepairMaskRegion, RepairSource, SeekIndex, SelectionPcm, SourceInfo, SpectralEqResponse,
+    SpectralRepair, SpectrogramChannel, SpectrogramDetail, SpectrumView, TreatmentProbe,
+    TreatmentProbeOptions, TreatmentProcessor, WaveformIndex, WaveformPeaks, MAX_EQ_BANDS,
+    MAX_SPECTRAL_REPAIRS,
 };
 pub use frame_copy::{CopyCodec, FrameCopyIndex};
 pub use markers::FrameRange;

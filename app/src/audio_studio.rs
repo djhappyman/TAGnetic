@@ -9,8 +9,9 @@ use std::sync::{
 use tagrex_commands::audio_studio::{
     AudioTreatment, CueEncoding, DiscogsProposal, DraftSegment, EqBand, ExportResult, ImportedCue,
     OpenedRecording, PreviewComparison, PreviewMonitor, Progress, ProviderAnchor,
-    RecordingProgress, RestoreResult, Review, ReviewRequest, SpectrogramChannel, SpectrogramDetail,
-    SpectrumView, Studio, StudioError, TreatmentAnalysis, TreatmentProbe, TreatmentProbeOptions,
+    RecordingProgress, RestoreResult, Review, ReviewRequest, SpectralRepair, SpectrogramChannel,
+    SpectrogramDetail, SpectrumView, Studio, StudioError, TreatmentAnalysis, TreatmentProbe,
+    TreatmentProbeOptions,
 };
 use tagrex_commands::ErrorDto;
 use tauri::{
@@ -713,7 +714,9 @@ pub(super) async fn audio_split_discogs(
 }
 
 use std::time::Duration;
-use tagrex_player::{Player, StudioAudition, StudioPlayback, StudioPreviewState};
+use tagrex_player::{
+    Player, StudioAudition, StudioPlayback, StudioPreviewRange, StudioPreviewState,
+};
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -754,23 +757,45 @@ pub(super) async fn audio_split_transport(
     end_frame: Option<u64>,
     loop_start_frame: Option<u64>,
     smooth_loop: Option<bool>,
+    repeat: Option<bool>,
     sequence: Option<u64>,
     treatment: Option<AudioTreatment>,
     revision: Option<u64>,
     monitor: Option<PreviewMonitor>,
+    preview_selection: Option<SpectralRepair>,
     preview_gain_db: Option<f32>,
 ) -> Result<(), ErrorDto> {
     if matches!(action, TransportAction::Retune) {
+        let range = if let Some(end) = end_frame {
+            let (rate, total) = studio.cue_geometry(&id).map_err(shell_error)?;
+            let start = loop_start_frame.unwrap_or_default();
+            if start >= end || end > total {
+                return Err(shell_error(
+                    "Choose an audition range inside the recording.",
+                ));
+            }
+            Some(StudioPreviewRange {
+                start: frame_time(start, rate),
+                end: frame_time(end, rate),
+                repeat: repeat.unwrap_or(false),
+                smooth: smooth_loop.unwrap_or(false),
+            })
+        } else {
+            None
+        };
         let (file, prepared) = studio
             .playback_treatment(&id, treatment.unwrap_or_default())
             .map_err(shell_error)?;
         return player
-            .studio_retune(
+            .studio_retune_range(
                 id,
                 sequence.unwrap_or_default(),
                 revision.unwrap_or_default(),
                 file,
-                prepared.with_preview_monitor(monitor, preview_gain_db),
+                prepared
+                    .with_preview_monitor(monitor, preview_gain_db)
+                    .with_preview_selection(preview_selection),
+                range,
             )
             .map_err(shell_error);
     }
@@ -790,27 +815,28 @@ pub(super) async fn audio_split_transport(
                     ));
                 }
                 let start = frame_time(frame, rate);
-                let end = frame_time(total, rate);
                 let owner = id.clone();
                 let sequence = sequence.unwrap_or_default();
-                let play = |audition| {
+                let play = |audition, end_frame| {
                     player.studio_play_request(
                         owner.clone(),
                         sequence,
                         StudioPlayback {
                             file,
                             start,
-                            end,
+                            end: frame_time(end_frame, rate),
                             audition,
                             sample_rate: rate,
                             seek_index,
-                            treatment: treatment.with_preview_monitor(monitor, preview_gain_db),
+                            treatment: treatment
+                                .with_preview_monitor(monitor, preview_gain_db)
+                                .with_preview_selection(preview_selection),
                         },
                     )
                 };
                 match action {
                     TransportAction::Seek => player.studio_seek_sequenced(owner, sequence, start),
-                    TransportAction::Play => play(None),
+                    TransportAction::Play => play(None, total),
                     TransportAction::Pause => player.studio_pause_sequenced(owner, sequence),
                     TransportAction::Retune => unreachable!("retune has no source transport"),
                     TransportAction::Audition => {
@@ -830,7 +856,11 @@ pub(super) async fn audio_split_transport(
                             end: frame_time(cut_end, rate),
                             smooth: smooth_loop.unwrap_or(false),
                         };
-                        play(Some(audition))
+                        let repeat = repeat.unwrap_or(true);
+                        play(
+                            repeat.then_some(audition),
+                            if repeat { total } else { cut_end },
+                        )
                     }
                 }
                 .map_err(StudioError::new)
