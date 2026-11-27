@@ -10,6 +10,7 @@
   import EqDial from './AudioSplitEqDial.svelte';
   import AudioSplitRepairListen from './AudioSplitRepairListen.svelte';
   import AudioSplitRepairPlot from './AudioSplitRepairPlot.svelte';
+  import AudioSplitRepairMeters from './AudioSplitRepairMeters.svelte';
   import RepairPopup from './AudioSplitRepairPopup.svelte';
   import AudioSplitToolModes, { isToolMode } from './AudioSplitToolModes.svelte';
   import Button from './AudioSplitButton.svelte';
@@ -19,12 +20,14 @@
   import { noTreatment, readTreatment, sameTreatment, treatmentNumbers, type AudioTreatment, type SpectralRepair, type TreatmentNumber } from '../js/audio-treatment';
   import type { AnalyzerView, TreatmentPlotMode, TreatmentProbe } from '../js/audio-treatment-plot';
   import { readEqPresets, saveEqPresets, treatmentForRecording, type SavedEqPreset } from '../js/audio-treatment-recipes';
-  import { toolPatch, type PreviewBand, type RepairListenCommand, type SpectrogramViewOptions, type ToolAction, type ToolSnapshot } from '../js/audio-tools-window';
+  import { toolPatch, type PreviewBand, type RepairListenCommand, type RepairMeterUpdate, type SpectrogramViewOptions, type ToolAction, type ToolSnapshot } from '../js/audio-tools-window';
+  import { projectRepairFrame, repairClockHorizon } from '../js/audio-repair-clock';
 
-  let { kind, snapshot, probe, onedit, onaction, onviewport, onanalyzer, onlearn, onlisten }: {
+  let { kind, snapshot, probe, meter, onedit, onaction, onviewport, onanalyzer, onlearn, onlisten }: {
     kind: TreatmentPlotMode;
     snapshot: ToolSnapshot | null;
     probe: TreatmentProbe | null;
+    meter?: RepairMeterUpdate;
     onanalyzer: (view: AnalyzerView) => void;
     onlearn: (index: number) => void;
     onlisten: (command: RepairListenCommand) => void;
@@ -74,7 +77,8 @@
   const settings = $derived(snapshot?.settings ?? noTreatment);
   const sampleRate = $derived(snapshot?.sampleRate || 44100);
   const repairSignal = $derived(snapshot?.repairListen?.signal ?? (snapshot?.original ? 'original' : 'repaired'));
-  const playTime = $derived(timeLabel(snapshot?.frame ?? 0, sampleRate, 2));
+  const playTime = $derived(timeLabel(snapshot?.frame ?? 0, sampleRate, 3));
+  const meterReading = $derived(meter?.sequence === snapshot?.transportSequence ? meter : undefined);
   let enteredTime = $state<string>();
   let timeInvalid = $state(false);
   const selectedShape = $derived(kind === 'eq' ? findEqNode(settings, mode)?.shape ?? '' : '');
@@ -308,6 +312,21 @@
     enteredTime = undefined;
     timeInvalid = false;
   }
+
+  function playbackPosition(input: HTMLInputElement) {
+    if (!snapshot || !(snapshot.clockRunning ?? snapshot.playing) || enteredTime !== undefined) return;
+    const loop = snapshot.loop ? snapshot.loopRange : undefined;
+    const observed = performance.now();
+    const clock = { frame: snapshot.frame, observed, running: true, rate: sampleRate, frames: snapshot.frames, loop,
+      endFrame: !loop && snapshot.selectionPlaying ? snapshot.loopRange?.end : undefined };
+    let animation = 0;
+    const paint = (now: number) => {
+      if (document.activeElement !== input) input.value = timeLabel(projectRepairFrame(clock, now), clock.rate, 3);
+      if (now - observed < repairClockHorizon) animation = requestAnimationFrame(paint);
+    };
+    animation = requestAnimationFrame(paint);
+    return () => cancelAnimationFrame(animation);
+  }
 </script>
 
 {#snippet choice(label: string, value: string, options: readonly Option[], controller: ReturnType<typeof createSelectController<string>>, change: (value: string) => void)}
@@ -359,8 +378,7 @@
   </RepairPopup>
 {/snippet}
 
-<section class={['tool-window', { eq: kind === 'eq', repair: kind === 'repair' }]} aria-label={title[kind]}>
-  <header class="tool-header">
+{#snippet transportControls()}
     <div class="transport" role="group" aria-label="Preview controls">
       <Button variant="ghost" size="icon-sm" disabled={!snapshot} aria-label={snapshot?.playing ? 'Pause' : 'Play'} aria-keyshortcuts="Space"
         title={snapshot?.playing ? 'Pause (Space)' : 'Play (Space)'} data-transport-space onclick={() => onaction('play')}>
@@ -372,6 +390,7 @@
         <Button variant="ghost" size="icon-sm" disabled={!snapshot} aria-label="Back 5 seconds" title="Back 5 seconds"
           onclick={() => seek((snapshot?.frame ?? 0) - 5 * sampleRate)}><Rewind size={15} aria-hidden="true"/></Button>
         <Input class="repair-position" type="text" inputmode="decimal" aria-label="Playback position"
+          {@attach playbackPosition}
           title="Playback position · enter a time to seek" value={enteredTime ?? playTime} disabled={!snapshot} aria-invalid={timeInvalid}
           onfocus={event => event.currentTarget.select()}
           oninput={event => { enteredTime = event.currentTarget.value; timeInvalid = false; }}
@@ -424,6 +443,9 @@
         </Button>
       {/if}
     </div>
+{/snippet}
+
+{#snippet windowControls()}
     <div class="transport preset-controls">
       <Button variant="ghost" size="icon-sm" class="tool-power" disabled={!snapshot} aria-label="Keep tool on top" title="Keep tool on top"
         aria-pressed={snapshot?.pinned ?? false} onclick={() => onaction('pin')}><Pin size={15} aria-hidden="true"/></Button>
@@ -496,8 +518,15 @@
           onclick={() => stepEqPreset(1)}><ChevronRight size={15} aria-hidden="true"/></Button>
       {/if}
     </div>
-  </header>
+{/snippet}
 
+<section class={['tool-window', { eq: kind === 'eq', repair: kind === 'repair' }]} aria-label={title[kind]}>
+  {#if kind !== 'repair'}
+    <header class="tool-header">
+      {@render transportControls()}
+      {@render windowControls()}
+    </header>
+  {/if}
   {#if kind === 'eq'}
     <AudioSplitEqPanel {snapshot} {probe} {mode} onmode={setMode} {onedit} {onaction} {onanalyzer} {onlearn}/>
   {:else if kind === 'dynamics'}
@@ -507,9 +536,14 @@
       <AudioSplitRepairListen {snapshot} {selection} {candidate} {repairSlot} {onlisten}/>
     {/snippet}
     {#key snapshot?.sourceId}
-      <AudioSplitRepairPlot {snapshot} {probe} {onviewport} {onedit} {onaction} {onlisten} {modeRail} {listen}
+      <AudioSplitRepairPlot {snapshot} {probe} {onviewport} {onedit} {onaction} {onlisten} {modeRail} {listen} {windowControls}
         signal={repairSignal} onsignal={signal => onlisten({ type: 'signal', signal })}/>
     {/key}
+    <div class="repair-transport">
+      {@render transportControls()}
+      <AudioSplitRepairMeters reading={meterReading} running={!!(snapshot?.clockRunning ?? snapshot?.playing)}
+        stereo={!!(snapshot?.repairStereoOutput ?? snapshot?.stereo)} monitor={snapshot?.repairListen?.channel ?? 'stereo'}/>
+    </div>
   {/if}
 
   {#if kind === 'dynamics'}
@@ -588,14 +622,20 @@
     grid-template-columns:minmax(0,1fr) auto; grid-template-rows:auto 1fr auto;
     gap:var(--sp-2,8px); padding:var(--sp-3,12px); background:var(--panel); color:var(--text); font-family:var(--font-ui,system-ui);
   }
-  .tool-window.eq::after {
+  .tool-window:is(.eq,.repair)::after {
     content:''; position:absolute; inset:1px; border:1px solid var(--border);
     border-radius:var(--r-dialog); pointer-events:none;
   }
   .tool-window:is(.eq,.repair) { grid-template-columns:minmax(0,1fr); }
-  .tool-window.repair { grid-template-rows:auto 1fr; }
+  .tool-window.repair { grid-template-rows:1fr auto; }
   .tool-header,.transport,.comparison { display:flex; align-items:center; gap:var(--sp-2,8px); }
   .tool-header { grid-column:1 / -1; justify-content:space-between; min-width:0; }
+  .repair-transport {
+    display:flex; align-items:center; flex-wrap:wrap; gap:var(--sp-1) var(--sp-4); min-width:0;
+    padding-block:var(--sp-2) var(--sp-1); border-top:1px solid var(--border);
+  }
+  .repair-transport .transport { flex-wrap:wrap; }
+  .repair-transport :global(.repair-meters) { flex:1 1 260px; max-width:480px; }
   .tool-side { grid-column:2; grid-row:2 / 4; align-self:start; }
   .transport { gap:var(--sp-1,4px); }
   .comparison { gap:2px; }
@@ -603,7 +643,7 @@
   .comparison :global([aria-pressed=true]) { background:var(--sel-tint); color:var(--accent-ink,var(--text)); }
   .repair :global(.repair-position) {
     width:11ch; min-width:0; padding:0 2px; block-size:26px; border:0; background:transparent;
-    color:var(--text); font-family:var(--font-literal); font-size:var(--text-xs); text-align:center;
+    color:var(--text); font-family:var(--font-literal); font-variant-numeric:tabular-nums; font-size:var(--text-xs); text-align:center;
   }
   .repair :global(.repair-position[aria-invalid=true]) { outline:1px solid var(--del); }
   .repair :global(.repair-signal) {
@@ -660,8 +700,6 @@
   .shortcut-help dd { margin:0; color:var(--muted); }
   :global(.app-select-menu.audio-tool-popup) { background:var(--panel); }
   @media (max-width: 480px) {
-    .repair .tool-header { flex-wrap: wrap; gap: var(--sp-1); }
     .repair .transport { gap: 2px; }
-    .repair .preset-controls { margin-inline-start: auto; }
   }
 </style>

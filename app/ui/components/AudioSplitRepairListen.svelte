@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Play, Repeat2, SlidersHorizontal, Square } from '@lucide/svelte';
+  import { Repeat2, Square } from '@lucide/svelte';
   import { Input } from '@ui-sdk/svelte/input';
   import Button from './AudioSplitButton.svelte';
   import RepairPopup from './AudioSplitRepairPopup.svelte';
@@ -16,11 +16,6 @@
   } = $props();
 
   const channels = { stereo: 'Stereo', left: 'Left', right: 'Right' } as const;
-  const playbackMessage = {
-    buffering: 'Buffering audio…',
-    updating: 'Updating audio preview…',
-    failed: 'Could not update the audio. The previous preview is still playing.',
-  } as const;
   let loopMode = $state<'exact' | 'context'>('exact');
   let manualRange = $state.raw<FrameRange>();
   let smooth = $state(false);
@@ -83,20 +78,8 @@
 </script>
 
 <div class="listen" role="group" aria-label="Listen to repair">
-  <div class="listen-main">
-    <Button variant="ghost" size="sm" disabled={!range} title="Audition only the selected time and frequencies (Enter)"
-      aria-keyshortcuts="Enter" aria-pressed={snapshot?.selectionPlaying ?? false} onclick={() => listen('exact')}>
-      {#if snapshot?.selectionPlaying}<Square size={12} aria-hidden="true"/>{:else}<Play size={13} aria-hidden="true"/>{/if}
-      Play Selection
-    </Button>
-    <Button variant="ghost" size="icon-sm" disabled={!range} aria-label="With context" title="Audition the surrounding mix (Shift+Enter)"
-      onclick={() => listen('context')}><Repeat2 size={15} aria-hidden="true"/></Button>
-  </div>
-  {#if snapshot?.repairPlayback}
-    <p class="listen-status" role="status">{playbackMessage[snapshot.repairPlayback]}</p>
-  {/if}
-  <RepairPopup label="Loop and comparison" side="top" disabled={!snapshot}>
-    {#snippet icon()}<SlidersHorizontal size={15} aria-hidden="true"/>{/snippet}
+  <RepairPopup label="Loop and comparison" side="top" disabled={!snapshot} active={!!snapshot?.repairPlayback}>
+    {#snippet icon()}<Repeat2 size={15} aria-hidden="true"/>{/snippet}
     <div class="listen-options">
       <div class="listen-main">
         <Button variant="ghost" size="sm" disabled={!snapshot} onclick={() => onlisten({ type: 'all' })}>Whole mix</Button>
@@ -104,7 +87,13 @@
           <Square size={12} aria-hidden="true"/>Stop
         </Button>
       </div>
-      {#if snapshot?.stereo}
+      <div class="listen-main">
+        <Button variant="ghost" size="sm" disabled={!range} title="Audition only the selected time and frequencies (Enter)"
+          aria-keyshortcuts="Enter" aria-pressed={snapshot?.selectionPlaying ?? false} onclick={() => listen('exact')}>Play Selection</Button>
+        <Button variant="ghost" size="sm" disabled={!range} aria-keyshortcuts="Shift+Enter"
+          title="Audition the surrounding mix (Shift+Enter)" onclick={() => listen('context')}>With context</Button>
+      </div>
+      {#if snapshot?.repairStereoOutput ?? snapshot?.stereo}
         <div class="listen-main" role="group" aria-label="Monitor channel">
           {#each Object.entries(channels) as [value, label] (value)}
             <Button variant="ghost" size="sm" aria-pressed={channel === value}
@@ -165,5 +154,4 @@
   select { min-height:28px; border-radius:var(--input-radius); color:var(--text); background:var(--surface); }
   .seam { margin-inline-end:var(--sp-2); }
   p { margin:0; }
-  .listen-status { color:var(--muted); font-size:var(--text-xs); }
 </style>

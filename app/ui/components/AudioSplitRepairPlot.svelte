@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, untrack, type Snippet } from 'svelte';
   import { devicePixelRatio } from 'svelte/reactivity/window';
-  import { AudioLines, Check, Crosshair, Focus, Lasso, Layers, LocateFixed, Maximize2, Minus, MoveHorizontal, MoveVertical, Paintbrush, Plus, Power, RectangleHorizontal, Ruler, SlidersHorizontal, Trash2, X } from '@lucide/svelte';
+  import { AudioLines, Check, Crosshair, Ellipsis, Focus, Lasso, Layers, LocateFixed, Maximize2, Minus, MoveHorizontal, MoveVertical, Paintbrush, Plus, Power, RectangleHorizontal, SlidersHorizontal, Trash2, X } from '@lucide/svelte';
   import { Button as PlotButton } from '@ui-sdk/svelte/button';
   import { Input } from '@ui-sdk/svelte/input';
   import { createMenuController, Menu, MenuContent, MenuGroup, MenuGroupLabel, MenuItem, MenuItemIndicator, MenuRadioGroup, MenuRadioItem, MenuTrigger } from '@ui-sdk/svelte/menu';
@@ -11,10 +11,10 @@
   import EqDial from './AudioSplitEqDial.svelte';
   import AudioSplitRepairAnalysis from './AudioSplitRepairAnalysis.svelte';
   import RepairPopup from './AudioSplitRepairPopup.svelte';
-  import { plotBounds, type TreatmentProbe } from '../js/audio-treatment-plot';
+  import type { TreatmentProbe } from '../js/audio-treatment-plot';
   import {
     boundedTime, buildRepairTexture, clampRepair, drawRepairOverview, drawRepairViewport, frameAtX, frameX, frequencyAtY,
-    frequencyY, interpolateRepairTime, recordingFrequencyRange, repairDbScale, repairLevelAt, repairPaletteGradient, repairTimeLabel, spectralWindowLimit, spectrogramRange,
+    frequencyY, interpolateRepairTime, recordingFrequencyRange, repairDbScale, repairLevelAt, repairPaletteGradient, repairPlotBounds, repairTimeLabel, spectralWindowLimit, spectrogramRange,
     type FrequencyRange, type RepairChannel, type RepairContrast, type RepairPaletteName, type RepairTexture, type RepairViewport, type RepairWaveform,
   } from '../js/audio-repair-plot';
   import { edgePanSpeed, editRepairBounds, remapRepairMask, repairDragAt, repairDragCursor, repairMaskBounds, repairRegionPath,
@@ -25,7 +25,7 @@
   import { projectRepairFrame, repairClockHorizon, type RepairClock } from '../js/audio-repair-clock';
   import { frameAtTime, timeLabel, type FrameRange } from '../js/audio-split';
 
-  let { snapshot, probe, signal, onsignal, onlisten, onviewport, onedit, onaction, modeRail, listen }: {
+  let { snapshot, probe, signal, onsignal, onlisten, onviewport, onedit, onaction, modeRail, listen, windowControls }: {
     snapshot: ToolSnapshot | null;
     probe: TreatmentProbe | null;
     signal: RepairListenState['signal'];
@@ -35,6 +35,7 @@
     onedit: (patch: Partial<AudioTreatment>, gesture?: string) => void;
     onaction: (action: ToolAction, range?: FrameRange, band?: PreviewBand) => void;
     modeRail: Snippet;
+    windowControls: Snippet;
     listen: Snippet<[SpectralRepair | undefined, SpectralRepair | undefined, number | undefined]>;
   } = $props();
 
@@ -45,6 +46,7 @@
     x: number; y: number; mode: 'pick' | 'pan' | 'edit' | 'seek'; moved: boolean;
     ruler?: 'time' | 'frequency';
     origin: RepairViewport; previous: RepairViewport | null; lane: RepairChannel;
+    targetChannel?: Pick['channel']; singleChannel: boolean;
     tool: RepairSelectionTool; operation: 'replace' | 'add' | 'subtract'; points: RepairMaskPoint[]; frequencyTime: FrameRange;
     brush: { radiusFrames: number; radiusHz: number };
     baseline?: { pick: Pick; handles: RepairDrag; amount: number };
@@ -65,8 +67,9 @@
   const plotHelpID = $props.id();
   const noRepairs: readonly (SpectralRepair | null)[] = [];
   const channels: readonly RepairChannel[] = ['combined', 'left', 'right'];
+  const monitorChannels = ['left', 'right'] as const;
   const displayChannels: readonly DisplayChannel[] = [...channels, 'stereo'];
-  const channelLabel = { combined: 'Combined', left: 'Left', right: 'Right', stereo: 'Linked stereo' };
+  const channelLabel = { combined: 'Combined', left: 'Left', right: 'Right', stereo: 'Both' };
   const selectionTools = [
     { tool: 'rectangle', label: 'Rectangle', shortcut: '1', icon: RectangleHorizontal, hint: 'Drag a time and frequency area' },
     { tool: 'time', label: 'Time', shortcut: '2', icon: MoveHorizontal, hint: 'Drag across time to select the full frequency band' },
@@ -79,8 +82,15 @@
   const paletteLabel = { theme: 'Theme', warm: 'Warm', neutral: 'Neutral', blue: 'Blue and gold' };
   const detailLabel = { balanced: 'Balanced', transients: 'Transients', tones: 'Tones' };
   const contrastLabel = { balanced: 'Balanced', detail: 'Reveal faint detail', strong: 'Emphasise strong signals' } as const;
+  const playbackMessage = {
+    buffering: 'Buffering audio…',
+    updating: 'Updating audio preview…',
+    failed: 'Could not update the audio. The previous preview is still playing.',
+  } as const;
   const viewKey = 'tagnetic.audio-repair-view.v1';
-  const defaultView: ViewOptions = { channel: 'combined', waveform: true, waveformOnly: false, opacity: 30,
+  const sharedRulerHeight = 23;
+  const timeTicks = [0, .25, .5, .75, 1];
+  const defaultView: ViewOptions = { channel: 'stereo', waveform: true, waveformOnly: false, opacity: 30,
     contrast: 'balanced', palette: 'theme', offset: 0, detail: 'balanced' };
   const storedView = readView();
   let view = $state.raw<ViewOptions>(storedView);
@@ -88,6 +98,8 @@
   let height = $state(0);
   let overviewWidth = $state(0);
   let overviewHeight = $state(0);
+  let overviewPlayhead = $state<HTMLElement>();
+  let plotPlayhead = $state<HTMLElement>();
   let shown = $state.raw<RepairViewport>();
   let manual = $state.raw<RepairViewport | null>(null);
   let selection = $state.raw<Pick>();
@@ -169,8 +181,13 @@
   const stereo = $derived(snapshot?.stereo === true);
   const stereoDisplay = $derived(stereo && (!treated || settings?.mono === 'off'));
   const displayChannel = $derived(stereoDisplay ? view.channel : 'combined');
-  const laneHeight = $derived(displayChannel === 'stereo' ? height / 2 : height);
-  const bounds = $derived(plotBounds(width, laneHeight));
+  const splitLanes = $derived(displayChannel === 'stereo');
+  const laneHeight = $derived(splitLanes ? Math.max(1, (height - sharedRulerHeight) / 2) : height);
+  const bounds = $derived(repairPlotBounds(width, laneHeight, splitLanes));
+  const monitorStereo = $derived(snapshot?.repairStereoOutput ?? snapshot?.stereo ?? false);
+  const activeMonitor = $derived(monitorStereo ? snapshot?.repairListen?.channel ?? 'stereo' : 'stereo');
+  const highlightedChannel = $derived((splitLanes ? selected?.channel : undefined) ?? activeMonitor);
+  const monitorLanes = $derived(displayChannel === 'left' || displayChannel === 'right' ? [displayChannel] : monitorChannels);
   const channel = $derived(displayChannel === 'stereo' ? 'combined' : displayChannel);
   const probeView = $derived<ProbeView>({ treated, ...(difference ? { difference: true } : {}), channel: displayChannel,
     ...(view.detail === 'balanced' ? {} : { detail: view.detail }) });
@@ -200,12 +217,13 @@
 
   function readView(): ViewOptions {
     try {
-      const saved = JSON.parse(localStorage.getItem(viewKey) ?? '{}') as Partial<ViewOptions> | null;
+      const saved = JSON.parse(localStorage.getItem(viewKey) ?? '{}') as (Partial<ViewOptions> & { version?: number }) | null;
       return {
         waveform: saved?.waveform ?? defaultView.waveform,
         waveformOnly: saved?.waveformOnly === true,
         opacity: typeof saved?.opacity === 'number' ? clampRepair(saved.opacity, 0, 100) : defaultView.opacity,
-        channel: saved?.channel === 'left' || saved?.channel === 'right' || saved?.channel === 'stereo' ? saved.channel : 'combined',
+        channel: saved?.channel === 'left' || saved?.channel === 'right' || saved?.channel === 'stereo'
+          || (saved?.version === 2 && saved.channel === 'combined') ? saved.channel : defaultView.channel,
         contrast: saved?.contrast === 'detail' || saved?.contrast === 'strong' ? saved.contrast : 'balanced',
         palette: saved?.palette === 'warm' || saved?.palette === 'neutral' || saved?.palette === 'blue' ? saved.palette : 'theme',
         offset: typeof saved?.offset === 'number' ? clampRepair(saved.offset, -50, 20) : 0,
@@ -218,7 +236,7 @@
 
   function changeView(patch: Partial<ViewOptions>) {
     view = { ...view, ...patch };
-    try { localStorage.setItem(viewKey, JSON.stringify(view)); } catch { /* Keep this session's choice. */ }
+    try { localStorage.setItem(viewKey, JSON.stringify({ ...view, version: 2 })); } catch { /* Keep this session's choice. */ }
   }
 
   function matchesView(result: TreatmentProbe, requestedView: ProbeView) {
@@ -234,36 +252,34 @@
     return { values, time: { start: 0, end: frames }, stereo: values === stereoWaveform, channel: mode };
   }
 
-  function playheadAttachment(overview: boolean) {
-    return (marker: HTMLElement) => {
-      if (!snapshot) return;
-      const frame = snapshot.frame;
-      const running = snapshot.clockRunning ?? snapshot.playing;
-      const loop = snapshot.loop ? loopRange : undefined;
-      const endFrame = !loop && snapshot.selectionPlaying ? loopRange?.end : undefined;
-      if (!playbackClock || playbackClock.frame !== frame || playbackClock.running !== running
-        || playbackClock.endFrame !== endFrame
-        || playbackClock.loop?.start !== loop?.start || playbackClock.loop?.end !== loop?.end) {
-        playbackClock = { frame, running, rate, frames, loop, endFrame, observed: performance.now() };
-      }
-      const clock = playbackClock;
-      const time = overview ? undefined : visible.time;
-      const geometry = overview ? undefined : bounds;
-      const miniWidth = overview ? overviewWidth : 0;
-      const scrub = scrubFrame;
-      let animation = 0;
-      const paint = (now: number) => {
-        const position = scrub ?? projectRepairFrame(clock, now);
-        marker.hidden = !!time && (position < time.start || position > time.end);
-        if (!marker.hidden) {
-          const x = time && geometry ? frameX(position, geometry, time) : position * miniWidth / clock.frames;
-          marker.style.transform = 'translateX(' + x + 'px)';
-        }
-        if (scrub === undefined && clock.running && now - clock.observed < repairClockHorizon) animation = requestAnimationFrame(paint);
-      };
-      paint(performance.now());
-      return () => cancelAnimationFrame(animation);
+  function attachPlayheads() {
+    const overview = overviewPlayhead;
+    const marker = plotPlayhead;
+    if (!snapshot || !overview || !marker) return;
+    const frame = snapshot.frame;
+    const running = snapshot.clockRunning ?? snapshot.playing;
+    const loop = snapshot.loop ? loopRange : undefined;
+    const endFrame = !loop && snapshot.selectionPlaying ? loopRange?.end : undefined;
+    if (!playbackClock || playbackClock.frame !== frame || playbackClock.running !== running
+      || playbackClock.endFrame !== endFrame
+      || playbackClock.loop?.start !== loop?.start || playbackClock.loop?.end !== loop?.end) {
+      playbackClock = { frame, running, rate, frames, loop, endFrame, observed: performance.now() };
+    }
+    const clock = playbackClock;
+    const miniWidth = overviewWidth;
+    const time = visible.time;
+    const geometry = bounds;
+    const scrub = scrubFrame;
+    let animation = 0;
+    const paint = (now: number) => {
+      const position = scrub ?? projectRepairFrame(clock, now);
+      overview.style.transform = 'translateX(' + (position * miniWidth / clock.frames) + 'px)';
+      marker.hidden = position < time.start || position > time.end;
+      if (!marker.hidden) marker.style.transform = 'translateX(' + frameX(position, geometry, time) + 'px)';
+      if (scrub === undefined && clock.running && now - clock.observed < repairClockHorizon) animation = requestAnimationFrame(paint);
     };
+    paint(performance.now());
+    return () => cancelAnimationFrame(animation);
   }
 
   function paintOverview(canvas: HTMLCanvasElement) {
@@ -336,7 +352,9 @@
       : laneWaveform?.length && waveformTime
         ? { values: laneWaveform, time: waveformTime, opacity, clipping: view.waveformOnly }
         : fallbackWaveform && { ...fallbackWaveform, opacity, clipping: view.waveformOnly };
-    drawRepairViewport(canvas, width, laneHeight, visible, textures, rate, palette, guides, scale, line, view.waveformOnly);
+    const edge = splitLanes && !view.waveformOnly ? (lane === 'left' ? 'bottom' : 'top') : undefined;
+    drawRepairViewport(canvas, width, laneHeight, visible, textures, rate, palette, guides, scale,
+      line && { ...line, edge }, view.waveformOnly, splitLanes);
   }
 
   $effect(() => {
@@ -586,7 +604,7 @@
     }
     const x = event.clientX - rect.left;
     const y = localY(event.clientY - rect.top);
-    if (event.shiftKey || x < bounds.left) {
+    if (event.shiftKey || x < bounds.left || x > bounds.right) {
       if (waveformView) return;
       const half = Math.log(fullFrequency.highHz / fullFrequency.lowHz);
       const logMin = Math.log(fullFrequency.lowHz);
@@ -665,13 +683,16 @@
     const local = event.clientY - rect.top;
     const lane = laneAt(local);
     const y = localY(local);
-    if (x > bounds.right || y < bounds.top) return;
-    const ruler = x < bounds.left ? 'frequency' : y > bounds.bottom ? 'time' : undefined;
-    const transportSeek = event.button === 0 && !ruler && (event.ctrlKey || event.metaKey);
+    if (y < bounds.top) return;
+    const ruler = x < bounds.left || x > bounds.right ? 'frequency' : y > bounds.bottom ? 'time' : undefined;
     const panning = event.button === 1 || !!ruler;
+    const modifier = !panning && (event.ctrlKey || event.metaKey);
+    const singleChannel = modifier && lane !== 'combined';
+    const transportSeek = modifier && lane === 'combined';
+    const targetChannel = lane !== 'combined' && (!splitLanes || singleChannel) ? lane : undefined;
     const origin = visible;
     const action = panning || transportSeek ? 'replace' : gestureOperation(event);
-    const target = panning || transportSeek ? undefined : hit(x, y, lane);
+    const target = panning || modifier ? undefined : hit(x, y, lane);
     const handles = activeHandles(target?.handles, action);
     const baseline = target && handles ? { ...target, handles } : undefined;
     selectionNotice = '';
@@ -680,7 +701,7 @@
       return;
     }
     if (event.button === 0 && !baseline && action !== 'replace' && selection
-      && lane !== 'combined' && selection.channel !== lane) {
+      && lane !== 'combined' && (selection.channel || singleChannel) && selection.channel !== lane) {
       selectionNotice = 'Add and subtract use the selected repair channel. Draw a new selection to edit this lane.';
       return;
     }
@@ -689,7 +710,7 @@
     if (event.button === 1 && !ruler) rememberCamera();
     interaction = {
       pointer: event.pointerId, node, rect, firstX: x, firstY: y,
-      firstFrame, firstHz, x, y, lane,
+      firstFrame, firstHz, x, y, lane, targetChannel, singleChannel,
       mode: transportSeek ? 'seek' : panning ? 'pan' : baseline ? 'edit' : 'pick',
       moved: false, origin, previous: manual, baseline, ruler,
       tool: currentTool, operation: action, points: [{ frame: Math.round(firstFrame), hz: Math.round(firstHz) }],
@@ -756,7 +777,7 @@
     const end = Math.round(frame);
     const band = { lowHz: Math.round(Math.min(gesture.firstHz, hz)), highHz: Math.round(Math.max(gesture.firstHz, hz)) };
     const span = { startFrame: Math.min(first, end), endFrame: Math.max(first, end) };
-    const target = gesture.lane === 'combined' ? undefined : gesture.lane;
+    const target = gesture.targetChannel;
     if (gesture.tool === 'rectangle' && gesture.operation === 'replace') {
       draft = { ...span, ...band, channel: target };
       return;
@@ -884,7 +905,8 @@
       const local = event.clientY - rect.top;
       const y = localY(local);
       const lane = laneAt(local);
-      cursor = x < bounds.left || y > bounds.bottom ? 'grab' : repairDragCursor(activeHandles(hit(x, y, lane)?.handles, gestureOperation(event)));
+      const target = event.ctrlKey || event.metaKey ? undefined : hit(x, y, lane);
+      cursor = x < bounds.left || x > bounds.right || y > bounds.bottom ? 'grab' : repairDragCursor(activeHandles(target?.handles, gestureOperation(event)));
       pendingHover = x >= bounds.left && x <= bounds.right && y >= bounds.top && y <= bounds.bottom
         ? { x, y: local, frame: frameAtX(x, bounds, visible.time), hz: frequencyAtY(y, bounds, visible.frequency), lane } : undefined;
       if (!hoverFrame) hoverFrame = requestAnimationFrame(() => {
@@ -941,7 +963,7 @@
   function seekWithinSelection(gesture: Gesture) {
     const pick = selection;
     const { firstX, firstY, lane } = gesture;
-    if (!pick || !snapshot?.playing || gesture.moved || gesture.mode === 'pan'
+    if (!pick || !snapshot?.playing || gesture.moved || gesture.mode === 'pan' || gesture.singleChannel
       || (lane !== 'combined' && pick.channel && pick.channel !== lane)) return false;
     const rect = rectangle(pick, gesture.origin);
     if (firstX < rect.left || firstX > rect.right || firstY < rect.top || firstY > rect.bottom) return false;
@@ -969,6 +991,8 @@
       updatePoint(gesture, release);
       if (gesture.mode === 'seek') {
         jumpTo(frameAtX(gesture.x, bounds, visible.time), false);
+      } else if (gesture.singleChannel && !gesture.moved && gesture.operation === 'replace' && gesture.tool !== 'brush') {
+        jumpTo(gesture.firstFrame, false);
       } else if (release.altKey || release.shiftKey || !seekWithinSelection(gesture)) {
         paintGesture(gesture);
         if (gesture.mode !== 'pan' && draft && draft.endFrame > draft.startFrame) {
@@ -1399,7 +1423,8 @@
   </label>
 {/snippet}
 
-<div class="repair-layout">
+<div class={['repair-layout', { 'stereo-output': monitorStereo }]} {@attach attachPlayheads}
+  style:--time-ruler-height={(splitLanes ? sharedRulerHeight : 25) + 'px'}>
   <div class="overview-bar">
     <div class="recording-overview" bind:clientWidth={overviewWidth} bind:clientHeight={overviewHeight}>
       <canvas aria-hidden="true" {@attach paintOverview}></canvas>
@@ -1415,7 +1440,7 @@
           aria-label={'Jump to cut at ' + repairTimeLabel(frame, rate, true)} onclick={() => jumpTo(frame)}></button>
       {/each}
       {#if snapshot}
-        <span class="overview-playhead" aria-hidden="true" {@attach playheadAttachment(true)}></span>
+        <span class="overview-playhead" aria-hidden="true" bind:this={overviewPlayhead}></span>
       {/if}
       <PlotButton class="overview-hit" type="button" aria-label="Jump in recording overview"
         aria-keyshortcuts="ArrowLeft ArrowRight PageUp PageDown Home End"
@@ -1427,18 +1452,24 @@
           onclick={() => overviewLandmark(repair, index)}></button>
       {/each}
     </div>
-    <div class="image-scale">
-      {#if !waveformView}
-        <span class="db-legend" aria-label={legend.floor + ' to ' + legend.ceiling + ' dBFS'}>
-          <span>{legend.floor}</span>
-          <span class="db-gradient" style:--db-colours={repairPaletteGradient(view.palette, lightTheme)} aria-hidden="true"></span>
-          <span>{legend.ceiling} dBFS</span>
-        </span>
-      {/if}
-    </div>
+    {@render windowControls()}
   </div>
 
-  <div class={['repair-plot', { panning: moving === 'pan', 'linked-stereo': displayChannel === 'stereo' }]}
+  {#if monitorStereo}
+    <div class="monitor-channels" style:grid-template-rows={'repeat(' + monitorLanes.length + ', 1fr)'} role="group" aria-label="Monitor channels">
+      {#each monitorLanes as lane (lane)}
+        {@const solo = activeMonitor === lane}
+        <PlotButton class={'monitor-channel' + (activeMonitor !== 'stereo' && !solo ? ' dimmed' : '')}
+          type="button" aria-label={'Solo ' + lane + ' channel'} aria-pressed={solo}
+          title={solo ? 'Restore stereo monitoring' : 'Solo ' + lane + ' during playback'}
+          onclick={() => onlisten({ type: 'channel', channel: solo ? 'stereo' : lane })}>
+          <span>{channelLabel[lane]}</span>
+        </PlotButton>
+      {/each}
+    </div>
+  {/if}
+
+  <div class={['repair-plot', { panning: moving === 'pan', 'linked-stereo': splitLanes }]}
     bind:clientWidth={width} bind:clientHeight={height}
     aria-label={compareName + (waveformView ? ' waveform' : ' spectrogram')} role="group"
     style:--repair-cursor={cursor}
@@ -1449,38 +1480,44 @@
       Hold Shift to adjust the other edge. Enter plays only the selection. Shift+Enter auditions the surrounding mix.
       Ctrl or Command+Enter applies the selection. F fits the selection. R repeats the last reduction. Zero resets the view.
       Shift-drag adds and Alt or Option-drag subtracts. Drag the ruler to pan. Click the time ruler to seek.
-      Click inside a playing selection or Ctrl or Command-drag to reposition the playhead without clearing the selection.
+      In the two-lane view, drag to select both channels or hold Ctrl or Command to select one lane.
+      Click inside a playing selection to reposition the playhead without clearing the selection. In the combined view, Ctrl or Command-drag scrubs.
       Escape cancels a drag or clears the selection. Delete removes a saved repair.</span>
     <span class="sr-only" role="status">
       {toolDescription?.label} selection tool{currentTool === 'frequency' ? ' · ' + scopeLabels[scope] : ''}
-      {selection ? ' · ' + editLabel(selection) : ''}
+      {selection ? ' · ' + editLabel(selection) + (stereo ? ' · ' + (selection.channel ? channelLabel[selection.channel] + ' only' : 'Both channels') : '') : ''}
     </span>
-    {#if selectionNotice}<span class="view-status" role="status">{selectionNotice}</span>{/if}
-    {#if !selectionNotice && updatingView}
+    {#if snapshot?.repairPlayback}
+      <span class="view-status" role="status">{playbackMessage[snapshot.repairPlayback]}</span>
+    {:else if selectionNotice}
+      <span class="view-status" role="status">{selectionNotice}</span>
+    {:else if updatingView}
       <span class="view-status" role="status">Updating spectrogram…</span>
     {/if}
     {#each displayLanes as lane (lane)}
-      <canvas aria-hidden="true" class={{ 'lower-lane': displayChannel === 'stereo' && lane === 'right' }} {@attach attachPaint(lane)}></canvas>
-      {#if displayChannel === 'stereo'}
-        <span class="lane-label" style:top={(laneOffset(lane) + bounds.top + 4) + 'px'}>{channelLabel[lane]}</span>
-      {/if}
+      <canvas aria-hidden="true" data-channel={lane} class={ { dimmed: lane !== 'combined' && highlightedChannel !== 'stereo' && highlightedChannel !== lane } }
+        style:inset-block-start={laneOffset(lane) + 'px'}
+        style:block-size={splitLanes ? laneHeight + 'px' : '100%'} {@attach attachPaint(lane)}></canvas>
     {/each}
+    {#if splitLanes}
+      <div class="lane-divider" aria-hidden="true" style:top={laneHeight + 'px'}></div>
+      <div class="shared-time" aria-hidden="true">
+        {#each timeTicks as fraction (fraction)}
+          {@const time = visible.time}
+          {@const frame = time.start + (time.end - time.start) * fraction}
+          <span class:time-start={fraction === 0} class:time-end={fraction === 1} style:left={frameX(frame, bounds, time) + 'px'}>
+            {repairTimeLabel(frame, rate, time.end - time.start < rate)}
+          </span>
+        {/each}
+        {#if !waveformView}<span class="frequency-unit" style:left={(bounds.right + 6) + 'px'}>Hz</span>{/if}
+      </div>
+    {/if}
     <PlotButton class="repair-hit" type="button" disabled={!viewportReady}
       aria-label="Select time and frequency" aria-describedby={plotHelpID} aria-keyshortcuts="Space"
       onpointerdown={begin} onpointermove={move} onpointerup={end} onpointercancel={end} onlostpointercapture={end}
       onpointerleave={clearHover}
       onauxclick={event => event.preventDefault()} onkeydown={keys}/>
-    {#if snapshot}
-      <span class="playhead" aria-hidden="true" {@attach playheadAttachment(false)}
-        style:top={bounds.top + 'px'} style:bottom={height - bounds.bottom - laneOffset(displayLanes.at(-1) ?? 'combined') + 'px'}></span>
-    {/if}
     {#each displayLanes as lane (lane)}
-      {#if visibleLoop && visibleLoop.start < visible.time.end && visibleLoop.end > visible.time.start}
-        {@const left = frameX(Math.max(visible.time.start, visibleLoop.start), bounds, visible.time)}
-        {@const right = frameX(Math.min(visible.time.end, visibleLoop.end), bounds, visible.time)}
-        <span class="loop-bracket" aria-hidden="true" style:left={left + 'px'} style:top={(bounds.bottom + laneOffset(lane) - 5) + 'px'}
-          style:width={(right - left) + 'px'}></span>
-      {/if}
       {#each drawnRepairs as { repair, index } (index)}
         {@const position = lane === 'combined' || !repair.channel || repair.channel === lane ? boxStyle(repair, lane) : ''}
         {#if position}<span class={['applied', { shaped: !!repair.mask, bypassed: repair.bypassed }]} aria-hidden="true" style={position}></span>{/if}
@@ -1517,10 +1554,15 @@
         {/if}
       {/if}
     {/each}
+    {#if snapshot}
+      <span class="playhead" aria-hidden="true" bind:this={plotPlayhead}
+        style:top={bounds.top + 'px'} style:bottom={(height - bounds.bottom - (splitLanes ? laneHeight : 0)) + 'px'}></span>
+    {/if}
     {#if hover && !moving}
       <span class="pointer-guide" aria-hidden="true" style:left={hover.x + 'px'} style:top={hover.y + 'px'}></span>
       <span class="pointer-readout" aria-hidden="true">
         {repairTimeLabel(hover.frame, rate, true)}
+        {#if splitLanes} · {channelLabel[hover.lane]}{/if}
         {#if !waveformView}
           · {Math.round(hover.hz)} Hz · {noteLabel(hover.hz)}
           {#if hoverLevel !== undefined} · ~{Math.round(hoverLevel)} dBFS{/if}
@@ -1534,7 +1576,17 @@
           style:width={(xRadius * 2) + 'px'} style:height={Math.min(laneHeight, yRadius * 2) + 'px'}></span>
       {/if}
     {/if}
+    {@render plotControls()}
   </div>
+
+  {#if !waveformView}
+    <div class="db-legend" role="img" aria-label={legend.floor + ' to ' + legend.ceiling + ' dBFS'}>
+      <span aria-hidden="true">{legend.ceiling}</span>
+      <span class="db-gradient" style:--db-colours={repairPaletteGradient(view.palette, lightTheme)} aria-hidden="true"></span>
+      <span aria-hidden="true">{legend.floor}</span>
+      <span aria-hidden="true">dBFS</span>
+    </div>
+  {/if}
 
   <div class="repair-rail">
     <div class="draw-tools" role="group" aria-label="Spectrogram selection tools">
@@ -1578,222 +1630,234 @@
     <div class="repair-effect-tools" role="group" aria-label="Repair tools">{@render modeRail()}</div>
   </div>
 
-  <div class="repair-selection">
-    <div class="repair-summary">
-      <span class="range-text selection-readout">{selected ? editLabel(selected)
-        : currentTool === 'frequency' ? 'Frequency · ' + scopeLabels[scope]
-        : currentTool === 'time' ? 'Full frequency band' : toolDescription?.label}</span>
-      <div class="view-controls" aria-label="Spectrogram controls" role="group">
-        <RepairPopup label="Spectrogram display" side="top" disabled={!viewportReady}>
-          {#snippet icon()}<SlidersHorizontal size={15} aria-hidden="true"/>{/snippet}
-          <div class="display-settings">
-            {#if stereoDisplay}
-              {@render displayChoice('Display channel', displayChannel, channelLabel, value => changeView({ channel: value as DisplayChannel }))}
-            {/if}
-            {@render displayChoice('Palette', view.palette, paletteLabel, value => changeView({ palette: value as RepairPaletteName }))}
-            {@render displayChoice('Contrast', view.contrast, contrastLabel, value => changeView({ contrast: value as RepairContrast }))}
-            {@render displayChoice('Detail', view.detail, detailLabel, value => changeView({ detail: value as Detail }))}
-          </div>
-          <div class="display-dials">
-            <EqDial label="Level offset" value={view.offset} min={-50} max={20} step={1} unit="dB" resetValue={0}
-              color="var(--accent-ink)" onvalue={value => changeView({ offset: value })}/>
-            <EqDial label="Waveform opacity" value={view.opacity} min={0} max={100} step={1} unit="%" resetValue={defaultView.opacity}
-              color="var(--accent-ink)" disabled={!view.waveform || waveformView} onvalue={value => changeView({ opacity: value })}/>
-          </div>
-          <div class="display-switches">
-            <Button variant="ghost" size="sm" role="switch" aria-checked={view.waveform}
-              onclick={() => changeView({ waveform: !view.waveform })}>Waveform overlay</Button>
-            <Button variant="ghost" size="sm" role="switch" aria-checked={waveformView}
-              onclick={() => changeView({ waveformOnly: !waveformView })}>Waveform only</Button>
-          </div>
-          <div class="display-switches">
-            <Button variant="ghost" size="sm" disabled={waveformView} onclick={fitContrast}>Fit contrast</Button>
-            <Button variant="ghost" size="sm" disabled={!history.length} onclick={previousCamera}>Previous zoom</Button>
-            <Button variant="ghost" size="sm" disabled={!selection} onclick={() => fitSelection('time')}>Fit time</Button>
-            <Button variant="ghost" size="sm" disabled={!selection || waveformView} onclick={() => fitSelection('frequency')}>Fit frequency</Button>
-          </div>
-        </RepairPopup>
-        <Button variant="ghost" size="icon-sm" aria-label="Follow playhead" title="Follow playhead" aria-pressed={!manual} disabled={!viewportReady} onclick={toggleFollow}>
-          <LocateFixed size={15} aria-hidden="true"/>
-        </Button>
-        <Button variant="ghost" size="icon-sm" aria-label="Fit selected area" aria-keyshortcuts="F" title="Fit selected area (F)" disabled={!selection} onclick={() => fitSelection()}>
-          <Crosshair size={15} aria-hidden="true"/>
-        </Button>
-        <Button variant="ghost" size="icon-sm" aria-label="Fit recording" aria-keyshortcuts="0" title="Fit recording (0)" disabled={!viewportReady} onclick={fitRecording}>
-          <Maximize2 size={15} aria-hidden="true"/>
-        </Button>
-        <Button variant="ghost" size="icon-sm" aria-label="Zoom to playhead" title="Zoom to playhead" disabled={!viewportReady} onclick={showSpectralDetail}>
-          <Focus size={15} aria-hidden="true"/>
-        </Button>
-        <Button variant="ghost" size="icon-sm" aria-label="Clear selected area" aria-keyshortcuts="Escape" title="Clear selected area (Esc)"
-          disabled={!selection} onclick={() => { clear(); focusPlot(); }}><X size={15} aria-hidden="true"/></Button>
-        <AudioSplitRepairAnalysis probe={analysisProbe} {selection} {rate} maxFrames={detailLimit} channel={analysisChannel} target={selection?.channel} onselect={selectSuggestion}
-          {canInterpolate} oninterpolate={interpolateClick}
-          onsource={transients => {
-            if (!selection) return;
-            onsignal('original');
-            changeView({ waveformOnly: false, ...(transients ? { detail: 'transients' as const } : {}) });
-            const { startFrame, endFrame } = selection;
-            const size = Math.min(detailLimit, Math.max(rate / 4, (endFrame - startFrame) * 1.15));
-            const time = boundedTime((startFrame + endFrame - size) / 2, size, rate, frames);
-            rememberCamera();
-            setManual({ ...visible, time }, 140);
-            requestViewport(time);
-          }}
-          onaudition={event => onaction('loop', {
-            start: Math.max(0, event.startFrame - Math.round(rate / 2)),
-            end: Math.min(frames, event.endFrame + Math.round(rate / 2)),
-          })}/>
-        <Menu controller={editMenu}>
-          <MenuTrigger class="repair-menu" aria-label="Applied repairs" title="Applied repairs" disabled={!attached.length}>
-            <Layers size={15} aria-hidden="true"/>
-          </MenuTrigger>
-          <MenuContent class="app-select-menu audio-tool-popup" align="end" sideOffset={6} collisionPadding={8}>
-            {#each attached as { repair, index } (index)}
-              {@const label = repair.name ? repair.name + ' · ' + editLabel(repair) : editLabel(repair)}
-              <MenuItem data-slot="select-item" {label} onSelect={() => chooseExisting(repair, index, true)}>
-                {label} · {repair.interpolate ? 'Click interpolation' : '−' + repair.amountDb + ' dB'}{repair.bypassed ? ' · Bypassed' : ''}
-              </MenuItem>
-            {/each}
-          </MenuContent>
-        </Menu>
-      </div>
-    </div>
-    <div class="edit-controls">
-      {@render listen(listenSelection, listenRepair, active ? selection?.index : undefined)}
-      <div class="selection-commands" aria-label="Selection actions" role="group">
-        {#if selection}
-          {#if stereo}
-            <Menu controller={channelMenu}>
-              {@const target = selection.channel ? channelLabel[selection.channel] : 'Both channels'}
-              <MenuTrigger class="repair-channel" aria-label="Apply repair to channel" aria-description={target} title={'Apply repair to ' + target.toLowerCase()}>
-                <AudioLines size={15} aria-hidden="true"/>{#if selection.channel}<span aria-hidden="true">{target[0]}</span>{/if}
-              </MenuTrigger>
-              <MenuContent class="app-select-menu audio-tool-popup" align="end" sideOffset={6} collisionPadding={8}>
-                <MenuGroup>
-                  <MenuGroupLabel>Apply repair to</MenuGroupLabel>
-                  <MenuRadioGroup value={selection.channel ?? 'combined'} onValueChange={value => {
-                    if (selection) {
-                      selection = { ...selection, channel: value === 'left' || value === 'right' ? value : undefined };
-                      syncSelection(selection, true);
-                    }
-                  }}>
-                    {#each channels as mode (mode)}
-                      <MenuRadioItem data-slot="select-item" value={mode} closeOnSelect>
-                        <MenuItemIndicator><Check size={13} aria-hidden="true"/></MenuItemIndicator>{mode === 'combined' ? 'Both channels' : channelLabel[mode] + ' only'}
-                      </MenuRadioItem>
-                    {/each}
-                  </MenuRadioGroup>
-                </MenuGroup>
-              </MenuContent>
-            </Menu>
-          {/if}
-          {#if !selection.interpolate}
-            <NumberInput class="repair-number" bind:value={amount} min={1} max={36} step={1}>
-              <NumberInputControl class="repair-amount" aria-label="Attenuation in dB" title="Attenuation in dB" placeholder={String(defaultAmount)}/>
-              <span aria-hidden="true">dB</span>
-            </NumberInput>
-          {/if}
-          {#if active}
-            <Button variant="ghost" size="icon-sm" aria-label="Bypass" title={active.bypassed ? 'Enable this repair' : 'Bypass this repair'}
-              aria-pressed={!!active.bypassed} onclick={() => updateMetadata({ bypassed: !active?.bypassed })}>
-              <Power size={14} aria-hidden="true"/>
-            </Button>
-            <Button variant="ghost" size="icon-sm" aria-label="Remove repair" title="Remove repair (Delete)" aria-keyshortcuts="Delete"
-              onclick={remove}><Trash2 size={14} aria-hidden="true"/></Button>
-          {/if}
-        {/if}
-        <div class="commit-controls">
-          <RepairPopup label="Exact selection boundaries" side="top" disabled={!selection} controller={boundsPopup}>
-            {#snippet icon()}<Ruler size={15} aria-hidden="true"/>{/snippet}
-            {#if selection}
-              <div class="precision-panel">
-                {#each ['startFrame', 'endFrame', 'duration'] as edge (edge)}
-                  {@const key = edge as TimeEdge}
-                  <label>
-                    <span>{timeLabels[key]}</span>
-                    <Input class="repair-time-input" value={timeLabel(timeValue(key, selection), rate, 6)}
-                      aria-invalid={inputError?.edge === key} aria-describedby={inputError?.edge === key ? plotHelpID + '-error' : undefined}
-                      onfocus={event => {
-                        if (!selection || inputError?.edge === key) return;
-                        event.currentTarget.value = timeLabel(timeValue(key, selection), rate, 6);
-                        event.currentTarget.select();
-                      }}
-                      onblur={event => commitTime(event.currentTarget, key)}
-                      onkeydown={event => exactTimeKeys(event, key)}/>
-                  </label>
-                {/each}
-                {#if !selection.interpolate}
-                  {#each ['lowHz', 'highHz'] as edge (edge)}
-                    {@const key = edge as FrequencyEdge}
-                    {@const name = key === 'lowHz' ? 'Low frequency' : 'High frequency'}
-                    <label>
-                      <span>{name}</span>
-                      <NumberInput class="repair-number" value={selection[key]} min={key === 'lowHz' ? minSelectableHz : Math.min(maxSelectableHz, selection.lowHz + 20)}
-                        max={key === 'lowHz' ? Math.max(minSelectableHz, selection.highHz - 20) : maxSelectableHz} step={1} largeStep={10}
-                        onValueCommit={value => editFrequency(key, value)}>
-                        <NumberInputControl class="repair-hertz-input" aria-label={name + ' in Hz'}/>
-                        <span aria-hidden="true">Hz</span>
-                      </NumberInput>
-                    </label>
-                  {/each}
-                  <label>
-                    <span>Time feather</span>
-                    <NumberInput class="repair-number" value={Math.round((selection.mask?.featherFrames ?? 0) * 1000 / rate)} min={0} max={1000} step={1}
-                      onValueCommit={value => feather('featherFrames', value)}>
-                      <NumberInputControl class="repair-hertz-input" aria-label="Time feather in ms"/><span aria-hidden="true">ms</span>
-                    </NumberInput>
-                  </label>
-                  <label>
-                    <span>Frequency feather</span>
-                    <NumberInput class="repair-number" value={selection.mask?.featherHz ?? 0} min={0} max={10_000} step={1}
-                      onValueCommit={value => feather('featherHz', value)}>
-                      <NumberInputControl class="repair-hertz-input" aria-label="Frequency feather in Hz"/><span aria-hidden="true">Hz</span>
-                    </NumberInput>
-                  </label>
-                {/if}
-                {#if active}
-                  <label>
-                    <span>Repair name</span>
-                    <Input class="repair-time-input" value={selection.name ?? ''} maxlength={80}
-                      onchange={event => updateMetadata({ name: event.currentTarget.value.trim() })}/>
-                  </label>
-                {/if}
-                {#if inputError}<p class="boundary-error" id={plotHelpID + '-error'} role="status">{inputError.message}</p>{/if}
-              </div>
-            {/if}
-          </RepairPopup>
-          <Button size="sm" disabled={!selection || !validPick || (!active && nextSlot >= editLimit) || !!inputError || (!!selection.interpolate && !validClickBounds(selection))}
-            title={!selection ? 'Draw a selection to reduce' : !validPick ? 'Select at least 20 Hz'
-              : !active && nextSlot >= editLimit ? 'All eight repair slots are used' : 'Apply selected reduction (Ctrl/⌘+Enter)'}
-            aria-keyshortcuts="Control+Enter Meta+Enter" onclick={apply}>
-            <Check size={14} aria-hidden="true"/>{active ? 'Update' : 'Reduce'}
-          </Button>
-        </div>
-      </div>
-    </div>
-
-  </div>
-
 </div>
+
+{#snippet plotControls()}
+  <div class="graph-controls" class:dragging={!!moving} style:--graph-tools-inset={(width - bounds.right + 6) + 'px'}>
+    <div class="view-controls" aria-label="Spectrogram controls" role="group">
+      <RepairPopup label="Spectrogram display" side="top" disabled={!viewportReady}>
+        {#snippet icon()}<SlidersHorizontal size={15} aria-hidden="true"/>{/snippet}
+        <div class="display-settings">
+          {#if stereoDisplay}
+            {@render displayChoice('Display channel', displayChannel, channelLabel, value => changeView({ channel: value as DisplayChannel }))}
+          {/if}
+          {@render displayChoice('Palette', view.palette, paletteLabel, value => changeView({ palette: value as RepairPaletteName }))}
+          {@render displayChoice('Contrast', view.contrast, contrastLabel, value => changeView({ contrast: value as RepairContrast }))}
+          {@render displayChoice('Detail', view.detail, detailLabel, value => changeView({ detail: value as Detail }))}
+        </div>
+        <div class="display-dials">
+          <EqDial label="Level offset" value={view.offset} min={-50} max={20} step={1} unit="dB" resetValue={0}
+            color="var(--accent-ink)" onvalue={value => changeView({ offset: value })}/>
+          <EqDial label="Waveform opacity" value={view.opacity} min={0} max={100} step={1} unit="%" resetValue={defaultView.opacity}
+            color="var(--accent-ink)" disabled={!view.waveform || waveformView} onvalue={value => changeView({ opacity: value })}/>
+        </div>
+        <div class="display-switches">
+          <Button variant="ghost" size="sm" role="switch" aria-checked={view.waveform}
+            onclick={() => changeView({ waveform: !view.waveform })}>Waveform overlay</Button>
+          <Button variant="ghost" size="sm" role="switch" aria-checked={waveformView}
+            onclick={() => changeView({ waveformOnly: !waveformView })}>Waveform only</Button>
+        </div>
+        <div class="display-switches">
+          <Button variant="ghost" size="sm" disabled={waveformView} onclick={fitContrast}>Fit contrast</Button>
+          <Button variant="ghost" size="sm" disabled={!history.length} onclick={previousCamera}>Previous zoom</Button>
+          <Button variant="ghost" size="sm" disabled={!selection} onclick={() => fitSelection('time')}>Fit time</Button>
+          <Button variant="ghost" size="sm" disabled={!selection || waveformView} onclick={() => fitSelection('frequency')}>Fit frequency</Button>
+        </div>
+      </RepairPopup>
+      <Button variant="ghost" size="icon-sm" aria-label="Follow playhead" title="Follow playhead" aria-pressed={!manual} disabled={!viewportReady} onclick={toggleFollow}>
+        <LocateFixed size={15} aria-hidden="true"/>
+      </Button>
+      <Button variant="ghost" size="icon-sm" aria-label="Fit selected area" aria-keyshortcuts="F" title="Fit selected area (F)" disabled={!selection} onclick={() => fitSelection()}>
+        <Crosshair size={15} aria-hidden="true"/>
+      </Button>
+      <Button variant="ghost" size="icon-sm" aria-label="Fit recording" aria-keyshortcuts="0" title="Fit recording (0)" disabled={!viewportReady} onclick={fitRecording}>
+        <Maximize2 size={15} aria-hidden="true"/>
+      </Button>
+      <Button variant="ghost" size="icon-sm" aria-label="Zoom to playhead" title="Zoom to playhead" disabled={!viewportReady} onclick={showSpectralDetail}>
+        <Focus size={15} aria-hidden="true"/>
+      </Button>
+      <Button variant="ghost" size="icon-sm" aria-label="Clear selected area" aria-keyshortcuts="Escape" title="Clear selected area (Esc)"
+        disabled={!selection} onclick={() => { clear(); focusPlot(); }}><X size={15} aria-hidden="true"/></Button>
+      <AudioSplitRepairAnalysis probe={analysisProbe} {selection} {rate} maxFrames={detailLimit} channel={analysisChannel} target={selection?.channel} onselect={selectSuggestion}
+        {canInterpolate} oninterpolate={interpolateClick}
+        onsource={transients => {
+          if (!selection) return;
+          onsignal('original');
+          changeView({ waveformOnly: false, ...(transients ? { detail: 'transients' as const } : {}) });
+          const { startFrame, endFrame } = selection;
+          const size = Math.min(detailLimit, Math.max(rate / 4, (endFrame - startFrame) * 1.15));
+          const time = boundedTime((startFrame + endFrame - size) / 2, size, rate, frames);
+          rememberCamera();
+          setManual({ ...visible, time }, 140);
+          requestViewport(time);
+        }}
+        onaudition={event => onaction('loop', {
+          start: Math.max(0, event.startFrame - Math.round(rate / 2)),
+          end: Math.min(frames, event.endFrame + Math.round(rate / 2)),
+        })}/>
+      <Menu controller={editMenu}>
+        <MenuTrigger class="repair-menu" aria-label="Applied repairs" title="Applied repairs" disabled={!attached.length}>
+          <Layers size={15} aria-hidden="true"/>
+        </MenuTrigger>
+        <MenuContent class="app-select-menu audio-tool-popup" align="end" sideOffset={6} collisionPadding={8}>
+          {#each attached as { repair, index } (index)}
+            {@const label = repair.name ? repair.name + ' · ' + editLabel(repair) : editLabel(repair)}
+            <MenuItem data-slot="select-item" {label} onSelect={() => chooseExisting(repair, index, true)}>
+              {label} · {repair.interpolate ? 'Click interpolation' : '−' + repair.amountDb + ' dB'}{repair.bypassed ? ' · Bypassed' : ''}
+            </MenuItem>
+          {/each}
+        </MenuContent>
+      </Menu>
+    </div>
+    <div class="graph-edit-tools">
+      {@render listen(listenSelection, listenRepair, active ? selection?.index : undefined)}
+      <RepairPopup label="Selection details" side="top" disabled={!selection} controller={boundsPopup}>
+        {#snippet icon()}<Ellipsis size={16} aria-hidden="true"/>{/snippet}
+        {#if selection}
+          <p class="range-text">{editLabel(selection)} · {repairTimeLabel(selection.endFrame - selection.startFrame, rate, true)}</p>
+          <div class="selection-commands" aria-label="Selection actions" role="group">
+            {#if stereo}
+              <Menu controller={channelMenu}>
+                {@const target = selection.channel ? channelLabel[selection.channel] : 'Both channels'}
+                <MenuTrigger class="repair-channel" aria-label="Apply repair to channel" aria-description={target} title={'Apply repair to ' + target.toLowerCase()}>
+                  <AudioLines size={15} aria-hidden="true"/>{#if selection.channel}<span aria-hidden="true">{target[0]}</span>{/if}
+                </MenuTrigger>
+                <MenuContent class="app-select-menu audio-tool-popup" align="end" sideOffset={6} collisionPadding={8}>
+                  <MenuGroup>
+                    <MenuGroupLabel>Apply repair to</MenuGroupLabel>
+                    <MenuRadioGroup value={selection.channel ?? 'combined'} onValueChange={value => {
+                      if (selection) {
+                        selection = { ...selection, channel: value === 'left' || value === 'right' ? value : undefined };
+                        syncSelection(selection, true);
+                      }
+                    }}>
+                      {#each channels as mode (mode)}
+                        <MenuRadioItem data-slot="select-item" value={mode} closeOnSelect>
+                          <MenuItemIndicator><Check size={13} aria-hidden="true"/></MenuItemIndicator>{mode === 'combined' ? 'Both channels' : channelLabel[mode] + ' only'}
+                        </MenuRadioItem>
+                      {/each}
+                    </MenuRadioGroup>
+                  </MenuGroup>
+                </MenuContent>
+              </Menu>
+            {/if}
+            {#if !selection.interpolate}
+              <NumberInput class="repair-number" bind:value={amount} min={1} max={36} step={1}>
+                <NumberInputControl class="repair-amount" aria-label="Attenuation in dB" title="Attenuation in dB" placeholder={String(defaultAmount)}/>
+                <span aria-hidden="true">dB</span>
+              </NumberInput>
+            {/if}
+            {#if active}
+              <Button variant="ghost" size="icon-sm" aria-label="Bypass" title={active.bypassed ? 'Enable this repair' : 'Bypass this repair'}
+                aria-pressed={!!active.bypassed} onclick={() => updateMetadata({ bypassed: !active?.bypassed })}>
+                <Power size={14} aria-hidden="true"/>
+              </Button>
+              <Button variant="ghost" size="icon-sm" aria-label="Remove repair" title="Remove repair (Delete)" aria-keyshortcuts="Delete"
+                onclick={remove}><Trash2 size={14} aria-hidden="true"/></Button>
+            {/if}
+          </div>
+          <div class="precision-panel">
+            {#each ['startFrame', 'endFrame', 'duration'] as edge (edge)}
+              {@const key = edge as TimeEdge}
+              <label>
+                <span>{timeLabels[key]}</span>
+                <Input class="repair-time-input" value={timeLabel(timeValue(key, selection), rate, 6)}
+                  aria-invalid={inputError?.edge === key} aria-describedby={inputError?.edge === key ? plotHelpID + '-error' : undefined}
+                  onfocus={event => {
+                    if (!selection || inputError?.edge === key) return;
+                    event.currentTarget.value = timeLabel(timeValue(key, selection), rate, 6);
+                    event.currentTarget.select();
+                  }}
+                  onblur={event => commitTime(event.currentTarget, key)}
+                  onkeydown={event => exactTimeKeys(event, key)}/>
+              </label>
+            {/each}
+            {#if !selection.interpolate}
+              {#each ['lowHz', 'highHz'] as edge (edge)}
+                {@const key = edge as FrequencyEdge}
+                {@const name = key === 'lowHz' ? 'Low frequency' : 'High frequency'}
+                <label>
+                  <span>{name}</span>
+                  <NumberInput class="repair-number" value={selection[key]} min={key === 'lowHz' ? minSelectableHz : Math.min(maxSelectableHz, selection.lowHz + 20)}
+                    max={key === 'lowHz' ? Math.max(minSelectableHz, selection.highHz - 20) : maxSelectableHz} step={1} largeStep={10}
+                    onValueCommit={value => editFrequency(key, value)}>
+                    <NumberInputControl class="repair-hertz-input" aria-label={name + ' in Hz'}/>
+                    <span aria-hidden="true">Hz</span>
+                  </NumberInput>
+                </label>
+              {/each}
+              <label>
+                <span>Time feather</span>
+                <NumberInput class="repair-number" value={Math.round((selection.mask?.featherFrames ?? 0) * 1000 / rate)} min={0} max={1000} step={1}
+                  onValueCommit={value => feather('featherFrames', value)}>
+                  <NumberInputControl class="repair-hertz-input" aria-label="Time feather in ms"/><span aria-hidden="true">ms</span>
+                </NumberInput>
+              </label>
+              <label>
+                <span>Frequency feather</span>
+                <NumberInput class="repair-number" value={selection.mask?.featherHz ?? 0} min={0} max={10_000} step={1}
+                  onValueCommit={value => feather('featherHz', value)}>
+                  <NumberInputControl class="repair-hertz-input" aria-label="Frequency feather in Hz"/><span aria-hidden="true">Hz</span>
+                </NumberInput>
+              </label>
+            {/if}
+            {#if active}
+              <label>
+                <span>Repair name</span>
+                <Input class="repair-time-input" value={selection.name ?? ''} maxlength={80}
+                  onchange={event => updateMetadata({ name: event.currentTarget.value.trim() })}/>
+              </label>
+            {/if}
+            {#if inputError}<p class="boundary-error" id={plotHelpID + '-error'} role="status">{inputError.message}</p>{/if}
+          </div>
+          <div class="commit-controls">
+            <Button size="sm" disabled={!validPick || (!active && nextSlot >= editLimit) || !!inputError || (!!selection.interpolate && !validClickBounds(selection))}
+              title={!validPick ? 'Select at least 20 Hz'
+                : !active && nextSlot >= editLimit ? 'All eight repair slots are used' : 'Apply selected reduction (Ctrl/⌘+Enter)'}
+              aria-keyshortcuts="Control+Enter Meta+Enter" onclick={apply}>
+              {active ? 'Update' : 'Reduce'}
+            </Button>
+          </div>
+        {/if}
+      </RepairPopup>
+    </div>
+  </div>
+{/snippet}
 
 <style>
   .repair-layout {
     min-width: 0;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-rows: auto minmax(218px, 1fr) auto;
-    gap: var(--sp-2, 8px);
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-rows: auto minmax(218px, 1fr);
+    row-gap: var(--sp-2, 8px);
   }
+  .repair-layout.stereo-output { grid-template-columns: auto minmax(0, 1fr) auto auto; }
   .recording-overview, .repair-plot {
     position: relative;
     isolation: isolate;
     overflow: hidden;
     overflow: clip;
   }
-  .overview-bar { grid-column: 1; display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
+  .overview-bar { grid-column: 1 / -1; display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
   .recording-overview { flex: 1; min-width: 0; min-height: 26px; border-radius: var(--r-compact); }
-  .repair-rail { grid-column: 2; grid-row: 1 / -1; align-self: start; display: grid; justify-items: center; gap: 5px; }
+  .repair-rail {
+    grid-column: -2; grid-row: 2; align-self: start; display: grid; justify-items: center;
+    gap: 5px; margin-inline-start: var(--sp-1);
+  }
+  .monitor-channels { display: grid; grid-column: 1; grid-row: 2; margin-block-end: var(--time-ruler-height); }
+  .monitor-channels :global(.monitor-channel) {
+    display: grid; place-items: center; cursor: pointer;
+    width: 24px; height: 100%; min-height: 0; padding: 0; border: 0; border-radius: var(--r-compact);
+    color: var(--text); background: var(--row-stripe);
+    font: var(--text-xs) var(--font-literal);
+  }
+  .monitor-channels :global(.monitor-channel:hover) { background: var(--row-hover); }
+  .monitor-channels :global(.monitor-channel[aria-pressed=true]) { background: var(--row-hover); color: var(--accent-ink); font-weight: 600; }
+  .monitor-channels :global(.monitor-channel.dimmed) { background: transparent; color: var(--muted); }
+  .monitor-channels :global(.monitor-channel.dimmed:hover) { background: var(--row-stripe); }
+  .monitor-channels :global(.monitor-channel:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .monitor-channels :global(.monitor-channel > span) { writing-mode: vertical-rl; text-orientation: mixed; line-height: 1; }
   .draw-tools, .repair-effect-tools { display: grid; justify-items: center; gap: 2px; }
   .draw-tools :global(.draw-tool) {
     inline-size: 28px; block-size: 28px; padding: 0; color: var(--muted); border: 0; border-radius: var(--r-compact);
@@ -1803,12 +1867,15 @@
   .operation-tools { grid-template-columns: 1fr 1fr; gap: 0; }
   .operation-tools :global(.draw-tool) { inline-size: 24px; block-size: 24px; }
   .repair-effect-tools { padding-block-start: 5px; border-block-start: 1px solid var(--border); width: 100%; }
-  .image-scale { display: flex; align-items: center; gap: var(--sp-1); }
-  .db-legend { display: flex; align-items: center; gap: var(--sp-1); white-space: nowrap; color: var(--muted); font-size: var(--text-xs); }
+  .db-legend {
+    display: grid; grid-column: -3; grid-row: 2; grid-template-rows: auto 1fr auto auto;
+    justify-items: center; gap: var(--sp-1); margin-block: 7px 8px; padding-inline: var(--sp-1); color: var(--muted);
+    font: 10px var(--font-literal); font-variant-numeric: tabular-nums;
+  }
   .db-gradient {
-    width: clamp(34px, 10vw, 72px); height: 6px; border-radius: var(--r-pill);
-    background: linear-gradient(90deg, var(--db-colours));
-    background: linear-gradient(90deg in srgb, var(--db-colours));
+    width: 5px; min-height: 40px; border-radius: var(--r-pill);
+    background: linear-gradient(0deg, var(--db-colours));
+    background: linear-gradient(0deg in srgb, var(--db-colours));
   }
   .display-settings { display: grid; gap: var(--sp-1); }
   .display-settings label { display: grid; align-items: center; grid-template-columns: 1fr auto; gap: var(--sp-2); font-size: var(--text-xs); }
@@ -1877,19 +1944,29 @@
   .overview-repair::before { content: ''; display: inline-block; width: 7px; height: 7px; transform: rotate(45deg); border-radius: 1px; background: currentColor; }
   .overview-repair.bypassed { opacity: .45; }
   .repair-plot { grid-column: 1; grid-row: 2; min-height: 218px; min-width: 0; }
+  .stereo-output .repair-plot { grid-column: 2; }
   .repair-plot.linked-stereo { min-height: 312px; }
-  .linked-stereo canvas { height: 50%; border-radius: 0; }
-  .linked-stereo canvas.lower-lane { inset-block-start: 50%; border-top: 1px solid var(--border); }
-  .lane-label { position: absolute; right: 26px; pointer-events: none; color: #f2ebf8; font-size: var(--text-xs); }
+  .linked-stereo canvas { border-radius: 0; }
+  .repair-plot canvas.dimmed { opacity: .36; }
+  .lane-divider {
+    position: absolute; inset-inline: 0; height: 1px; pointer-events: none;
+    background: color-mix(in srgb, var(--border), var(--muted) 36%);
+  }
+  .shared-time {
+    position: absolute; inset: auto 0 0; height: var(--time-ruler-height); pointer-events: none;
+    color: var(--muted); font: 10px/1.3 var(--font-literal); font-variant-numeric: tabular-nums;
+  }
+  .shared-time span { position: absolute; top: 4px; transform: translateX(-50%); }
+  .shared-time .time-start, .shared-time .frequency-unit { transform: none; }
+  .shared-time .time-end { transform: translateX(-100%); }
   .repair-plot :global(.repair-hit) { cursor: var(--repair-cursor, crosshair); }
   .panning :global(.repair-hit) { cursor: grabbing; }
   .playhead, .applied, .picked, .repair-handle, .view-status { position: absolute; pointer-events: none; }
-  .playhead { left: 0; z-index: 1; width: 1px; background: #fff4d7; opacity: .88; }
+  .playhead { inset-inline-start: 0; z-index: 1; width: 1px; background: var(--accent-ink, var(--text)); box-shadow: 0 0 2px rgb(0 0 0 / 55%); }
   .picked { background: color-mix(in srgb, var(--accent) 26%, transparent); }
   .picked.audition { background: color-mix(in srgb, var(--accent) 39%, transparent); }
   .picked.shaped { background: transparent; }
   .shape-overlay { position: absolute; inset: 0; width: 100%; height: 100%; fill: color-mix(in srgb, var(--accent) 32%, transparent); pointer-events: none; }
-  .loop-bracket { position: absolute; height: 2px; pointer-events: none; background: var(--accent-ink, var(--accent)); border-radius: var(--r-pill); opacity: .9; }
   .brush-footprint, .pointer-guide { position: absolute; pointer-events: none; transform: translate(-50%, -50%); }
   .brush-footprint { border: 1px solid #f2ebf8; border-radius: 50%; }
   .pointer-guide { width: 13px; height: 13px; opacity: .75; }
@@ -1919,22 +1996,20 @@
     background: var(--panel);
     font-size: var(--text-xs);
   }
-  .repair-selection {
-    grid-column: 1;
-    display: grid;
-    gap: var(--sp-1, 4px);
+  .graph-controls {
+    position: absolute; z-index: 2; display: flex; align-items: center; justify-content: end;
+    inset-inline-end: var(--graph-tools-inset); inset-block-end: calc(var(--time-ruler-height) + 4px);
+    max-width: calc(100% - var(--graph-tools-inset) - 4px); flex-wrap: wrap; gap: 2px var(--sp-1);
+    padding: 2px; border-radius: var(--r-compact);
+    opacity: .42; transition: opacity 120ms ease;
   }
-  .repair-summary {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: var(--sp-1, 4px) var(--sp-2, 8px);
+  .graph-controls:is(:hover, :focus-within), .graph-controls:has(:global([aria-expanded=true])) {
+    opacity: 1; background: color-mix(in srgb, var(--panel) 95%, transparent);
   }
-  .range-text { color: var(--muted); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
-  .edit-controls { display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-1) var(--sp-2); min-width: 0; }
+  .graph-controls.dragging { opacity: 0; pointer-events: none; }
+  .graph-edit-tools { display: flex; align-items: center; gap: 2px; border-inline-start: 1px solid var(--border); padding-inline-start: var(--sp-1); }
+  .range-text { margin: 0; color: var(--muted); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
   .selection-commands {
-    margin-inline-start: auto;
     min-width: 0;
     display: flex;
     align-items: center;
@@ -1942,7 +2017,7 @@
     gap: var(--sp-1, 4px);
   }
   .commit-controls { display: flex; align-items: center; gap: var(--sp-1); margin-inline-start: auto; }
-  .repair-layout :global(.repair-menu), .repair-layout :global(.repair-channel) {
+  .view-controls :global(.repair-menu), .selection-commands :global(.repair-channel) {
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1953,12 +2028,12 @@
     color: var(--muted);
     background: transparent;
   }
-  .repair-layout :global(.repair-menu:hover), .repair-layout :global(.repair-channel:hover) {
+  .view-controls :global(.repair-menu:hover), .selection-commands :global(.repair-channel:hover) {
     color: var(--accent-ink);
   }
-  .repair-layout :global(.repair-menu:disabled) { opacity: .45; }
-  .repair-layout :global(.repair-channel) { gap: 2px; padding-inline: var(--sp-1); font-size: var(--text-xs); }
-  :is(.repair-layout, .precision-panel) :global(.repair-number), .precision-panel :global(.repair-time-input) {
+  .view-controls :global(.repair-menu:disabled) { opacity: .45; }
+  .selection-commands :global(.repair-channel) { gap: 2px; padding-inline: var(--sp-1); font-size: var(--text-xs); }
+  :is(.selection-commands, .precision-panel) :global(.repair-number), .precision-panel :global(.repair-time-input) {
     display: flex;
     align-items: center;
     min-width: 0;
@@ -1970,22 +2045,22 @@
     color: var(--text);
     background: transparent;
   }
-  :is(.repair-layout, .precision-panel) :global(.repair-number:hover), .precision-panel :global(.repair-time-input:hover) { background:var(--row-hover); }
-  .repair-layout :global(.repair-amount), .precision-panel :global(.repair-hertz-input), .precision-panel :global(.repair-time-input) {
+  :is(.selection-commands, .precision-panel) :global(.repair-number:hover), .precision-panel :global(.repair-time-input:hover) { background:var(--row-hover); }
+  .selection-commands :global(.repair-amount), .precision-panel :global(.repair-hertz-input), .precision-panel :global(.repair-time-input) {
     color: var(--text);
     border: 0;
     font-variant-numeric: tabular-nums;
     outline: none;
   }
-  .repair-layout :global(.repair-amount), .precision-panel :global(.repair-hertz-input) {
+  .selection-commands :global(.repair-amount), .precision-panel :global(.repair-hertz-input) {
     background: transparent;
     padding: 5px 0;
     text-align: right;
   }
-  .repair-layout :global(.repair-amount) { width: 3ch; }
+  .selection-commands :global(.repair-amount) { width: 3ch; }
   .precision-panel :global(.repair-hertz-input), .precision-panel :global(.repair-time-input) { width: 100%; min-width: 0; }
-  :is(.repair-layout, .precision-panel) :global(.repair-number:focus-within), .precision-panel :global(.repair-time-input:focus-visible),
-  .repair-layout :global(.repair-menu:focus-visible), .repair-layout :global(.repair-channel:focus-visible) {
+  :is(.selection-commands, .precision-panel) :global(.repair-number:focus-within), .precision-panel :global(.repair-time-input:focus-visible),
+  .view-controls :global(.repair-menu:focus-visible), .selection-commands :global(.repair-channel:focus-visible) {
     outline: 2px solid var(--accent);
   }
   .precision-panel :global(.repair-time-input[aria-invalid=true]) { outline: 2px solid var(--danger, var(--destructive)); }
@@ -1998,12 +2073,15 @@
   }
   .precision-panel label { display: grid; gap: var(--sp-1, 4px); min-width: 0; color: var(--muted); font-size: var(--text-xs); }
   .boundary-error { grid-column: 1 / -1; margin: 0; color: var(--danger, var(--destructive)); font-size: var(--text-xs); }
-  .view-controls { display:flex; align-items:center; flex-wrap:wrap; gap:var(--sp-1); margin-inline-start:auto; }
+  .view-controls { display:flex; align-items:center; flex-wrap:wrap; gap:2px; }
   .view-controls :global([aria-pressed=true]), .selection-commands :global([aria-pressed=true]) { color:var(--accent-ink); }
   @media (max-height: 420px) {
-    .repair-layout { grid-template-rows: auto minmax(150px, 1fr) auto; }
+    .repair-layout { grid-template-rows: auto minmax(150px, 1fr); }
     .repair-plot { min-height: 150px; }
     .repair-plot.linked-stereo { min-height: 236px; }
     .draw-tools :global(.draw-tool), .repair-rail :global(.repair-popup-trigger) { block-size: 24px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .graph-controls { transition: none; }
   }
 </style>

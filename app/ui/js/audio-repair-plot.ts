@@ -6,7 +6,7 @@ export type RepairViewport = { time: FrameRange; frequency: FrequencyRange };
 export type RepairTexture = { bitmap: HTMLCanvasElement; time: FrameRange; frequency: FrequencyRange };
 export type RepairChannel = 'combined' | 'left' | 'right';
 export type RepairContrast = 'balanced' | 'detail' | 'strong';
-export type RepairWaveform = { values: readonly number[]; time: FrameRange; stereo?: boolean; channel?: RepairChannel; opacity?: number; clipping?: boolean };
+export type RepairWaveform = { values: readonly number[]; time: FrameRange; stereo?: boolean; channel?: RepairChannel; opacity?: number; clipping?: boolean; edge?: 'top' | 'bottom' };
 const repairPalettes = {
   theme: [[37, 37, 37], [102, 102, 102], [177, 177, 177], [251, 251, 251]],
   warm: [[39, 22, 25], [170, 72, 34], [238, 179, 88], [255, 240, 203]],
@@ -47,6 +47,13 @@ export function clampRepair(value: number, minimum: number, maximum: number): nu
 
 export function recordingFrequencyRange(rate: number): FrequencyRange {
   return { lowHz: 20, highHz: Math.max(21, Math.min(20_000, Math.floor(rate * .45))) };
+}
+
+export function repairPlotBounds(width: number, height: number, sharedTime = false): PlotBounds {
+  const bounds = plotBounds(width, height);
+  return sharedTime
+    ? { ...bounds, left: 0, top: 7, bottom: Math.max(8, height - 7) }
+    : { ...bounds, left: 1 };
 }
 
 export function spectrogramRange(probe?: TreatmentProbe | null): FrameRange | null {
@@ -178,7 +185,7 @@ export function drawRepairViewport(
   canvas: HTMLCanvasElement, width: number, height: number, viewport: RepairViewport,
   textures: readonly RepairTexture[], rate: number, palette: RepairPalette,
   guides: readonly number[], scale = 1,
-  waveform?: RepairWaveform, waveformOnly = false,
+  waveform?: RepairWaveform, waveformOnly = false, sharedTime = false,
 ): void {
   if (width <= 0 || height <= 0) return;
   const ctx = canvas.getContext('2d');
@@ -190,7 +197,7 @@ export function drawRepairViewport(
   ctx.setTransform(scale, 0, 0, scale, 0, 0);
   ctx.clearRect(0, 0, width, height);
   const { time, frequency } = viewport;
-  const bounds = plotBounds(width, height);
+  const bounds = repairPlotBounds(width, height, sharedTime);
   ctx.save();
   ctx.beginPath();
   ctx.rect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
@@ -215,9 +222,18 @@ export function drawRepairViewport(
     ctx.clearRect(x, y, w, h);
     ctx.drawImage(texture.bitmap, tx, ty, tw, th, x, y, w, h);
   }
+  ctx.restore();
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(bounds.left, 0, bounds.right - bounds.left, height);
+  ctx.clip();
   if (waveform) {
     const inset = waveformOnly ? 0 : (bounds.bottom - bounds.top) * .34;
-    drawWaveform(ctx, waveform, { ...bounds, top: bounds.top + inset, bottom: bounds.bottom - inset },
+    const waveformBounds = waveform.edge === 'bottom' ? { ...bounds, top: height * .7, bottom: height }
+      : waveform.edge === 'top' ? { ...bounds, top: 0, bottom: height * .3 }
+      : { ...bounds, top: bounds.top + inset, bottom: bounds.bottom - inset };
+    drawWaveform(ctx, waveform, waveformBounds,
       time, palette.waveform, waveform.opacity ?? .16);
   }
 
@@ -231,9 +247,9 @@ export function drawRepairViewport(
   rightFade.addColorStop(1, '#000');
   ctx.globalCompositeOperation = 'destination-out';
   ctx.fillStyle = leftFade;
-  ctx.fillRect(bounds.left, bounds.top, fade, bounds.bottom - bounds.top);
+  ctx.fillRect(bounds.left, 0, fade, height);
   ctx.fillStyle = rightFade;
-  ctx.fillRect(bounds.right - fade, bounds.top, fade, bounds.bottom - bounds.top);
+  ctx.fillRect(bounds.right - fade, 0, fade, height);
   ctx.globalCompositeOperation = 'source-over';
 
   ctx.strokeStyle = palette.guide;
@@ -251,7 +267,7 @@ export function drawRepairViewport(
   ctx.fillStyle = palette.ink;
   ctx.font = '10px ' + palette.font;
   ctx.textBaseline = 'middle';
-  ctx.textAlign = 'right';
+  ctx.textAlign = 'left';
   const ticks = waveformOnly ? [-1, -.5, 0, .5, 1] : [20, 50, 100, 200, 500, 1000, 2000, 5000, 10_000, 20_000]
     .filter(hz => hz >= frequency.lowHz && hz <= frequency.highHz);
   if (!waveformOnly && ticks.length < 2) {
@@ -264,17 +280,20 @@ export function drawRepairViewport(
     ctx.globalAlpha = .45;
     strokeLine(ctx, bounds.left, y, bounds.right, y);
     ctx.globalAlpha = .9;
-    ctx.fillText(waveformOnly ? String(tick) : hertzLabel(tick), bounds.left - 6, y);
+    ctx.fillText(waveformOnly ? String(tick) : hertzLabel(tick), bounds.right + 6, y);
   }
+  if (!waveformOnly && !sharedTime) ctx.fillText('Hz', bounds.right + 6, bounds.bottom + 13);
   ctx.textAlign = 'center';
   for (const fraction of [0, .25, .5, .75, 1]) {
     const x = bounds.left + (bounds.right - bounds.left) * fraction;
-    const frame = time.start + (time.end - time.start) * fraction;
     ctx.globalAlpha = .45;
     strokeLine(ctx, x, bounds.top, x, bounds.bottom);
-    ctx.globalAlpha = .9;
-    ctx.textAlign = fraction === 0 ? 'left' : fraction === 1 ? 'right' : 'center';
-    ctx.fillText(repairTimeLabel(frame, rate, time.end - time.start < rate), x, bounds.bottom + 13);
+    if (!sharedTime) {
+      const frame = time.start + (time.end - time.start) * fraction;
+      ctx.globalAlpha = .9;
+      ctx.textAlign = fraction === 0 ? 'left' : fraction === 1 ? 'right' : 'center';
+      ctx.fillText(repairTimeLabel(frame, rate, time.end - time.start < rate), x, bounds.bottom + 13);
+    }
   }
   ctx.globalAlpha = 1;
 }
@@ -309,14 +328,24 @@ function drawWaveform(
   const left = frameX(first, bounds, time);
   const right = frameX(last, bounds, time);
   const points = Math.max(1, Math.min(Math.ceil(right - left), Math.ceil((last - first) * count / span)));
-  const center = (bounds.top + bounds.bottom) / 2;
-  const height = (bounds.bottom - bounds.top) * .47;
+  const center = waveform.edge === 'top' ? bounds.top : waveform.edge === 'bottom' ? bounds.bottom : (bounds.top + bounds.bottom) / 2;
+  const height = (bounds.bottom - bounds.top) * (waveform.edge ? .94 : .47);
   function peak(index: number, side: number) {
     let value = 0;
     const from = first + index * (last - first) / points;
     const to = first + (index + 1) * (last - first) / points;
     const start = clampRepair(Math.floor((from - waveform.time.start) * count / span), 0, count - 1);
     const end = clampRepair(Math.ceil((to - waveform.time.start) * count / span), start + 1, count);
+    if (waveform.edge) {
+      const rising = waveform.edge === 'bottom';
+      if (!!side !== rising) return center;
+      let magnitude = 0;
+      for (let bin = start; bin < end; bin++) {
+        const base = bin * stride + offset;
+        magnitude = Math.max(magnitude, Math.abs(waveform.values[base] ?? 0), Math.abs(waveform.values[base + 1] ?? 0));
+      }
+      return center + (rising ? -1 : 1) * Math.min(magnitude, 1) * height;
+    }
     const compare = side ? Math.max : Math.min;
     for (let bin = start; bin < end; bin++) value = compare(value, waveform.values[bin * stride + offset + side] ?? 0);
     return center - clampRepair(value, -1, 1) * height;

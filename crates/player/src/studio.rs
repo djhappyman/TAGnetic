@@ -2,7 +2,7 @@
 mod retune;
 mod stream;
 
-use super::{router, Output};
+use super::{router, Output, StudioMonitorChannel};
 use std::{
     fs::File,
     sync::{Arc, Mutex},
@@ -69,6 +69,7 @@ pub(super) enum Command {
         sample_rate: u32,
         seek_index: Option<Arc<SeekIndex>>,
         treatment: Box<PreparedTreatment>,
+        channel: StudioMonitorChannel,
     },
     Seek {
         owner: String,
@@ -152,9 +153,28 @@ struct Snapshot {
     owns_output: bool,
     value: StudioStatus,
     analysis: Option<Arc<Mutex<PlaybackHistory>>>,
+    router: Option<router::Handle>,
 }
 
 impl Shared {
+    pub(super) fn meter(
+        &self,
+        owner: &str,
+        sequence: u64,
+        channel: Option<StudioMonitorChannel>,
+    ) -> Option<[f32; 2]> {
+        let state = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        if state.owner.as_deref() != Some(owner) || state.value.sequence != sequence {
+            return None;
+        }
+        let router = state.router.as_ref()?;
+        if let Some(channel) = channel {
+            router.studio_monitor(channel);
+            return None;
+        }
+        state.value.playing.then(|| router.studio_peaks()).flatten()
+    }
+
     pub(super) fn for_owner(&self, owner: &str) -> StudioStatus {
         let state = self.0.lock().unwrap_or_else(|p| p.into_inner());
         if state.owner.as_deref() == Some(owner) {
@@ -275,6 +295,7 @@ impl Actor {
                 sample_rate,
                 seek_index,
                 treatment,
+                channel,
                 ..
             } => {
                 self.lease = None;
@@ -288,6 +309,7 @@ impl Actor {
                     retune_pending: None,
                 };
                 if let Some(router) = output.and_then(Output::studio_router) {
+                    router.studio_monitor(channel);
                     if self.worker.is_none() {
                         self.worker = Worker::new().ok();
                     }
@@ -468,6 +490,7 @@ impl Actor {
             .lease
             .as_ref()
             .map(|lease| lease.voice.playback_history());
+        state.router = self.lease.as_ref().map(|lease| lease.router.clone());
         if state.value != current || state.owns_output != owns_output || state.owner != self.owner {
             state.owner.clone_from(&self.owner);
             state.value = current;

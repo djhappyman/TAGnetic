@@ -83,7 +83,7 @@ impl Fixture {
         let channels = rodio::ChannelCount::new(2).unwrap();
         let rate = rodio::SampleRate::new(rate).unwrap();
         let (main_handle, main) = router::Router::new(channels, rate);
-        let (studio_handle, studio) = router::Router::new(channels, rate);
+        let (studio_handle, studio) = router::Router::new_studio(rate);
         let output = Routed {
             main: main_handle,
             studio: studio_handle,
@@ -532,6 +532,7 @@ fn sustained_retunes_hand_off_an_intermediate_voice_and_the_last_edit() {
             sample_rate: RATE,
             seek_index: None,
             treatment: Box::new(dry.clone()),
+            channel: StudioMonitorChannel::Stereo,
         },
         Some(&routed),
         1.0,
@@ -723,6 +724,97 @@ fn spectral_selection_plays_to_its_end_once_or_repeats_from_its_start() {
             });
         }
     }
+    fixture.drain();
+}
+
+#[test]
+fn studio_peaks_follow_audible_selection_and_channel_switches_without_restarting() {
+    use tagrex_audio_workbench::{RepairChannel, SpectralRepair};
+
+    let recording = Recording::ramp("audible-meter", 4_096, 8_000);
+    let mut fixture = Fixture::new(true);
+    let owner = "editor".to_string();
+    let sequence = 3;
+    let treatment = PreparedTreatment::default().with_preview_selection(Some(SpectralRepair {
+        start_frame: 500,
+        end_frame: 2_000,
+        high_hz: RATE / 2,
+        amount_db: 1,
+        channel: Some(RepairChannel::Left),
+        ..SpectralRepair::default()
+    }));
+    fixture
+        .player
+        .studio_play_monitored(
+            owner.clone(),
+            sequence,
+            crate::StudioPlayback {
+                file: File::open(&recording.0).unwrap(),
+                start: point(900),
+                end: point(4_096),
+                audition: Some(StudioAudition {
+                    start: point(500),
+                    end: point(2_000),
+                    smooth: false,
+                }),
+                sample_rate: RATE,
+                seek_index: None,
+                treatment,
+            },
+            StudioMonitorChannel::Stereo,
+        )
+        .unwrap();
+    fixture.wait("the selected channel is audible", |player| {
+        player.studio_status(&owner).playing
+    });
+    first_audio(&mut fixture.studio);
+    for _ in 0..64 {
+        assert_eq!(pcm(&mut fixture.studio).1, 0);
+    }
+    let [left, right] = fixture.player.studio_meter(&owner, sequence, None).unwrap();
+    assert!(left > 0.2);
+    assert_eq!(
+        right, 0.0,
+        "reviewing the pre-mask decoder would show the right channel"
+    );
+
+    fixture
+        .player
+        .studio_meter("stale-owner", sequence, Some(StudioMonitorChannel::Right));
+    fixture
+        .player
+        .studio_meter(&owner, sequence - 1, Some(StudioMonitorChannel::Right));
+    for _ in 0..64 {
+        assert!(pcm(&mut fixture.studio).0 > 0);
+    }
+    fixture
+        .player
+        .studio_meter(&owner, sequence, Some(StudioMonitorChannel::Right));
+    // Give the short monitor ramp time to finish and clear peaks from before it.
+    for _ in 0..96 {
+        pcm(&mut fixture.studio);
+    }
+    fixture.player.studio_meter(&owner, sequence, None);
+    for _ in 0..64 {
+        assert_eq!(pcm(&mut fixture.studio), (0, 0));
+    }
+    assert_eq!(
+        fixture.player.studio_meter(&owner, sequence, None),
+        Some([0.0; 2])
+    );
+
+    fixture
+        .player
+        .studio_meter(&owner, sequence, Some(StudioMonitorChannel::Stereo));
+    for _ in 0..64 {
+        pcm(&mut fixture.studio);
+    }
+    let [left, right] = fixture.player.studio_meter(&owner, sequence, None).unwrap();
+    assert!(left > 0.2);
+    assert_eq!(right, 0.0);
+    let status = fixture.player.studio_status(&owner);
+    assert!(status.playing);
+    assert_eq!(status.sequence, sequence);
     fixture.drain();
 }
 

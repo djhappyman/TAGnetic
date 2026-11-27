@@ -18,6 +18,11 @@ test.beforeEach(async ({ page }) => {
     } catch { await route.fulfill({ status: 404 }); }
   });
   await page.addInitScript(({ rate, settings, palettes }) => {
+    if (!sessionStorage.getItem('repair-tests-initial-view')) {
+      // Keep selection geometry tests on one lane. A separate test opens the default stereo view.
+      localStorage.setItem('tagnetic.audio-repair-view.v1', JSON.stringify({ version: 2, channel: 'combined' }));
+      sessionStorage.setItem('repair-tests-initial-view', 'true');
+    }
     const calls = [];
     const handlers = new Map();
     const history = [];
@@ -26,7 +31,7 @@ test.beforeEach(async ({ page }) => {
     const overview = Array.from({ length: 256 }, (_, i) => Math.sin(i * .21) ** 2 * (i % 2 ? .8 : -.8));
     let snapshot = {
       sourceId: 'repair-fixture', frame: 10 * rate, frames: 60 * rate, sampleRate: rate,
-      playing: false, original: false, loop: false, stereo: true, settings, cuts: [8 * rate, 44 * rate],
+      playing: false, original: false, loop: false, stereo: true, transportSequence: 1, settings, cuts: [8 * rate, 44 * rate],
       overview, theme: { theme: 'dark', palette: 'navy', accent: [palettes[0].accent] },
     };
     const send = (name, payload) => handlers.get('tagnetic:audio-tools-' + name)?.({ payload });
@@ -59,6 +64,9 @@ test.beforeEach(async ({ page }) => {
       updateClock(clock) {
         snapshot = { ...snapshot, ...clock };
         send('state', { ...snapshot, settings: undefined, overview: undefined, stereoOverview: undefined, cuts: undefined });
+      },
+      sendMeter(peaks, sequence = snapshot.transportSequence) {
+        send('meter', { sourceId: snapshot.sourceId, sequence, peaks });
       },
       setCuts(cuts) {
         snapshot = { ...snapshot, cuts };
@@ -134,6 +142,8 @@ test.beforeEach(async ({ page }) => {
                   repairListen: before, selectionPlaying: !!command.selection, monitor: command.band ? 'band' : undefined };
               } else if (command.type === 'signal') {
                 snapshot = { ...snapshot, repairListen: { ...before, signal: command.signal }, monitor: undefined };
+              } else if (command.type === 'channel') {
+                snapshot = { ...snapshot, repairListen: { ...before, channel: command.channel } };
               } else if (command.type === 'trial') {
                 snapshot = { ...snapshot, repairListen: { ...before, signal: 'repaired', trial: command.strength }, monitor: undefined };
               } else if (command.type === 'stop') {
@@ -178,7 +188,7 @@ async function drawSelection(page) {
   await page.mouse.down();
   await page.mouse.move(plot.x + plot.width * .66, plot.y + plot.height * .66, { steps: 5 });
   await page.mouse.up();
-  await expect(page.getByRole('button', { name: 'Reduce', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Selection details' })).toBeEnabled();
   return plot;
 }
 
@@ -200,6 +210,18 @@ async function closePopup(page, label) {
   if (await trigger.getAttribute('aria-expanded') === 'true') await trigger.click();
 }
 
+async function playSelected(page) {
+  await openPopup(page, 'Loop and comparison');
+  await page.getByRole('button', { name: 'Play Selection', exact: true }).click();
+  await closePopup(page, 'Loop and comparison');
+}
+
+async function reduceSelected(page) {
+  await openPopup(page, 'Selection details');
+  await page.getByRole('button', { name: 'Reduce', exact: true }).click();
+  await closePopup(page, 'Selection details');
+}
+
 test('keeps audition bounds and preview strengths separate from repair edits', async ({ page }) => {
   await zoomToPlayhead(page);
   await drawSelection(page);
@@ -208,6 +230,7 @@ test('keeps audition bounds and preview strengths separate from repair edits', a
     if (command?.type === 'selection') return [{ range: { start: command.selection.startFrame, end: command.selection.endFrame } }];
     return command?.type === 'loop' ? [command] : [];
   }));
+  await openPopup(page, 'Loop and comparison');
   await page.getByRole('button', { name: 'Play Selection', exact: true }).click();
   await page.getByRole('button', { name: 'With context', exact: true }).click();
   await expect.poll(async () => (await loopCommands()).length).toBe(2);
@@ -216,6 +239,7 @@ test('keeps audition bounds and preview strengths separate from repair edits', a
 
   const selected = page.locator('.picked');
   const before = await selected.boundingBox();
+  await closePopup(page, 'Loop and comparison');
   await page.getByRole('button', { name: 'Loop and comparison' }).press('Space');
   expect(await page.evaluate(() => window.repairFixture.calls.some(call => call.action === 'play'))).toBe(false);
   await page.getByLabel('Smooth loop join').check();
@@ -267,11 +291,11 @@ test('keeps audition bounds and preview strengths separate from repair edits', a
 test('interpolates a full-band manual Time selection without saving its attenuation mask', async ({ page }) => {
   await page.getByRole('button', { name: 'Time', exact: true }).click();
   await drawSelection(page);
-  await page.getByRole('button', { name: 'Exact selection boundaries' }).click();
+  await openPopup(page, 'Selection details');
   const duration = page.getByRole('textbox', { name: 'Duration' });
   await duration.fill('0:00.001');
   await duration.press('Enter');
-  await closePopup(page, 'Exact selection boundaries');
+  await closePopup(page, 'Selection details');
   await openPopup(page, 'Find and review');
   await page.getByRole('combobox', { name: 'Find repair candidates' }).selectOption('clicks');
   await page.getByRole('button', { name: 'Interpolate click' }).click();
@@ -330,7 +354,7 @@ test('saves a brush with a subtracting lasso and one grouped repair history entr
   await move(.35, .49, 3);
   await page.mouse.up();
   await expect(page.locator('.shape-overlay mask path')).toHaveCount(2);
-  await page.getByRole('button', { name: 'Reduce', exact: true }).click();
+  await reduceSelected(page);
   const saved = () => page.evaluate(() => window.repairFixture.snapshot.settings.spectralRepairs?.[0]);
   await expect.poll(saved).toMatchObject({ mask: {
     version: 1, featherFrames: 0, featherHz: 0,
@@ -343,9 +367,9 @@ test('saves a brush with a subtracting lasso and one grouped repair history entr
   expect(await page.evaluate(() => window.repairFixture.calls.filter(call => call.action === 'edit').length)).toBe(1);
 
   const bypass = page.getByRole('button', { name: 'Bypass', exact: true });
+  await openPopup(page, 'Selection details');
   await bypass.click();
   await expect(bypass).toHaveAttribute('aria-pressed', 'true');
-  await page.getByRole('button', { name: 'Exact selection boundaries' }).click();
   const name = page.getByRole('textbox', { name: 'Repair name' });
   await name.fill('Crowd whistle');
   await name.press('Tab');
@@ -355,10 +379,9 @@ test('saves a brush with a subtracting lasso and one grouped repair history entr
 test('undo restores the last saved boundaries without keeping the newer selection', async ({ page }) => {
   await zoomToPlayhead(page);
   await drawSelection(page);
-  const reduce = page.getByRole('button', { name: 'Reduce', exact: true });
   const field = page.getByRole('textbox', { name: 'Start time' });
-  await reduce.click();
-  await page.getByRole('button', { name: 'Exact selection boundaries' }).click();
+  await reduceSelected(page);
+  await openPopup(page, 'Selection details');
   const saved = () => page.evaluate(() => window.repairFixture.snapshot.settings.spectralRepairs?.[0]?.startFrame);
   const original = await saved();
   await field.fill('0:10.000');
@@ -368,18 +391,17 @@ test('undo restores the last saved boundaries without keeping the newer selectio
   const surface = page.getByRole('button', { name: 'Select time and frequency' });
   await surface.press((process.platform === 'darwin' ? 'Meta' : 'Control') + '+z');
   await expect.poll(saved).toBe(original);
-  await openPopup(page, 'Exact selection boundaries');
+  await openPopup(page, 'Selection details');
   await expect(field).toHaveValue(/^0:09\./);
 });
 
 test('uses the full source band for a time stripe and leaves the selection on ruler seek', async ({ page }) => {
   await page.getByRole('button', { name: 'Time', exact: true }).click();
-  await expect(page.getByText('Full frequency band', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Time', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await drawSelection(page);
   const plot = await page.getByRole('button', { name: 'Select time and frequency' }).boundingBox();
   await page.mouse.click(plot.x + plot.width * .75, plot.y + plot.height - 11);
-  await expect(page.getByRole('button', { name: 'Reduce', exact: true })).toBeEnabled();
-  await page.getByRole('button', { name: 'Reduce', exact: true }).click();
+  await reduceSelected(page);
   const saved = () => page.evaluate(() => window.repairFixture.snapshot.settings.spectralRepairs?.[0]);
   await expect.poll(saved).toMatchObject({ lowHz: 0, highHz: 24_000, mask: { regions: [
     { kind: 'rectangle', operation: 'add', lowHz: 0, highHz: 24_000 },
@@ -391,9 +413,9 @@ test('finds full-width bands directly and edits their exact duration and scope',
   await page.setViewportSize({ width: 640, height: 600 });
   const graph = page.getByRole('button', { name: 'Select time and frequency' });
   const reduce = page.getByRole('button', { name: 'Reduce', exact: true });
-  const bounds = page.getByRole('button', { name: 'Exact selection boundaries' });
+  const bounds = page.getByRole('button', { name: 'Selection details' });
   const frequency = page.getByRole('button', { name: 'Frequency', exact: true });
-  await expect(reduce).toBeDisabled();
+  await expect(reduce).toHaveCount(0);
   await expect(bounds).toBeDisabled();
   await expect(frequency).toBeVisible();
   await graph.press('3');
@@ -430,14 +452,14 @@ test('finds full-width bands directly and edits their exact duration and scope',
   await expect(reduce).toBeEnabled();
   await bounds.click();
 
-  await page.getByRole('button', { name: 'Play Selection', exact: true }).click();
+  await playSelected(page);
   await editScope();
   await expect(scope.locator('option[value=loop]')).toBeEnabled();
   const loop = await page.evaluate(() => window.repairFixture.snapshot.loopRange);
   await scope.selectOption('loop');
   await closeScope();
   await band(.57, .72, false);
-  await reduce.click();
+  await reduceSelected(page);
   const repair = slot => page.evaluate(slot => window.repairFixture.snapshot.settings.spectralRepairs?.[slot], slot);
   await expect.poll(() => repair(0)).toMatchObject({ startFrame: loop.start, endFrame: loop.end });
   await graph.press('Escape');
@@ -446,7 +468,7 @@ test('finds full-width bands directly and edits their exact duration and scope',
   await scope.selectOption('recording');
   await closeScope();
   await band(.30, .46);
-  await reduce.click();
+  await reduceSelected(page);
   await expect.poll(() => repair(1)).toMatchObject({ startFrame: 0, endFrame: 60 * rate, mask: { regions: [
     { kind: 'rectangle', operation: 'add', startFrame: 0, endFrame: 60 * rate },
   ] } });
@@ -469,11 +491,15 @@ test('links the stereo lanes and keeps the dB scale fixed when changing the comp
   const legend = page.locator('.db-legend');
   const scale = await legend.getAttribute('aria-label');
   const plot = await surface.boundingBox();
+  await page.keyboard.down('Control');
   await page.mouse.move(plot.x + plot.width * .30, plot.y + plot.height * .64);
   await page.mouse.down();
   await page.mouse.move(plot.x + plot.width * .63, plot.y + plot.height * .82, { steps: 5 });
   await page.mouse.up();
+  await page.keyboard.up('Control');
+  await openPopup(page, 'Selection details');
   await expect(page.getByRole('button', { name: 'Apply repair to channel' })).toHaveAttribute('aria-description', 'Right');
+  await closePopup(page, 'Selection details');
   await page.keyboard.down('Shift');
   await page.mouse.move(plot.x + plot.width * .27, plot.y + plot.height * .18);
   await page.mouse.down();
@@ -481,7 +507,9 @@ test('links the stereo lanes and keeps the dB scale fixed when changing the comp
   await page.mouse.up();
   await page.keyboard.up('Shift');
   await expect(page.getByText('Add and subtract use the selected repair channel.', { exact: false })).toBeVisible();
+  await openPopup(page, 'Selection details');
   await expect(page.getByRole('button', { name: 'Apply repair to channel' })).toHaveAttribute('aria-description', 'Right');
+  await closePopup(page, 'Selection details');
   await chooseSignal(page, 'Removed');
   await expect(page.getByRole('group', { name: 'Removed spectrogram' })).toBeVisible();
   await expect(legend).toHaveAttribute('aria-label', scale);
@@ -492,6 +520,137 @@ test('links the stereo lanes and keeps the dB scale fixed when changing the comp
   await expect(page.getByRole('group', { name: 'Removed waveform' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Time', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await expect(legend).toHaveCount(0);
+});
+
+test('selects matching regions in both stereo lanes unless Ctrl or Command scopes the drag', async ({ page }) => {
+  await openPopup(page, 'Spectrogram display');
+  await page.getByRole('combobox', { name: 'Display channel' }).selectOption('stereo');
+  await closePopup(page, 'Spectrogram display');
+  const graph = page.locator('.repair-plot');
+  const left = graph.locator('canvas[data-channel=left]');
+  const right = graph.locator('canvas[data-channel=right]');
+  const picks = graph.locator('.picked');
+  const drag = async (lane, from, to, modifier) => {
+    const { x, y, width, height } = await lane.boundingBox();
+    if (modifier) await page.keyboard.down(modifier);
+    await page.mouse.move(x + width * from[0], y + height * from[1]);
+    await page.mouse.down();
+    await page.mouse.move(x + width * to[0], y + height * to[1], { steps: 6 });
+    await page.mouse.up();
+    if (modifier) await page.keyboard.up(modifier);
+  };
+  const lastSelection = () => page.evaluate(() => window.repairFixture.calls
+    .findLast(call => call.command?.type === 'set-selection')?.command);
+  await drag(right, [.25, .31], [.52, .56]);
+  await expect(picks).toHaveCount(2);
+  const upper = await picks.first().boundingBox();
+  const lower = await picks.last().boundingBox();
+  expect(upper.x).toBeCloseTo(lower.x, 1);
+  expect(upper.height).toBeCloseTo(lower.height, 1);
+  expect(lower.y - upper.y).toBeCloseTo((await left.boundingBox()).height, 1);
+  expect((await lastSelection()).selection.channel).toBeUndefined();
+  await expect(graph.locator('.playhead')).toBeVisible();
+  await expect(graph.locator('.loop-bracket')).toHaveCount(0);
+
+  await drag(left, [.65, .30], [.78, .53], 'Shift');
+  const expanded = await lastSelection();
+  expect(expanded.adjust).toBe(true);
+  expect(expanded.selection.channel).toBeUndefined();
+  expect(expanded.selection.mask.regions).toHaveLength(2);
+  await expect(picks).toHaveCount(2);
+
+  // A scoped drag inside the stereo selection starts a new selection instead of moving it.
+  await drag(right, [.35, .37], [.47, .51], 'Control');
+  await expect(picks).toHaveCount(1);
+  expect((await lastSelection()).selection.channel).toBe('right');
+  expect((await lastSelection()).adjust).toBe(false);
+  await expect(left).toHaveCSS('opacity', '0.36');
+  await expect(right).toHaveCSS('opacity', '1');
+  await drag(left, [.47, .34], [.58, .48], 'Meta');
+  await expect(picks).toHaveCount(1);
+  expect((await lastSelection()).selection.channel).toBe('left');
+  await expect(left).toHaveCSS('opacity', '1');
+  await expect(right).toHaveCSS('opacity', '0.36');
+  await graph.getByRole('button', { name: 'Select time and frequency' }).press('Escape');
+  await expect(picks).toHaveCount(0);
+  await expect(left).toHaveCSS('opacity', '1');
+  await expect(right).toHaveCSS('opacity', '1');
+});
+
+test('opens two channel strips with one ruler and leaves only transport and meters in the footer', async ({ page }) => {
+  await page.evaluate(() => localStorage.setItem('tagnetic.audio-repair-view.v1', JSON.stringify({ channel: 'combined', opacity: 37 })));
+  await page.reload();
+  const graph = page.locator('.repair-plot');
+  const left = graph.locator('canvas[data-channel=left]');
+  const right = graph.locator('canvas[data-channel=right]');
+  await expect(left).toBeVisible();
+  await expect(right).toBeVisible();
+  await expect(graph.locator('.shared-time')).toHaveCount(1);
+  const measure = () => graph.evaluate(plot => {
+    const [l, r] = [...plot.querySelectorAll('canvas')];
+    const [leftRail, rightRail] = [...document.querySelectorAll('.monitor-channel')];
+    const box = node => node.getBoundingClientRect();
+    const leftBox = box(l);
+    const rightBox = box(r);
+    return {
+      equalLaneWidths: Math.abs(leftBox.width - rightBox.width) < 1,
+      railTouchesPlot: Math.abs(box(leftRail).right - leftBox.left) < 1,
+      sharedMiddle: Math.abs(box(leftRail).bottom - rightBox.top) < 1 && Math.abs(box(rightRail).top - rightBox.top) < 1,
+      railsEndAtCanvas: Math.abs(box(rightRail).bottom - rightBox.bottom) < 1,
+      writingMode: getComputedStyle(leftRail.querySelector('span')).writingMode,
+    };
+  });
+  await expect.poll(measure).toEqual({
+    equalLaneWidths: true, railTouchesPlot: true, sharedMiddle: true, railsEndAtCanvas: true, writingMode: 'vertical-rl',
+  });
+  const energyAt = (canvas, fraction) => canvas.evaluate((canvas, fraction) =>
+    canvas.getContext('2d').getImageData(Math.round(canvas.width * .57), Math.round(canvas.height * fraction), 1, 1).data[3], fraction);
+  await expect.poll(async () => (await energyAt(left, .77)) - (await energyAt(right, .77))).toBeGreaterThan(40);
+  await expect.poll(async () => (await energyAt(right, .31)) - (await energyAt(left, .31))).toBeGreaterThan(40);
+  const wavePixels = () => graph.locator('canvas').evaluateAll(canvases => canvases.map(canvas => {
+    const ctx = canvas.getContext('2d');
+    const row = fraction => [...ctx.getImageData(Math.round(canvas.width * .1),
+      Math.min(canvas.height - 1, Math.round(canvas.height * fraction)), Math.round(canvas.width * .8), 1).data];
+    return [row(canvas.dataset.channel === 'left' ? .99 : .01), row(.5)];
+  }));
+  const withWave = await wavePixels();
+  await openPopup(page, 'Spectrogram display');
+  const overlay = page.getByRole('switch', { name: 'Waveform overlay' });
+  await overlay.click();
+  await expect.poll(async () => (await wavePixels()).map(([edge, middle], index) => [
+    edge.some((value, pixel) => value !== withWave[index][0][pixel]),
+    middle.every((value, pixel) => value === withWave[index][1][pixel]),
+  ])).toEqual([[true, true], [true, true]]);
+  await overlay.click();
+  await closePopup(page, 'Spectrogram display');
+
+  const leftMonitor = page.getByRole('button', { name: 'Solo left channel' });
+  const rightMonitor = page.getByRole('button', { name: 'Solo right channel' });
+  await expect(leftMonitor).toHaveCSS('background-color', 'rgb(43, 48, 70)');
+  await expect.poll(() => leftMonitor.evaluate(button => parseFloat(getComputedStyle(button).borderRadius))).toBeGreaterThan(0);
+  await leftMonitor.click();
+  await expect(left).toHaveCSS('opacity', '1');
+  await expect(right).toHaveCSS('opacity', '0.36');
+  await expect(rightMonitor).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+  await leftMonitor.click();
+  await expect(right).toHaveCSS('opacity', '1');
+  await expect(graph.locator('.playhead')).toBeVisible();
+  await expect(page.locator('.overview-playhead')).toBeVisible();
+
+  const footer = page.locator('.repair-transport');
+  await expect(footer.getByRole('button', { name: 'Play', exact: true })).toBeVisible();
+  await expect(footer.getByRole('meter', { name: 'Left playback level' })).toBeVisible();
+  await expect(footer.getByRole('button', { name: /selection details|reduce|play selection/i })).toHaveCount(0);
+  await expect(page.locator('.overview-bar').getByRole('button', { name: 'Keep tool on top' })).toBeVisible();
+  await expect(graph.getByRole('button', { name: 'Spectrogram display' })).toBeVisible();
+
+  for (const channel of ['left', 'right', 'combined', 'stereo']) {
+    await openPopup(page, 'Spectrogram display');
+    await page.getByRole('combobox', { name: 'Display channel' }).selectOption(channel);
+    await closePopup(page, 'Spectrogram display');
+    await expect(graph.locator('canvas')).toHaveCount(channel === 'stereo' ? 2 : 1);
+    await expect(graph.locator('canvas').first()).toHaveAttribute('data-channel', channel === 'stereo' ? 'left' : channel);
+  }
 });
 
 test('uses the same theme shades for signal levels in the spectrogram and legend', async ({ page }) => {
@@ -554,7 +713,7 @@ test('navigates the recording, refines a repair and auditions time and frequency
   await expect.poll(visibleStart).toBeGreaterThan(edgeStart + .1);
   await page.mouse.up();
 
-  await page.getByRole('button', { name: 'Exact selection boundaries' }).click();
+  await openPopup(page, 'Selection details');
   const start = page.getByRole('textbox', { name: 'Start time' });
   await start.fill('0:19.125');
   await start.press('Enter');
@@ -564,6 +723,7 @@ test('navigates the recording, refines a repair and auditions time and frequency
   const surface = page.getByRole('button', { name: 'Select time and frequency' });
   await page.getByRole('button', { name: 'Apply repair to channel' }).click();
   await page.getByRole('menuitemradio', { name: 'Right only' }).click();
+  await closePopup(page, 'Selection details');
   await surface.press('Enter');
   await surface.press('Shift+Enter');
   await expect.poll(() => page.evaluate(() => window.repairFixture.calls.find(call => call.command?.type === 'selection')?.command.selection))
@@ -594,7 +754,8 @@ test('persists spectrogram display choices and requests the correct channel and 
   const mode = await page.getByRole('button', { name: 'Rectangle' }).boundingBox();
   const controls = await page.getByRole('group', { name: 'Spectrogram controls' }).boundingBox();
   expect(mode.x).toBeGreaterThanOrEqual(graph.x + graph.width);
-  expect(controls.y).toBeGreaterThanOrEqual(graph.y + graph.height);
+  expect(controls.y).toBeGreaterThan(graph.y);
+  expect(controls.y + controls.height).toBeLessThanOrEqual(graph.y + graph.height);
   expect(await page.getByRole('button', { name: 'Rectangle' }).innerText()).toBe('');
   const hum = await openPopup(page, 'Mains hum');
   await expect(page.getByRole('combobox', { name: 'Mains frequency' })).toBeVisible();
@@ -721,7 +882,7 @@ test('seeks when the user selects audio or enters a playback position', async ({
   const initial = await page.evaluate(() => window.repairFixture.calls.findLast(call =>
     call.command?.type === 'set-selection').command.selection.startFrame);
   await expect.poll(current).toBe(initial);
-  await page.getByRole('button', { name: 'Reduce', exact: true }).click();
+  await reduceSelected(page);
   expect(await page.evaluate(() => window.repairFixture.snapshot.settings.spectralRepairs[0].startFrame)).toBe(initial);
   const position = page.getByRole('textbox', { name: 'Playback position' });
   await position.fill('0:35.250');
@@ -743,8 +904,10 @@ test('arms the brush loop, auditions its mask, and updates it without seeking', 
     .findLast(call => call.command?.type === 'selection')?.command.selection);
   await expect(loop).toHaveAttribute('aria-pressed', 'true');
   expect(await page.evaluate(() => window.repairFixture.snapshot.playing)).toBe(false);
+  await openPopup(page, 'Loop and comparison');
   await playSelection.click();
   await expect(playSelection).toHaveAttribute('aria-pressed', 'true');
+  await closePopup(page, 'Loop and comparison');
   await expect.poll(latestPick).toMatchObject({ mask: { regions: [{ kind: 'brush', operation: 'add' }] } });
   const first = await latestPick();
   await expect.poll(() => page.evaluate(() => window.repairFixture.snapshot.loop)).toBe(true);
@@ -761,6 +924,7 @@ test('arms the brush loop, auditions its mask, and updates it without seeking', 
   await loop.click();
   await expect(loop).toHaveAttribute('aria-pressed', 'false');
   await surface.press('Escape');
+  await openPopup(page, 'Loop and comparison');
   await expect(playSelection).toHaveAttribute('aria-pressed', 'false');
   expect(await page.evaluate(() => window.repairFixture.snapshot.playing)).toBe(true);
 });
@@ -770,7 +934,7 @@ for (const tool of ['Rectangle', 'Brush']) {
     await zoomToPlayhead(page);
     await page.getByRole('button', { name: tool, exact: true }).click();
     const plot = await drawSelection(page);
-    await page.getByRole('button', { name: 'Play Selection', exact: true }).click();
+    await playSelected(page);
     const read = () => page.evaluate(() => ({
       frame: window.repairFixture.snapshot.frame, playing: window.repairFixture.snapshot.playing,
       loop: window.repairFixture.snapshot.loopRange,
@@ -810,6 +974,38 @@ test('Space pauses and plays after pointer use and preserves keyboard button act
   await position.focus();
   await page.keyboard.press('Space');
   await expect(page.getByRole('button', { name: 'Pause', exact: true })).toBeVisible();
+});
+
+test('shows live output peaks and keeps channel solo separate from the active repair', async ({ page }) => {
+  await drawSelection(page);
+  await playSelected(page);
+  await page.evaluate(() => window.repairFixture.sendMeter([.5, .125]));
+  const left = page.getByRole('meter', { name: 'Left playback level' });
+  const right = page.getByRole('meter', { name: 'Right playback level' });
+  await expect(left).toHaveAttribute('aria-valuetext', '−6.0 dBFS');
+  await expect(right).toHaveAttribute('aria-valuetext', '−18.1 dBFS');
+  const solo = page.getByRole('button', { name: 'Solo left channel' });
+  await solo.click();
+  await expect(solo).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('button', { name: 'Loop selection', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('.picked')).toBeVisible();
+  await page.evaluate(() => {
+    window.repairFixture.sendMeter([1, 0]);
+  });
+  await expect(right).toHaveAttribute('aria-valuetext', '−∞ dBFS');
+  const clip = page.getByRole('button', { name: 'Reset left peak hold, clipping detected' });
+  await expect(clip).toBeVisible();
+  await clip.click();
+  await expect(clip).toHaveCount(0);
+  await solo.click();
+  await expect(solo).toHaveAttribute('aria-pressed', 'false');
+  await page.evaluate(() => window.repairFixture.updateClock({ playing: false, transportSequence: 2 }));
+  await page.evaluate(() => window.repairFixture.sendMeter([1, 1], 1));
+  await expect(left).toHaveAttribute('aria-valuetext', 'No playback');
+  await expect(clip).toHaveCount(0);
+  await page.evaluate(() => window.repairFixture.updateClock({ repairStereoOutput: false }));
+  await expect(page.getByRole('meter', { name: 'Mono playback level' })).toBeVisible();
+  await expect(solo).toHaveCount(0);
 });
 
 test('keeps selection focus unobtrusive and retints the waveform with the theme', async ({ page }) => {
@@ -869,11 +1065,14 @@ test('pans from the time ruler and moves the playhead without dropping the selec
 });
 
 test('playhead feedback continues between snapshots and holds while audio is buffering', async ({ page }) => {
-  const position = () => page.locator('.overview-playhead').evaluate(marker =>
+  const position = (selector = '.overview-playhead') => page.locator(selector).evaluate(marker =>
     new DOMMatrixReadOnly(getComputedStyle(marker).transform).m41);
+  await expect(page.locator('.repair-plot .playhead')).toBeVisible();
+  const plotStart = await position('.repair-plot .playhead');
   await page.evaluate(() => window.repairFixture.updateClock({ playing: true, clockRunning: true }));
   const first = await position();
   await expect.poll(position).toBeGreaterThan(first);
+  await expect.poll(() => position('.repair-plot .playhead')).toBeGreaterThan(plotStart);
   await page.evaluate(() => window.repairFixture.updateClock({ clockRunning: false }));
   await expect.poll(position).toBeLessThanOrEqual(first);
   const stopped = await position();

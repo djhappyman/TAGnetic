@@ -15,7 +15,7 @@
   import AudioSplitOutput from './AudioSplitOutput.svelte';
   import AudioSplitImport from './AudioSplitImport.svelte';
   import {
-    activeRepairCount, listenToolRequests, listenToolVisibility, requestToolFlush, sendToolProbe, sendToolState,
+    activeRepairCount, listenToolRequests, listenToolVisibility, requestToolFlush, sendRepairMeter, sendToolProbe, sendToolState,
     toolEffectCount, toolModes, toolNames, toolPatch, toolTheme,
     type EqReference, type PreviewBand, type RepairListenCommand, type RepairListenState, type RepairLoopPreferences,
     type SpectrogramViewOptions, type ToolRequest, type ToolSnapshot, type ToolVisibility,
@@ -91,6 +91,9 @@
   let activeToolTheme: ToolSnapshot['theme'] | undefined;
   let toolTimer: ReturnType<typeof setInterval> | undefined;
   let meterTimer: ReturnType<typeof setInterval> | undefined;
+  let repairMeterPending = false;
+  let repairMeterRetryAt = 0;
+  let repairMeterRead = { sequence: -1, at: 0 };
   const liveMeterRate = 30;
   type ProbeLane = { pending?: string; retryAt: number; latest?: { key: string; sourceId: string; probe: TreatmentProbe } };
   let eqAnalyzerView: 'before' | 'after' | 'both' | 'off' = 'both';
@@ -385,6 +388,8 @@
       loopEnabled = false;
       repairListen = repairTrial = repairAudition = undefined;
       repairPick = undefined;
+      repairMeterRetryAt = 0;
+      repairMeterRead = { sequence: -1, at: 0 };
       repairTrialCache = undefined;
       repairLoopPreferences = defaultRepairLoop;
       repeatSelection = false;
@@ -722,6 +727,10 @@
       if (wasBuffering || wasRetuning !== retunePending || previousError !== listeningError || wasPlaying !== playing) {
         publishRepairPlayback();
       }
+      if (wasBuffering && playing && visibleTools.has('repair')) {
+        syncRepairMonitor();
+        void refreshRepairMeter();
+      }
     } catch (reason) {
       if (!current()) return;
       fail(String(reason));
@@ -761,7 +770,7 @@
       const repairLoop = action === 'audition' && repairAudition?.range.end === endFrame ? repairAudition : undefined;
       await audioCommand('transport', { id, action, frame, endFrame, sequence,
         ...(repairLoop ? { loopStartFrame: repairLoop.range.start, smoothLoop: repairLoop.smooth, repeat: loopEnabled } : {}),
-        ...(action === 'pause' ? {} : request) });
+        ...(action === 'pause' ? {} : { ...request, monitorChannel: repairMonitorChannel() }) });
       if (active && source?.id === id && playing && sequence === transportVersion) {
         scheduleStatus(id, sequence, 20);
         if (!sameTreatment(request.treatment, playbackTreatment().treatment) || measured !== treatmentAnalysis
@@ -795,6 +804,7 @@
         ? { loopStartFrame: selectedAudition.range.start, endFrame: selectedAudition.range.end, repeat: loopEnabled, smoothLoop: selectedAudition.smooth }
         : releaseSelectionRange ? { loopStartFrame: 0, endFrame: total, repeat: false } : {};
       releaseSelectionRange = false;
+      if (repairListen) syncRepairMonitor();
       void audioCommand('transport', { id, action: 'retune', sequence, revision, ...range, ...playbackTreatment() }).catch(reason => {
         if (active && source?.id === id && sequence === transportVersion && revision === retuneVersion) {
           listeningError = String(reason).replace(/^Error: /, '');
@@ -818,11 +828,10 @@
       return { treatment: noTreatment, monitor: { kind: 'band', lowHz, highHz, channel: hasStereo ? channel : undefined } };
     }
     if (repairListen && !monitor) {
-      const { signal, channel } = repairListen;
-      const isolated = hasStereo && channel !== 'stereo' ? channel : undefined;
+      const { signal } = repairListen;
       const settings = signal === 'original' ? noTreatment : repairListeningSettings();
-      if (signal === 'removed') return { treatment: settings, monitor: { kind: 'repair-difference', channel: isolated } };
-      return { treatment: settings, ...(isolated ? { monitor: { kind: 'channel', channel: isolated } } : {}) };
+      if (signal === 'removed') return { treatment: settings, monitor: { kind: 'repair-difference' } };
+      return { treatment: settings };
     }
     if (monitor?.kind === 'difference-compressor') {
       return { treatment, monitor: { kind: 'compressor-difference' } };
@@ -830,6 +839,22 @@
     if (monitor?.kind === 'bypass-compressor') return { treatment: { ...treatment, compressorDb: 0 } };
     const previewGainDb = hearOriginal ? comparisonGain.input : comparisonGain.output;
     return { treatment: hearOriginal ? noTreatment : listeningSettings(), ...(previewGainDb ? { previewGainDb } : {}) };
+  }
+
+  function repairStereoOutput() {
+    return hasStereo && (monitor?.kind === 'band'
+      || (repairListen ? repairListen.signal === 'original' : hearOriginal)
+      || repairListeningSettings().mono === 'off');
+  }
+
+  function repairMonitorChannel() {
+    return repairStereoOutput() ? repairListen?.channel ?? 'stereo' : 'stereo';
+  }
+
+  function syncRepairMonitor() {
+    if (!source) return;
+    void audioCommand('meter', { id: source.id, sequence: transportVersion, channel: repairMonitorChannel() })
+      .catch(console.error);
   }
 
   function readLevelMatch() {
@@ -1016,10 +1041,7 @@
         const preservePosition = command.preservePosition === true && playhead >= range.start && playhead < range.end;
         repairLoopPreferences = { smooth: command.smooth === true, returnTo: command.returnTo };
         repairAudition = { origin, range, selection: selection ?? undefined, ...repairLoopPreferences };
-        const monitorChannel = repairListen?.channel ?? command.band?.channel;
-        monitor = command.band ? { owner: 'repair', kind: 'band', band: {
-          ...command.band, channel: monitorChannel === 'stereo' ? undefined : monitorChannel,
-        } } : undefined;
+        monitor = command.band ? { owner: 'repair', kind: 'band', band: command.band } : undefined;
         loopRegion = range;
         loopEnabled = !selection || repeatSelection;
         if (selection && command.preservePosition && playing) retuneListening(true);
@@ -1038,15 +1060,9 @@
         retuneListening(true);
         break;
       case 'channel':
-        if (!['stereo', 'left', 'right'].includes(command.channel) || (!hasStereo && command.channel !== 'stereo')) return;
+        if (!['stereo', 'left', 'right'].includes(command.channel) || (!repairStereoOutput() && command.channel !== 'stereo')) return;
         repairListen = { ...before, channel: command.channel };
-        if (repairAudition?.selection) repairAudition = { ...repairAudition, selection: {
-          ...repairAudition.selection, channel: command.channel === 'stereo' ? undefined : command.channel,
-        } };
-        if (monitor?.owner === 'repair' && monitor.band) monitor = { ...monitor, band: {
-          ...monitor.band, channel: command.channel === 'stereo' ? undefined : command.channel,
-        } };
-        retuneListening(true);
+        syncRepairMonitor();
         break;
       case 'trial': {
         if (!['light', 'full'].includes(command.strength) || !command.candidate) return;
@@ -1109,9 +1125,14 @@
     if (visible) {
       if (visibleTools.has(kind)) return;
       visibleTools.add(kind);
+      if (kind === 'repair' && playing && !buffering) repairMeterRead = { sequence: transportVersion, at: -Infinity };
       if (toolTimer === undefined) toolTimer = setInterval(updateTools, 125);
-      if (kind !== 'repair' && meterTimer === undefined) {
-        meterTimer = setInterval(() => { if (playing) void refreshToolProbe(false); }, 1000 / liveMeterRate);
+      if (meterTimer === undefined) {
+        meterTimer = setInterval(() => {
+          if (!playing) return;
+          void refreshToolProbe(false);
+          void refreshRepairMeter();
+        }, 1000 / liveMeterRate);
       }
       publishToolState(kind, true);
       publishCachedProbe(kind);
@@ -1122,6 +1143,7 @@
       if (kind === 'repair') {
         const releaseSelection = !!repairAudition?.selection;
         repairListen = repairTrial = repairAudition = undefined;
+        syncRepairMonitor();
         if (releaseSelection) {
           loopRegion = null;
           loopEnabled = false;
@@ -1130,7 +1152,7 @@
       }
       if (monitor?.owner === kind) stopMonitor();
       if (wasVisible) void tick().then(() => document.getElementById('studio-tool-' + kind)?.focus({ preventScroll: true }));
-      if (!visibleTools.has('eq') && !visibleTools.has('dynamics')) {
+      if (!visibleTools.size) {
         clearInterval(meterTimer);
         meterTimer = undefined;
       }
@@ -1221,6 +1243,7 @@
       normalisation: kind === 'dynamics' ? treatmentAnalysis ?? undefined : undefined,
       ...(kind === 'repair' ? { overview: source.overview, stereoOverview: source.stereoOverview, cuts: toolCuts,
         repairListen, selectionPlaying: playing && !!repairAudition?.selection, repeatSelection,
+        transportSequence: transportVersion, repairStereoOutput: repairStereoOutput(),
         clockRunning: playing && !buffering && !scrubbing,
         repairPlayback: !playing ? undefined : listeningError ? 'failed' : buffering ? 'buffering' : retunePending ? 'updating' : undefined } : {}),
     } : null;
@@ -1233,6 +1256,7 @@
       && snapshot.pinned === sent.pinned && snapshot.levelMatch === sent.levelMatch && snapshot.monitor === sent.monitor
       && snapshot.repairListen === sent.repairListen && snapshot.clockRunning === sent.clockRunning
       && snapshot.repeatSelection === sent.repeatSelection && snapshot.selectionPlaying === sent.selectionPlaying
+      && snapshot.transportSequence === sent.transportSequence && snapshot.repairStereoOutput === sent.repairStereoOutput
       && snapshot.repairPlayback === sent.repairPlayback
       && snapshot.undoLabel === sent.undoLabel && snapshot.redoLabel === sent.redoLabel
       && snapshot.eqLearning === sent.eqLearning && snapshot.normalisation === sent.normalisation && snapshot.reference === sent.reference && snapshot.cuts === sent.cuts))) return;
@@ -1271,6 +1295,30 @@
     for (const kind of visibleTools) publishToolState(kind);
     void refreshToolProbe(false);
     void refreshToolProbe(true);
+  }
+
+  async function refreshRepairMeter() {
+    const id = source?.id;
+    const sequence = transportVersion;
+    const now = performance.now();
+    const current = () => active && id === source?.id && sequence === transportVersion
+      && visibleTools.has('repair') && playing && !buffering && !scrubbing;
+    if (!id || repairMeterPending || now < repairMeterRetryAt || !current()) return;
+    // A peak read drains the output tap. Drain an expired interval before
+    // showing fresh levels when the window is reopened or timers were suspended.
+    const expired = repairMeterRead.sequence === sequence && now - repairMeterRead.at > 180;
+    repairMeterPending = true;
+    try {
+      const peaks = await audioCommand<[number, number] | null>('meter', { id, sequence });
+      if (peaks && current()) {
+        repairMeterRead = { sequence, at: now };
+        if (!expired) await sendRepairMeter({ sourceId: id, sequence, peaks });
+      }
+    } catch {
+      repairMeterRetryAt = performance.now() + 500;
+    } finally {
+      repairMeterPending = false;
+    }
   }
 
   async function refreshToolProbe(spectrogram: boolean, movedViewport = false) {

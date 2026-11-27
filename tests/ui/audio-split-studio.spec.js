@@ -60,6 +60,8 @@ test.beforeEach(async ({ page }) => {
             window.studioFixture.toolSnapshots = { ...window.studioFixture.toolSnapshots, [target]: state };
           } else if (name === 'tagnetic:audio-tools-probe') {
             window.studioFixture.toolProbes = { ...window.studioFixture.toolProbes, [target]: payload };
+          } else if (name === 'tagnetic:audio-tools-meter') {
+            window.studioFixture.meterUpdates?.push({ ...payload, time: performance.now() });
           } else if (name === 'tagnetic:audio-tools-flush') {
             window.studioFixture.toolFence = payload;
           }
@@ -113,6 +115,8 @@ test.beforeEach(async ({ page }) => {
             case 'audio_split_status':
               if (args.audition) return { playing: true, loading: false, sequence: args.sequence };
               return window.studioFixture.statusProbe?.(args) ?? { frame: 48001, playing: true };
+            case 'audio_split_meter':
+              return args.channel ? null : window.studioFixture.outputPeaks ?? null;
             case 'audio_split_audition_output': return;
             case 'audio_split_transport':
             case 'audio_split_close': return;
@@ -1174,12 +1178,12 @@ test('Repair plot shortcuts use the configured audition seam, return point and m
   await send({ action: 'loop', range });
   await expect.poll(lastTransport).toMatchObject({
     action: 'audition', frame: range.start, endFrame: range.end, loopStartFrame: range.start,
-    smoothLoop: true, monitor: { kind: 'channel', channel: 'right' },
+    smoothLoop: true, monitorChannel: 'right',
   });
   await send({ action: 'audition-band', range, band: { lowHz: 400, highHz: 1_700, channel: 'left' } });
   await expect.poll(lastTransport).toMatchObject({
     action: 'audition', frame: range.start, endFrame: range.end, loopStartFrame: range.start,
-    smoothLoop: true, monitor: { kind: 'band', channel: 'right', lowHz: 400, highHz: 1_700 },
+    smoothLoop: true, monitorChannel: 'right', monitor: { kind: 'band', channel: 'left', lowHz: 400, highHz: 1_700 },
   });
   await send({ action: 'play' });
   await expect.poll(lastTransport).toMatchObject({ action: 'pause' });
@@ -1187,7 +1191,7 @@ test('Repair plot shortcuts use the configured audition seam, return point and m
   await send({ action: 'play' });
   await expect.poll(lastTransport).toMatchObject({
     action: 'audition', endFrame: range.end, loopStartFrame: range.start,
-    monitor: { kind: 'band', channel: 'right', lowHz: 400, highHz: 1_700 },
+    monitorChannel: 'right', monitor: { kind: 'band', channel: 'left', lowHz: 400, highHz: 1_700 },
   });
   await send({ action: 'repair-listen', command: { type: 'stop' } });
   await expect.poll(lastTransport).toMatchObject({ action: 'pause', frame: 0 });
@@ -1241,6 +1245,39 @@ test('Repair selection arms a filtered loop and changes its boundaries on the ru
   await listen({ type: 'clear-selection', frame: 88_000 });
   await expect.poll(lastTransport).toMatchObject({ action: 'play', frame: 88_000 });
   expect(await lastTransport()).not.toHaveProperty('previewSelection');
+});
+
+test('Repair streams native output peaks at the live meter cadence and solos without retuning audio', async ({ page }) => {
+  await page.evaluate(() => {
+    const fixture = window.studioFixture;
+    fixture.meterUpdates = [];
+    fixture.stereo = true;
+    fixture.outputPeaks = [.25, .5];
+    fixture.statusProbe = ({ sequence }) => ({ sequence, frame: 120_000, playing: true });
+  });
+  await page.getByRole('button', { name: 'Split recording', exact: true }).click();
+  const studio = page.getByRole('dialog', { name: 'Split recording' });
+  await studio.getByRole('button', { name: 'Repair', exact: true }).click();
+  const send = data => page.evaluate(data => window.__TAURI__.event.emitTo('main', 'tagnetic:audio-tools-command', {
+    kind: 'repair', sourceId: 'recording', ...data,
+  }), data);
+  const selection = { startFrame: 96_000, endFrame: 144_000, lowHz: 400, highHz: 1_700, amountDb: 1 };
+  await send({ action: 'repair-listen', command: { type: 'set-selection', selection } });
+  await send({ action: 'play' });
+  const updates = () => page.evaluate(() => window.studioFixture.meterUpdates);
+  await expect.poll(async () => (await updates()).length).toBeGreaterThanOrEqual(6);
+  const series = await updates();
+  const intervals = series.slice(1).map((item, index) => item.time - series[index].time).sort((a, b) => a - b);
+  expect(intervals[Math.floor(intervals.length / 2)]).toBeLessThan(75);
+  expect(series.at(-1)).toMatchObject({ sourceId: 'recording', peaks: [.25, .5] });
+  const count = (await calls(page, 'transport')).length;
+  await send({ action: 'repair-listen', command: { type: 'channel', channel: 'left' } });
+  await expect.poll(async () => (await calls(page, 'meter')).findLast(call => call.args.channel)?.args)
+    .toMatchObject({ sequence: series.at(-1).sequence, channel: 'left' });
+  expect((await calls(page, 'transport')).length).toBe(count);
+  await send({ action: 'repair-listen', command: { type: 'signal', signal: 'removed' } });
+  await expect.poll(async () => (await calls(page, 'transport')).at(-1)?.args)
+    .toMatchObject({ action: 'retune', previewSelection: selection, monitor: { kind: 'repair-difference' } });
 });
 
 test('track and Shift-drag loops share playback and the waveform handles', async ({ page }) => {

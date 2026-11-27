@@ -3,7 +3,7 @@
 //! retain all old sinks while an output device is not pulling samples.
 use rodio::{queue::SourcesQueueOutput, source::UniformSourceIterator, Source};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering},
     Arc, Mutex, TryLockError,
 };
 use std::time::Duration;
@@ -23,12 +23,42 @@ struct Shared {
     changed: AtomicBool,
     channels: rodio::ChannelCount,
     rate: rodio::SampleRate,
+    studio: Option<StudioOutput>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[repr(u8)]
+pub enum StudioMonitorChannel {
+    #[default]
+    Stereo,
+    Left,
+    Right,
+}
+
+#[derive(Default)]
+struct StudioOutput {
+    monitor: AtomicU8,
+    peaks: [AtomicU32; 2],
 }
 #[derive(Clone)]
 pub(super) struct Handle(Arc<Shared>);
 impl Handle {
     pub fn format(&self) -> (rodio::ChannelCount, rodio::SampleRate) {
         (self.0.channels, self.0.rate)
+    }
+
+    pub fn studio_monitor(&self, channel: StudioMonitorChannel) {
+        if let Some(studio) = &self.0.studio {
+            studio.monitor.store(channel as u8, Ordering::Relaxed);
+        }
+    }
+
+    pub fn studio_peaks(&self) -> Option<[f32; 2]> {
+        let output = self.0.studio.as_ref()?;
+        Some(std::array::from_fn(|index| {
+            f32::from_bits(output.peaks[index].swap(0, Ordering::Relaxed))
+        }))
     }
     pub fn replace(&self, output: SourcesQueueOutput) {
         self.queue(output, None);
@@ -69,6 +99,9 @@ pub(super) struct Router {
     current: Option<Output>,
     fade: Option<Fade>,
     frame_remaining: usize,
+    monitor_gains: [f32; 2],
+    meter_peaks: [f32; 2],
+    meter_frames: u32,
 }
 
 struct Fade {
@@ -79,11 +112,28 @@ struct Fade {
 }
 impl Router {
     pub fn new(channels: rodio::ChannelCount, rate: rodio::SampleRate) -> (Handle, Self) {
+        Self::with_studio(channels, rate, None)
+    }
+
+    pub fn new_studio(rate: rodio::SampleRate) -> (Handle, Self) {
+        Self::with_studio(
+            rodio::ChannelCount::new(2).unwrap(),
+            rate,
+            Some(StudioOutput::default()),
+        )
+    }
+
+    fn with_studio(
+        channels: rodio::ChannelCount,
+        rate: rodio::SampleRate,
+        studio: Option<StudioOutput>,
+    ) -> (Handle, Self) {
         let shared = Arc::new(Shared {
             pending: Mutex::new(None),
             changed: AtomicBool::new(false),
             channels,
             rate,
+            studio,
         });
         (
             Handle(shared.clone()),
@@ -92,6 +142,9 @@ impl Router {
                 current: None,
                 fade: None,
                 frame_remaining: 0,
+                monitor_gains: [1.0; 2],
+                meter_peaks: [0.0; 2],
+                meter_frames: 0,
             },
         )
     }
@@ -130,6 +183,14 @@ impl Iterator for Router {
                 } else {
                     self.current = Some(output);
                     self.fade = None;
+                    self.meter_peaks = [0.0; 2];
+                    self.meter_frames = 0;
+                    if let Some(studio) = &self.shared.studio {
+                        for peak in &studio.peaks {
+                            peak.store(0, Ordering::Relaxed);
+                        }
+                        self.monitor_gains = monitor_gains(studio);
+                    }
                 }
             }
         }
@@ -154,7 +215,36 @@ impl Iterator for Router {
                 }
             }
         }
+        if let Some(studio) = &self.shared.studio {
+            let channel = 1 - self.frame_remaining;
+            if channel == 0 {
+                let step = 1.0 / ((self.shared.rate.get() / 250).max(1) as f32);
+                for (gain, target) in self.monitor_gains.iter_mut().zip(monitor_gains(studio)) {
+                    *gain += (target - *gain).clamp(-step, step);
+                }
+            }
+            sample *= self.monitor_gains[channel];
+            self.meter_peaks[channel] = self.meter_peaks[channel].max(sample.abs());
+            if channel == 1 {
+                self.meter_frames += 1;
+                if self.meter_frames >= (self.shared.rate.get() / 250).max(1) {
+                    for (peak, measured) in studio.peaks.iter().zip(self.meter_peaks) {
+                        peak.fetch_max(measured.to_bits(), Ordering::Relaxed);
+                    }
+                    self.meter_peaks = [0.0; 2];
+                    self.meter_frames = 0;
+                }
+            }
+        }
         Some(sample)
+    }
+}
+
+fn monitor_gains(studio: &StudioOutput) -> [f32; 2] {
+    match studio.monitor.load(Ordering::Relaxed) {
+        value if value == StudioMonitorChannel::Left as u8 => [1.0, 0.0],
+        value if value == StudioMonitorChannel::Right as u8 => [0.0, 1.0],
+        _ => [1.0, 1.0],
     }
 }
 impl Source for Router {
@@ -201,6 +291,38 @@ mod tests {
         fn total_duration(&self) -> Option<Duration> {
             None
         }
+    }
+
+    #[test]
+    fn studio_meter_reads_output_with_volume_and_monitor_gain_applied() {
+        let rate = rodio::SampleRate::new(8_000).unwrap();
+        let (handle, mut router) = Router::new_studio(rate);
+        let (channels, _) = handle.format();
+        let (player, output) = rodio::Player::new();
+        player.set_volume(0.5);
+        player.append(rodio::buffer::SamplesBuffer::new(
+            channels,
+            rate,
+            [0.75, -0.5].repeat(256),
+        ));
+        handle.replace(output);
+        for _ in 0..128 {
+            router.next();
+        }
+        assert_eq!(handle.studio_peaks(), Some([0.375, 0.25]));
+        assert_eq!(handle.studio_peaks(), Some([0.0, 0.0]));
+
+        handle.studio_monitor(StudioMonitorChannel::Right);
+        for _ in 0..128 {
+            router.next();
+        }
+        handle.studio_peaks();
+        assert_eq!(router.next(), Some(0.0));
+        assert_eq!(router.next(), Some(-0.25));
+        for _ in 0..126 {
+            router.next();
+        }
+        assert_eq!(handle.studio_peaks(), Some([0.0, 0.25]));
     }
 
     #[test]

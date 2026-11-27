@@ -25,6 +25,7 @@ mod fixed;
 mod mailbox;
 mod mp4;
 mod router;
+pub use router::StudioMonitorChannel;
 mod studio;
 pub use mailbox::PlayerError;
 pub use studio::{StudioAudition, StudioPreviewRange, StudioPreviewState, StudioStatus};
@@ -171,6 +172,16 @@ impl Player {
         sequence: u64,
         request: StudioPlayback,
     ) -> Result<(), PlayerError> {
+        self.studio_play_monitored(owner, sequence, request, StudioMonitorChannel::Stereo)
+    }
+
+    pub fn studio_play_monitored(
+        &self,
+        owner: String,
+        sequence: u64,
+        request: StudioPlayback,
+        channel: StudioMonitorChannel,
+    ) -> Result<(), PlayerError> {
         self.tx.send(Cmd::Studio(studio::Command::Play {
             owner,
             sequence,
@@ -181,6 +192,7 @@ impl Player {
             sample_rate: request.sample_rate,
             seek_index: request.seek_index,
             treatment: Box::new(request.treatment),
+            channel,
         }))
     }
 
@@ -255,6 +267,15 @@ impl Player {
 
     pub fn studio_status(&self, owner: &str) -> StudioStatus {
         self.studio_status.for_owner(owner)
+    }
+
+    pub fn studio_meter(
+        &self,
+        owner: &str,
+        sequence: u64,
+        channel: Option<StudioMonitorChannel>,
+    ) -> Option<[f32; 2]> {
+        self.studio_status.meter(owner, sequence, channel)
     }
 }
 
@@ -406,8 +427,8 @@ impl Output for Device {
         Some(
             self.studio_router
                 .get_or_init(|| {
-                    let (channels, rate) = self.router.format();
-                    let (handle, source) = router::Router::new(channels, rate);
+                    let (_, rate) = self.router.format();
+                    let (handle, source) = router::Router::new_studio(rate);
                     self._output.mixer().add(source);
                     handle
                 })

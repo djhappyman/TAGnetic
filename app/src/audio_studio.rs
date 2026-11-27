@@ -715,7 +715,8 @@ pub(super) async fn audio_split_discogs(
 
 use std::time::Duration;
 use tagrex_player::{
-    Player, StudioAudition, StudioPlayback, StudioPreviewRange, StudioPreviewState,
+    Player, StudioAudition, StudioMonitorChannel, StudioPlayback, StudioPreviewRange,
+    StudioPreviewState,
 };
 
 #[derive(serde::Deserialize)]
@@ -764,6 +765,7 @@ pub(super) async fn audio_split_transport(
     monitor: Option<PreviewMonitor>,
     preview_selection: Option<SpectralRepair>,
     preview_gain_db: Option<f32>,
+    monitor_channel: Option<StudioMonitorChannel>,
 ) -> Result<(), ErrorDto> {
     if matches!(action, TransportAction::Retune) {
         let range = if let Some(end) = end_frame {
@@ -818,7 +820,7 @@ pub(super) async fn audio_split_transport(
                 let owner = id.clone();
                 let sequence = sequence.unwrap_or_default();
                 let play = |audition, end_frame| {
-                    player.studio_play_request(
+                    player.studio_play_monitored(
                         owner.clone(),
                         sequence,
                         StudioPlayback {
@@ -832,6 +834,7 @@ pub(super) async fn audio_split_transport(
                                 .with_preview_monitor(monitor, preview_gain_db)
                                 .with_preview_selection(preview_selection),
                         },
+                        monitor_channel.unwrap_or_default(),
                     )
                 };
                 match action {
@@ -907,6 +910,16 @@ pub(super) fn audio_split_audition_output(
             },
         )
         .map_err(shell_error)
+}
+
+#[tauri::command]
+pub(super) fn audio_split_meter(
+    player: State<'_, Player>,
+    id: String,
+    sequence: u64,
+    channel: Option<StudioMonitorChannel>,
+) -> Option<[f32; 2]> {
+    player.studio_meter(&id, sequence, channel)
 }
 
 #[tauri::command]

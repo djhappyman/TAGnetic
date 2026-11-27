@@ -8,6 +8,7 @@ export const toolLabel = (kind: TreatmentPlotMode) => `audio-tool-${kind}`;
 const commandEvent = 'tagnetic:audio-tools-command';
 const stateEvent = 'tagnetic:audio-tools-state';
 const probeEvent = 'tagnetic:audio-tools-probe';
+const meterEvent = 'tagnetic:audio-tools-meter';
 const flushEvent = 'tagnetic:audio-tools-flush';
 const visibilityEvent = 'tagnetic:audio-tool-visibility';
 
@@ -72,6 +73,8 @@ export type ToolSnapshot = {
   playing: boolean;
   clockRunning?: boolean;
   repairPlayback?: 'buffering' | 'updating' | 'failed';
+  transportSequence?: number;
+  repairStereoOutput?: boolean;
   original: boolean;
   loop: boolean;
   loopRange?: FrameRange;
@@ -103,9 +106,10 @@ export type SpectrogramViewOptions = {
   detail?: 'balanced' | 'transients' | 'tones';
 };
 export type PreviewBand = { lowHz: number; highHz: number; channel?: Exclude<EqChannel, 'stereo'> };
+export type RepairMonitorChannel = 'stereo' | 'left' | 'right';
 export type RepairListenState = {
   signal: 'original' | 'repaired' | 'removed';
-  channel: 'stereo' | 'left' | 'right';
+  channel: RepairMonitorChannel;
   trial?: 'light' | 'full';
 };
 export type RepairLoopPreferences = { smooth: boolean; returnTo: 'hold' | 'loop' | 'start' };
@@ -140,6 +144,7 @@ export type ToolRequest = { kind: TreatmentPlotMode } & (
 
 export type ToolAction = DirectToolAction | 'original' | 'treated' | 'loop' | 'undo' | 'redo';
 export type ToolProbeUpdate = { sourceId: string; probe?: TreatmentProbe; error?: string };
+export type RepairMeterUpdate = { sourceId: string; sequence: number; peaks: [number, number] };
 export type ToolVisibility = { kind: TreatmentPlotMode; visible: boolean };
 
 type Events = {
@@ -165,6 +170,14 @@ export function listenToolVisibility(handler: (visibility: ToolVisibility) => vo
 
 export function listenToolProbe(handler: (update: ToolProbeUpdate) => void) {
   return events()?.listen<ToolProbeUpdate>(probeEvent, ({ payload }) => handler(payload));
+}
+
+export function listenRepairMeter(handler: (update: RepairMeterUpdate) => void) {
+  return events()?.listen<RepairMeterUpdate>(meterEvent, ({ payload }) => handler(payload));
+}
+
+export function sendRepairMeter(update: RepairMeterUpdate) {
+  return events()?.emitTo(toolLabel('repair'), meterEvent, update);
 }
 
 export function listenToolFlush(handler: (fence: string) => void) {

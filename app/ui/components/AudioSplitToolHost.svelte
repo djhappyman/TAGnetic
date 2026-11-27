@@ -6,13 +6,14 @@
   import { readTreatment, sameTreatment, type AudioTreatment } from '../js/audio-treatment';
   import type { AnalyzerView, TreatmentPlotMode, TreatmentProbe } from '../js/audio-treatment-plot';
   import {
-    applyToolTheme, listenToolFlush, listenToolProbe, listenToolState, sendToolRequest, toolPatch,
-    type PreviewBand, type RepairListenCommand, type SpectrogramViewOptions, type ToolAction, type ToolProbeUpdate, type ToolRequest, type ToolSnapshot, type ToolStateUpdate,
+    applyToolTheme, listenRepairMeter, listenToolFlush, listenToolProbe, listenToolState, sendToolRequest, toolPatch,
+    type PreviewBand, type RepairListenCommand, type RepairMeterUpdate, type SpectrogramViewOptions, type ToolAction, type ToolProbeUpdate, type ToolRequest, type ToolSnapshot, type ToolStateUpdate,
   } from '../js/audio-tools-window';
 
   let { kind }: { kind: TreatmentPlotMode } = $props();
   let snapshot = $state.raw<ToolSnapshot | null>(null);
   let probe = $state.raw<TreatmentProbe | null>(null);
+  let meter = $state.raw<RepairMeterUpdate | undefined>();
   let connectionError = $state('');
   let probeError = $state('');
   let received: ToolSnapshot | null = null;
@@ -134,6 +135,7 @@
       queued.length = 0;
       requestedFence = undefined;
       probe = null;
+      meter = undefined;
       probeError = '';
     }
     received = state;
@@ -179,6 +181,9 @@
       requestedFence = fence;
       flush();
     })];
+    if (kind === 'repair') listeners.push(listenRepairMeter(update => {
+      if (active && received?.sourceId === update.sourceId) meter = update;
+    }));
     if (listeners.every(Boolean)) {
       void Promise.all(listeners.map(pending => pending?.then(stop => {
         if (active) unlisten.push(stop);
@@ -200,7 +205,7 @@
     <p class="problem" role="status">{connectionError || probeError}</p>
   {/if}
   {#key snapshot?.sourceId}
-    <AudioSplitToolWindow {kind} {snapshot} {probe} onedit={edit} onaction={action} onviewport={viewport} onanalyzer={analyzer} onlearn={learnThreshold} onlisten={listen}/>
+    <AudioSplitToolWindow {kind} {snapshot} {probe} {meter} onedit={edit} onaction={action} onviewport={viewport} onanalyzer={analyzer} onlearn={learnThreshold} onlisten={listen}/>
   {/key}
 </main>
 
