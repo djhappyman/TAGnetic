@@ -112,7 +112,9 @@ fn xml_cell(out: &mut dyn Write, value: &str) -> fmt::Result {
         '&' => Some("&amp;"),
         '<' => Some("&lt;"),
         '>' => Some("&gt;"),
-        '\t' | '\n' | '\r' => None,
+        // XML readers normalize literal CR and CRLF sequences to LF.
+        '\r' => Some("&#13;"),
+        '\t' | '\n' => None,
         '\u{FFFE}' | '\u{FFFF}' => Some(""),
         c if c < ' ' => Some(""),
         _ => None,

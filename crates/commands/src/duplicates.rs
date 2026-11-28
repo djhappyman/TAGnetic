@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use rusty_chromaprint::{match_fingerprints, Configuration, Fingerprinter};
@@ -74,7 +74,7 @@ impl Stamp {
 #[derive(Debug, Clone)]
 struct AudioSignature {
     pcm: Option<[u8; 32]>,
-    fingerprint: Vec<u32>,
+    fingerprint: Arc<[u32]>,
     frames: u64,
     rate: u32,
     complete: bool,
@@ -355,7 +355,7 @@ pub fn scan_with_updates(
                 let full = kind == "same_audio";
                 entry
                     .audio
-                    .clone()
+                    .take()
                     .filter(|audio| !full || audio.pcm.is_some())
                     .map(Ok)
                     .unwrap_or_else(|| analyze_audio(Path::new(&row.path), full, &cancelled))
@@ -667,6 +667,7 @@ fn analyze_audio(
     let mut full_read = true;
     let mut bytes = Vec::new();
     let mut fingerprint_input = Vec::new();
+    let mut sample_buffer: Option<SampleBuffer<f64>> = None;
     loop {
         if cancelled() {
             return Err(QueryError::Cancelled);
@@ -698,10 +699,18 @@ fn analyze_audio(
             hash.update(current.channels.bits().to_le_bytes());
             spec = Some(current);
         }
-        let mut buffer = SampleBuffer::<f64>::new(decoded.capacity() as u64, current);
+        let channels = current.channels.count();
+        let capacity = decoded.capacity();
+        let buffer = match &mut sample_buffer {
+            Some(buffer) if buffer.capacity() >= capacity.saturating_mul(channels) => buffer,
+            slot => {
+                // Growing scratch should not temporarily retain both buffers.
+                drop(slot.take());
+                slot.insert(SampleBuffer::new(capacity as u64, current))
+            }
+        };
         buffer.copy_interleaved_ref(decoded);
         let samples = buffer.samples();
-        let channels = current.channels.count();
         frames += samples.len() as u64 / channels as u64;
         if full {
             bytes.clear();
@@ -734,7 +743,7 @@ fn analyze_audio(
     let rate = spec.ok_or_else(|| io_error("No audio samples"))?.rate;
     Ok(AudioSignature {
         pcm: (full && full_read).then(|| hash.finalize().into()),
-        fingerprint: printer.fingerprint().to_vec(),
+        fingerprint: Arc::from(printer.fingerprint()),
         frames,
         rate,
         complete: full_read,

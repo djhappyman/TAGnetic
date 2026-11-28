@@ -490,4 +490,13 @@ mod tests {
         assert!(out.contains("<artist>Nulled[0m</artist>"));
         assert!(out.contains("<comment>two\nlines\tand \u{85}</comment>"));
     }
+
+    #[test]
+    fn xml_preserves_carriage_returns_for_readers() {
+        let out = xml(&[track(
+            "/music/x.mp3",
+            &[(TagField::Comment, "first\rsecond\r\nthird\tfourth & fifth")],
+        )]);
+        assert!(out.contains("<comment>first&#13;second&#13;\nthird\tfourth &amp; fifth</comment>"));
+    }
 }

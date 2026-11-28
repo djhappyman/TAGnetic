@@ -165,13 +165,16 @@ impl Latest {
             cancelled: AtomicBool::new(false),
             waiter: Mutex::new(None),
         }));
-        if let Some(old) = self
+        let waiter = self
             .0
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .replace(next.clone())
-        {
-            old.cancel();
+            .and_then(|old| old.cancel_and_take_waiter());
+        // Mark supersession in admission order, but let the waker run without
+        // the lane lock in case it polls or schedules another admission.
+        if let Some(waiter) = waiter {
+            waiter.wake();
         }
         next
     }
@@ -190,16 +193,18 @@ struct CancelFlag {
 pub struct Cancellation(Arc<CancelFlag>);
 impl Cancellation {
     fn cancel(&self) {
+        if let Some(waiter) = self.cancel_and_take_waiter() {
+            waiter.wake();
+        }
+    }
+
+    fn cancel_and_take_waiter(&self) -> Option<Waker> {
         self.0.cancelled.store(true, Ordering::Release);
-        let waiter = self
-            .0
+        self.0
             .waiter
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .take();
-        if let Some(waiter) = waiter {
-            waiter.wake();
-        }
+            .take()
     }
 
     pub fn cancelled(&self) -> bool {
@@ -460,6 +465,37 @@ mod tests {
         assert_eq!(queue.resource().pending.load(Ordering::Acquire), 0);
         assert!(!newest.cancelled(), "the newest request was cancelled");
         drop(held);
+    }
+
+    #[test]
+    fn supersession_wakes_after_releasing_the_lane_lock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::{Wake, Waker};
+
+        struct InspectLane {
+            lane: Arc<super::Latest>,
+            lock_available: AtomicBool,
+        }
+        impl Wake for InspectLane {
+            fn wake(self: Arc<Self>) {
+                self.lock_available
+                    .store(self.lane.0.try_lock().is_ok(), Ordering::Relaxed);
+            }
+        }
+
+        let lane = Arc::new(super::Latest::new());
+        let first = lane.begin();
+        let observer = Arc::new(InspectLane {
+            lane: lane.clone(),
+            lock_available: AtomicBool::new(false),
+        });
+        *first.0.waiter.lock().unwrap() = Some(Waker::from(observer.clone()));
+
+        let newest = lane.begin();
+
+        assert!(first.cancelled());
+        assert!(!newest.cancelled());
+        assert!(observer.lock_available.load(Ordering::Relaxed));
     }
 
     #[test]

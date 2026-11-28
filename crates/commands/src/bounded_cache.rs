@@ -59,16 +59,12 @@ impl<K: Clone + Eq + Hash, V> Cache<K, V> {
     where
         K: Borrow<Q>,
     {
-        if !self.entries.contains_key(key) {
-            return None;
-        }
         let stamp = self.tick();
-        let (owned, entry) = self.entries.get_key_value(key)?;
-        let owned = owned.clone();
-        self.order.remove(&entry.2);
-        self.order.insert(stamp, owned);
         let entry = self.entries.get_mut(key)?;
-        entry.2 = stamp;
+        if let Some(owned) = self.order.remove(&entry.2) {
+            self.order.insert(stamp, owned);
+            entry.2 = stamp;
+        }
         Some(&entry.0)
     }
     pub fn insert(&mut self, key: K, value: V, bytes: usize) {
@@ -105,6 +101,45 @@ impl<K: Clone + Eq + Hash, V> Cache<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn warm_lookup_hashes_once_and_reuses_the_owned_recency_key() {
+        use std::{cell::Cell, hash::Hasher, rc::Rc};
+
+        #[derive(Default)]
+        struct Counts {
+            hashes: Cell<usize>,
+            clones: Cell<usize>,
+        }
+        struct Key(usize, Rc<Counts>);
+        impl Clone for Key {
+            fn clone(&self) -> Self {
+                self.1.clones.set(self.1.clones.get() + 1);
+                Self(self.0, Rc::clone(&self.1))
+            }
+        }
+        impl PartialEq for Key {
+            fn eq(&self, other: &Self) -> bool {
+                self.0 == other.0
+            }
+        }
+        impl Eq for Key {}
+        impl Hash for Key {
+            fn hash<H: Hasher>(&self, state: &mut H) {
+                self.1.hashes.set(self.1.hashes.get() + 1);
+                self.0.hash(state);
+            }
+        }
+
+        let counts = Rc::new(Counts::default());
+        let mut cache = Cache::new(2, 10);
+        cache.insert(Key(1, Rc::clone(&counts)), "cached", 1);
+        counts.hashes.set(0);
+        counts.clones.set(0);
+
+        assert_eq!(cache.get(&Key(1, Rc::clone(&counts))), Some(&"cached"));
+        assert_eq!((counts.hashes.get(), counts.clones.get()), (1, 0));
+    }
+
     #[test]
     fn hot_entries_survive_count_byte_pressure_and_clock_rollover() {
         let mut c = Cache::new(3, 10);

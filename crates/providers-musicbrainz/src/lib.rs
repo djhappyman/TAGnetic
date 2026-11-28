@@ -184,8 +184,8 @@ impl MetadataProvider for MusicBrainzProvider {
         };
         let mut params: Vec<(&str, &str)> =
             vec![("query", &query_str), ("fmt", "json"), ("limit", limit_str)];
-        if query.per_page > 0 && query.page > 1 {
-            offset = (query.per_page * (query.page - 1)).to_string();
+        if let Some(page_offset) = search_offset(query) {
+            offset = page_offset.to_string();
             params.push(("offset", &offset));
         }
         // dismax matches a plain user query across fields (see `build_query`).
@@ -203,6 +203,11 @@ impl MetadataProvider for MusicBrainzProvider {
         )?;
         parse_release(&body)
     }
+}
+
+fn search_offset(query: &SearchQuery) -> Option<u64> {
+    (query.per_page > 0 && query.page > 1)
+        .then(|| u64::from(query.per_page) * u64::from(query.page - 1))
 }
 
 /// The Cover Art Archive front-cover URL for a release MBID. The archive 302s to
@@ -635,6 +640,16 @@ fn date_to_year(value: &Value) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_large_search_offset_does_not_wrap() {
+        let query = SearchQuery {
+            per_page: 100,
+            page: u32::MAX,
+            ..SearchQuery::default()
+        };
+        assert_eq!(search_offset(&query), Some(429_496_729_400));
+    }
 
     /// A server that answers 429 with a `Retry-After` (with the whitespace HTTP
     /// allows around it) is a rate limit for as long as it asks, end to end.

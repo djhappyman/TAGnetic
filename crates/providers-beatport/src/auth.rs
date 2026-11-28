@@ -72,10 +72,13 @@ impl BeatportToken {
             .get("expires_in")
             .and_then(|v| v.as_u64())
             .unwrap_or(3600);
+        let expires_at = now_unix().checked_add(expires_in).ok_or_else(|| {
+            ProviderError::Other("malformed token response: expiry out of range".into())
+        })?;
         Ok(Self {
             access_token,
             refresh_token,
-            expires_at: now_unix() + expires_in,
+            expires_at,
         })
     }
 }
@@ -383,6 +386,15 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ProviderError::Auth(detail) if detail.contains("invalid")));
+    }
+
+    #[test]
+    fn an_unrepresentable_expiry_is_a_response_error() {
+        let response = r#"{"access_token":"fixture-access","refresh_token":"fixture-refresh","expires_in":18446744073709551615}"#;
+        assert!(matches!(
+            BeatportToken::from_response(response),
+            Err(ProviderError::Other(detail)) if detail.contains("expiry")
+        ));
     }
 
     #[test]

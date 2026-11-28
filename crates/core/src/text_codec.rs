@@ -75,13 +75,19 @@ impl TextEncoding {
     }
 }
 
-fn append<T: Clone>(output: &mut Vec<T>, part: &[T], limit: usize) -> Result<(), TextError> {
-    if output
+fn append(output: &mut Vec<u8>, part: &[u8], limit: usize) -> Result<(), TextError> {
+    let required = output
         .len()
         .checked_add(part.len())
-        .is_none_or(|size| size > limit)
-    {
-        return Err(TextError::Limit);
+        .filter(|size| *size <= limit)
+        .ok_or(TextError::Limit)?;
+    if required > output.capacity() {
+        // Grow geometrically for incremental encoders, but never request an
+        // allocation beyond the output limit. Reserve fallibly before copying.
+        let target = required.max(output.capacity().saturating_mul(2)).min(limit);
+        output
+            .try_reserve_exact(target - output.len())
+            .map_err(|_| TextError::Limit)?;
     }
     output.extend_from_slice(part);
     Ok(())
@@ -347,5 +353,18 @@ mod tests {
             Err(TextError::Limit)
         );
         assert_eq!(encode("", TextEncoding::Utf8, false, 0).unwrap(), []);
+    }
+
+    #[test]
+    fn incremental_output_keeps_allocation_within_its_byte_limit() {
+        let limit = 10_001;
+        let text = "a".repeat(5_000);
+        let encoded = encode(&text, TextEncoding::Utf16Le, false, limit).unwrap();
+        assert!(encoded.capacity() <= limit);
+        assert_eq!(encoded.len(), 10_000);
+        assert_eq!(
+            decode(&encoded, TextEncoding::Utf16Le, limit).unwrap(),
+            text
+        );
     }
 }

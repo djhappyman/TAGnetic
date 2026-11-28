@@ -572,7 +572,7 @@ fn parse_disc_total(value: Option<&Value>) -> Option<u32> {
         .iter()
         .filter_map(|entry| entry.get("qty").and_then(Value::as_str))
         .filter_map(|qty| qty.trim().parse::<u32>().ok())
-        .sum();
+        .try_fold(0u32, u32::checked_add)?;
     (total > 0).then_some(total)
 }
 
@@ -818,6 +818,12 @@ fn is_discogs_https(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disc_total_that_does_not_fit_is_unknown() {
+        let formats = serde_json::json!([{"qty":"4294967295"}, {"qty":"2"}]);
+        assert_eq!(parse_disc_total(Some(&formats)), None);
+    }
 
     #[test]
     fn timing_retains_nested_and_missing_durations_and_single_release_credit() {

@@ -15,6 +15,8 @@
 //! Deliberately free of provider, network and GUI concerns so it can be tested
 //! against plain strings.
 
+use std::cmp::Reverse;
+
 /// Attributes that carry no identity — stripping them lets "Desert Rain" match
 /// "Desert Rain (Original Mix)". Remixer credits are **not** listed here: a
 /// remix is a different recording, and collapsing it onto the original is
@@ -242,55 +244,67 @@ pub fn align_by_duration_sequence(
     tolerance_secs: u64,
 ) -> Vec<Option<usize>> {
     let (rows, columns) = (locals.len(), candidates.len());
-    // Cell = (pairs matched so far, total seconds of disagreement). More pairs
-    // always wins; ties go to the tighter fit.
-    let mut best = vec![vec![(0u32, 0u64); columns + 1]; rows + 1];
-
-    let pairing = |i: usize, j: usize| -> Option<u64> {
-        match (locals[i].duration_secs, candidates[j].duration_secs) {
-            (Some(a), Some(b)) if a.abs_diff(b) <= tolerance_secs => Some(a.abs_diff(b)),
-            _ => None,
-        }
-    };
-
-    for i in 1..=rows {
-        for j in 1..=columns {
-            let mut cell = better(best[i - 1][j], best[i][j - 1]);
-            if let Some(delta) = pairing(i - 1, j - 1) {
-                let previous = best[i - 1][j - 1];
-                cell = better(cell, (previous.0 + 1, previous.1 + delta));
-            }
-            best[i][j] = cell;
-        }
+    let mut result = vec![None; rows];
+    if rows == 0 || columns == 0 {
+        return result;
     }
 
-    let mut result = vec![None; rows];
+    #[derive(Clone, Copy)]
+    #[repr(u8)]
+    enum Step {
+        Pair,
+        SkipLocal,
+        SkipCandidate,
+    }
+
+    // Score by most pairs, then least total disagreement. Only the next row
+    // needs these scores, so retain one byte per cell for the traceback.
+    let zero = (0usize, Reverse(0u128));
+    let mut scores = vec![zero; columns + 1];
+    let mut traceback = Vec::with_capacity(rows);
+    for local in locals {
+        let mut steps = Vec::with_capacity(columns);
+        let mut diagonal = zero;
+        for (column, candidate) in candidates.iter().enumerate() {
+            let left = scores[column];
+            let above = scores[column + 1];
+            let (mut score, mut step) = if left > above {
+                (left, Step::SkipCandidate)
+            } else {
+                (above, Step::SkipLocal)
+            };
+            if let (Some(a), Some(b)) = (local.duration_secs, candidate.duration_secs) {
+                let delta = a.abs_diff(b);
+                if delta <= tolerance_secs {
+                    let (matches, Reverse(disagreement)) = diagonal;
+                    let paired = (matches + 1, Reverse(disagreement + u128::from(delta)));
+                    if paired >= score {
+                        (score, step) = (paired, Step::Pair);
+                    }
+                }
+            }
+            // Equal scores prefer a pair, then skipping the local track. This
+            // preserves the original order when multiple alignments fit.
+            diagonal = above;
+            scores[column + 1] = score;
+            steps.push(step);
+        }
+        traceback.push(steps);
+    }
+
     let (mut i, mut j) = (rows, columns);
     while i > 0 && j > 0 {
-        let current = best[i][j];
-        let paired = pairing(i - 1, j - 1).map(|delta| {
-            let previous = best[i - 1][j - 1];
-            (previous.0 + 1, previous.1 + delta)
-        });
-        if paired == Some(current) {
-            result[i - 1] = Some(j - 1);
-            i -= 1;
-            j -= 1;
-        } else if best[i - 1][j] == current {
-            i -= 1;
-        } else {
-            j -= 1;
+        match traceback[i - 1][j - 1] {
+            Step::Pair => {
+                result[i - 1] = Some(j - 1);
+                i -= 1;
+                j -= 1;
+            }
+            Step::SkipLocal => i -= 1,
+            Step::SkipCandidate => j -= 1,
         }
     }
     result
-}
-
-fn better(a: (u32, u64), b: (u32, u64)) -> (u32, u64) {
-    if a.0 > b.0 || (a.0 == b.0 && a.1 <= b.1) {
-        a
-    } else {
-        b
-    }
 }
 
 /// The best-scoring candidate for `local`, with its index.
@@ -356,9 +370,14 @@ const CREDIT_ONLY_SCORE: f32 = 0.9;
 /// Compare two titles, trying each normalization level for an exact hit before
 /// falling back to similarity on the most-normalized forms.
 fn title_score(a: &str, b: &str) -> (f32, MatchReason) {
-    let a_variants = variants(a);
-    let b_variants = variants(b);
-    for (left, right) in a_variants.iter().zip(b_variants.iter()) {
+    let basic_a = normalized(a);
+    let basic_b = normalized(b);
+    if !basic_a.is_empty() && basic_a == basic_b {
+        return (1.0, MatchReason::Exact);
+    }
+    let a_variants = variants(basic_a);
+    let b_variants = variants(basic_b);
+    for (left, right) in a_variants.iter().zip(b_variants.iter()).skip(1) {
         if !left.is_empty() && left == right {
             return (1.0, MatchReason::Exact);
         }
@@ -442,8 +461,7 @@ fn artists_match(a: &str, b: &str) -> bool {
 }
 
 /// Cumulative normalization levels, gentlest first.
-fn variants(value: &str) -> Vec<String> {
-    let basic = normalized(value);
+fn variants(basic: String) -> [String; 6] {
     let no_noise = strip_noise(&basic);
     let no_punctuation = strip_punctuation(&no_noise);
     let no_article = strip_leading_article(&no_punctuation);
@@ -456,7 +474,7 @@ fn variants(value: &str) -> Vec<String> {
     // Joined before the article goes, or `A.T.T.O.S.` would lose its `a`.
     let joined_initials =
         strip_leading_article(&strip_leading_number(&join_initials(&no_punctuation)));
-    vec![
+    [
         basic,
         no_noise,
         no_punctuation,
@@ -1000,6 +1018,30 @@ mod tests {
         assert_eq!(
             align_by_duration_sequence(&unknown, &candidates, DURATION_SEQUENCE_TOLERANCE_SECS),
             vec![None]
+        );
+    }
+
+    #[test]
+    fn duration_sequence_ranks_differences_without_wrapping() {
+        let locals = [timed("a", 0), timed("b", 0), timed("c", 1)];
+        let candidates = [timed("x", 1), timed("y", u64::MAX)];
+        assert_eq!(
+            align_by_duration_sequence(&locals, &candidates, u64::MAX),
+            vec![None, Some(0), Some(1)]
+        );
+    }
+
+    #[test]
+    fn duration_sequence_prefers_the_original_pairing_when_scores_tie() {
+        let locals = [timed("a", 2), timed("b", 4), timed("c", 4)];
+        let candidates = [timed("x", 4), timed("y", 2)];
+        assert_eq!(
+            align_by_duration_sequence(&locals, &candidates, 0),
+            vec![Some(1), None, None]
+        );
+        assert_eq!(
+            align_by_duration_sequence(&locals, &candidates[..1], 0),
+            vec![None, None, Some(0)]
         );
     }
 

@@ -192,9 +192,10 @@ impl ReadCache {
                 && before.as_ref() == Some(&entry.stamp)
                 && tagrex_core::model::read_policy_revision() == policy_before
             {
-                self.order.remove(&entry.used_at);
-                self.order.insert(used_at, path.to_path_buf());
-                entry.used_at = used_at;
+                if let Some(path) = self.order.remove(&entry.used_at) {
+                    self.order.insert(used_at, path);
+                    entry.used_at = used_at;
+                }
                 return Ok(entry.read.clone());
             }
         }

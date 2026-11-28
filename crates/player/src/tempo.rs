@@ -66,6 +66,7 @@ impl TempoDetector {
     /// Blocking and slow, seconds per track. The caller must keep it off the
     /// main thread.
     pub fn detect(&mut self, path: &Path, cancel: &AtomicBool) -> Result<Option<f64>, TempoError> {
+        check_cancelled(cancel)?;
         let decoder = crate::open_decoder(path).map_err(TempoError::Failed)?;
         let channels = decoder.channels().get() as usize;
         let rate = decoder.sample_rate().get();
@@ -80,6 +81,7 @@ impl TempoDetector {
         rate: u32,
         cancel: &AtomicBool,
     ) -> Result<Option<f64>, TempoError> {
+        check_cancelled(cancel)?;
         let failed = |err: anyhow::Error| TempoError::Failed(err.to_string());
         let mut stream = self.tracker.stream(rate).map_err(failed)?;
         let mut mono = Vec::with_capacity(CHUNK_FRAMES);
@@ -93,21 +95,27 @@ impl TempoDetector {
             mono.push(frame_sum / channels as f32);
             (frame_sum, in_frame) = (0.0, 0);
             if mono.len() == CHUNK_FRAMES {
-                if cancel.load(Ordering::Relaxed) {
-                    return Err(TempoError::Cancelled);
-                }
+                check_cancelled(cancel)?;
                 stream.push(&mono).map_err(failed)?;
                 mono.clear();
             }
         }
+        check_cancelled(cancel)?;
         if !mono.is_empty() {
             stream.push(&mono).map_err(failed)?;
-        }
-        if cancel.load(Ordering::Relaxed) {
-            return Err(TempoError::Cancelled);
+            check_cancelled(cancel)?;
         }
         let analysis = stream.finish().map_err(failed)?;
+        check_cancelled(cancel)?;
         Ok(fitted_bpm(&analysis.beats))
+    }
+}
+
+fn check_cancelled(cancel: &AtomicBool) -> Result<(), TempoError> {
+    if cancel.load(Ordering::Relaxed) {
+        Err(TempoError::Cancelled)
+    } else {
+        Ok(())
     }
 }
 
@@ -295,5 +303,15 @@ mod tests {
         let result =
             detector.detect_samples(samples.into_iter(), 2, 22_050, &AtomicBool::new(true));
         assert!(matches!(result, Err(TempoError::Cancelled)));
+    }
+
+    #[test]
+    fn cancelled_analysis_does_not_pull_audio_samples() {
+        let mut detector = TempoDetector::new().unwrap();
+        let mut decoded = 0;
+        let samples = [0.0; 16].into_iter().inspect(|_| decoded += 1);
+        let result = detector.detect_samples(samples, 2, 22_050, &AtomicBool::new(true));
+        assert!(matches!(result, Err(TempoError::Cancelled)));
+        assert_eq!(decoded, 0, "a cancelled analysis still decoded audio");
     }
 }

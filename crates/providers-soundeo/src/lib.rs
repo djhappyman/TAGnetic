@@ -28,6 +28,7 @@
 //! HTTP is blocking (`ureq`), matching the worker-thread model in
 //! architecture.md.
 
+use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -326,14 +327,14 @@ fn release_redirect(current: &str, location: &str) -> Result<String, ProviderErr
 // track's own title, and the listed duration — plus what the row says about the
 // release itself (#396): its cover thumbnail, label and date, so a search
 // result can show them without fetching the release page.
-struct TrackItem {
-    release_href: String,
-    release_name: String,
-    track_title: String,
-    duration: Option<String>,
-    cover: Option<String>,
-    label: Option<String>,
-    date: Option<String>,
+struct TrackItem<'a> {
+    release_href: &'a str,
+    release_name: &'a str,
+    track_title: &'a str,
+    duration: Option<&'a str>,
+    cover: Option<&'a str>,
+    label: Option<&'a str>,
+    date: Option<&'a str>,
 }
 
 static TRACKITEM_SPLIT: LazyLock<Regex> =
@@ -357,55 +358,50 @@ static COVER_SIZE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"-\d+\.jpg$").
 
 /// The `.trackitem` rows in an HTML fragment. Each row that names both a track
 /// and a release is returned; the caller decides which to keep.
-fn parse_trackitems(html: &str) -> Vec<TrackItem> {
-    let mut items = Vec::new();
+fn parse_trackitems(html: &str) -> impl Iterator<Item = TrackItem<'_>> {
     // Split on the row marker; the first piece is whatever came before the first
     // row, so it is skipped.
-    for block in TRACKITEM_SPLIT.split(html).skip(1) {
-        let (Some(title), Some(release)) =
-            (TRACK_TITLE.captures(block), TRACK_RELEASE.captures(block))
-        else {
-            continue;
-        };
-        items.push(TrackItem {
-            release_href: release[1].to_string(),
-            release_name: unescape(&release[2]),
-            track_title: unescape(&title[1]),
-            duration: TRACK_TIME
-                .captures(block)
-                .map(|caps| caps[1].trim().to_string()),
-            cover: TRACK_COVER.captures(block).map(|caps| caps[1].to_string()),
-            label: TRACK_LABEL.captures(block).map(|caps| unescape(&caps[1])),
-            date: TRACK_DATE.captures(block).map(|caps| caps[1].to_string()),
-        });
-    }
-    items
+    TRACKITEM_SPLIT.split(html).skip(1).filter_map(|block| {
+        let track_title = first_capture(&TRACK_TITLE, block)?;
+        let release = TRACK_RELEASE.captures(block)?;
+        Some(TrackItem {
+            release_href: release.get(1)?.as_str(),
+            release_name: release.get(2)?.as_str(),
+            track_title,
+            duration: first_capture(&TRACK_TIME, block),
+            cover: first_capture(&TRACK_COVER, block),
+            label: first_capture(&TRACK_LABEL, block),
+            date: first_capture(&TRACK_DATE, block),
+        })
+    })
+}
+
+fn first_capture<'a>(regex: &Regex, html: &'a str) -> Option<&'a str> {
+    Some(regex.captures(html)?.get(1)?.as_str())
 }
 
 /// Parse the "Search results" section into release candidates, folding the track
 /// rows to their releases (one release, one candidate) in first-seen order.
 fn parse_search(html: &str) -> Vec<ReleaseCandidate> {
     let section = results_section(html);
-    let mut seen: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
     let mut candidates = Vec::new();
     for item in parse_trackitems(section) {
-        if seen.contains(&item.release_href) {
+        if !seen.insert(item.release_href) {
             continue;
         }
-        seen.push(item.release_href.clone());
         // The row's thumbnail is the 50 px size; the card wants something that
         // stays sharp at its size, and the same URL serves the others (#396).
-        let cover = item.cover.as_deref();
         candidates.push(ReleaseCandidate {
-            id: ReleaseId(absolute(&item.release_href)),
-            artist: artist_of(&item.track_title),
-            title: item.release_name,
-            year: item.date.as_deref().and_then(year_from_date),
+            id: ReleaseId(absolute(item.release_href)),
+            artist: artist_of(&unescape(item.track_title)),
+            title: unescape(item.release_name),
+            year: item.date.and_then(year_from_date),
             score: 0.0, // the app re-scores against the query text (#53)
-            thumb_url: cover.map(|url| sized_cover(url, 500)),
-            cover_url: cover.map(upgrade_cover),
+            thumb_url: item.cover.map(|url| sized_cover(url, 500)),
+            cover_url: item.cover.map(upgrade_cover),
             country: None,
-            label: item.label,
+            label: item.label.map(unescape),
             format: None,
             catalog_number: None,
         });
@@ -463,17 +459,16 @@ fn parse_release(html: &str, url: &str) -> Result<Release, ProviderError> {
     // page order. The leading "Artist - " that Soundeo repeats in each track
     // title is dropped when it matches the release artist.
     let tracks: Vec<ReleaseTrack> = parse_trackitems(html)
-        .into_iter()
         .filter(|item| {
-            release_id_from_url(&item.release_href).as_deref() == Some(release_key.as_str())
+            release_id_from_url(item.release_href).as_deref() == Some(release_key.as_str())
         })
         .enumerate()
         .map(|(index, item)| ReleaseTrack {
             position: (index + 1).to_string(),
             disc: None,
             artist: None,
-            title: strip_artist_prefix(&item.track_title, &artist),
-            duration_secs: item.duration.as_deref().and_then(duration_secs),
+            title: strip_artist_prefix(&unescape(item.track_title), &artist),
+            duration_secs: item.duration.and_then(duration_secs),
             isrc: None,
             bpm: None,
             key: None,
@@ -629,7 +624,9 @@ fn sized_cover(url: &str, size: u32) -> String {
 fn duration_secs(text: &str) -> Option<u64> {
     let mut total = 0u64;
     for part in text.trim().split(':') {
-        total = total * 60 + part.trim().parse::<u64>().ok()?;
+        total = total
+            .checked_mul(60)?
+            .checked_add(part.trim().parse().ok()?)?;
     }
     (total > 0).then_some(total)
 }
@@ -835,13 +832,15 @@ mod tests {
               <time>5:06</time>
               <span><a href="/release/gianesini-deep-dive-5740905.html">Deep Dive</a></span></div>
             </div>
+            <div class="trackitem" data-track-id="3"><strong><a href="/track/another-3.html">Another - One</a></strong><span><a href="/release/another-3.html">Another</a></span></div>
           </div>
           <h2>HOW IT WORKS</h2>
           <div class="trackitem" data-track-id="9"><strong><a href="/track/other-9.html">Other - Thing</a></strong><span><a href="/release/other-9.html">Other</a></span></div>"#;
         let hits = parse_search(html);
         // Two tracks share the release -> one candidate; the row after "HOW IT
         // WORKS" is outside the results section and dropped.
-        assert_eq!(hits.len(), 1);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[1].title, "Another");
         assert_eq!(hits[0].artist, "Gianesini");
         assert_eq!(hits[0].title, "Deep Dive");
         assert_eq!(
@@ -961,5 +960,16 @@ mod tests {
         assert_eq!(duration_secs(""), None);
         assert_eq!(year_from_date("2026-09-11"), Some(2026));
         assert_eq!(year_from_date(""), None);
+    }
+
+    #[test]
+    fn an_out_of_range_duration_preserves_the_release_and_its_other_tracks() {
+        let html = r#"<meta property="og:title" content="Artist - Title">
+          <div class="trackitem" data-track-id="1"><strong><a href="/track/a-1.html">Artist - First</a></strong><time>307445734561825861:57</time><span><a href="/release/title-123.html">Title</a></span></div>
+          <div class="trackitem" data-track-id="2"><strong><a href="/track/a-2.html">Artist - Second</a></strong><time>5:02</time><span><a href="/release/title-123.html">Title</a></span></div>"#;
+        let release = parse_release(html, "https://soundeo.com/release/title-123.html").unwrap();
+        assert_eq!(release.tracks.len(), 2);
+        assert_eq!(release.tracks[0].duration_secs, None);
+        assert_eq!(release.tracks[1].duration_secs, Some(302));
     }
 }

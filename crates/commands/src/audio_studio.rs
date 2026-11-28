@@ -299,6 +299,13 @@ pub struct OpenedRecording {
     tags: Values,
 }
 
+impl OpenedRecording {
+    /// Identifies the session so a caller can release an unclaimed recording.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordingProgress {

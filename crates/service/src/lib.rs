@@ -601,6 +601,10 @@ impl Service {
         let state = lock(&self.0.state)?;
         Ok(self.grant_in_state(&state, principal, action)?.clone())
     }
+    fn check_grant(&self, principal: &Principal, action: &str) -> ServiceResult<()> {
+        let state = lock(&self.0.state)?;
+        self.grant_in_state(&state, principal, action).map(|_| ())
+    }
     fn grant_in_state<'a>(
         &self,
         state: &'a State,
@@ -704,8 +708,8 @@ impl Service {
         Ok(lock(&self.0.state)?.manual_plan.clone())
     }
     pub fn call(&self, principal: &Principal, tool: &str, args: Value) -> ServiceResult<Value> {
-        self.grant(principal, "read")?;
-        if serde_json::to_vec(&args)?.len() > MAX_ARGUMENT_BYTES {
+        self.check_grant(principal, "read")?;
+        if !json_accounting::fits_wire_cap(&args)? {
             return Err(ServiceError::new(
                 "quota",
                 "Tool arguments exceed 1 MiB; use handles and pages",
@@ -754,8 +758,8 @@ impl Service {
         }?;
         // A grant can expire/revoke while native/network work is running.
         // Do not publish its result after that authorization boundary changes.
-        self.grant(principal, "read")?;
-        if serde_json::to_vec(&result)?.len() > 1024 * 1024 {
+        self.check_grant(principal, "read")?;
+        if !json_accounting::fits_wire_cap(&result)? {
             let handle = result
                 .get("draft")
                 .or_else(|| result.get("operation"))
@@ -943,24 +947,26 @@ impl Service {
                 "Query lane must be short printable text",
             ));
         }
-        let query_request = args
-            .get("query_request")
-            .and_then(Value::as_str)
-            .map(String::from)
-            .unwrap_or(opaque("query")?);
+        let query_request = match args.get("query_request").and_then(Value::as_str) {
+            Some(id) => id.to_owned(),
+            None => opaque("query")?,
+        };
         if query_request.len() > 128 || query_request.chars().any(char::is_control) {
             return Err(ServiceError::invalid(
                 "Query request ID must be short printable text",
             ));
         }
-        let expiry = self.grant(principal, "read")?.expires_at.map(|expiry| {
-            std::time::Instant::now() + std::time::Duration::from_secs(expiry.saturating_sub(now()))
-        });
         let key = (principal.id.clone(), lane.to_string());
         let cancel = Arc::new(AtomicBool::new(false));
-        {
+        let expiry = {
             let mut state = lock(&self.0.state)?;
-            self.grant_in_state(&state, principal, "read")?;
+            let grant = self.grant_in_state(&state, principal, "read")?;
+            // Expiries beyond the monotonic clock's representable range
+            // cannot occur during this query. Publication still checks it.
+            let expiry = grant.expires_at.and_then(|expiry| {
+                std::time::Instant::now()
+                    .checked_add(std::time::Duration::from_secs(expiry.saturating_sub(now())))
+            });
             if !state.query_lanes.contains_key(&key)
                 && state
                     .query_lanes
@@ -980,7 +986,8 @@ impl Service {
             {
                 previous.store(true, Ordering::Release);
             }
-        }
+            expiry
+        };
         let outcome = snapshot.index.query(&request, || {
             cancel.load(Ordering::Acquire)
                 || expiry.is_some_and(|deadline| std::time::Instant::now() >= deadline)
@@ -996,7 +1003,7 @@ impl Service {
             }
         }
         let result = outcome.map_err(ServiceError::from)?;
-        self.grant(principal, "read")?;
+        self.check_grant(principal, "read")?;
         let bytes = result
             .indices
             .iter()
@@ -1042,42 +1049,34 @@ impl Service {
     }
     fn select(&self, principal: &Principal, args: &Value) -> ServiceResult<Value> {
         let snapshot = self.get_snapshot(principal, args)?;
-        let estimated_bytes = if let Some(indices) = args.get("indices") {
-            let indices: Vec<usize> = serde_json::from_value(indices.clone())?;
-            indices
-                .iter()
-                .map(|i| {
-                    snapshot
-                        .rows
-                        .get(*i)
-                        .map(|r| r.path.len() + std::mem::size_of::<PathBuf>())
-                        .ok_or_else(|| ServiceError::invalid("Selection index is outside snapshot"))
-                })
-                .collect::<ServiceResult<Vec<_>>>()?
-                .iter()
-                .sum()
-        } else {
+        let indices = args
+            .get("indices")
+            .map(Vec::<usize>::deserialize)
+            .transpose()?;
+        let path_at = |index| {
             snapshot
                 .rows
+                .get(index)
+                .map(|row| row.path.as_str())
+                .ok_or_else(|| ServiceError::invalid("Selection index is outside snapshot"))
+        };
+        let path_bytes = |path: &str| path.len() + std::mem::size_of::<PathBuf>();
+        let estimated_bytes = if let Some(indices) = &indices {
+            indices
                 .iter()
-                .map(|r| r.path.len() + std::mem::size_of::<PathBuf>())
-                .sum()
+                .map(|&i| path_at(i).map(path_bytes))
+                .sum::<ServiceResult<usize>>()?
+        } else {
+            snapshot.rows.iter().map(|row| path_bytes(&row.path)).sum()
         };
         {
             let state = lock(&self.0.state)?;
             selection_budget(&state, estimated_bytes)?;
         }
-        let paths = if let Some(indices) = args.get("indices") {
-            let indices: Vec<usize> = serde_json::from_value(indices.clone())?;
+        let paths = if let Some(indices) = indices {
             indices
                 .into_iter()
-                .map(|i| {
-                    snapshot
-                        .rows
-                        .get(i)
-                        .map(|r| PathBuf::from(&r.path))
-                        .ok_or_else(|| ServiceError::invalid("Selection index is outside snapshot"))
-                })
+                .map(|i| path_at(i).map(PathBuf::from))
                 .collect::<ServiceResult<Vec<_>>>()?
         } else {
             snapshot

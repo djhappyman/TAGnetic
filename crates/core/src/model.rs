@@ -5349,6 +5349,30 @@ fn is_timestamp_frame_id(id: &str) -> bool {
 /// seeking, so the audio is never loaded.
 fn raw_id3v2_block(path: &Path, container: FileType) -> Result<Option<Vec<u8>>, TagIoError> {
     use std::io::{Read, Seek, SeekFrom};
+
+    fn read_block(
+        mut file: std::fs::File,
+        start: u64,
+        len: u64,
+    ) -> Result<Option<Vec<u8>>, TagIoError> {
+        // A truncated header can claim gigabytes of tag data. Check the held
+        // file before allocating while keeping the existing absent-block result.
+        if len > file.metadata()?.len().saturating_sub(start) {
+            return Ok(None);
+        }
+        let len = usize::try_from(len).map_err(std::io::Error::other)?;
+        let mut block = Vec::new();
+        block
+            .try_reserve_exact(len)
+            .map_err(std::io::Error::other)?;
+        block.resize(len, 0);
+        file.seek(SeekFrom::Start(start))?;
+        if file.read_exact(&mut block).is_err() {
+            return Ok(None);
+        }
+        Ok(Some(block))
+    }
+
     let mut file = exact::source_file(path)?;
     let mut header = [0u8; 12];
     match container {
@@ -5357,13 +5381,11 @@ fn raw_id3v2_block(path: &Path, container: FileType) -> Result<Option<Vec<u8>>, 
                 return Ok(None);
             }
             let footer = if header[5] & 0x10 != 0 { 10 } else { 0 };
-            let len = 10 + syncsafe_u32(&header[6..10]) as usize + footer;
-            let mut block = vec![0u8; len];
-            file.seek(SeekFrom::Start(0))?;
-            if file.read_exact(&mut block).is_err() {
-                return Ok(None);
-            }
-            Ok(Some(block))
+            read_block(
+                file,
+                0,
+                10 + u64::from(syncsafe_u32(&header[6..10])) + footer,
+            )
         }
         FileType::Aiff | FileType::Wav => {
             let big_endian = container == FileType::Aiff;
@@ -5384,11 +5406,7 @@ fn raw_id3v2_block(path: &Path, container: FileType) -> Result<Option<Vec<u8>>, 
                     u32::from_le_bytes(size_bytes)
                 } as u64;
                 if chunk[..4].eq_ignore_ascii_case(b"ID3 ") {
-                    let mut block = vec![0u8; size as usize];
-                    if file.read_exact(&mut block).is_err() {
-                        return Ok(None);
-                    }
-                    return Ok(Some(block));
+                    return read_block(file, pos + 8, size);
                 }
                 pos += 8 + size + (size & 1);
             }
@@ -7690,6 +7708,25 @@ mod tests {
         out.extend_from_slice(b"AIFF");
         out.extend_from_slice(&body);
         out
+    }
+
+    #[test]
+    fn raw_id3v2_block_ignores_a_truncated_container_tag() {
+        let mut bytes = aiff_bytes(&[(b"ID3 ", b"opaque tag")]);
+        let path = std::env::temp_dir().join(format!(
+            "tagrex-truncated-id3v2-{}.aiff",
+            std::process::id()
+        ));
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            raw_id3v2_block(&path, FileType::Aiff).unwrap().as_deref(),
+            Some(b"opaque tag".as_slice())
+        );
+        bytes.truncate(bytes.len() - 1);
+        std::fs::write(&path, &bytes).unwrap();
+        let truncated = raw_id3v2_block(&path, FileType::Aiff).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(truncated.is_none());
     }
 
     #[test]

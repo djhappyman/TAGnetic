@@ -242,6 +242,66 @@ struct Opening {
     cancel: AtomicBool,
     progress: Mutex<Option<RecordingProgress>>,
 }
+
+struct OpeningRequest<'a> {
+    openings: &'a Openings,
+    id: String,
+    opening: Arc<Opening>,
+}
+
+impl Openings {
+    fn register(&self, id: String) -> Result<OpeningRequest<'_>, ErrorDto> {
+        if id.is_empty() || id.len() > 100 {
+            return Err(shell_error("Invalid recording request."));
+        }
+        let mut pending = self.0.lock().map_err(shell_error)?;
+        if pending.contains_key(&id) || pending.len() >= 4 {
+            return Err(shell_error("Too many recordings are opening."));
+        }
+        let opening = Arc::new(Opening::default());
+        pending.insert(id.clone(), opening.clone());
+        Ok(OpeningRequest {
+            openings: self,
+            id,
+            opening,
+        })
+    }
+}
+
+impl Drop for OpeningRequest<'_> {
+    fn drop(&mut self) {
+        self.opening.cancel.store(true, Ordering::Release);
+        self.openings
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&self.id);
+    }
+}
+
+/// The queue can finish after its caller drops the response. Release the
+/// newly registered source unless the command actually takes ownership.
+struct UnclaimedRecording {
+    studio: Arc<Studio>,
+    recording: Option<OpenedRecording>,
+}
+
+impl UnclaimedRecording {
+    fn claim(mut self) -> OpenedRecording {
+        self.recording
+            .take()
+            .expect("recording was not claimed yet")
+    }
+}
+
+impl Drop for UnclaimedRecording {
+    fn drop(&mut self) {
+        if let Some(recording) = &self.recording {
+            let _ = self.studio.close(recording.id());
+        }
+    }
+}
+
 static OPEN: blocking::Queue = blocking::Queue::new();
 static PEAKS: blocking::Queue = blocking::Queue::new();
 static LATEST_PEAKS: blocking::Latest = blocking::Latest::new();
@@ -269,40 +329,33 @@ pub(super) async fn audio_split_open(
     request_id: Option<String>,
 ) -> Result<OpenedRecording, ErrorDto> {
     let studio = studio.inner().clone();
-    let Some(id) = request_id else {
-        return OPEN
-            .run(move || studio.open(Path::new(&path), || false).map_err(shell_error))
-            .await;
-    };
-    if id.is_empty() || id.len() > 100 {
-        return Err(shell_error("Invalid recording request."));
-    }
-    let opening = Arc::new(Opening::default());
-    {
-        let mut pending = openings.0.lock().map_err(shell_error)?;
-        if pending.contains_key(&id) || pending.len() >= 4 {
-            return Err(shell_error("Too many recordings are opening."));
-        }
-        pending.insert(id.clone(), opening.clone());
-    }
-    let job = opening.clone();
-    let result = OPEN
+    // Tie the progress registration to the command future. The blocking worker
+    // can outlive a dropped caller, so it gets its own cancellation handle.
+    let request = request_id.map(|id| openings.register(id)).transpose()?;
+    let opening = request.as_ref().map(|request| request.opening.clone());
+    let opened = OPEN
         .run(move || {
-            studio
-                .open_with_progress(
-                    Path::new(&path),
-                    || job.cancel.load(Ordering::Acquire),
+            let path = Path::new(&path);
+            let recording = match opening {
+                Some(opening) => studio.open_with_progress(
+                    path,
+                    || opening.cancel.load(Ordering::Acquire),
                     |progress| {
-                        if let Ok(mut current) = job.progress.lock() {
+                        if let Ok(mut current) = opening.progress.lock() {
                             *current = Some(progress);
                         }
                     },
-                )
-                .map_err(shell_error)
+                ),
+                None => studio.open(path, || false),
+            }
+            .map_err(shell_error)?;
+            Ok(UnclaimedRecording {
+                studio,
+                recording: Some(recording),
+            })
         })
-        .await;
-    openings.0.lock().map_err(shell_error)?.remove(&id);
-    result
+        .await?;
+    Ok(opened.claim())
 }
 
 #[tauri::command]
@@ -975,4 +1028,70 @@ pub(super) fn audio_split_close(
             player.studio_close(id.clone()).map_err(StudioError::new)
         })
         .map_err(shell_error)
+}
+
+#[cfg(test)]
+mod opening_tests {
+    use super::*;
+
+    #[test]
+    fn dropping_the_open_request_cancels_the_worker_and_releases_its_slot() {
+        let openings = Openings::default();
+        let request = openings.register("recording".into()).unwrap();
+        let worker = request.opening.clone();
+        assert!(openings.register("recording".into()).is_err());
+        assert!(!worker.cancel.load(Ordering::Acquire));
+
+        drop(request);
+
+        let replacement = openings.register("recording".into()).unwrap();
+        assert!(worker.cancel.load(Ordering::Acquire));
+        assert!(!replacement.opening.cancel.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn only_claimed_recordings_keep_a_studio_session() {
+        use std::io::Write;
+
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "tagnetic-opening-{}-{stamp}.wav",
+            std::process::id()
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let fixture = Fixture(path);
+        // The first byte tells the fuzz harness which extension to use.
+        let seed = include_bytes!("../../fuzz/seeds/seed-wav");
+        file.write_all(&seed[1..]).unwrap();
+        drop(file);
+
+        let studio = Arc::new(Studio::default());
+        let open = || UnclaimedRecording {
+            studio: studio.clone(),
+            recording: Some(studio.open(&fixture.0, || false).unwrap()),
+        };
+        let abandoned = open();
+        let id = abandoned.recording.as_ref().unwrap().id().to_owned();
+        assert!(studio.cue_geometry(&id).is_ok());
+
+        drop(abandoned);
+
+        assert!(studio.cue_geometry(&id).is_err());
+        let claimed = open().claim();
+        assert!(studio.cue_geometry(claimed.id()).is_ok());
+    }
 }

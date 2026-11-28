@@ -646,22 +646,19 @@ fn probe_window(
                 for column in 0..columns {
                     let at = (2 * column + 1) * span / (2 * columns);
                     let relative = centered(at, u64::from(fft_size), span);
-                    let region = interleaved(relative, 0, visual_channels);
-                    values.push(analyzer.measure_channel(
-                        &visual_pcm[region.clone()],
+                    let samples = &visual_pcm[interleaved(relative, 0, visual_channels)];
+                    let mut channel_levels = [Vec::new(), Vec::new()];
+                    values.push(analyzer.measure_channels(
+                        samples,
                         visual_channels,
                         channel,
+                        lanes.as_ref().map(|_| &mut channel_levels),
                         &mut cancelled,
                     )?);
                     if let Some(lanes) = &mut lanes {
-                        for (lane, values) in lanes.iter_mut().enumerate() {
-                            values.push(analyzer.measure_channel(
-                                &visual_pcm[region.clone()],
-                                visual_channels,
-                                Some(lane ^ usize::from(swapped)),
-                                &mut cancelled,
-                            )?);
-                        }
+                        let [left, right] = channel_levels;
+                        lanes[usize::from(swapped)].push(left);
+                        lanes[usize::from(!swapped)].push(right);
                     }
                 }
                 spectrogram = Some(values);
@@ -900,6 +897,7 @@ struct Spectrum {
     scratch: Vec<Complex32>,
     buffer: Vec<Complex32>,
     window: Vec<f32>,
+    window_scale: f32,
     power: Vec<f32>,
     bin_spacing: f32,
     frequencies: Vec<f32>,
@@ -936,11 +934,14 @@ impl Spectrum {
                 start.min(nearest)..end.max(nearest + 1)
             })
             .collect();
+        let window = hann(size);
+        let window_scale = window_scale(&window);
         Self {
             scratch: vec![Complex32::default(); fft.get_inplace_scratch_len()],
             fft,
             buffer: vec![Complex32::default(); size],
-            window: hann(size),
+            window,
+            window_scale,
             power: vec![0.0; size / 2 + 1],
             bin_spacing,
             frequencies,
@@ -954,7 +955,7 @@ impl Spectrum {
         channels: usize,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<f32>, MediaError> {
-        let mut levels = self.measure_channel(samples, channels, None, cancelled)?;
+        let mut levels = self.measure_channels(samples, channels, None, None, cancelled)?;
         // Narrow display bands often share an FFT bin in the bass. Interpolate
         // their positions instead of repeating the same reading across a step.
         for (index, level) in levels.iter_mut().enumerate() {
@@ -969,23 +970,24 @@ impl Spectrum {
         Ok(levels)
     }
 
-    fn measure_channel(
+    fn measure_channels(
         &mut self,
         samples: &[i32],
         channels: usize,
         channel: Option<usize>,
+        mut stereo_levels: Option<&mut [Vec<f32>; 2]>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<f32>, MediaError> {
         let frames = (samples.len() / channels).min(self.window.len());
         let short_window;
-        let window = if frames < self.window.len() {
+        let (window, scale) = if frames < self.window.len() {
             short_window = hann(frames);
-            &short_window
+            (&short_window, window_scale(&short_window))
         } else {
-            &self.window
+            (&self.window, self.window_scale)
         };
         let selected = channel.map_or(0..channels, |index| index..index + 1);
-        let scale = (2.0 / window.iter().sum::<f32>().max(1.0)).powi(2) / selected.len() as f32;
+        let combined_scale = scale / selected.len() as f32;
         self.power.fill(0.0);
         for channel in selected {
             check_cancelled(cancelled)?;
@@ -1001,7 +1003,22 @@ impl Spectrum {
             self.fft
                 .process_with_scratch(&mut self.buffer, &mut self.scratch);
             for (power, point) in self.power.iter_mut().zip(&self.buffer) {
-                *power += point.norm_sqr() * scale;
+                *power += point.norm_sqr() * combined_scale;
+            }
+            if let Some(levels) = &mut stereo_levels {
+                // Extract each lane while its FFT is still available. The
+                // combined view averages powers before finding band peaks.
+                levels[channel] = self
+                    .bands
+                    .iter()
+                    .map(|band| {
+                        let power = self.buffer[band.clone()]
+                            .iter()
+                            .map(|point| point.norm_sqr() * scale)
+                            .fold(0.0, f32::max);
+                        power_db(power)
+                    })
+                    .collect();
             }
         }
         Ok(self
@@ -1010,6 +1027,10 @@ impl Spectrum {
             .map(|band| power_db(self.power[band.clone()].iter().copied().fold(0.0, f32::max)))
             .collect())
     }
+}
+
+fn window_scale(window: &[f32]) -> f32 {
+    (2.0 / window.iter().sum::<f32>().max(1.0)).powi(2)
 }
 
 fn hann(size: usize) -> Vec<f32> {
@@ -1615,6 +1636,44 @@ mod tests {
             removed.spectrogram_left_waveform,
             swapped.spectrogram_left_waveform
         );
+    }
+
+    #[test]
+    fn shared_stereo_spectra_match_separate_transforms_with_one_fft_per_channel() {
+        let mut spectrum = Spectrum::new(1024, RATE);
+        let samples: Vec<_> = (0..1024)
+            .flat_map(|frame| {
+                let phase = std::f32::consts::TAU * frame as f32 / 1024.0;
+                [
+                    ((phase * 19.0).sin() * 500_000_000.0) as i32,
+                    ((phase * 83.0).sin() * 100_000_000.0) as i32,
+                ]
+            })
+            .collect();
+        for input in [&samples[..], &samples[..638]] {
+            let mut bands = [Vec::new(), Vec::new()];
+            let mut transforms = 0;
+            let combined = spectrum
+                .measure_channels(input, 2, None, Some(&mut bands), &mut || {
+                    transforms += 1;
+                    false
+                })
+                .unwrap();
+            assert_eq!(transforms, 2);
+            let separate = |spectrum: &mut Spectrum, channel| {
+                spectrum
+                    .measure_channels(input, 2, channel, None, &mut || false)
+                    .unwrap()
+            };
+            assert_eq!(combined, separate(&mut spectrum, None));
+            assert_eq!(
+                bands,
+                [
+                    separate(&mut spectrum, Some(0)),
+                    separate(&mut spectrum, Some(1)),
+                ]
+            );
+        }
     }
 
     #[test]

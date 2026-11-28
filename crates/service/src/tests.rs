@@ -219,6 +219,55 @@ fn snapshot_pagination_and_projection_are_bounded() {
     assert_eq!(page["next_offset"], 1);
     assert!(page["rows"][0]["tags"].as_object().unwrap().is_empty());
 }
+
+#[test]
+fn service_argument_limit_counts_the_exact_escaped_wire_bytes() {
+    let f = Fixture::new();
+    let prefix = "\"\\\né";
+    let sequence_overhead = serde_json::to_vec(&json!({"padding": prefix}))
+        .unwrap()
+        .len();
+    let at_limit = format!(
+        "{prefix}{}",
+        "a".repeat(MAX_ARGUMENT_BYTES - sequence_overhead)
+    );
+
+    f.call("session.status", json!({"padding": at_limit}))
+        .unwrap();
+    let err = f
+        .call("session.status", json!({"padding": format!("{at_limit}a")}))
+        .unwrap_err();
+    assert_eq!(err.code, "quota");
+    assert_eq!(
+        err.message,
+        "Tool arguments exceed 1 MiB; use handles and pages"
+    );
+}
+
+#[test]
+fn an_explicit_selection_keeps_order_and_rejects_missing_or_repeated_rows() {
+    let f = Fixture::new();
+    let snapshot = f.call("files.snapshot", json!({})).unwrap();
+    let args = json!({"snapshot":snapshot["snapshot"], "indices":[2, 0]});
+    let selected = f.call("files.select", args).unwrap();
+    assert_eq!(selected["count"], 2);
+    let state = lock(&f.service.0.state).unwrap();
+    let selection = &state.selections[selected["selection"].as_str().unwrap()];
+    let saved = &state.snapshots[snapshot["snapshot"].as_str().unwrap()];
+    assert_eq!(
+        selection.paths,
+        [2, 0].map(|index| PathBuf::from(&saved.rows[index].path))
+    );
+    drop(state);
+
+    let invalid = json!({"snapshot":snapshot["snapshot"], "indices":[3]});
+    let err = f.call("files.select", invalid).unwrap_err();
+    assert_eq!(err.message, "Selection index is outside snapshot");
+    let repeated = json!({"snapshot":snapshot["snapshot"], "indices":[2, 0, 2]});
+    let err = f.call("files.select", repeated).unwrap_err();
+    assert_eq!(err.message, "Selection contains duplicate file identities");
+    assert_eq!(lock(&f.service.0.state).unwrap().selections.len(), 1);
+}
 #[test]
 fn private_handles_cannot_be_used_by_another_paired_client() {
     let f = Fixture::new();
@@ -714,6 +763,40 @@ fn query_handles_are_private_and_do_not_cancel_desktop_or_other_clients() {
             json!({"selection":result["selection"]})
         )
         .is_err());
+}
+
+#[test]
+fn an_unrepresentably_distant_expiry_still_allows_a_query() {
+    let f = Fixture::new();
+    let paired = f
+        .service
+        .pair_client(
+            "Long-lived search".into(),
+            Grant {
+                roots: vec![f.media.clone()],
+                expires_at: Some(u64::MAX),
+                ..Grant::default()
+            },
+        )
+        .unwrap();
+    let principal = f.service.authenticate(&paired.credential).unwrap();
+    let snapshot = f
+        .service
+        .call(&principal, "files.snapshot", json!({}))
+        .unwrap();
+    let query = json!({"version":2,"text":"Track 1","root":{"kind":"group","id":"root","mode":"all","children":[]}});
+    let result = f
+        .service
+        .call(
+            &principal,
+            "files.query",
+            json!({
+                "snapshot":snapshot["snapshot"], "query":query, "query_request":"explicit-request"
+            }),
+        )
+        .unwrap();
+    assert_eq!(result["query_request"], "explicit-request");
+    assert_eq!(result["matched"], 1);
 }
 #[test]
 fn oversized_single_tag_requires_explicit_chunks_instead_of_unbounded_rows() {

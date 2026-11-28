@@ -271,7 +271,7 @@ fn next_track_page(first: &str, next: &str, expected_page: usize) -> Result<Stri
 fn collect_track_pages(
     first: &str,
     mut get: impl FnMut(&str) -> Result<String, ProviderError>,
-) -> Result<String, ProviderError> {
+) -> Result<Vec<Value>, ProviderError> {
     let mut url = next_track_page(first, first, 1)?;
     let mut seen_pages = std::collections::HashSet::new();
     let mut seen_tracks = std::collections::HashSet::new();
@@ -282,12 +282,11 @@ fn collect_track_pages(
             return Err(pagination_error("repeated page"));
         }
         let body = get(&url)?;
-        let root: Value = serde_json::from_str(&body)
+        let mut root: Value = serde_json::from_str(&body)
             .map_err(|err| pagination_error(&format!("page {page}: {err}")))?;
-        let results = root
-            .get("results")
-            .and_then(Value::as_array)
-            .ok_or_else(|| pagination_error("page missing results array"))?;
+        let Some(Value::Array(results)) = root.get_mut("results").map(Value::take) else {
+            return Err(pagination_error("page missing results array"));
+        };
         if results.len() > TRACKS_PER_PAGE as usize {
             return Err(pagination_error("oversized page"));
         }
@@ -302,15 +301,16 @@ fn collect_track_pages(
             }
             total = Some(count);
         }
+        let has_results = !results.is_empty();
         for track in results {
-            let id = id_of(track);
+            let id = id_of(&track);
             if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
                 return Err(pagination_error("track missing numeric ID"));
             }
             if !seen_tracks.insert(id) {
                 return Err(pagination_error("duplicate track ID"));
             }
-            tracks.push(track.clone());
+            tracks.push(track);
         }
         if total.is_some_and(|n| tracks.len() as u64 > n) {
             return Err(pagination_error("results exceed count"));
@@ -320,10 +320,9 @@ fn collect_track_pages(
                 if total.is_some_and(|n| tracks.len() as u64 != n) {
                     return Err(pagination_error("incomplete tracklist"));
                 }
-                return serde_json::to_string(&tracks)
-                    .map_err(|err| pagination_error(&err.to_string()));
+                return Ok(tracks);
             }
-            Some(Value::String(next)) if !next.is_empty() && !results.is_empty() => {
+            Some(Value::String(next)) if !next.is_empty() && has_results => {
                 if page == MAX_TRACK_PAGES {
                     return Err(pagination_error("page limit exceeded"));
                 }
@@ -436,16 +435,9 @@ fn candidate_from(release: &Value) -> ReleaseCandidate {
     }
 }
 
-fn parse_release(release_body: &str, tracks_body: &str) -> Result<Release, ProviderError> {
+fn parse_release(release_body: &str, track_values: &[Value]) -> Result<Release, ProviderError> {
     let release: Value =
         serde_json::from_str(release_body).map_err(|err| ProviderError::Other(err.to_string()))?;
-    let tracks_root: Value =
-        serde_json::from_str(tracks_body).map_err(|err| ProviderError::Other(err.to_string()))?;
-    let track_values = tracks_root
-        .get("results")
-        .or(Some(&tracks_root))
-        .and_then(Value::as_array)
-        .ok_or_else(|| pagination_error("missing results array"))?;
 
     let mut tracks = Vec::with_capacity(track_values.len());
     let mut genres: Vec<String> = Vec::new();
@@ -761,7 +753,7 @@ mod tests {
                 calls[1],
                 "https://api.beatport.com/v4/catalog/releases/4321/tracks/?page=2&per_page=100"
             );
-            let release = parse_release(RELEASE_JSON, &tracks).unwrap();
+            let release = super::parse_release(RELEASE_JSON, &tracks).unwrap();
             assert_eq!(release.tracks.len(), count);
             for (index, track) in release.tracks.iter().enumerate() {
                 assert_eq!(track.title, format!("Track {}", index + 1));
@@ -784,7 +776,7 @@ mod tests {
             .into())
         })
         .unwrap();
-        let release = parse_release(RELEASE_JSON, &tracks).unwrap();
+        let release = super::parse_release(RELEASE_JSON, &tracks).unwrap();
         assert_eq!(
             release
                 .tracks
@@ -902,6 +894,11 @@ mod tests {
     fn unexpected_tracklist_schema_is_an_error() {
         assert!(parse_release(RELEASE_JSON, "{}").is_err());
         assert!(parse_release(RELEASE_JSON, r#"{"results":null}"#).is_err());
+    }
+
+    fn parse_release(release_body: &str, tracks_body: &str) -> Result<Release, ProviderError> {
+        let tracks = collect_track_pages(FIRST_TRACK_PAGE, |_| Ok(tracks_body.to_owned()))?;
+        super::parse_release(release_body, &tracks)
     }
 
     const SEARCH_JSON: &str = r#"{
