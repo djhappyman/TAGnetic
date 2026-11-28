@@ -24,6 +24,7 @@ mod controlled;
 mod fixed;
 mod mailbox;
 mod mp4;
+mod next_track;
 mod router;
 pub use router::StudioMonitorChannel;
 mod studio;
@@ -448,7 +449,20 @@ fn audio_thread<O, F>(
     rx: mailbox::Receiver,
     status: Arc<Mutex<PlayerStatus>>,
     studio_status: studio::Shared,
+    open: F,
+) where
+    O: Output,
+    F: FnMut() -> Result<O, DeviceSinkError>,
+{
+    audio_thread_with_next(rx, status, studio_status, open, next_track::Worker::new());
+}
+
+fn audio_thread_with_next<O, F>(
+    rx: mailbox::Receiver,
+    status: Arc<Mutex<PlayerStatus>>,
+    studio_status: studio::Shared,
     mut open: F,
+    mut next_worker: next_track::Worker,
 ) where
     O: Output,
     F: FnMut() -> Result<O, DeviceSinkError>,
@@ -479,6 +493,9 @@ fn audio_thread<O, F>(
     // Whether the decoder refused the last seek on the current track (#190).
     let mut seek_refused = false;
     let mut pending_seek: Option<PendingSeek> = None;
+    let mut pending_next: Option<next_track::Pending> = None;
+    let mut next_retry = None;
+    let mut deferred_tail_seek = None;
     let mut studio = studio::Actor::new(studio_status);
     // What the UI was last told. Compared before anything is built, so a tick
     // that changes nothing costs no allocation and takes no lock.
@@ -496,6 +513,7 @@ fn audio_thread<O, F>(
             seek_refused,
             device.is_none(),
             pending_seek.is_some(),
+            false,
         ),
     );
 
@@ -505,7 +523,7 @@ fn audio_thread<O, F>(
         // nothing queued there is nothing to advance and nothing to report, so
         // it parks until a command arrives instead of ticking an idle player
         // five times a second.
-        let wait = if pending_seek.is_some() || studio.needs_tick() {
+        let wait = if pending_seek.is_some() || pending_next.is_some() || studio.needs_tick() {
             Duration::from_millis(10)
         } else if queue.is_empty() {
             IDLE_WAIT
@@ -529,9 +547,13 @@ fn audio_thread<O, F>(
                 clock.resume();
             }
         }
+        let mut seek_secs = None;
         match received {
             Ok(cmd) => match cmd {
                 Cmd::Play(path) => {
+                    pending_next = None;
+                    next_retry = None;
+                    deferred_tail_seek = None;
                     if let Some(pending) = pending_seek.take() {
                         pending.ticket.cancel();
                     }
@@ -568,9 +590,13 @@ fn audio_thread<O, F>(
                 Cmd::SetNext(path) => {
                     // Only prime a next track when exactly the current one is
                     // queued; ignore otherwise (already primed, or idle).
-                    if queue.len() == 1 {
-                        if let Some(sink) = sink.as_ref() {
-                            enqueue(sink, &mut queue, path);
+                    if queue.len() == 1 && sink.is_some() {
+                        if pending_next.is_some() {
+                            // A successful first request owns the slot. If
+                            // it fails, keep the latest replacement request.
+                            next_retry = Some(path);
+                        } else {
+                            pending_next = next_worker.start(path);
                         }
                     }
                 }
@@ -593,6 +619,9 @@ fn audio_thread<O, F>(
                     }
                 }
                 Cmd::Stop => {
+                    pending_next = None;
+                    next_retry = None;
+                    deferred_tail_seek = None;
                     if let Some(pending) = pending_seek.take() {
                         pending.ticket.cancel();
                     }
@@ -613,52 +642,8 @@ fn audio_thread<O, F>(
                     studio.set_volume(volume);
                 }
                 Cmd::Seek(secs) => {
-                    if !queue.is_empty() {
-                        // The clock is what the UI shows, so it may only move
-                        // when the audio did (#190). A sink can also finish the
-                        // track between that check and the seek, so what the
-                        // sink reports afterwards decides — not the `Ok`.
-                        let target = Duration::from_secs_f64(secs.max(0.0)).min(
-                            queue.front().map_or(Duration::MAX, |track| {
-                                if track.duration.is_zero() {
-                                    Duration::MAX
-                                } else {
-                                    track.duration
-                                }
-                            }),
-                        );
-                        let previous = pending_seek.take();
-                        if let Some(previous) = &previous {
-                            previous.ticket.supersede();
-                        }
-                        match seek(sink.as_ref(), target, queue.len()) {
-                            SeekOutcome::Seeked => {
-                                clock.seek(target);
-                                seek_refused = false;
-                            }
-                            SeekOutcome::Pending(ticket) => {
-                                pending_seek = Some(PendingSeek {
-                                    ticket,
-                                    track: queue.front().expect("nonempty seek queue").path.clone(),
-                                    started: Instant::now(),
-                                });
-                            }
-                            SeekOutcome::Refused(err) => {
-                                if let Some(previous) = &previous {
-                                    previous.ticket.cancel();
-                                }
-                                eprintln!("audio: seek refused: {err}");
-                                seek_refused = true;
-                            }
-                            // Nothing is left to seek; the boundary below takes
-                            // the player idle.
-                            SeekOutcome::PlayedOut => {
-                                if let Some(previous) = &previous {
-                                    previous.ticket.cancel();
-                                }
-                            }
-                        }
-                    }
+                    deferred_tail_seek = None;
+                    seek_secs = Some(secs);
                 }
                 Cmd::Studio(command) => {
                     let owned_before = studio.owns_output();
@@ -685,6 +670,74 @@ fn audio_thread<O, F>(
             },
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
+        }
+
+        if let Some(std::task::Poll::Ready(prepared)) =
+            pending_next.as_ref().map(next_track::Pending::poll)
+        {
+            pending_next = None;
+            if let (Some(sink), Some(prepared)) = (&sink, prepared) {
+                append_prepared(sink, &mut queue, prepared);
+                next_retry = None;
+            } else if let Some(path) = next_retry.take() {
+                pending_next = next_worker.start(path);
+            }
+            if pending_next.is_none() {
+                seek_secs = seek_secs.or(deferred_tail_seek.take());
+            }
+        }
+        if let Some((secs, track)) = seek_secs.zip(queue.front()) {
+            // The clock is what the UI shows, so it may only move
+            // when the audio did (#190). A sink can also finish the
+            // track between that check and the seek, so what the
+            // sink reports afterwards decides — not the `Ok`.
+            let target = Duration::from_secs_f64(secs.max(0.0)).min(if track.duration.is_zero() {
+                Duration::MAX
+            } else {
+                track.duration
+            });
+            // The frontend can explicitly prime before a seek into the last
+            // few seconds. Preserve append-before-seek there so seeking into
+            // the final samples cannot outrun the next decoder.
+            if pending_next.is_some()
+                && pending_seek.is_none()
+                && !track.duration.is_zero()
+                && track.duration.saturating_sub(target).as_secs_f64() <= PRIME_LEAD_SECS
+            {
+                deferred_tail_seek = Some(secs);
+            } else {
+                let previous = pending_seek.take();
+                if let Some(previous) = &previous {
+                    previous.ticket.supersede();
+                }
+                match seek(sink.as_ref(), target, queue.len()) {
+                    SeekOutcome::Seeked => {
+                        clock.seek(target);
+                        seek_refused = false;
+                    }
+                    SeekOutcome::Pending(ticket) => {
+                        pending_seek = Some(PendingSeek {
+                            ticket,
+                            track: track.path.clone(),
+                            started: Instant::now(),
+                        });
+                    }
+                    SeekOutcome::Refused(err) => {
+                        if let Some(previous) = &previous {
+                            previous.ticket.cancel();
+                        }
+                        eprintln!("audio: seek refused: {err}");
+                        seek_refused = true;
+                    }
+                    // Nothing is left to seek; the boundary below takes
+                    // the player idle.
+                    SeekOutcome::PlayedOut => {
+                        if let Some(previous) = &previous {
+                            previous.ticket.cancel();
+                        }
+                    }
+                }
+            }
         }
 
         if let Some(pending) = pending_seek.take() {
@@ -737,7 +790,10 @@ fn audio_thread<O, F>(
         // The sink drains sources as they finish. When it holds fewer than our
         // queue, a track boundary was crossed: drop the finished front and
         // restart the clock for the new current track.
-        while queue.len() > sink.as_ref().map_or(0, Sink::len) && !queue.is_empty() {
+        // Keep the outgoing track associated with an in-flight next request.
+        // If it drains just before preparation finishes, append on the same
+        // sink and cross the boundary once, keeping pause state intact.
+        while pending_next.is_none() && queue.len() > sink.as_ref().map_or(0, Sink::len) {
             queue.pop_front();
             clock.start();
             if paused || studio.owns_output() {
@@ -760,7 +816,8 @@ fn audio_thread<O, F>(
                 paused || studio.owns_output() && !queue.is_empty(),
                 seek_refused,
                 device.is_none(),
-                pending_seek.is_some(),
+                pending_seek.is_some() || deferred_tail_seek.is_some(),
+                pending_next.is_some(),
             ),
         );
     }
@@ -818,22 +875,39 @@ fn fresh_sink<O: Output>(device: Option<&O>, volume: f32) -> Option<O::Sink> {
     device.map(|output| output.sink(volume))
 }
 
-/// Decode `path` and append it to the sink, recording it in `queue`. Returns
-/// false (and leaves the queue untouched) if the file can't be opened/decoded.
-fn enqueue<S: Sink>(sink: &S, queue: &mut VecDeque<Track>, path: PathBuf) -> bool {
+struct PreparedTrack {
+    decoder: Decoded,
+    track: Track,
+}
+
+fn prepare_track(path: PathBuf) -> Option<PreparedTrack> {
     let decoder = match open_decoder(&path) {
         Ok(decoder) => decoder,
         Err(err) => {
             eprintln!("audio: can't play {}: {err}", path.display());
-            return false;
+            return None;
         }
     };
     let duration = TagEngine::read_duration(&path).unwrap_or(Duration::ZERO);
-    sink.append(decoder);
-    queue.push_back(Track {
-        path: Arc::new(path),
-        duration,
-    });
+    Some(PreparedTrack {
+        decoder,
+        track: Track {
+            path: Arc::new(path),
+            duration,
+        },
+    })
+}
+
+fn append_prepared<S: Sink>(sink: &S, queue: &mut VecDeque<Track>, prepared: PreparedTrack) {
+    sink.append(prepared.decoder);
+    queue.push_back(prepared.track);
+}
+
+fn enqueue<S: Sink>(sink: &S, queue: &mut VecDeque<Track>, path: PathBuf) -> bool {
+    let Some(prepared) = prepare_track(path) else {
+        return false;
+    };
+    append_prepared(sink, queue, prepared);
     true
 }
 
@@ -1059,6 +1133,7 @@ impl StatusKey {
         seek_refused: bool,
         output_unavailable: bool,
         seek_pending: bool,
+        preparing_next: bool,
     ) -> Self {
         let Some(current) = queue.front() else {
             return Self {
@@ -1083,7 +1158,7 @@ impl StatusKey {
             is_paused: paused,
             position,
             duration,
-            wants_next: queue.len() == 1 && near_end,
+            wants_next: queue.len() == 1 && near_end && !preparing_next,
             seek_refused,
             seek_pending,
             output_unavailable,
@@ -1577,6 +1652,7 @@ mod test_support {
             output: FakeOutput,
             watching: bool,
             mut open: impl FnMut() -> Result<FakeOutput, DeviceSinkError> + Send + 'static,
+            next_worker: next_track::Worker,
         ) -> Self {
             let (tx, rx) = mailbox::channel();
             let (done_tx, done) = std::sync::mpsc::channel();
@@ -1588,7 +1664,7 @@ mod test_support {
                 if watching {
                     allocations::watch_current_thread();
                 }
-                audio_thread(
+                audio_thread_with_next(
                     rx,
                     status_for_thread,
                     studio::Shared::default(),
@@ -1596,6 +1672,7 @@ mod test_support {
                         attempts_for_thread.fetch_add(1, Ordering::SeqCst);
                         open()
                     },
+                    next_worker,
                 );
                 let _ = done_tx.send(());
             });
@@ -1611,14 +1688,23 @@ mod test_support {
 
         /// A thread whose device opener always fails.
         pub(super) fn without_a_device() -> Self {
-            Self::start(FakeOutput::new(), false, || Err(DeviceSinkError::NoDevice))
+            Self::start(
+                FakeOutput::new(),
+                false,
+                || Err(DeviceSinkError::NoDevice),
+                next_track::Worker::new(),
+            )
         }
 
         /// A thread whose device is always there.
         pub(super) fn with_a_device() -> Self {
+            Self::with_next_worker(next_track::Worker::new())
+        }
+
+        pub(super) fn with_next_worker(worker: next_track::Worker) -> Self {
             let output = FakeOutput::new();
             let for_thread = output.clone();
-            Self::start(output, false, move || Ok(for_thread.clone()))
+            Self::start(output, false, move || Ok(for_thread.clone()), worker)
         }
 
         /// Like [`TestPlayer::with_a_device`], with this thread's heap
@@ -1626,7 +1712,12 @@ mod test_support {
         pub(super) fn with_a_counted_device() -> Self {
             let output = FakeOutput::new();
             let for_thread = output.clone();
-            Self::start(output, true, move || Ok(for_thread.clone()))
+            Self::start(
+                output,
+                true,
+                move || Ok(for_thread.clone()),
+                next_track::Worker::new(),
+            )
         }
 
         pub(super) fn send(&self, cmd: Cmd) {
@@ -2127,6 +2218,131 @@ mod with_an_output_device {
 
         player.finish("after a seek into a track that played out");
         clean_up(&track);
+    }
+
+    #[test]
+    fn slow_next_track_keeps_controls_live_and_primes_before_a_tail_seek() {
+        let first = playable_file("slow-prime-first", 12);
+        let second = playable_file("slow-prime-second", 4);
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, gate) = std::sync::mpsc::channel();
+        let worker = next_track::Worker::with(move |path| {
+            entered.send(()).unwrap();
+            gate.recv().ok()?;
+            prepare_track(path)
+        });
+        let player = TestPlayer::with_next_worker(worker);
+        player.send(Cmd::Play(first.clone()));
+        player.wait_until("first track", |p| playing(p, &first));
+        player.send(Cmd::SetNext(second.clone()));
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        player.send(Cmd::Pause);
+        player.send(Cmd::Seek(2.0));
+        player.wait_until("paused and sought while file preparation is held", |p| {
+            let status = p.status();
+            status.is_paused && status.position_secs == 2.0
+        });
+        assert_eq!(player.output.queued(), 1);
+        player.send(Cmd::Seek(11.9));
+        player.wait_until("tail seek pending", |p| p.status().seek_pending);
+        assert_eq!(player.status().position_secs, 2.0);
+        release.send(()).unwrap();
+        player.wait_until("next track appended before tail seek", |p| {
+            p.output.queued() == 2 && p.status().position_secs == 11.9
+        });
+        let calls = player.output.calls();
+        let append = calls
+            .iter()
+            .rposition(|call| *call == Call::Append)
+            .unwrap();
+        let tail_seek = calls
+            .iter()
+            .rposition(|call| *call == Call::Seek(Duration::from_millis(11_900)))
+            .unwrap();
+        assert!(append < tail_seek);
+        player.finish("after asynchronous next-track and tail seek");
+        clean_up(&first);
+        clean_up(&second);
+    }
+
+    #[test]
+    fn stop_and_play_discard_an_obsolete_prepared_track() {
+        let first = playable_file("prime-stop-first", 4);
+        let old_next = playable_file("prime-stop-old-next", 4);
+        let new_track = playable_file("prime-stop-new-track", 4);
+        let new_next = playable_file("prime-stop-new-next", 4);
+        let old = old_next.clone();
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, gate) = std::sync::mpsc::channel();
+        let worker = next_track::Worker::with(move |path| {
+            if path == old {
+                entered.send(()).unwrap();
+                gate.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+            prepare_track(path)
+        });
+        let player = TestPlayer::with_next_worker(worker);
+        player.send(Cmd::Play(first.clone()));
+        player.send(Cmd::SetNext(old_next.clone()));
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        player.send(Cmd::Stop);
+        player.wait_until("stop before old preparation finishes", |p| {
+            p.status().path.is_none()
+        });
+        player.send(Cmd::Play(new_track.clone()));
+        player.wait_until("replacement starts while old file is held", |p| {
+            playing(p, &new_track)
+        });
+        player.send(Cmd::SetNext(new_next.clone()));
+        release.send(()).unwrap();
+        player.wait_until("fresh next track", |p| p.output.queued() == 2);
+        player.output.finish_front();
+        player.wait_until("only the fresh next track plays", |p| playing(p, &new_next));
+        player.finish("after cancelling next-track preparation");
+        for path in [&first, &old_next, &new_track, &new_next] {
+            clean_up(path);
+        }
+    }
+
+    #[test]
+    fn a_failed_prime_can_fall_back_to_the_next_requested_file() {
+        let first = playable_file("prime-retry-first", 4);
+        let second = playable_file("prime-retry-second", 4);
+        let missing = first.with_file_name("missing.aiff");
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, gate) = std::sync::mpsc::channel();
+        let worker = next_track::Worker::with(move |path| {
+            if path == missing {
+                entered.send(()).unwrap();
+                gate.recv().ok()?;
+            }
+            prepare_track(path)
+        });
+        let player = TestPlayer::with_next_worker(worker);
+        player.send(Cmd::Play(first.clone()));
+        player.wait_until("first track", |p| playing(p, &first));
+        player.send(Cmd::SetNext(first.with_file_name("missing.aiff")));
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        player.send(Cmd::SetNext(second.clone()));
+        player.send(Cmd::Pause);
+        player.wait_until("paused behind the replacement request", |p| {
+            p.status().is_paused
+        });
+        // Even if the current source has drained, a queued next track should
+        // still become current and keep the pause state.
+        player.output.finish_front();
+        release.send(()).unwrap();
+        player.wait_until("replacement next track", |p| {
+            playing(p, &second) && p.status().is_paused
+        });
+        let position = player.status().position_secs;
+        assert!(position < 0.001);
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(player.status().position_secs, position);
+        player.finish("after retrying next track preparation");
+        clean_up(&first);
+        clean_up(&second);
     }
 
     #[test]
