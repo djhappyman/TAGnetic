@@ -308,6 +308,10 @@ pub(crate) fn load_entries(
     conn: &rusqlite::Connection,
     batch: &AppliedBatch,
 ) -> Result<Entries, JournalError> {
+    // The quota preflight, data and final commitment must see the same rows.
+    if conn.is_autocommit() {
+        return Err(invalid("native entries require a journal transaction"));
+    }
     check_batch_header(conn, batch)?;
     let(count,bytes):(i64,i64)=conn.query_row("SELECT count(*),coalesce(sum(length(intents)+coalesce(length(record),0)+coalesce(length(receipts),0)+coalesce(length(recovery),0)+512),0) FROM native_tag_files WHERE batch_id=?1",[batch.id.0],|r|Ok((r.get(0)?,r.get(1)?)))?;
     if count as usize != batch.plan.changes.len()
@@ -334,13 +338,19 @@ pub(crate) fn load_entries(
     let mut stmt=conn.prepare("SELECT n.ordinal,CASE WHEN length(n.identity)=32 THEN n.identity END,CASE WHEN length(n.digest)=32 THEN n.digest END,n.intents,n.operation,n.record,n.receipts,n.recovery,n.done,CASE WHEN length(CAST(n.operation_id AS BLOB))=34 THEN n.operation_id END,CASE WHEN length(CAST(f.path AS BLOB))<=8192 THEN f.path END,CASE WHEN length(n.roots_digest)=32 THEN n.roots_digest END,n.recovery_role FROM native_tag_files n JOIN file_changes f ON f.id=n.file_change_id AND f.batch_id=n.batch_id WHERE n.batch_id=?1 ORDER BY n.ordinal")?;
     let mut rows = stmt.query([batch.id.0])?;
     let mut entries = Vec::with_capacity(count as usize);
+    let expected_roots = root_digest(&batch.allowed_roots);
     while let Some(row) = rows.next()? {
         let ordinal = usize::try_from(row.get::<_, i64>(0)?).map_err(storage)?;
         if ordinal != entries.len() {
             return Err(invalid("native ordinal collection"));
         }
+        let change = batch
+            .plan
+            .changes
+            .get(ordinal)
+            .ok_or_else(|| invalid("native ordinal collection"))?;
         let roots_digest: Vec<u8> = row.get(11)?;
-        if roots_digest.as_slice() != root_digest(&batch.allowed_roots) {
+        if roots_digest.as_slice() != expected_roots {
             return Err(invalid("native root authorization binding"));
         }
         let identity: Vec<u8> = row.get(1)?;
@@ -349,7 +359,7 @@ pub(crate) fn load_entries(
         let operation: u8 = row.get(4)?;
         let operation_id: String = row.get(9)?;
         let (path, marked) = super::stored_path(row.get_ref(10)?)?;
-        if !marked || path != batch.plan.changes[ordinal].path {
+        if !marked || path != change.path {
             return Err(invalid("native row owner"));
         }
         let record: Option<Vec<u8>> = row.get(5)?;
@@ -374,10 +384,10 @@ pub(crate) fn load_entries(
             || recovery_role > 2
             || (operation == 1 && recovery_role > 1)
             || (operation == 2 && recovery.is_none())
-            || digest != file_digest(&batch.plan.changes[ordinal])
+            || digest != file_digest(change)
             || record.as_ref().is_some_and(|r| {
                 r.source_identity() != identity
-                    || r.original_path() != batch.plan.changes[ordinal].path
+                    || r.original_path() != change.path
                     || r.id() != operation_id
             })
         {
@@ -409,7 +419,7 @@ pub(crate) fn load_entries(
             intent: Intent {
                 identity,
                 operation_id,
-                roots_digest: root_digest(&batch.allowed_roots),
+                roots_digest: expected_roots,
                 digest,
                 bytes,
                 _owner: owner.clone(),
@@ -650,7 +660,13 @@ impl NativeJournal for SqliteJournal {
         self.record_with_native(batch, Some(intents))
     }
     fn entries(&self, batch: &AppliedBatch) -> Result<Entries, JournalError> {
-        load_entries(&self.conn, batch)
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Deferred,
+        )?;
+        let entries = load_entries(&tx, batch)?;
+        tx.commit()?;
+        Ok(entries)
     }
     fn begin(
         &mut self,

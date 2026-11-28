@@ -149,6 +149,16 @@ pub fn open_private_lock(path: &Path) -> io::Result<File> {
 /// sync where supported. Existing symlinks and foreign/broadly-readable files
 /// are refused, rather than read or overwritten through their target.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomic_with_publication(path, bytes, || {})
+}
+
+/// Reports when the new file becomes visible, including replacements whose
+/// subsequent directory sync reports a durability error.
+pub(super) fn write_atomic_with_publication(
+    path: &Path,
+    bytes: &[u8],
+    published: impl FnOnce(),
+) -> io::Result<()> {
     let parent = path.parent().ok_or_else(denied)?;
     verify_private(parent, true)?;
     match fs::symlink_metadata(path) {
@@ -167,6 +177,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         file.sync_all()?;
         drop(file);
         fs::rename(&temporary, path)?;
+        published();
         #[cfg(unix)]
         File::open(parent)?.sync_all()?;
         Ok(())
@@ -212,11 +223,32 @@ mod tests {
         let (_root, dir) = private_dir();
         let file = dir.join("state.json");
         write_atomic(&file, b"first").unwrap();
-        write_atomic(&file, b"second").unwrap();
+        let mut published = false;
+        write_atomic_with_publication(&file, b"second", || published = true).unwrap();
+        assert!(published);
         assert_eq!(read_bounded(&file, 6).unwrap(), b"second");
         assert!(read_bounded(&file, 5).is_err());
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_precedes_the_parent_sync() {
+        let (root, dir) = private_dir();
+        let moved = root.path().join("moved");
+        let file = dir.join("state.json");
+        let error = write_atomic_with_publication(&file, b"published", || {
+            // Make the subsequent directory sync fail after a real file rename.
+            fs::rename(&dir, &moved).unwrap();
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(
+            read_bounded(&moved.join("state.json"), 16).unwrap(),
+            b"published"
+        );
+    }
+
     #[test]
     fn stable_lock_file_is_not_truncated_on_reopen() {
         let (_root, dir) = private_dir();

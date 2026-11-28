@@ -70,7 +70,7 @@ impl Format<'_> {
 fn escaped(
     out: &mut dyn Write,
     value: &str,
-    replacement: impl Fn(char) -> Option<&'static str>,
+    mut replacement: impl FnMut(char) -> Option<&'static str>,
 ) -> fmt::Result {
     let mut start = 0;
     for (i, c) in value.char_indices() {
@@ -120,9 +120,28 @@ fn xml_cell(out: &mut dyn Write, value: &str) -> fmt::Result {
         _ => None,
     })
 }
+// Display metadata must occupy one line in M3U and CUE. Treat CRLF as
+// one break, without changing the file path that identifies the track.
+fn single_line(
+    out: &mut dyn Write,
+    value: &str,
+    quote_replacement: Option<&'static str>,
+) -> fmt::Result {
+    let mut after_cr = false;
+    escaped(out, value, |c| {
+        let replacement = match c {
+            '\n' if after_cr => Some(""),
+            '\r' | '\n' => Some(" "),
+            '"' => quote_replacement,
+            _ => None,
+        };
+        after_cr = c == '\r';
+        replacement
+    })
+}
 fn cue_cell(out: &mut dyn Write, value: &str) -> fmt::Result {
     out.write_char('"')?;
-    escaped(out, value, |c| (c == '"').then_some("'"))?;
+    single_line(out, value, Some("'"))?;
     out.write_char('"')
 }
 fn column<'a>(track: &'a TrackFile, name: &str, field: &Option<TagField>) -> Cow<'a, str> {
@@ -147,9 +166,11 @@ pub(super) fn write_m3u(out: &mut dyn Write, tracks: &[PlaylistTrack]) -> fmt::R
     for track in tracks {
         write!(out, "#EXTINF:{},", track.duration_secs)?;
         if !track.artist.is_empty() {
-            write!(out, "{} - ", track.artist)?;
+            single_line(out, &track.artist, None)?;
+            out.write_str(" - ")?;
         }
-        writeln!(out, "{}\n{}", track.title, track.path)?;
+        single_line(out, &track.title, None)?;
+        writeln!(out, "\n{}", track.path)?;
     }
     Ok(())
 }
@@ -180,11 +201,11 @@ pub(super) fn write_cue(out: &mut dyn Write, tracks: &[CueTrack]) -> fmt::Result
         }
     }
     for (index, track) in tracks.iter().enumerate() {
-        out.write_str("FILE ")?;
-        cue_cell(out, &track.path)?;
+        out.write_str("FILE \"")?;
+        escaped(out, &track.path, |c| (c == '"').then_some("'"))?;
         writeln!(
             out,
-            " {}\n  TRACK {:02} AUDIO",
+            "\" {}\n  TRACK {:02} AUDIO",
             cue_file_type(&track.path),
             index + 1
         )?;
@@ -304,6 +325,46 @@ pub(super) fn write_report(out: &mut dyn Write, tracks: &[TrackFile], mask: &Mas
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playlist_and_cue_metadata_stays_within_its_record_line() {
+        let title = "First line\r\nsecond line";
+        let artist = "One artist\nanother artist";
+        let playlist = [PlaylistTrack {
+            path: "track.wav".into(),
+            title: title.into(),
+            artist: artist.into(),
+            duration_secs: 30,
+        }];
+        let cues = [CueTrack {
+            path: "track.wav".into(),
+            tags: TagMap::from([
+                (TagField::Title, title.into()),
+                (TagField::Album, "Live\rSession".into()),
+                (TagField::Artist, artist.into()),
+            ]),
+        }];
+
+        assert_eq!(
+            (
+                Format::M3u(&playlist).render_bounded(1024).unwrap().as_str(),
+                Format::Cue(&cues).render_bounded(1024).unwrap().as_str(),
+            ),
+            (
+                "#EXTM3U\n#EXTINF:30,One artist another artist - First line second line\ntrack.wav\n",
+                concat!(
+                    "PERFORMER \"One artist another artist\"\n",
+                    "TITLE \"Live Session\"\n",
+                    "FILE \"track.wav\" WAVE\n",
+                    "  TRACK 01 AUDIO\n",
+                    "    TITLE \"First line second line\"\n",
+                    "    PERFORMER \"One artist another artist\"\n",
+                    "    INDEX 01 00:00:00\n"
+                )
+            ),
+        );
+    }
+
     #[test]
     fn every_format_counts_headers_unicode_and_escaping_before_returning_output() {
         let tracks = [TrackFile {

@@ -152,6 +152,39 @@ fn credentials_are_hashed_on_disk_and_revocation_is_immediate() {
     );
     assert!(f.service.authenticate(&f.credential).is_err());
 }
+
+#[test]
+fn failed_pairing_does_not_retain_a_client_or_consume_its_slot() {
+    let f = Fixture::new();
+    let path = f.root.join("service/clients.json");
+    let saved = fs::read(&path).unwrap();
+    let before = f.service.list_clients().unwrap();
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+
+    let grant = Grant {
+        roots: vec![f.media.clone()],
+        ..Grant::default()
+    };
+    assert!(f
+        .service
+        .pair_client("Retry".into(), grant.clone())
+        .is_err());
+    assert_eq!(f.service.list_clients().unwrap(), before);
+
+    fs::remove_dir(&path).unwrap();
+    private_storage::write_atomic(&path, &saved).unwrap();
+    let paired = f.service.pair_client("Retry".into(), grant).unwrap();
+    assert!(f.service.authenticate(&paired.credential).is_ok());
+    assert!(f.service.authenticate(&f.credential).is_ok());
+    assert_eq!(
+        f.service.list_clients().unwrap()["clients"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
 #[test]
 fn revocation_releases_image_receipt_capacity_without_touching_another_owner() {
     let f = Fixture::new();

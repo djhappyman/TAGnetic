@@ -2623,17 +2623,20 @@ fn ogg_safe_write<T>(
         return Ok(result);
     }
     let before = exact::source_bytes(path)?;
-    let result = body();
+    // Catch the writer's unwind inside the snapshot guard so that any partial
+    // write still reaches the byte-for-byte recovery below.
+    let result = guarded(path, body);
     let after = exact::source_bytes(path)?;
     if after == before {
         return result;
     }
-    let readable =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| probe_file(path).is_ok()))
-            .unwrap_or(false);
-    let intact = readable && last_ogg_granule(&after) == last_ogg_granule(&before);
-    if result.is_ok() && intact {
-        return result;
+    if result.is_ok() {
+        let readable =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| probe_file(path).is_ok()))
+                .unwrap_or(false);
+        if readable && last_ogg_granule(&after) == last_ogg_granule(&before) {
+            return result;
+        }
     }
     rewrite_in_place(path, &after, &before)?;
     match result {
@@ -6783,6 +6786,28 @@ pub enum TagIoError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ogg_write_guard_restores_bytes_after_a_writer_panics() {
+        let path = std::env::temp_dir().join(format!(
+            "tagrex-ogg-guard-unwind-{}.ogg",
+            std::process::id()
+        ));
+        let original = b"OggS original bytes for an injected writer failure";
+        std::fs::write(&path, original).unwrap();
+
+        let result: Result<(), TagIoError> = guarded(&path, || {
+            ogg_safe_write(&path, || {
+                std::fs::write(&path, b"partial output")?;
+                panic!("injected writer panic after modifying the file");
+            })
+        });
+
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(result, Err(TagIoError::Malformed(_))));
+        assert_eq!(bytes, original);
+    }
 
     fn known_fields() -> Vec<TagField> {
         vec![

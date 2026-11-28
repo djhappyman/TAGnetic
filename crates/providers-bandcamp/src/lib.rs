@@ -359,7 +359,7 @@ fn parse_search(body: &str) -> Result<Vec<ReleaseCandidate>, ProviderError> {
         .get("auto")
         .and_then(|auto| auto.get("results"))
         .and_then(Value::as_array)
-        .cloned()
+        .map(Vec::as_slice)
         .unwrap_or_default();
     let candidates = results
         .iter()
@@ -409,11 +409,16 @@ fn parse_release(html: &str, url: &str) -> Result<Release, ProviderError> {
                 .and_then(|by| str_field(by, "name"))
         })
         .unwrap_or_default();
-    let release_date = current
-        .and_then(|current| str_field(current, "release_date"))
-        .or_else(|| str_field(&tralbum, "album_release_date"))
-        .or_else(|| ld.as_ref().and_then(|ld| str_field(ld, "datePublished")));
-    let year = release_date.as_deref().and_then(year_from_date);
+    let parse_date = |value: &Value, key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .and_then(year_from_date)
+    };
+    let year = current
+        .and_then(|current| parse_date(current, "release_date"))
+        .or_else(|| parse_date(&tralbum, "album_release_date"))
+        .or_else(|| ld.as_ref().and_then(|ld| parse_date(ld, "datePublished")));
 
     let art_id = tralbum
         .get("art_id")
@@ -559,13 +564,31 @@ fn release_format(ld: &Value) -> Option<String> {
     Some(mapped.to_string())
 }
 
-/// The four-digit year out of a Bandcamp date string (`"04 Mar 2024 00:00:00
-/// GMT"` → `2024`). Tolerant: the first whitespace token that reads as a
-/// plausible year wins, so a leading day or a bare year both work.
+/// Extract the year from Bandcamp's display dates and JSON-LD ISO dates.
 fn year_from_date(date: &str) -> Option<u16> {
     date.split_whitespace()
         .filter_map(|token| token.parse::<u16>().ok())
         .find(|year| (1900..=2100).contains(year))
+        .or_else(|| {
+            let date = date.trim();
+            let day_part = date.split_once('T').map_or(date, |(day_part, _)| day_part);
+            let (year, month_day) = day_part.split_once('-')?;
+            let (month, day) = month_day.split_once('-')?;
+            if year.len() != 4
+                || month.len() != 2
+                || day.len() != 2
+                || ![year, month, day]
+                    .into_iter()
+                    .all(|part| part.bytes().all(|digit| digit.is_ascii_digit()))
+            {
+                return None;
+            }
+            let year = year.parse::<u16>().ok()?;
+            let month = month.parse::<u8>().ok()?;
+            let day = day.parse::<u8>().ok()?;
+            ((1900..=2100).contains(&year) && (1..=12).contains(&month) && (1..=31).contains(&day))
+                .then_some(year)
+        })
 }
 
 /// Extract and parse the `data-tralbum` attribute's JSON. The value sits in a
@@ -827,5 +850,18 @@ mod tests {
         assert_eq!(year_from_date("04 Mar 2024 00:00:00 GMT"), Some(2024));
         assert_eq!(year_from_date("2019"), Some(2019));
         assert_eq!(year_from_date(""), None);
+    }
+
+    #[test]
+    fn a_release_uses_a_valid_iso_date_when_its_primary_date_is_unusable() {
+        let html = r#"
+            <div data-tralbum="{&quot;current&quot;:{&quot;release_date&quot;:&quot;unknown&quot;}}"></div>
+            <script type="application/ld+json">{"datePublished":"2024-03-04"}</script>
+        "#;
+        let release = parse_release(html, "https://label.bandcamp.com/album/example").unwrap();
+        assert_eq!(release.year, Some(2024));
+        assert_eq!(year_from_date("2024-03-04T00:00:00Z"), Some(2024));
+        assert_eq!(year_from_date("2024-xx-04"), None);
+        assert_eq!(year_from_date("2024-03-04junk"), None);
     }
 }

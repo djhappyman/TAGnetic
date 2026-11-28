@@ -144,6 +144,53 @@ impl NativeJournal for Full {
         NativeJournal::remove_native(&mut self.inner, id)
     }
 }
+
+#[test]
+fn native_entries_use_one_sqlite_read_snapshot() {
+    let fixture = Fixture(std::env::temp_dir().join(format!(
+        "tagrex-native-read-snapshot-{}",
+        std::process::id()
+    )));
+    std::fs::create_dir(&fixture.0).unwrap();
+    let path = fixture.0.join("track.flac");
+    std::fs::write(&path, flac()).unwrap();
+    let db = fixture.0.join("journal.sqlite");
+    let mut journal = SqliteJournal::open(&db).unwrap();
+    journal
+        .conn
+        .pragma_update(None, "journal_mode", "WAL")
+        .unwrap();
+    let plan = ChangePlan {
+        changes: vec![FileChange {
+            path: path.clone(),
+            tag_changes: vec![FieldChange {
+                field: TagField::Title,
+                old: Some("Saved".into()),
+                new: Some("Changed".into()),
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let batch = Executor::apply(&plan, &mut journal, std::slice::from_ref(&fixture.0)).unwrap();
+    assert!(load_entries(&journal.conn, &batch).is_err());
+    assert_eq!(
+        NativeJournal::entries(&journal, &batch).unwrap().rows.len(),
+        1
+    );
+    assert!(journal.conn.is_autocommit());
+
+    let read = journal.conn.unchecked_transaction().unwrap();
+    check_batch_header(&read, &batch).unwrap();
+    let mut other = SqliteJournal::open(&db).unwrap();
+    UndoJournal::rollback(&mut other, batch.id).unwrap();
+
+    assert_eq!(load_entries(&read, &batch).unwrap().rows.len(), 1);
+    read.commit().unwrap();
+    assert!(NativeJournal::entries(&journal, &batch).is_err());
+    assert!(journal.conn.is_autocommit());
+}
+
 #[test]
 fn real_native_sqlite_full_busy_and_abort_preserve_media_prior_history_and_no_completion() {
     for kind in 0..3 {

@@ -19,6 +19,7 @@
 
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
@@ -48,7 +49,7 @@ pub enum PlaybackState {
     not(any(target_os = "macos", target_os = "linux", windows)),
     allow(dead_code)
 )]
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct NowPlaying {
     pub state: PlaybackState,
     pub path: Option<String>,
@@ -72,43 +73,232 @@ pub struct MediaControl {
     pub position_secs: Option<f64>,
 }
 
-/// The track whose cover was last handed to the system, so a state change on
-/// the same track does not read the file again.
-static COVER_FOR: Mutex<Option<String>> = Mutex::new(None);
+struct CoverRequest {
+    generation: u64,
+    path: PathBuf,
+}
+
+#[derive(Default)]
+struct Reports {
+    track: Option<String>,
+    generation: u64,
+    worker_running: bool,
+    pending_cover: Option<CoverRequest>,
+    latest_while_loading: Option<(NowPlaying, Instant)>,
+}
+
+impl Reports {
+    fn record(
+        &mut self,
+        now: &NowPlaying,
+        player_path: Option<&str>,
+        reported_at: Instant,
+    ) -> (bool, bool) {
+        let track = now
+            .path
+            .as_deref()
+            .filter(|path| now.state != PlaybackState::Stopped && Some(*path) == player_path);
+        let changed_track = self.track.as_deref() != track;
+        if changed_track {
+            self.track = track.map(str::to_owned);
+            self.generation = self.generation.wrapping_add(1);
+            self.pending_cover = track.map(|path| CoverRequest {
+                generation: self.generation,
+                path: PathBuf::from(path),
+            });
+            self.latest_while_loading = None;
+        }
+        if self.pending_cover.is_some() || self.latest_while_loading.is_some() {
+            self.latest_while_loading = Some((now.clone(), reported_at));
+        }
+        let start_worker = self.pending_cover.is_some() && !self.worker_running;
+        self.worker_running |= start_worker;
+        (changed_track, start_worker)
+    }
+
+    fn next_cover(&mut self) -> Option<CoverRequest> {
+        let next = self.pending_cover.take();
+        if next.is_none() {
+            self.worker_running = false;
+        }
+        next
+    }
+
+    fn complete(&mut self, generation: u64, completed_at: Instant) -> Option<NowPlaying> {
+        if self.generation != generation {
+            return None;
+        }
+        let (mut now, reported_at) = self.latest_while_loading.take()?;
+        // The system has already been running the clock since the report.
+        // Adding a cover must not reset its position or signal a second seek.
+        if now.state == PlaybackState::Playing {
+            let elapsed = completed_at.saturating_duration_since(reported_at);
+            now.position_secs = now.position_secs.max(0.0) + elapsed.as_secs_f64();
+            if now.duration_secs > 0.0 {
+                now.position_secs = now.position_secs.min(now.duration_secs);
+            }
+        }
+        Some(now)
+    }
+}
+
+static REPORTS: Mutex<Reports> = Mutex::new(Reports {
+    track: None,
+    generation: 0,
+    worker_running: false,
+    pending_cover: None,
+    latest_while_loading: None,
+});
+
+fn reports() -> std::sync::MutexGuard<'static, Reports> {
+    REPORTS.lock().unwrap_or_else(|error| error.into_inner())
+}
 
 /// Publish `now` to the system. The cover is read here, from the file, and
 /// only for the track the player is actually playing — the frontend names a
 /// path, but it cannot make this read any other file.
 pub async fn update(app: AppHandle, now: NowPlaying) {
-    let playing = app.state::<Player>().status().path;
-    let track = now
-        .path
-        .clone()
-        .filter(|path| Some(path) == playing.as_ref());
-    let new_track = {
-        let mut cover_for = COVER_FOR.lock().unwrap();
-        let changed = *cover_for != track;
-        cover_for.clone_from(&track);
-        changed
+    let start_worker = {
+        let mut reports = reports();
+        let playing = app.state::<Player>().status().path;
+        let (changed_track, start_worker) =
+            reports.record(&now, playing.as_deref(), Instant::now());
+        // Keep platform publication in report order. Start the track without
+        // waiting on its cover, and clear artwork from the previous track.
+        publish(&app, now, changed_track.then_some(None));
+        start_worker
     };
-    // `None`: same track, keep the cover already published. `Some(None)`: a
-    // new track without one.
-    let cover = match (new_track, track) {
-        (false, _) => None,
-        (true, None) => Some(None),
-        (true, Some(path)) => Some(
-            tauri::async_runtime::spawn_blocking(move || {
-                tagrex_core::model::TagEngine::read_cover(&PathBuf::from(path))
-                    .ok()
-                    .flatten()
-                    .map(|art| art.data.to_vec())
-            })
-            .await
-            .ok()
-            .flatten(),
-        ),
-    };
-    publish(&app, now, cover);
+    if start_worker {
+        // Keep the worker alive if the IPC caller disconnects. There can be
+        // one running read and one pending path, regardless of skip rate.
+        let _ = tauri::async_runtime::spawn(read_pending_covers(app)).await;
+    }
+}
+
+async fn read_pending_covers(app: AppHandle) {
+    loop {
+        let next = reports().next_cover();
+        let Some(CoverRequest { generation, path }) = next else {
+            return;
+        };
+        let cover = tauri::async_runtime::spawn_blocking(move || {
+            tagrex_core::model::TagEngine::read_cover(&path)
+                .ok()
+                .flatten()
+                .map(|art| art.data.to_vec())
+        })
+        .await
+        .ok()
+        .flatten();
+        let mut reports = reports();
+        if let (Some(now), Some(cover)) = (reports.complete(generation, Instant::now()), cover) {
+            publish(&app, now, Some(Some(cover)));
+        }
+    }
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn report(state: PlaybackState, path: Option<&str>, position_secs: f64) -> NowPlaying {
+        NowPlaying {
+            state,
+            path: path.map(str::to_owned),
+            title: String::new(),
+            artist: String::new(),
+            album: String::new(),
+            duration_secs: 60.0,
+            position_secs,
+        }
+    }
+
+    #[test]
+    fn a_stop_invalidates_inflight_art_and_drops_the_pending_track() {
+        let mut reports = Reports::default();
+        let start = Instant::now();
+        let first = report(PlaybackState::Playing, Some("first"), 0.0);
+        assert_eq!(reports.record(&first, Some("first"), start), (true, true));
+        let old = reports.next_cover().unwrap();
+
+        for path in ["second", "third", "fourth"] {
+            let next = report(PlaybackState::Playing, Some(path), 0.0);
+            assert_eq!(reports.record(&next, Some(path), start), (true, false));
+        }
+        assert_eq!(
+            reports.pending_cover.as_ref().unwrap().path,
+            PathBuf::from("fourth")
+        );
+
+        let stopped = report(PlaybackState::Stopped, None, 0.0);
+        assert_eq!(reports.record(&stopped, None, start), (true, false));
+        assert!(reports.complete(old.generation, start).is_none());
+        assert!(reports.next_cover().is_none());
+        assert_eq!(reports.record(&first, Some("first"), start), (true, true));
+    }
+
+    #[test]
+    fn leaving_and_returning_to_a_track_rejects_its_old_cover() {
+        let mut reports = Reports::default();
+        let start = Instant::now();
+        let first = report(PlaybackState::Playing, Some("first"), 0.0);
+        reports.record(&first, Some("first"), start);
+        let old = reports.next_cover().unwrap();
+
+        let second = report(PlaybackState::Playing, Some("second"), 0.0);
+        reports.record(&second, Some("second"), start);
+        reports.record(&first, Some("first"), start);
+
+        assert!(reports.complete(old.generation, start).is_none());
+        let newest = reports.next_cover().unwrap();
+        assert_eq!(newest.path, PathBuf::from("first"));
+        assert_eq!(
+            reports
+                .complete(newest.generation, start)
+                .unwrap()
+                .path
+                .as_deref(),
+            Some("first")
+        );
+    }
+
+    #[test]
+    fn an_inflight_cover_keeps_the_latest_pause_and_seek() {
+        let mut reports = Reports::default();
+        let start = Instant::now();
+        let first = report(PlaybackState::Playing, Some("track"), 0.0);
+        reports.record(&first, Some("track"), start);
+        let request = reports.next_cover().unwrap();
+
+        let paused = report(PlaybackState::Paused, Some("track"), 35.0);
+        assert_eq!(
+            reports.record(&paused, Some("track"), start),
+            (false, false)
+        );
+        let published = reports
+            .complete(request.generation, start + Duration::from_secs(10))
+            .unwrap();
+        assert!(published.state == PlaybackState::Paused);
+        assert_eq!(published.position_secs, 35.0);
+        assert!(reports.next_cover().is_none());
+    }
+
+    #[test]
+    fn late_art_keeps_the_playing_clock_moving_without_passing_the_end() {
+        let mut reports = Reports::default();
+        let start = Instant::now();
+        let first = report(PlaybackState::Playing, Some("track"), 57.0);
+        assert_eq!(reports.record(&first, None, start), (false, false));
+        assert!(reports.next_cover().is_none());
+
+        reports.record(&first, Some("track"), start);
+        let request = reports.next_cover().unwrap();
+        let published = reports
+            .complete(request.generation, start + Duration::from_secs(10))
+            .unwrap();
+        assert_eq!(published.position_secs, 60.0);
+    }
 }
 
 #[cfg(target_os = "macos")]

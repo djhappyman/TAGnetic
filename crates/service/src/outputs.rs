@@ -492,7 +492,7 @@ impl Service {
             .spawn(move || {
                 let cancelled =
                     || job.cancel.load(Ordering::Acquire) || service.grant(&actor, "read").is_err();
-                let result = (|| -> ServiceResult<AnalysisResult> {
+                let run = || -> ServiceResult<AnalysisResult> {
                     if cancelled() {
                         return Err(ServiceError::new("cancelled", "Scan cancelled"));
                     }
@@ -582,7 +582,14 @@ impl Service {
                             "Duplicate scan did not complete",
                         )
                     })
-                })();
+                };
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run))
+                    .unwrap_or_else(|_| {
+                        Err(ServiceError::new(
+                            "analysis_failed",
+                            "Analysis worker stopped unexpectedly",
+                        ))
+                    });
                 let was_cancelled = cancelled();
                 if let Ok(mut status) = job.status.lock() {
                     match result {
@@ -900,6 +907,60 @@ mod tests {
         let one = service.authenticate(&one.credential).unwrap();
         let two = service.authenticate(&two.credential).unwrap();
         (root, service, one, two, paths)
+    }
+
+    #[test]
+    fn failed_analysis_worker_finishes_and_can_be_released() {
+        struct PanickingBpm;
+
+        impl DesktopBackend for PanickingBpm {
+            fn call(&self, _: &str, _: Value) -> ServiceResult<Value> {
+                Err(ServiceError::invalid("Unexpected desktop action"))
+            }
+
+            fn bpm(
+                &self,
+                _: &[PathBuf],
+                _: &AtomicBool,
+                _: &mut dyn FnMut(usize, usize),
+            ) -> ServiceResult<Value> {
+                panic!("fixture analysis worker panic")
+            }
+        }
+
+        let (root, service, actor, _, paths) = fixture();
+        service.set_desktop_backend(Arc::new(PanickingBpm)).unwrap();
+        let (send, received) = std::sync::mpsc::channel();
+        service
+            .set_event_sink(Arc::new(move |name, payload| {
+                if name == "analysis_changed" && payload["complete"] == true {
+                    let _ = send.send(payload);
+                }
+            }))
+            .unwrap();
+        let original = fs::read(&paths[0]).unwrap();
+        let started = service
+            .call(&actor, "analysis.bpm", json!({"paths":[paths[0]]}))
+            .unwrap();
+        let stopped = received.recv_timeout(std::time::Duration::from_secs(2));
+        let status = service.call(
+            &actor,
+            "analysis.bpm",
+            json!({"action":"status","job":started["job"]}),
+        );
+        let released = service.call(
+            &actor,
+            "analysis.bpm",
+            json!({"action":"release","job":started["job"]}),
+        );
+        let unchanged = fs::read(&paths[0]).unwrap() == original;
+        drop(service);
+        fs::remove_dir_all(root).unwrap();
+
+        assert_eq!(status.unwrap()["status"], "failed");
+        assert_eq!(stopped.unwrap()["job"], started["job"]);
+        assert_eq!(released.unwrap()["released"], started["job"]);
+        assert!(unchanged);
     }
 
     #[test]

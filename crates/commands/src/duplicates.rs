@@ -26,6 +26,7 @@ use crate::query::{DuplicateQueryGroup, DuplicateResults, QueryError, QueryIndex
 
 const FINGERPRINT_SECONDS: f64 = 120.0;
 const CACHE_ENTRIES: usize = 4096;
+const MAX_LIKELY_PAIRS: usize = 1_000_000;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -466,11 +467,16 @@ pub fn scan_with_updates(
                 .map(|v| v >> 16)
                 .collect();
             for token in tokens {
-                for bucket in duration_bucket.saturating_sub(1)..=duration_bucket + 1 {
+                for bucket in duration_bucket.saturating_sub(1)..=duration_bucket.saturating_add(1)
+                {
                     if let Some(candidates) = buckets.get(&(bucket, token)) {
-                        for &other in candidates {
-                            pairs.insert((i.min(other), i.max(other)));
-                        }
+                        collect_candidate_pairs(
+                            &mut pairs,
+                            i,
+                            candidates,
+                            MAX_LIKELY_PAIRS,
+                            &cancelled,
+                        )?;
                     }
                 }
                 buckets.entry((duration_bucket, token)).or_default().push(i);
@@ -480,14 +486,15 @@ pub fn scan_with_updates(
             if !artist.is_empty() && !title.is_empty() {
                 let key = format!("{artist}\0{title}");
                 if let Some(candidates) = metadata.get(&key) {
-                    for &other in candidates {
-                        pairs.insert((i.min(other), i.max(other)));
-                    }
+                    collect_candidate_pairs(
+                        &mut pairs,
+                        i,
+                        candidates,
+                        MAX_LIKELY_PAIRS,
+                        &cancelled,
+                    )?;
                 }
                 metadata.entry(key).or_default().push(i);
-            }
-            if pairs.len() > 1_000_000 {
-                return Err(QueryError::Invalid("Duplicate candidates exceed the comparison budget; open a narrower library and rescan.".into()));
             }
         }
         let mut adjacency: HashMap<usize, BTreeSet<usize>> = HashMap::new();
@@ -545,6 +552,29 @@ pub fn scan_with_updates(
         errors,
         groups_revision: 0,
     })
+}
+
+fn collect_candidate_pairs(
+    pairs: &mut BTreeSet<(usize, usize)>,
+    row: usize,
+    candidates: &[usize],
+    limit: usize,
+    cancelled: &impl Fn() -> bool,
+) -> Result<(), QueryError> {
+    for (offset, &other) in candidates.iter().enumerate() {
+        if offset % 256 == 0 && cancelled() {
+            return Err(QueryError::Cancelled);
+        }
+        let pair = (row.min(other), row.max(other));
+        if pairs.len() < limit {
+            pairs.insert(pair);
+        } else if !pairs.contains(&pair) {
+            return Err(QueryError::Invalid(
+                "Duplicate candidates exceed the comparison budget; open a narrower library and rescan.".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn make_group(
@@ -917,6 +947,76 @@ mod tests {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
+
+    #[test]
+    fn dense_likely_buckets_stop_at_the_candidate_limit_and_allow_repeated_pairs() {
+        let mut pairs = BTreeSet::from([(0, 4)]);
+        collect_candidate_pairs(&mut pairs, 4, &[0, 1], 2, &|| false).unwrap();
+        collect_candidate_pairs(&mut pairs, 4, &[1, 0], 2, &|| false).unwrap();
+
+        let result = collect_candidate_pairs(&mut pairs, 4, &[0, 2, 3], 2, &|| false);
+
+        assert!(matches!(result, Err(QueryError::Invalid(_))));
+        assert_eq!(pairs, BTreeSet::from([(0, 4), (1, 4)]));
+    }
+
+    #[test]
+    fn dense_likely_buckets_check_cancellation_during_pair_collection() {
+        let mut pairs = BTreeSet::new();
+        let candidates: Vec<_> = (0..1000).collect();
+        let polls = std::cell::Cell::new(0);
+        let cancelled = || {
+            polls.set(polls.get() + 1);
+            polls.get() == 2
+        };
+
+        let result = collect_candidate_pairs(&mut pairs, 1000, &candidates, 2000, &cancelled);
+
+        assert!(matches!(result, Err(QueryError::Cancelled)));
+        assert_eq!(pairs.len(), 256);
+    }
+
+    #[test]
+    fn very_large_duration_evidence_does_not_overflow_candidate_buckets() {
+        let fixture = Fixture::new();
+        let path = fixture.0.join("duration.wav");
+        std::fs::write(&path, b"cached fixture").unwrap();
+        let track: TrackDto = serde_json::from_value(serde_json::json!({
+            "path": path,
+            "format": "WAV",
+            "tags": {"duration": "1e30"}
+        }))
+        .unwrap();
+        let mut cache = AnalysisCache::default();
+        cache.put(
+            track.path.clone(),
+            CachedAnalysis {
+                stamp: Stamp::read(&path).unwrap(),
+                bytes: None,
+                audio: Some(AudioSignature {
+                    pcm: None,
+                    fingerprint: (0..128).map(|i| i << 16).collect(),
+                    frames: 0,
+                    rate: 0,
+                    complete: false,
+                }),
+            },
+        );
+
+        let result = scan(
+            &QueryIndex::from_tracks(&[track]),
+            "likely",
+            &Mutex::new(cache),
+            || false,
+            |_, _, _| {},
+        )
+        .unwrap();
+
+        assert_eq!(result.status, "complete");
+        assert!(result.groups.is_empty());
+        assert_eq!(result.skipped, 0);
+    }
+
     #[test]
     fn exact_hash_candidates_are_confirmed_with_bytes() {
         let fixture = Fixture::new();

@@ -6,7 +6,7 @@
 //! component styles and workflow controllers under `ui/`.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
@@ -323,12 +323,13 @@ const UPDATE_PROGRESS_EVENT: &str = "tagrex://update-progress";
 /// The paths in a command line. Windows and Linux hand a folder over as an
 /// argument; macOS does not, and passes `-psn_…` of its own when Finder starts
 /// the app, so anything that is not a path that exists is not ours.
-fn paths_from_args<I>(args: I) -> Vec<PathBuf>
+fn paths_from_args<I>(args: I, working_dir: &Path) -> Vec<PathBuf>
 where
     I: IntoIterator<Item = std::ffi::OsString>,
 {
     args.into_iter()
-        .map(PathBuf::from)
+        .filter(|arg| !arg.is_empty())
+        .map(|arg| working_dir.join(arg))
         .filter(|path| path.exists())
         .collect()
 }
@@ -2871,11 +2872,11 @@ fn main() {
     // it was given belongs in the window that is already open (#51). macOS
     // routes it to the running instance itself, as the Apple Event below.
     #[cfg(any(windows, target_os = "linux"))]
-    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-        // `argv` is the whole command line, the executable included.
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+        // Resolve relative arguments in the second process's working directory.
         hand_over_paths(
             app,
-            paths_from_args(argv.into_iter().skip(1).map(Into::into)),
+            paths_from_args(argv.into_iter().skip(1).map(Into::into), Path::new(&cwd)),
         );
     }));
 
@@ -2912,6 +2913,7 @@ fn main() {
         // What the app was started with, waiting for the frontend to ask (#51).
         .manage(PendingOpen::new(paths_from_args(
             std::env::args_os().skip(1),
+            Path::new(""),
         )))
         .setup(|app| {
             #[cfg(target_os = "linux")]
@@ -3135,6 +3137,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{paths_from_args, provider_page_url, release_url};
+    use std::path::Path;
 
     fn duplicate_job_fixture() -> (
         std::sync::Arc<tagrex_commands::query::QueryIndex>,
@@ -3604,11 +3607,24 @@ mod tests {
             dir.join("no-such-folder").to_string_lossy().into_owned(),
         ];
         assert_eq!(
-            paths_from_args(argv.into_iter().map(Into::into)),
+            paths_from_args(argv.into_iter().map(Into::into), Path::new("")),
             vec![dir.clone()]
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_existing_instance_resolves_arguments_in_the_sender_directory() {
+        let sender =
+            std::env::temp_dir().join(format!("tagrex-launch-args-sender-{}", std::process::id()));
+        let folder = sender.join("Relative music folder");
+        std::fs::create_dir_all(&folder).unwrap();
+        let arguments = ["Relative music folder", "missing", ""];
+        let actual = paths_from_args(arguments.into_iter().map(Into::into), &sender);
+        std::fs::remove_dir_all(&sender).unwrap();
+
+        assert_eq!(actual, vec![folder]);
     }
 
     #[test]

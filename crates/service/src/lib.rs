@@ -517,7 +517,20 @@ impl Service {
             ));
         }
         state.security.clients.push(record);
-        write_json(&self.0.directory.join("clients.json"), &state.security)?;
+        let mut published = false;
+        if let Err(error) = write_json_with_publication(
+            &self.0.directory.join("clients.json"),
+            &state.security,
+            || published = true,
+        ) {
+            // A directory sync can fail after the new file is visible. Keep
+            // memory aligned with that file, but never hand out a credential
+            // when its durability could not be confirmed.
+            if !published {
+                state.security.clients.pop();
+            }
+            return Err(error);
+        }
         drop(state);
         self.emit("service_changed", json!({"paired":id}));
         Ok(Pairing {
@@ -1424,7 +1437,18 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> ServiceResult<Optio
     }
 }
 fn write_json<T: Serialize>(path: &Path, value: &T) -> ServiceResult<()> {
-    private_storage::write_atomic(path, &serde_json::to_vec_pretty(value)?)?;
+    write_json_with_publication(path, value, || {})
+}
+fn write_json_with_publication<T: Serialize>(
+    path: &Path,
+    value: &T,
+    published: impl FnOnce(),
+) -> ServiceResult<()> {
+    private_storage::write_atomic_with_publication(
+        path,
+        &serde_json::to_vec_pretty(value)?,
+        published,
+    )?;
     Ok(())
 }
 
