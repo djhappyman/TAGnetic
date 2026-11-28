@@ -39,6 +39,17 @@ fn resize_cover_with_budget(art: &CoverArt, max_px: u32, quality: u8, budget: &B
     }) else {
         return art.clone();
     };
+    let quality = quality.clamp(1, 100);
+    let result = |data| CoverArt {
+        mime: "image/jpeg".into(),
+        data,
+        kind: art.kind,
+        description: art.description.clone(),
+    };
+    let cache = || resources::CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(data) = cache().get_for_source(&art.data, max_px, quality) {
+        return result(data);
+    }
     let Ok(mut reader) = image::ImageReader::new(Cursor::new(&art.data)).with_guessed_format()
     else {
         return art.clone();
@@ -53,7 +64,6 @@ fn resize_cover_with_budget(art: &CoverArt, max_px: u32, quality: u8, budget: &B
     if width <= max_px && height <= max_px {
         return art.clone();
     }
-    let quality = quality.clamp(1, 100);
     let huge = u64::from(width) * u64::from(height) > ROW_SHRINK_PIXELS;
     let full_allowed = resources::admitted(width, height, max_px, false);
     let rows_allowed = is_png && huge && resources::admitted(width, height, max_px, true);
@@ -61,20 +71,12 @@ fn resize_cover_with_budget(art: &CoverArt, max_px: u32, quality: u8, budget: &B
         return art.clone();
     }
     let key = resources::Key::new(&art.data, max_px, quality);
-    let cached = || {
-        resources::CACHE
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(&key)
-    };
-    let result = |data| CoverArt {
-        mime: "image/jpeg".into(),
-        data,
-        kind: art.kind,
-        description: art.description.clone(),
-    };
-    if let Some(data) = cached() {
-        return result(data);
+    {
+        let mut cache = cache();
+        if let Some(data) = cache.get(&key) {
+            cache.remember_source(key, &art.data);
+            return result(data);
+        }
     }
     // Reserve the larger permitted path because the row decoder can fall back
     // to a full decoder. The reservation precedes either decode/allocation.
@@ -134,15 +136,14 @@ fn resize_cover_with_budget(art: &CoverArt, max_px: u32, quality: u8, budget: &B
     // than PNG for artwork and universally embeddable.
     let rgb = resized.into_rgb8();
     let mut data = resources::Encoded(Vec::new());
-    let encoder = JpegEncoder::new_with_quality(&mut data, quality.clamp(1, 100));
+    let encoder = JpegEncoder::new_with_quality(&mut data, quality);
     if rgb.write_with_encoder(encoder).is_err() {
         return art.clone();
     }
     let data = std::sync::Arc::<[u8]>::from(data.0);
-    resources::CACHE
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .insert(key, data.clone());
+    let mut cache = cache();
+    cache.insert(key.clone(), data.clone());
+    cache.remember_source(key, &art.data);
     result(data)
 }
 

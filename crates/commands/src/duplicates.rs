@@ -26,6 +26,7 @@ use crate::query::{DuplicateQueryGroup, DuplicateResults, QueryError, QueryIndex
 
 const FINGERPRINT_SECONDS: f64 = 120.0;
 const CACHE_ENTRIES: usize = 4096;
+const CACHE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_LIKELY_PAIRS: usize = 1_000_000;
 
 #[derive(Debug, Clone, Serialize)]
@@ -87,22 +88,38 @@ struct CachedAnalysis {
     audio: Option<AudioSignature>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AnalysisCache {
-    entries: HashMap<String, CachedAnalysis>,
+    entries: crate::bounded_cache::Cache<String, CachedAnalysis>,
+    capacity: usize,
+}
+impl Default for AnalysisCache {
+    fn default() -> Self {
+        Self::new(CACHE_ENTRIES)
+    }
 }
 impl AnalysisCache {
-    fn get(&self, path: &str, stamp: &Stamp) -> Option<CachedAnalysis> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: crate::bounded_cache::Cache::new(capacity, CACHE_BYTES),
+            capacity,
+        }
+    }
+    fn get(&mut self, path: &str, stamp: &Stamp) -> Option<CachedAnalysis> {
         self.entries
             .get(path)
             .filter(|entry| entry.stamp == *stamp)
             .cloned()
     }
     fn put(&mut self, path: String, entry: CachedAnalysis) {
-        if self.entries.len() >= CACHE_ENTRIES && !self.entries.contains_key(&path) {
-            self.entries.clear();
-        }
-        self.entries.insert(path, entry);
+        let fingerprint_bytes = entry
+            .audio
+            .as_ref()
+            .map_or(0, |audio| std::mem::size_of_val(audio.fingerprint.as_ref()));
+        let bytes = 256usize
+            .saturating_add(path.capacity().saturating_mul(2))
+            .saturating_add(fingerprint_bytes);
+        self.entries.insert(path, entry, bytes);
     }
 }
 
@@ -294,6 +311,7 @@ pub fn scan_with_updates(
     let mut errors = 0;
     let mut stamps = Vec::with_capacity(total);
     let mut sizes: HashMap<u64, usize> = HashMap::new();
+    let exact = kind == "exact";
     groups.emit("stamping", (0, skipped, errors), total, false, &mut update);
     for (i, row) in index.rows.iter().enumerate() {
         if cancelled() {
@@ -305,7 +323,9 @@ pub fn scan_with_updates(
         } else {
             match Stamp::read(Path::new(&row.path)) {
                 Ok(stamp) => {
-                    *sizes.entry(stamp.length).or_default() += 1;
+                    if exact {
+                        *sizes.entry(stamp.length).or_default() += 1;
+                    }
                     Some(stamp)
                 }
                 Err(_) => {
@@ -327,12 +347,19 @@ pub fn scan_with_updates(
         "same_audio" => "decoding",
         _ => "fingerprinting",
     };
+    // Retain a stable prefix of useful evidence. Inserting the entire tail of
+    // an oversized sequential scan would evict the warm prefix before the
+    // next scan reaches it, even with an LRU.
+    let mut cache_slots = cache.lock().unwrap_or_else(|p| p.into_inner()).capacity;
     groups.emit(phase, (0, skipped, errors), total, false, &mut update);
     for (i, row) in index.rows.iter().enumerate() {
         if cancelled() {
             return Err(QueryError::Cancelled);
         }
-        if let Some(stamp) = &stamps[i] {
+        if let Some(stamp) = stamps[i]
+            .as_ref()
+            .filter(|stamp| !exact || sizes.get(&stamp.length).is_some_and(|&count| count >= 2))
+        {
             let mut entry = cache
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
@@ -342,24 +369,21 @@ pub fn scan_with_updates(
                     bytes: None,
                     audio: None,
                 });
-            let analyzed = if kind == "exact" {
-                if sizes.get(&stamp.length).copied().unwrap_or(0) < 2 {
-                    Ok(())
-                } else {
-                    entry
-                        .bytes
-                        .map(Ok)
-                        .unwrap_or_else(|| hash_file(Path::new(&row.path), &cancelled))
-                        .map(|hash| entry.bytes = Some(hash))
-                }
+            let full = kind == "same_audio";
+            let reused = if exact {
+                entry.bytes.is_some()
             } else {
-                let full = kind == "same_audio";
                 entry
                     .audio
-                    .take()
-                    .filter(|audio| !full || audio.pcm.is_some())
-                    .map(Ok)
-                    .unwrap_or_else(|| analyze_audio(Path::new(&row.path), full, &cancelled))
+                    .as_ref()
+                    .is_some_and(|audio| !full || audio.pcm.is_some())
+            };
+            let analyzed = if reused {
+                Ok(())
+            } else if exact {
+                hash_file(Path::new(&row.path), &cancelled).map(|hash| entry.bytes = Some(hash))
+            } else {
+                analyze_audio(Path::new(&row.path), full, &cancelled)
                     .map(|signature| entry.audio = Some(signature))
             };
             if matches!(analyzed, Err(QueryError::Cancelled)) {
@@ -368,11 +392,16 @@ pub fn scan_with_updates(
             if analyzed.is_err() {
                 errors += 1;
             } else if Stamp::read(Path::new(&row.path)).ok().as_ref() == Some(stamp) {
-                cache
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .put(row.path.clone(), entry.clone());
-                if kind == "exact" {
+                if cache_slots > 0 {
+                    cache_slots -= 1;
+                    if !reused {
+                        cache
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .put(row.path.clone(), entry.clone());
+                    }
+                }
+                if exact {
                     if let Some(hash) = entry.bytes {
                         let confirmed = byte_groups.entry(hash).or_default();
                         let mut placed = false;
@@ -428,6 +457,13 @@ pub fn scan_with_updates(
             } else {
                 errors += 1;
             }
+        } else if stamps[i]
+            .as_ref()
+            .is_some_and(|stamp| Stamp::read(Path::new(&row.path)).ok().as_ref() != Some(stamp))
+        {
+            // Size singletons have no hash to retain, but preserve the report
+            // when their file changes during the scan.
+            errors += 1;
         }
         groups.emit(phase, (i + 1, skipped, errors), total, false, &mut update);
     }
@@ -1036,6 +1072,68 @@ mod tests {
         assert_eq!(result.groups[0].indices, vec![0, 1]);
         assert_eq!(result.groups[0].confidence, "exact");
     }
+
+    #[test]
+    fn exact_scan_retains_only_useful_hashes_and_preserves_audio_evidence() {
+        let fixture = Fixture::new();
+        let a = fixture.0.join("a.wav");
+        let b = fixture.0.join("b.wav");
+        let singleton = fixture.0.join("singleton.wav");
+        std::fs::write(&a, b"pair").unwrap();
+        std::fs::write(&b, b"pair").unwrap();
+        std::fs::write(&singleton, b"only one with this size").unwrap();
+        let stamp = Stamp::read(&singleton).unwrap();
+        let path = singleton.to_string_lossy();
+        let mut cache = AnalysisCache::new(3);
+        cache.put(
+            path.to_string(),
+            CachedAnalysis {
+                stamp: stamp.clone(),
+                bytes: None,
+                audio: Some(AudioSignature {
+                    pcm: Some([0; 32]),
+                    fingerprint: Arc::new([]),
+                    frames: 10,
+                    rate: 8000,
+                    complete: true,
+                }),
+            },
+        );
+        let cache = Mutex::new(cache);
+        let index = fixture.index(&[a, b, singleton.clone()]);
+        let result = scan(&index, "exact", &cache, || false, |_, _, _| {}).unwrap();
+        assert_eq!(result.groups[0].indices, vec![0, 1]);
+        let retained = cache.lock().unwrap().get(&path, &stamp).unwrap();
+        assert!(retained.bytes.is_none());
+        assert!(retained.audio.is_some());
+        let cache = Mutex::new(AnalysisCache::new(3));
+        scan(&index, "exact", &cache, || false, |_, _, _| {}).unwrap();
+        assert!(cache.lock().unwrap().get(&path, &stamp).is_none());
+    }
+
+    #[test]
+    fn a_long_sequential_scan_keeps_a_warm_prefix_across_repeats() {
+        let fixture = Fixture::new();
+        let paths: Vec<_> = ["a.wav", "b.wav", "c.wav", "d.wav"]
+            .map(|name| {
+                let path = fixture.0.join(name);
+                std::fs::write(&path, b"same complete bytes").unwrap();
+                path
+            })
+            .into();
+        let index = fixture.index(&paths);
+        let cache = Mutex::new(AnalysisCache::new(2));
+        for _ in 0..2 {
+            let result = scan(&index, "exact", &cache, || false, |_, _, _| {}).unwrap();
+            assert_eq!(result.groups[0].indices, vec![0, 1, 2, 3]);
+            let mut retained = cache.lock().unwrap();
+            for (i, path) in paths.iter().enumerate() {
+                let entry = retained.get(&path.to_string_lossy(), &Stamp::read(path).unwrap());
+                assert_eq!(entry.is_some(), i < 2);
+            }
+        }
+    }
+
     #[test]
     fn verified_exact_groups_publish_early_and_grow_with_stable_ids() {
         let fixture = Fixture::new();

@@ -34,6 +34,72 @@ fn recording(path: &Path) -> Vec<u8> {
     pcm
 }
 
+#[test]
+fn studios_reuse_current_analysis_without_sharing_prepared_treatments() {
+    let root = fixtures();
+    let wav = root.path().join("warm.wav");
+    recording(&wav);
+    let studio = Studio::default();
+    let first = studio.open(&wav, || false).unwrap();
+    let first_source = studio.source(first.id()).unwrap();
+    let settings = AudioTreatment {
+        normalize: true,
+        ..AudioTreatment::default()
+    };
+    studio
+        .prepare_treatment(first.id(), settings.clone(), || false)
+        .unwrap();
+    assert!(first_source.cached_treatment(&settings).unwrap().is_some());
+
+    let second = studio
+        .open_with_progress(&wav, || false, |_| panic!("repeated audio analysis"))
+        .unwrap();
+    let second_source = studio.source(second.id()).unwrap();
+    assert_ne!(first.id(), second.id());
+    assert_eq!(first.source_stamp, second.source_stamp);
+    assert_eq!(first.overview, second.overview);
+    assert_eq!(first.stereo_overview, second.stereo_overview);
+    assert!(second_source.cached_treatment(&settings).unwrap().is_none());
+
+    // A new file at the old name has its own identity even with the same size.
+    let replacement = root.path().join("replacement.wav");
+    recording(&replacement);
+    fs::rename(&wav, root.path().join("previous.wav")).unwrap();
+    fs::rename(replacement, &wav).unwrap();
+    let mut rescanned = false;
+    let third = studio
+        .open_with_progress(&wav, || false, |_| rescanned = true)
+        .unwrap();
+    assert!(rescanned);
+    assert_ne!(first.source_stamp, third.source_stamp);
+    let fourth = studio
+        .open_with_progress(&wav, || false, |_| panic!("ignored a newer active source"))
+        .unwrap();
+    assert_eq!(third.source_stamp, fourth.source_stamp);
+}
+
+#[test]
+fn a_cancelled_warm_reopen_keeps_the_recording_ready_for_retry() {
+    let root = fixtures();
+    let wav = root.path().join("retry.wav");
+    recording(&wav);
+    let studio = Studio::default();
+    let first = studio.open(&wav, || false).unwrap();
+    studio.close(first.id()).unwrap();
+    assert!(studio.open(&wav, || true).is_err());
+
+    let reopened = studio
+        .open_with_progress(
+            &wav,
+            || false,
+            |_| panic!("cancelled reopen discarded the cache"),
+        )
+        .unwrap();
+    assert_ne!(first.id(), reopened.id());
+    assert_eq!(first.source_stamp, reopened.source_stamp);
+    assert_eq!(first.overview, reopened.overview);
+}
+
 fn request(root: &Path, source: &Path, name: &str, format: &str) -> ReviewRequest {
     ReviewRequest {
         sources: vec![source.to_str().unwrap().into()],

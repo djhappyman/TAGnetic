@@ -213,32 +213,69 @@ impl Recording {
         if recording.is_mp3 {
             // Read only compressed packets up to preroll, whether the
             // recording started from a verified point or from its beginning.
-            while recording.position < preroll_start {
-                let packet = recording
-                    .read_packet(cancelled)?
-                    .ok_or(MediaError::Range("The tile starts after the recording"))?;
-                recording.position += packet.dur();
-            }
+            recording.skip_mp3_packets(preroll_start, cancelled)?;
             return Ok(recording);
         }
-        if !recording.can_seek_lossless {
+        if !recording.can_seek_lossless || recording.seek_lossless(frame) {
             return Ok(recording);
-        }
-        if let Ok(seeked) = recording.reader.seek(
-            SeekMode::Accurate,
-            SeekTo::TimeStamp {
-                ts: frame,
-                track_id: recording.track,
-            },
-        ) {
-            if seeked.actual_ts <= frame {
-                recording.decoder.reset();
-                recording.position = seeked.actual_ts;
-                return Ok(recording);
-            }
         }
         drop(recording);
         Self::open(file)
+    }
+
+    fn seek_lossless(&mut self, frame: u64) -> bool {
+        if let Ok(seeked) = self.reader.seek(
+            SeekMode::Accurate,
+            SeekTo::TimeStamp {
+                ts: frame,
+                track_id: self.track,
+            },
+        ) {
+            if seeked.actual_ts <= frame {
+                self.decoder.reset();
+                self.position = seeked.actual_ts;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Move the held decoder between short windows of one overview request.
+    /// For unindexed MP3, each window keeps the ordinary seek's packet boundary
+    /// and fresh synthesis state. Only the repeated walk over its prefix is skipped.
+    pub(super) fn seek_overview(
+        &mut self,
+        frame: u64,
+        index: Option<&seek::SeekIndex>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<bool, MediaError> {
+        if frame == 0 {
+            return Ok(false);
+        }
+        if self.is_mp3 {
+            let preroll = frame.saturating_sub(MP3_PREROLL_FRAMES);
+            if index.is_some() || self.position > preroll {
+                return Ok(false);
+            }
+            self.skip_mp3_packets(preroll, cancelled)?;
+            self.decoder.reset();
+            return Ok(true);
+        }
+        Ok(self.can_seek_lossless && self.seek_lossless(frame))
+    }
+
+    fn skip_mp3_packets(
+        &mut self,
+        preroll: u64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), MediaError> {
+        while self.position < preroll {
+            let packet = self
+                .read_packet(cancelled)?
+                .ok_or(MediaError::Range("The tile starts after the recording"))?;
+            self.position += packet.dur();
+        }
+        Ok(())
     }
 
     fn open_mp3_suffix(

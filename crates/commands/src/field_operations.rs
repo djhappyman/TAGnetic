@@ -336,14 +336,13 @@ impl App {
         }
         let base = working_changes(working);
         let locked: HashSet<_> = self.locked_fields().into_iter().collect();
-        let selected: HashSet<_> = paths.iter().map(PathBuf::as_path).collect();
+        let mut selected: HashSet<_> = paths.iter().map(PathBuf::as_path).collect();
         let mut changes: Vec<_> = working
             .into_iter()
             .flat_map(|plan| &plan.changes)
             .filter(|change| !selected.contains(Path::new(&change.path)))
             .cloned()
             .collect();
-        let mut seen = HashSet::new();
         let mut unmatched = Vec::new();
         let mut batch_bytes = 0usize;
         for path in paths {
@@ -351,10 +350,11 @@ impl App {
                 return Err(tagrex_core::plan::PlanError::Cancelled.into());
             }
             check_policy()?;
-            if !seen.insert(path) {
+            if !selected.remove(path.as_path()) {
                 continue;
             }
-            let track = self.read_cached(path)?;
+            let read = self.read_snapshot(path)?;
+            let track = &read.file;
             let previous = base.get(path.as_path()).copied();
             if previous.is_some_and(|change| {
                 change.tag_changes.iter().any(|edit| {
@@ -404,12 +404,12 @@ impl App {
                 check_policy()?;
                 match step {
                     Step::Format(field, mask) => {
-                        let file = self.file_context(mask, &track);
+                        let file = Self::file_context(mask, &read);
                         let value = mask.render_value_with(&tags, &file)?;
                         assign_value(&mut tags, field, Some(value), &locked, &mut blocked)?;
                     }
                     Step::Extract(source, pattern) => {
-                        let file = self.file_context(source, &track);
+                        let file = Self::file_context(source, &read);
                         let value = source.render_value_with(&tags, &file)?;
                         match pattern.extract(&value) {
                             Ok(extracted) => {
@@ -513,10 +513,10 @@ impl App {
                     let key = field.to_storage_key();
                     let old = original_fields
                         .get(key.as_str())
-                        .map(|old| (*old).clone())
-                        .unwrap_or_else(|| track.tags.get(&field).cloned());
-                    let new = tags.get(&field).cloned();
-                    (old != new).then(|| FieldChangeDto::new(key, old, new))
+                        .map(|old| old.as_ref())
+                        .unwrap_or_else(|| track.tags.get(&field));
+                    let new = tags.get(&field);
+                    (old != new).then(|| FieldChangeDto::new(key, old.cloned(), new.cloned()))
                 })
                 .collect();
             // Keep rejected attempts for the existing gate's lock feedback,

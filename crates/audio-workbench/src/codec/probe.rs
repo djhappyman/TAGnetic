@@ -251,9 +251,50 @@ pub fn probe_treatment_with_options(
             );
         }
     }
-    probe_window(
-        source, info, frame, index, prepared, options, false, cancelled,
-    )
+    let mut input = ProbeInput {
+        source: Some(source),
+        index,
+        reusable: None,
+    };
+    probe_window(&mut input, info, frame, prepared, options, false, cancelled)
+}
+
+struct ProbeInput<'a> {
+    source: Option<File>,
+    index: Option<&'a SeekIndex>,
+    reusable: Option<PreviewDecoder>,
+}
+
+impl ProbeInput<'_> {
+    fn open(
+        &mut self,
+        start: u64,
+        overview: bool,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreviewDecoder, MediaError> {
+        if let Some(mut decoder) = self.reusable.take() {
+            check_cancelled(cancelled)?;
+            if decoder
+                .recording
+                .seek_overview(start, self.index, cancelled)?
+            {
+                decoder.start = start;
+                return Ok(decoder);
+            }
+            // The clones of this file share a stream cursor, so finish
+            // with the old reader before opening its replacement.
+            drop(decoder);
+        }
+        let source = if overview {
+            self.source
+                .as_ref()
+                .expect("held overview source")
+                .try_clone()?
+        } else {
+            self.source.take().expect("single probe source")
+        };
+        PreviewDecoder::open_indexed(source, start, self.index, cancelled)
+    }
 }
 
 fn probe_overview(
@@ -289,6 +330,11 @@ fn probe_overview(
     let mut left_waveform = Vec::new();
     let mut right_waveform = Vec::new();
     let mut result = None;
+    let mut input = ProbeInput {
+        source: Some(source),
+        index,
+        reusable: None,
+    };
     for column in 0..count {
         check_cancelled(&mut cancelled)?;
         if Instant::now() >= deadline {
@@ -299,10 +345,9 @@ fn probe_overview(
         let frame = range.start + (2 * column + 1) * span / (2 * count);
         let sample = centered(frame, width, info.frames);
         let mut reading = probe_window(
-            source.try_clone()?,
+            &mut input,
             info,
             frame,
-            index,
             prepared.clone(),
             TreatmentProbeOptions {
                 viewport: Some(sample),
@@ -348,12 +393,10 @@ fn probe_overview(
     Ok(result)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn probe_window(
-    source: File,
+    input: &mut ProbeInput<'_>,
     info: SourceInfo,
     frame: u64,
-    index: Option<&SeekIndex>,
     prepared: PreparedTreatment,
     options: TreatmentProbeOptions,
     overview_column: bool,
@@ -456,8 +499,9 @@ fn probe_window(
     } else {
         prepared.settings()
     };
-    let mut decoder =
-        super::RepairSource::open(source, cursor, index, mask_settings, &mut stop_decoding)?;
+    let mut decoder = super::RepairSource::open_with(cursor, mask_settings, |start| {
+        input.open(start, overview_column, &mut stop_decoding)
+    })?;
     if decoder.source_info().sample_rate != info.sample_rate
         || decoder.source_info().channels != info.channels
     {
@@ -549,6 +593,9 @@ fn probe_window(
             first = last;
         }
         cursor = next;
+    }
+    if overview_column {
+        input.reusable = Some(decoder.into_decoder());
     }
     let visual_end = keep_raw.start + (original_pcm.len() / channels) as u64;
     let seen = overlap(keep_raw.start, visual_end, spectrum).ok_or(MediaError::Range(
@@ -662,7 +709,13 @@ fn probe_window(
                     }
                 }
                 spectrogram = Some(values);
-                spectrogram_waveform = Some(waveform_samples(visual_pcm, visual_channels, channel));
+                let waveform_bins = if overview_column { 1 } else { 256 };
+                spectrogram_waveform = Some(waveform_samples(
+                    visual_pcm,
+                    visual_channels,
+                    channel,
+                    waveform_bins,
+                ));
                 if let Some([left, right]) = lanes {
                     spectrogram_left = Some(left);
                     spectrogram_right = Some(right);
@@ -670,11 +723,13 @@ fn probe_window(
                         visual_pcm,
                         visual_channels,
                         Some(usize::from(swapped)),
+                        waveform_bins,
                     ));
                     spectrogram_right_waveform = Some(waveform_samples(
                         visual_pcm,
                         visual_channels,
                         Some(usize::from(!swapped)),
+                        waveform_bins,
                     ));
                 }
             }
@@ -866,10 +921,14 @@ fn level_db(samples: &[i32]) -> (f32, f32) {
     )
 }
 
-fn waveform_samples(samples: &[i32], channels: usize, channel: Option<usize>) -> Vec<f32> {
-    const BINS: usize = 256;
+fn waveform_samples(
+    samples: &[i32],
+    channels: usize,
+    channel: Option<usize>,
+    bins: usize,
+) -> Vec<f32> {
     let frames = samples.len() / channels;
-    let count = BINS.min(frames);
+    let count = bins.min(frames);
     let mut output = Vec::with_capacity(count * 2);
     for bin in 0..count {
         let start = bin * frames / count;

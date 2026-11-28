@@ -42,6 +42,16 @@ impl RepairSource {
         settings: &AudioTreatment,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, MediaError> {
+        Self::open_with(start, settings, |decode_start| {
+            PreviewDecoder::open_indexed(source, decode_start, index, cancelled)
+        })
+    }
+
+    pub(super) fn open_with(
+        start: u64,
+        settings: &AudioTreatment,
+        open: impl FnOnce(u64) -> Result<PreviewDecoder, MediaError>,
+    ) -> Result<Self, MediaError> {
         if start >= super::decode::MAX_FRAMES {
             return Err(MediaError::Range(
                 "Preview starts beyond the supported timeline",
@@ -54,8 +64,12 @@ impl RepairSource {
         } else {
             start
         };
-        let decoder = PreviewDecoder::open_indexed(source, decode_start, index, cancelled)?;
+        let decoder = open(decode_start)?;
         Self::new(decoder, start, decode_start, settings)
+    }
+
+    pub(super) fn into_decoder(self) -> PreviewDecoder {
+        self.decoder
     }
 
     pub(super) fn from_recording(

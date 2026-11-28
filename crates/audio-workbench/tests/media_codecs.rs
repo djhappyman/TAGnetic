@@ -3,9 +3,10 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tagrex_audio_workbench::{
-    check_output, inspect, inspect_file, inspect_file_with_progress, probe_file, render,
-    render_file, waveform, waveform_file_indexed, FrameCount, FrameRange, MediaError, OutputFormat,
-    Peak, PreviewDecoder, RenderSegment, SeekIndex, SourceInfo,
+    check_output, inspect, inspect_file, inspect_file_with_progress, probe_file,
+    probe_treatment_with_options, render, render_file, waveform, waveform_file_indexed, FrameCount,
+    FrameRange, MediaError, OutputFormat, Peak, PreparedTreatment, PreviewDecoder, RenderSegment,
+    SeekIndex, SourceInfo, SpectrogramChannel, TreatmentProbeOptions,
 };
 
 fn ffmpeg(args: &[&str], source: &Path, output: &Path) {
@@ -451,6 +452,100 @@ fn sparse_mp3_seeks_match_sequential_pcm_and_skip_the_compressed_prefix() {
     let recovered = inspect(&path, 1024, || false).unwrap();
     assert_eq!(recovered.source.frames, clean.source.frames);
     assert!(recovered.seek_index.is_none());
+}
+
+#[test]
+fn unindexed_mp3_overview_preserves_every_lane_within_one_packet_pass() {
+    if !references_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let wav = dir.path().join("overview.wav");
+    let clean_mp3 = dir.path().join("overview.mp3");
+    let gapped_mp3 = dir.path().join("overview-unindexed.mp3");
+    pcm_wav(&wav, 120 * 48_000 + 123, 2, 16, 48_000);
+    ffmpeg(
+        &[
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            "160k",
+            "-write_xing",
+            "0",
+            "-id3v2_version",
+            "0",
+        ],
+        &wav,
+        &clean_mp3,
+    );
+    let mut bytes = fs::read(&clean_mp3).unwrap();
+    let mut gap = 0;
+    for _ in 0..80 {
+        let header =
+            rusty_mp3::header::FrameHeader::parse(bytes[gap..gap + 4].try_into().unwrap()).unwrap();
+        gap += header.frame_size();
+    }
+    bytes.splice(gap..gap, b"interrupted stream gap".iter().copied());
+    fs::write(&gapped_mp3, bytes).unwrap();
+
+    let clean = inspect(&clean_mp3, 64, || false).unwrap();
+    let gapped = inspect(&gapped_mp3, 64, || false).unwrap();
+    let index = clean.seek_index.as_deref().expect("contiguous MP3");
+    assert!(gapped.seek_index.is_none());
+    assert_eq!(gapped.source, clean.source);
+    let info = clean.source;
+    let options = TreatmentProbeOptions {
+        spectrogram: true,
+        spectrogram_channel: SpectrogramChannel::Stereo,
+        viewport: Some(FrameRange {
+            start: 0,
+            end: info.frames,
+        }),
+        ..TreatmentProbeOptions::default()
+    };
+    let expected = probe_treatment_with_options(
+        File::open(&clean_mp3).unwrap(),
+        info,
+        0,
+        Some(index),
+        PreparedTreatment::default(),
+        options,
+        || false,
+    )
+    .unwrap();
+    let mut checks = 0;
+    let actual = probe_treatment_with_options(
+        File::open(&gapped_mp3).unwrap(),
+        info,
+        0,
+        None,
+        PreparedTreatment::default(),
+        options,
+        || {
+            checks += 1;
+            // About 5,001 MP3 packets plus viewport, decode and FFT checks.
+            // Rewalking the prefix for each column exhausts this budget.
+            checks > 9_000
+        },
+    )
+    .unwrap();
+    assert_eq!(actual.frequencies, expected.frequencies);
+    assert_eq!(actual.spectrogram_start, expected.spectrogram_start);
+    assert_eq!(actual.spectrogram_end, expected.spectrogram_end);
+    assert_eq!(actual.spectrogram, expected.spectrogram);
+    assert_eq!(actual.spectrogram_left, expected.spectrogram_left);
+    assert_eq!(actual.spectrogram_right, expected.spectrogram_right);
+    assert_eq!(actual.spectrogram_waveform, expected.spectrogram_waveform);
+    assert_eq!(
+        actual.spectrogram_left_waveform,
+        expected.spectrogram_left_waveform
+    );
+    assert_eq!(
+        actual.spectrogram_right_waveform,
+        expected.spectrogram_right_waveform
+    );
+    assert_eq!(actual.input, expected.input);
+    assert_eq!(actual.input_peak, expected.input_peak);
 }
 
 #[test]

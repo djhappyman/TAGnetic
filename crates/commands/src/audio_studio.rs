@@ -92,7 +92,7 @@ struct Source {
     identity: Mutex<Option<same_file::Handle>>,
     stamp: Stamp,
     info: audio::SourceInfo,
-    analysis: Option<Analysis>,
+    analysis: Option<Arc<Analysis>>,
     overview_level: (f64, f64),
     format: AudioFormat,
     frame_index: OnceLock<Arc<FrameCopyIndex>>,
@@ -143,7 +143,7 @@ impl Source {
             identity: Mutex::new(Some(identity)),
             stamp,
             info: analysis.source,
-            analysis: (bins > 1).then_some(analysis),
+            analysis: (bins > 1).then(|| Arc::new(analysis)),
             overview_level: (mean_square, peak),
             format: tagged.format,
             frame_index: OnceLock::new(),
@@ -154,6 +154,25 @@ impl Source {
         };
         source.open_current()?;
         Ok(source)
+    }
+
+    fn independent_session(&self) -> Result<Self> {
+        let identity =
+            same_file::Handle::from_file(self.open_current()?).map_err(StudioError::new)?;
+        Ok(Self {
+            path: self.path.clone(),
+            identity: Mutex::new(Some(identity)),
+            stamp: self.stamp.clone(),
+            info: self.info,
+            analysis: self.analysis.clone(),
+            overview_level: self.overview_level,
+            format: self.format,
+            frame_index: OnceLock::new(),
+            treatments: Mutex::new(VecDeque::new()),
+            tags: self.tags.clone(),
+            tag_policy: self.tag_policy,
+            replaceable: self.replaceable,
+        })
     }
 
     fn open_current(&self) -> Result<File> {
@@ -539,6 +558,16 @@ struct StudioState {
     recent_sources: VecDeque<Arc<Source>>,
 }
 
+impl StudioState {
+    fn remember_source(&mut self, source: Arc<Source>) {
+        self.recent_sources.retain(|item| item.path != source.path);
+        self.recent_sources.push_back(source);
+        if self.recent_sources.len() > 2 {
+            self.recent_sources.pop_front();
+        }
+    }
+}
+
 struct CachedRelease {
     edition: String,
     fetched: Instant,
@@ -682,26 +711,44 @@ impl Studio {
         let replaceable = path
             .symlink_metadata()
             .is_ok_and(|metadata| metadata.is_file());
-        let cached = {
+        let matches =
+            |source: &Arc<Source>| source.path == canonical && source.replaceable == replaceable;
+        let (recent, active) = {
             let mut state = lock(&self.state)?;
             if state.sources.len() >= MAX_SESSIONS {
                 return Err(StudioError::new(
                     "Close an audio studio session before opening another",
                 ));
             }
-            state
+            let recent = state
                 .recent_sources
                 .iter()
-                .position(|source| source.path == canonical && source.replaceable == replaceable)
-                .and_then(|index| state.recent_sources.remove(index))
+                .position(matches)
+                .and_then(|index| state.recent_sources.remove(index));
+            let active = state
+                .sources
+                .values()
+                .filter(|source| matches(source))
+                .cloned()
+                .collect::<Vec<_>>();
+            (recent, active)
         };
-        let source = match cached {
-            Some(source)
-                if source.tag_policy == self.policy.revision() && source.open_current().is_ok() =>
-            {
-                source
-            }
-            _ => Arc::new(Source::load_with_progress(
+        let tag_policy = self.policy.revision();
+        let recent = recent
+            .filter(|source| source.tag_policy == tag_policy && source.open_current().is_ok());
+        let restore_recent_on_refusal = recent.is_some();
+        let reused = recent.or_else(|| {
+            // Warm audio analysis can be shared across active sessions.
+            // Treatment and frame-copy preparation stay private to each one.
+            active
+                .into_iter()
+                .filter(|source| source.tag_policy == tag_policy)
+                .find_map(|source| source.independent_session().ok())
+                .map(Arc::new)
+        });
+        let source = match reused {
+            Some(source) => source,
+            None => Arc::new(Source::load_with_progress(
                 path,
                 OVERVIEW_BINS,
                 &mut cancelled,
@@ -721,13 +768,19 @@ impl Studio {
             )?),
         };
         let mut state = lock(&self.state)?;
-        if cancelled() {
-            return Err(StudioError::new("Opening the recording was stopped"));
-        }
-        if state.sources.len() >= MAX_SESSIONS {
-            return Err(StudioError::new(
-                "Close an audio studio session before opening another",
-            ));
+        let refusal = if cancelled() {
+            Some("Opening the recording was stopped")
+        } else if state.sources.len() >= MAX_SESSIONS {
+            Some("Close an audio studio session before opening another")
+        } else {
+            None
+        };
+        if let Some(message) = refusal {
+            // Another session may have closed while this open was validating.
+            if restore_recent_on_refusal && !state.recent_sources.iter().any(matches) {
+                state.remember_source(source);
+            }
+            return Err(StudioError::new(message));
         }
         let id = self.id();
         let opened = OpenedRecording {
@@ -779,11 +832,7 @@ impl Studio {
     ) -> Result<()> {
         let mut state = lock(&self.state)?;
         if let Some(source) = state.sources.remove(id) {
-            state.recent_sources.retain(|item| item.path != source.path);
-            state.recent_sources.push_back(source);
-            if state.recent_sources.len() > 2 {
-                state.recent_sources.pop_front();
-            }
+            state.remember_source(source);
         }
         state.releases.remove(id);
         state

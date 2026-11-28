@@ -482,6 +482,7 @@ pub fn render_treated_file(
     let mut processor = treatment.processor(recording.source_info())?;
     let info = processor.output_info();
     check_output(&info, format)?;
+    let treated = treatment.settings().is_active();
     let channels = info.channels as usize;
     let mut processed = Vec::new();
     let mut next = 0;
@@ -495,7 +496,7 @@ pub fn render_treated_file(
             .next_block(&mut cancelled)?
             .ok_or(MediaError::Range("An output extends past the recording"))?;
         let packet = packet.samples();
-        let packet = if treatment.settings().is_active() {
+        let packet = if treated {
             processor.process(packet, &mut processed);
             &processed
         } else {

@@ -2,7 +2,10 @@
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     process::Command,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
 };
 use tagrex_commands::{query::QueryIndex, TrackDto};
 use tagrex_core::resources::Budget;
@@ -265,12 +268,19 @@ fn forked_snapshot_rows_share_admission_but_keep_independent_validity() {
         base.fork_snapshot_rows(None),
         Err(QueryError::Cancelled)
     ));
+    let inherited = first.fork_snapshot_rows(None).unwrap();
+    assert!(Arc::ptr_eq(&first.rows, &inherited.rows));
     first.invalidate();
     assert!(second.is_current());
+    assert!(inherited.is_current());
     drop(base);
     drop(second);
     assert!(budget.usage().0.retained > 0);
+    let retained = process_budget.usage().0;
+    assert!(retained.retained > process_before.retained);
     drop(first);
+    assert_eq!(process_budget.usage().0, retained);
+    drop(inherited);
     assert_eq!(budget.usage().0, Default::default());
     assert_eq!(process_budget.usage().0, process_before);
 }

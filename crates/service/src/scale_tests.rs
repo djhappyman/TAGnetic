@@ -77,11 +77,8 @@ impl ScaleFixture {
         // the measured seed phase, just as production consumes the App's base.
         let index = Arc::new(QueryIndex::from_tracks(&rows));
         let rows = Arc::new(SnapshotRows::all(rows));
-        self.service.0.state.lock().unwrap().snapshot_cache = Some(SavedSnapshot {
-            generation,
-            rows: rows.clone(),
-            index,
-        });
+        self.service.0.state.lock().unwrap().snapshot_cache =
+            Some(SavedSnapshot::new(generation, rows.clone(), index).unwrap());
         rows
     }
 
@@ -125,6 +122,8 @@ fn hundred_thousand_rows_keep_projection_and_concurrent_clients_independent() {
         let b = &state.snapshots[&second];
         assert!(Arc::ptr_eq(&a.rows, &b.rows));
         assert!(Arc::ptr_eq(&a.rows, &rows));
+        assert!(Arc::ptr_eq(&a.index.rows, &b.index.rows));
+        assert_ne!(a.index.id, b.index.id);
         (a.index.clone(), b.index.clone())
     };
     let started = Instant::now();

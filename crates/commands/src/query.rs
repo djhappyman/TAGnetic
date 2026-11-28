@@ -626,7 +626,7 @@ const MAX_FIELD_KEY_LEN: usize = 128;
 #[derive(Debug)]
 pub struct QueryIndex {
     pub id: u64,
-    pub rows: Vec<Arc<QueryRow>>,
+    pub rows: Arc<QueryRows>,
     facets: Mutex<crate::bounded_cache::Cache<String, Arc<Facet>>>,
     duplicates: Arc<Mutex<HashMap<String, DuplicateResults>>>,
     valid: Arc<AtomicBool>,
@@ -640,6 +640,21 @@ pub struct QueryIndex {
     read_policy_owner: Option<tagrex_core::model::ModelPolicy>,
     _overlay_ownership: RowOwnership,
     _snapshot_ownership: RowOwnership,
+}
+
+/// A row vector keeps its admission for as long as any snapshot shares it.
+#[derive(Debug)]
+pub struct QueryRows {
+    entries: Vec<Arc<QueryRow>>,
+    _ownership: RowOwnership,
+}
+
+impl std::ops::Deref for QueryRows {
+    type Target = [Arc<QueryRow>];
+
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
 }
 
 impl QueryIndex {
@@ -657,9 +672,12 @@ impl QueryIndex {
         Self::from_rows(tracks.iter().map(QueryRow::from_track).collect())
     }
     pub fn from_rows(rows: Vec<QueryRow>) -> Self {
-        Self::from_shared_rows(rows.into_iter().map(Arc::new).collect())
+        Self::from_shared_rows(Arc::new(QueryRows {
+            entries: rows.into_iter().map(Arc::new).collect(),
+            _ownership: RowOwnership::default(),
+        }))
     }
-    fn from_shared_rows(rows: Vec<Arc<QueryRow>>) -> Self {
+    fn from_shared_rows(rows: Arc<QueryRows>) -> Self {
         Self {
             id: SNAPSHOT_ID.fetch_add(1, Ordering::Relaxed),
             rows,
@@ -698,7 +716,7 @@ impl QueryIndex {
                 ));
             }
         }
-        let count = selected.map_or(self.rows.len(), <[usize]>::len);
+        let count = selected.map_or(0, <[usize]>::len);
         let retained = count
             .checked_mul(std::mem::size_of::<Arc<QueryRow>>())
             .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Self>() + 512))
@@ -709,21 +727,29 @@ impl QueryIndex {
                 ..Default::default()
             },
         )?;
-        let mut rows = Vec::with_capacity(count);
-        for position in 0..count {
-            if position.is_multiple_of(128) && !self.is_current() {
-                return Err(QueryError::Cancelled);
+        let owner = RowOwnership {
+            _lease: Some(Arc::new(lease)),
+        };
+        let rows = if let Some(selected) = selected {
+            let mut rows = Vec::with_capacity(count);
+            for (position, &index) in selected.iter().enumerate() {
+                if position.is_multiple_of(128) && !self.is_current() {
+                    return Err(QueryError::Cancelled);
+                }
+                rows.push(self.rows[index].clone());
             }
-            let index = selected.map_or(position, |indices| indices[position]);
-            rows.push(self.rows[index].clone());
-        }
+            Arc::new(QueryRows {
+                entries: rows,
+                _ownership: owner.clone(),
+            })
+        } else {
+            self.rows.clone()
+        };
         if !self.is_current() {
             return Err(QueryError::Cancelled);
         }
         let mut index = Self::from_shared_rows(rows).with_policy_from(self);
-        index._snapshot_ownership = RowOwnership {
-            _lease: Some(Arc::new(lease)),
-        };
+        index._snapshot_ownership = owner;
         Ok(index)
     }
 
@@ -752,7 +778,11 @@ impl QueryIndex {
             .iter()
             .map(|row| updates.remove(&row.path).unwrap_or_else(|| row.clone()))
             .collect();
-        Self::from_shared_rows(rows).with_policy_from(self)
+        Self::from_shared_rows(Arc::new(QueryRows {
+            entries: rows,
+            _ownership: RowOwnership::default(),
+        }))
+        .with_policy_from(self)
     }
     /// Read-only refreshes must not invalidate facets, ongoing queries or
     /// duplicate evidence unless the rows or their source identity changed.
@@ -945,7 +975,7 @@ impl QueryIndex {
             return Err(AdmissionError::TooLarge.into());
         }
         let mut rows = Vec::new();
-        for source in &self.rows {
+        for source in self.rows.iter() {
             if cancelled() {
                 return Err(QueryError::Cancelled);
             }
@@ -1116,7 +1146,10 @@ impl QueryIndex {
         }
         let index = Arc::new(Self {
             id: self.id,
-            rows,
+            rows: Arc::new(QueryRows {
+                entries: rows,
+                _ownership: owner.clone(),
+            }),
             facets: Mutex::new(crate::bounded_cache::Cache::new(
                 FACET_CACHE_ENTRIES,
                 FACET_CACHE_BYTES,

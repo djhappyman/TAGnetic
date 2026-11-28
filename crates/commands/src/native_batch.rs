@@ -362,11 +362,10 @@ impl App {
         let mut bytes = 0usize;
         for path in &paths {
             check_cancel(&cancelled)?;
-            let track = self.read_cached(path)?;
-            let mut tags = track.tags.clone();
-            overlay_working_tags(&mut tags, base.get(path.as_path()).copied());
-            restore_locked_sources(&mut tags, &track.tags, &locked);
-            let filename = mask.render_value_with(&tags, &self.file_context(&mask, &track))?;
+            let read = self.read_snapshot(path)?;
+            let tags =
+                unlocked_working_tags(&read.file.tags, base.get(path.as_path()).copied(), &locked);
+            let filename = mask.render_value_with(&tags, &Self::file_context(&mask, &read))?;
             // Portable patterns may contain either separator. Refuse Windows
             // drive/ADS syntax on every host as well as native parent traversal.
             if filename.contains(':')
@@ -482,10 +481,9 @@ impl App {
         let mut skipped_vinyl = Vec::new();
         for path in &paths {
             check_cancel(&cancelled)?;
-            let track = self.read_cached(path)?;
-            let mut tags = track.tags.clone();
-            overlay_working_tags(&mut tags, base.get(path.as_path()).copied());
-            restore_locked_sources(&mut tags, &track.tags, &locked);
+            let read = self.read_snapshot(path)?;
+            let tags =
+                unlocked_working_tags(&read.file.tags, base.get(path.as_path()).copied(), &locked);
             if options.keep_vinyl
                 && tags
                     .get(&TagField::TrackNumber)
@@ -599,6 +597,18 @@ impl App {
         preview.plan.unrendered.extend(skipped_vinyl);
         Ok(preview)
     }
+}
+
+pub(super) fn unlocked_working_tags<'a>(
+    saved: &'a TagMap,
+    change: Option<&FileChangeDto>,
+    locked: &[String],
+) -> Cow<'a, TagMap> {
+    let mut tags = working_tag_snapshot(saved, change);
+    if let Cow::Owned(tags) = &mut tags {
+        restore_locked_sources(tags, saved, locked);
+    }
+    tags
 }
 
 pub(super) fn restore_locked_sources(tags: &mut TagMap, saved: &TagMap, locked: &[String]) {

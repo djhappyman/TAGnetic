@@ -251,6 +251,34 @@ struct SavedSnapshot {
     index: Arc<tagrex_commands::query::QueryIndex>,
 }
 
+impl SavedSnapshot {
+    fn new(
+        generation: u64,
+        rows: Arc<SnapshotRows>,
+        index: Arc<tagrex_commands::query::QueryIndex>,
+    ) -> ServiceResult<Self> {
+        // These owners are immutable. Check their ordered pairing before
+        // caching so each later handle can reuse that validation.
+        if index.rows.len() != rows.len()
+            || index
+                .rows
+                .iter()
+                .zip(rows.iter())
+                .any(|(native, dto)| native.path != dto.path)
+        {
+            return Err(ServiceError::new(
+                "stale_snapshot",
+                "Saved rows and native query rows no longer describe one snapshot",
+            ));
+        }
+        Ok(Self {
+            generation,
+            rows,
+            index,
+        })
+    }
+}
+
 #[derive(Clone)]
 struct Snapshot {
     owner: String,
@@ -812,11 +840,7 @@ impl Service {
         } else {
             let rows = Arc::new(SnapshotRows::all(app.list_tracks()?));
             let index = app.query_snapshot()?;
-            let saved = SavedSnapshot {
-                generation: index.id,
-                rows,
-                index,
-            };
+            let saved = SavedSnapshot::new(index.id, rows, index)?;
             retired_cache = lock(&self.0.state)?.snapshot_cache.replace(saved.clone());
             saved
         };
@@ -830,18 +854,6 @@ impl Service {
         let native_index = saved.index;
         let all_rows = saved.rows;
         let source_root = app.library_root().to_path_buf();
-        if native_index.rows.len() != all_rows.len()
-            || native_index
-                .rows
-                .iter()
-                .zip(all_rows.iter())
-                .any(|(native, dto)| native.path != dto.path)
-        {
-            return Err(ServiceError::new(
-                "stale_snapshot",
-                "Saved rows and native query rows no longer describe one snapshot",
-            ));
-        }
         drop(app_guard);
         // Last-owner destruction can walk a large saved model; release both
         // registries before dropping the replaced cached rows/index.

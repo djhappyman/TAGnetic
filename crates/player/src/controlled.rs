@@ -169,7 +169,6 @@ struct Playback<S> {
     source: S,
     metadata: Option<Span>,
     advertised: bool,
-    fixed_format: bool,
     frame_remaining: usize,
     frame_paused: bool,
     ended: bool,
@@ -186,17 +185,19 @@ struct Span {
 #[cfg_attr(test, allow(dead_code))]
 pub(super) trait FixedFormat: Source {}
 
-pub(super) struct Controlled<S> {
+pub(super) struct Controlled<S, const FIXED: bool = true> {
     state: RefCell<Playback<S>>,
     control: Control,
     paused: Arc<AtomicBool>,
 }
-impl<S: Source> Controlled<S> {
+impl<S: Source> Controlled<S, false> {
     #[cfg(test)]
     pub fn new(source: S, paused: Arc<AtomicBool>) -> (Self, Control) {
-        Self::with_format(source, paused, false)
+        Self::with_format(source, paused)
     }
-    fn with_format(source: S, paused: Arc<AtomicBool>, fixed_format: bool) -> (Self, Control) {
+}
+impl<S: Source, const FIXED: bool> Controlled<S, FIXED> {
+    fn with_format(source: S, paused: Arc<AtomicBool>) -> (Self, Control) {
         let control = Control {
             pending: Arc::new(Mutex::new(None)),
             ended: Arc::new(AtomicBool::new(false)),
@@ -214,7 +215,6 @@ impl<S: Source> Controlled<S> {
                     source,
                     metadata: None,
                     advertised: false,
-                    fixed_format,
                     frame_remaining: 0,
                     frame_paused: false,
                     ended: false,
@@ -226,24 +226,24 @@ impl<S: Source> Controlled<S> {
             control,
         )
     }
-    fn take_request(&self) -> Option<Ticket> {
-        if !self.control.requested.load(Ordering::Acquire)
-            || !self.control.requested.swap(false, Ordering::AcqRel)
+    fn take_request(control: &Control) -> Option<Ticket> {
+        if !control.requested.load(Ordering::Acquire)
+            || !control.requested.swap(false, Ordering::AcqRel)
         {
             return None;
         }
-        self.control
+        control
             .pending
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .take()
     }
-    fn prepare(&self, advertise: bool) {
-        let mut state = self.state.borrow_mut();
+    #[inline]
+    fn prepare(control: &Control, state: &mut Playback<S>, advertise: bool) {
         state.advertised |= advertise;
-        if self.control.ownership.abort.load(Ordering::Acquire) {
+        if control.ownership.abort.load(Ordering::Acquire) {
             state.ended = true;
-            self.control.ended.store(true, Ordering::Release);
+            control.ended.store(true, Ordering::Release);
         }
         if state.ended {
             return;
@@ -252,12 +252,27 @@ impl<S: Source> Controlled<S> {
         if state.frame_remaining != 0 && !boundary {
             return;
         }
-        if state.advertised && !boundary && !state.fixed_format {
+        if FIXED
+            && !advertise
+            && !boundary
+            && !state.uncommitted_move
+            && !control.requested.load(Ordering::Acquire)
+            && state.source.current_span_len().is_none()
+        {
+            // Fixed output keeps its advertised rate and layout across native
+            // spans. The source still reports EOF even if output is paused.
+            return;
+        }
+        Self::refresh_span(control, state, boundary);
+    }
+
+    fn refresh_span(control: &Control, state: &mut Playback<S>, boundary: bool) {
+        if !FIXED && state.advertised && !boundary {
             // There is no safe reconfiguration point inside an advertised
             // unknown-length span. Refuse explicitly rather than seeking under
             // a converter that will never refresh its old format metadata.
             if state.metadata.is_some_and(|span| span.remaining.is_none()) {
-                if let Some(ticket) = self.take_request() {
+                if let Some(ticket) = Self::take_request(control) {
                     ticket.finish(Err(
                         "The source exposes no finite format boundary for safe seeking".into(),
                     ));
@@ -269,31 +284,31 @@ impl<S: Source> Controlled<S> {
         // can keep one newer request pending, but never builds a work backlog or
         // emits a superseded target. Between turns an unresolved move is silent.
         for _ in 0..2 {
-            let Some(ticket) = self.take_request() else {
+            let Some(ticket) = Self::take_request(control) else {
                 break;
             };
             let Some(target) = ticket.begin() else {
                 if ticket.cancelled() && state.uncommitted_move {
                     state.ended = true;
-                    self.control.ended.store(true, Ordering::Release);
+                    control.ended.store(true, Ordering::Release);
                 }
                 continue;
             };
-            if ticket.cancelled() || self.control.ownership.abort.load(Ordering::Acquire) {
+            if ticket.cancelled() || control.ownership.abort.load(Ordering::Acquire) {
                 state.ended = true;
-                self.control.ended.store(true, Ordering::Release);
+                control.ended.store(true, Ordering::Release);
                 break;
             }
             // No request/control lock is held across decoder I/O.
             let result = state.source.try_seek(target).map_err(|e| e.to_string());
-            if ticket.cancelled() || self.control.ownership.abort.load(Ordering::Acquire) {
+            if ticket.cancelled() || control.ownership.abort.load(Ordering::Acquire) {
                 state.ended = true;
-                self.control.ended.store(true, Ordering::Release);
+                control.ended.store(true, Ordering::Release);
                 break;
             }
             let moved = result.is_ok();
             if moved {
-                self.control
+                control
                     .ownership
                     .moved_since_accept
                     .store(true, Ordering::Release);
@@ -304,11 +319,7 @@ impl<S: Source> Controlled<S> {
             }
             let refused_after_move = result.is_err()
                 && (state.uncommitted_move
-                    || self
-                        .control
-                        .ownership
-                        .moved_since_accept
-                        .load(Ordering::Acquire));
+                    || control.ownership.moved_since_accept.load(Ordering::Acquire));
             if moved {
                 state.uncommitted_move = false;
             }
@@ -320,7 +331,7 @@ impl<S: Source> Controlled<S> {
                 // The latest decoder refused after an earlier superseded seek
                 // moved it. There is no verified original position to restore.
                 state.ended = true;
-                self.control.ended.store(true, Ordering::Release);
+                control.ended.store(true, Ordering::Release);
                 break;
             }
         }
@@ -334,19 +345,19 @@ impl<S: Source> Controlled<S> {
         };
         if span.remaining == Some(0) {
             state.ended = true;
-            self.control.ended.store(true, Ordering::Release);
+            control.ended.store(true, Ordering::Release);
         }
         state.metadata = Some(span);
         state.frame_remaining = 0;
     }
 }
-impl<S: Source + FixedFormat> Controlled<S> {
+impl<S: Source + FixedFormat> Controlled<S, true> {
     #[cfg_attr(test, allow(dead_code))]
     pub fn new_fixed(source: S, paused: Arc<AtomicBool>) -> (Self, Control) {
-        Self::with_format(source, paused, true)
+        Self::with_format(source, paused)
     }
 }
-impl<S> Drop for Controlled<S> {
+impl<S, const FIXED: bool> Drop for Controlled<S, FIXED> {
     fn drop(&mut self) {
         self.control.ended.store(true, Ordering::Release);
         if let Some(ticket) = self
@@ -360,11 +371,11 @@ impl<S> Drop for Controlled<S> {
         }
     }
 }
-impl<S: Source> Iterator for Controlled<S> {
+impl<S: Source, const FIXED: bool> Iterator for Controlled<S, FIXED> {
     type Item = rodio::Sample;
     fn next(&mut self) -> Option<Self::Item> {
-        self.prepare(false);
         let state = self.state.get_mut();
+        Self::prepare(&self.control, state, false);
         if state.ended {
             return None;
         }
@@ -396,10 +407,10 @@ impl<S: Source> Iterator for Controlled<S> {
         sample
     }
 }
-impl<S: Source> Source for Controlled<S> {
+impl<S: Source, const FIXED: bool> Source for Controlled<S, FIXED> {
     fn current_span_len(&self) -> Option<usize> {
-        self.prepare(true);
-        let state = self.state.borrow();
+        let mut state = self.state.borrow_mut();
+        Self::prepare(&self.control, &mut state, true);
         if state.ended {
             Some(0)
         } else {
@@ -407,18 +418,18 @@ impl<S: Source> Source for Controlled<S> {
         }
     }
     fn channels(&self) -> rodio::ChannelCount {
-        self.prepare(true);
-        self.state.borrow().metadata.map_or_else(
-            || self.state.borrow().source.channels(),
-            |span| span.channels,
-        )
+        let mut state = self.state.borrow_mut();
+        Self::prepare(&self.control, &mut state, true);
+        state
+            .metadata
+            .map_or_else(|| state.source.channels(), |span| span.channels)
     }
     fn sample_rate(&self) -> rodio::SampleRate {
-        self.prepare(true);
-        self.state.borrow().metadata.map_or_else(
-            || self.state.borrow().source.sample_rate(),
-            |span| span.rate,
-        )
+        let mut state = self.state.borrow_mut();
+        Self::prepare(&self.control, &mut state, true);
+        state
+            .metadata
+            .map_or_else(|| state.source.sample_rate(), |span| span.rate)
     }
     fn total_duration(&self) -> Option<Duration> {
         self.state.borrow().source.total_duration()
@@ -474,7 +485,7 @@ mod tests {
         }
     }
     type TestSource = (
-        Controlled<Counting>,
+        Controlled<Counting, false>,
         Control,
         Arc<AtomicBool>,
         Arc<Mutex<Vec<Duration>>>,

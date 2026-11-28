@@ -1192,10 +1192,10 @@ impl SqliteJournal {
         }
         #[cfg(target_os = "linux")]
         if let Some(intents) = intents {
+            let roots_digest = native::root_digest(&batch.allowed_roots);
             if intents.len() != batch.plan.changes.len()
                 || intents.iter().zip(&batch.plan.changes).any(|(i, c)| {
-                    i.digest != native::file_digest(c)
-                        || i.roots_digest != native::root_digest(&batch.allowed_roots)
+                    i.digest != native::file_digest(c) || i.roots_digest != roots_digest
                 })
             {
                 return Err(native::invalid("native initial plan binding"));
@@ -1216,55 +1216,55 @@ impl SqliteJournal {
         )?;
         let batch_id = tx.last_insert_rowid();
 
+        // Reuse SQL statements across each file's rows in the same durable
+        // transaction. SQLite still runs the same inserts in the same order.
         for (ordinal, change) in batch.plan.changes.iter().enumerate() {
-            tx.execute(
+            tx.prepare_cached(
                 "INSERT INTO file_changes (batch_id, path, rename_to, copied) \
                  VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![
-                    batch_id,
+            )?
+            .execute(rusqlite::params![
+                batch_id,
+                {
+                    #[cfg(target_os = "linux")]
                     {
-                        #[cfg(target_os = "linux")]
-                        {
-                            if intents.is_some() {
-                                rusqlite::types::Value::Blob(native::marked_path(&change.path))
-                            } else {
-                                rusqlite::types::Value::Text(
-                                    change.path.to_string_lossy().into_owned(),
-                                )
-                            }
-                        }
-                        #[cfg(not(target_os = "linux"))]
-                        {
+                        if intents.is_some() {
+                            rusqlite::types::Value::Blob(native::marked_path(&change.path))
+                        } else {
                             rusqlite::types::Value::Text(change.path.to_string_lossy().into_owned())
                         }
-                    },
-                    change
-                        .rename_to
-                        .as_ref()
-                        .map(|p| p.to_string_lossy().into_owned()),
-                    change.copy,
-                ],
-            )?;
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        rusqlite::types::Value::Text(change.path.to_string_lossy().into_owned())
+                    }
+                },
+                change
+                    .rename_to
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned()),
+                change.copy,
+            ])?;
             let file_change_id = tx.last_insert_rowid();
             #[cfg(target_os = "linux")]
             if let Some(intents) = intents {
                 let intent = &intents[ordinal];
-                tx.execute("INSERT INTO native_tag_files(file_change_id,batch_id,ordinal,identity,digest,intents,operation_id,roots_digest) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",rusqlite::params![file_change_id,batch_id,ordinal as i64,intent.identity.as_slice(),intent.digest.as_slice(),intent.bytes,intent.operation_id,intent.roots_digest.as_slice()])?;
+                tx.prepare_cached("INSERT INTO native_tag_files(file_change_id,batch_id,ordinal,identity,digest,intents,operation_id,roots_digest) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)")?.execute(rusqlite::params![file_change_id,batch_id,ordinal as i64,intent.identity.as_slice(),intent.digest.as_slice(),intent.bytes,intent.operation_id,intent.roots_digest.as_slice()])?;
             }
             #[cfg(not(target_os = "linux"))]
             let _ = ordinal;
 
             for field_change in &change.tag_changes {
-                tx.execute(
+                tx.prepare_cached(
                     "INSERT INTO field_changes (file_change_id, field, old_value, new_value) \
                      VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![
-                        file_change_id,
-                        field_change.field.to_storage_key(),
-                        field_change.old,
-                        field_change.new,
-                    ],
-                )?;
+                )?
+                .execute(rusqlite::params![
+                    file_change_id,
+                    field_change.field.to_storage_key(),
+                    field_change.old,
+                    field_change.new,
+                ])?;
             }
 
             // Both whole sides of the image set (#56), in order. The legacy
@@ -1273,34 +1273,34 @@ impl SqliteJournal {
             if let Some(cover) = &change.cover_change {
                 for (side, images) in [("old", &cover.old), ("new", &cover.new)] {
                     for image in images {
-                        tx.execute(
+                        tx.prepare_cached(
                             "INSERT INTO cover_images \
                              (file_change_id, side, kind, description, mime, data, blob_id) \
                              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                            rusqlite::params![
-                                file_change_id,
-                                side,
-                                image.kind.to_storage_key(),
-                                image.description,
-                                image.mime,
-                                "tagrex:pooled-artwork:upgrade-required",
-                                intern_image(&tx, &image.data, &mut image_ids)?,
-                            ],
-                        )?;
+                        )?
+                        .execute(rusqlite::params![
+                            file_change_id,
+                            side,
+                            image.kind.to_storage_key(),
+                            image.description,
+                            image.mime,
+                            "tagrex:pooled-artwork:upgrade-required",
+                            intern_image(&tx, &image.data, &mut image_ids)?,
+                        ])?;
                     }
                 }
             }
 
             for (from, to) in &change.sidecar_renames {
-                tx.execute(
+                tx.prepare_cached(
                     "INSERT INTO sidecar_renames (file_change_id, from_path, to_path) \
                      VALUES (?1, ?2, ?3)",
-                    rusqlite::params![
-                        file_change_id,
-                        from.to_string_lossy(),
-                        to.to_string_lossy(),
-                    ],
-                )?;
+                )?
+                .execute(rusqlite::params![
+                    file_change_id,
+                    from.to_string_lossy(),
+                    to.to_string_lossy(),
+                ])?;
             }
 
             // Both whole sides of every block change (#47, #205), field rows and
@@ -1309,48 +1309,53 @@ impl SqliteJournal {
             // `has_old`/`has_new` are separate from the row counts because a
             // block that exists and holds nothing is not the same as no block.
             for block_change in &change.block_changes {
-                tx.execute(
+                tx.prepare_cached(
                     "INSERT INTO block_changes \
                      (file_change_id, kind, revision, old_revision, old_bytes, has_old, has_new, \
                      text_to_unicode) \
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    rusqlite::params![
-                        file_change_id,
-                        block_change.kind.to_storage_key(),
-                        block_change.revision.map(Id3v2Revision::to_storage_key),
-                        block_change.old_revision.map(Id3v2Revision::to_storage_key),
-                        block_change.old_bytes,
-                        block_change.old.is_some(),
-                        block_change.new.is_some(),
-                        block_change.text_to_unicode,
-                    ],
-                )?;
+                )?
+                .execute(rusqlite::params![
+                    file_change_id,
+                    block_change.kind.to_storage_key(),
+                    block_change.revision.map(Id3v2Revision::to_storage_key),
+                    block_change.old_revision.map(Id3v2Revision::to_storage_key),
+                    block_change.old_bytes,
+                    block_change.old.is_some(),
+                    block_change.new.is_some(),
+                    block_change.text_to_unicode,
+                ])?;
                 let block_change_id = tx.last_insert_rowid();
                 let sides = [("old", &block_change.old), ("new", &block_change.new)];
                 for (side, content) in sides {
                     let Some(content) = content else { continue };
                     for (field, value) in &content.tags {
-                        tx.execute(
+                        tx.prepare_cached(
                             "INSERT INTO block_change_fields \
                              (block_change_id, side, field, value) VALUES (?1, ?2, ?3, ?4)",
-                            rusqlite::params![block_change_id, side, field.to_storage_key(), value],
-                        )?;
+                        )?
+                        .execute(rusqlite::params![
+                            block_change_id,
+                            side,
+                            field.to_storage_key(),
+                            value
+                        ])?;
                     }
                     for image in &content.covers {
-                        tx.execute(
+                        tx.prepare_cached(
                             "INSERT INTO block_change_images \
                              (block_change_id, side, kind, description, mime, data, blob_id) \
                              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                            rusqlite::params![
-                                block_change_id,
-                                side,
-                                image.kind.to_storage_key(),
-                                image.description,
-                                image.mime,
-                                "tagrex:pooled-artwork:upgrade-required",
-                                intern_image(&tx, &image.data, &mut image_ids)?,
-                            ],
-                        )?;
+                        )?
+                        .execute(rusqlite::params![
+                            block_change_id,
+                            side,
+                            image.kind.to_storage_key(),
+                            image.description,
+                            image.mime,
+                            "tagrex:pooled-artwork:upgrade-required",
+                            intern_image(&tx, &image.data, &mut image_ids)?,
+                        ])?;
                     }
                 }
             }
@@ -1359,14 +1364,14 @@ impl SqliteJournal {
         // Known before the first write, unlike the outcome below, so recorded
         // here and never again on `finish`.
         for file in &batch.id3v2_revisions {
-            tx.execute(
+            tx.prepare_cached(
                 "INSERT INTO id3v2_revisions (batch_id, path, revision) VALUES (?1, ?2, ?3)",
-                rusqlite::params![
-                    batch_id,
-                    file.path.to_string_lossy(),
-                    file.revision.to_storage_key(),
-                ],
-            )?;
+            )?
+            .execute(rusqlite::params![
+                batch_id,
+                file.path.to_string_lossy(),
+                file.revision.to_storage_key(),
+            ])?;
         }
 
         insert_outcome(&tx, batch_id, batch)?;
@@ -2161,28 +2166,20 @@ fn insert_outcome(
     batch: &AppliedBatch,
 ) -> Result<(), JournalError> {
     for dir in &batch.created_dirs {
-        tx.execute(
-            "INSERT INTO created_dirs (batch_id, path) VALUES (?1, ?2)",
-            rusqlite::params![batch_id, dir.to_string_lossy()],
-        )?;
+        tx.prepare_cached("INSERT INTO created_dirs (batch_id, path) VALUES (?1, ?2)")?
+            .execute(rusqlite::params![batch_id, dir.to_string_lossy()])?;
     }
     for dir in &batch.removed_dirs {
-        tx.execute(
-            "INSERT INTO removed_dirs (batch_id, path) VALUES (?1, ?2)",
-            rusqlite::params![batch_id, dir.to_string_lossy()],
-        )?;
+        tx.prepare_cached("INSERT INTO removed_dirs (batch_id, path) VALUES (?1, ?2)")?
+            .execute(rusqlite::params![batch_id, dir.to_string_lossy()])?;
     }
     for root in &batch.allowed_roots {
-        tx.execute(
-            "INSERT INTO allowed_roots (batch_id, path) VALUES (?1, ?2)",
-            rusqlite::params![batch_id, root.to_string_lossy()],
-        )?;
+        tx.prepare_cached("INSERT INTO allowed_roots (batch_id, path) VALUES (?1, ?2)")?
+            .execute(rusqlite::params![batch_id, root.to_string_lossy()])?;
     }
     for stamp in &batch.copy_stamps {
-        tx.execute(
-            "INSERT INTO copy_stamps (batch_id, path, len, modified_ns, sha256, undo_path, identity, moved) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![
+        tx.prepare_cached("INSERT INTO copy_stamps (batch_id, path, len, modified_ns, sha256, undo_path, identity, moved) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)")?.execute(rusqlite::params![
                 batch_id,
                 stamp.path.to_string_lossy(),
                 i64::try_from(stamp.len).unwrap_or(i64::MAX),
@@ -2195,19 +2192,19 @@ fn insert_outcome(
     }
 
     for fingerprint in &batch.block_fingerprints {
-        tx.execute("INSERT INTO block_fingerprints (batch_id,path,before_hash,after_hash) VALUES (?1,?2,?3,?4)", rusqlite::params![batch_id, fingerprint.path.to_string_lossy(), fingerprint.before, fingerprint.after])?;
+        tx.prepare_cached("INSERT INTO block_fingerprints (batch_id,path,before_hash,after_hash) VALUES (?1,?2,?3,?4)")?.execute(rusqlite::params![batch_id, fingerprint.path.to_string_lossy(), fingerprint.before, fingerprint.after])?;
     }
     for applied in &batch.applied_values {
-        tx.execute(
+        tx.prepare_cached(
             "INSERT INTO applied_values (batch_id, path, field, value) \
                  VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![
-                batch_id,
-                applied.path.to_string_lossy(),
-                applied.field.to_storage_key(),
-                applied.value,
-            ],
-        )?;
+        )?
+        .execute(rusqlite::params![
+            batch_id,
+            applied.path.to_string_lossy(),
+            applied.field.to_storage_key(),
+            applied.value,
+        ])?;
     }
     Ok(())
 }
@@ -2405,8 +2402,23 @@ impl SqliteJournal {
         batch_id: i64,
         images: &mut LoadedImages,
     ) -> Result<(Vec<FileChange>, bool), JournalError> {
+        // Probe the indexed child tables while reading the file row. Ordinary
+        // tag/rename batches skip opening separate empty result sets for each
+        // sidecar, artwork and tag-block table. Legacy rows count as present.
         let mut stmt = self.conn.prepare(
-            "SELECT id, CASE WHEN typeof(path)='blob' AND length(path)>8192 THEN NULL ELSE path END, rename_to, copied FROM file_changes WHERE batch_id = ?1 ORDER BY id",
+            "SELECT f.id, CASE WHEN typeof(f.path)='blob' AND length(f.path)>8192 THEN NULL ELSE f.path END,
+                    f.rename_to, f.copied,
+                    EXISTS(SELECT 1 FROM field_changes c WHERE c.file_change_id=f.id),
+                    EXISTS(SELECT 1 FROM cover_images c WHERE c.file_change_id=f.id) OR
+                        EXISTS(SELECT 1 FROM cover_changes c WHERE c.file_change_id=f.id),
+                    EXISTS(SELECT 1 FROM sidecar_renames c WHERE c.file_change_id=f.id),
+                    EXISTS(SELECT 1 FROM block_changes c WHERE c.file_change_id=f.id) OR
+                        EXISTS(SELECT 1 FROM block_removals c WHERE c.file_change_id=f.id)
+               FROM file_changes f WHERE f.batch_id = ?1 ORDER BY f.id",
+        )?;
+        let mut field_stmt = self.conn.prepare(
+            "SELECT field, old_value, new_value FROM field_changes \
+             WHERE file_change_id = ?1 ORDER BY id",
         )?;
         let rows = stmt.query_map(rusqlite::params![batch_id], |row| {
             Ok((
@@ -2414,13 +2426,26 @@ impl SqliteJournal {
                 stored_path(row.get_ref(1)?)?,
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, bool>(3)?,
+                row.get::<_, bool>(4)?,
+                row.get::<_, bool>(5)?,
+                row.get::<_, bool>(6)?,
+                row.get::<_, bool>(7)?,
             ))
         })?;
 
         let mut changes = Vec::new();
         let mut marker = None;
         for row in rows {
-            let (file_change_id, (path, native), rename_to, copied) = row?;
+            let (
+                file_change_id,
+                (path, native),
+                rename_to,
+                copied,
+                fields,
+                covers,
+                sidecars,
+                blocks,
+            ) = row?;
             if marker.is_some_and(|old| old != native) {
                 return Err(JournalError::NotRollbackable(
                     "mixed native path markers".into(),
@@ -2429,12 +2454,28 @@ impl SqliteJournal {
             marker = Some(native);
             changes.push(FileChange {
                 path,
-                tag_changes: self.load_field_changes(file_change_id)?,
-                cover_change: self.load_cover_change(file_change_id, images)?,
+                tag_changes: if fields {
+                    Self::load_field_changes(&mut field_stmt, file_change_id)?
+                } else {
+                    Vec::new()
+                },
+                cover_change: if covers {
+                    self.load_cover_change(file_change_id, images)?
+                } else {
+                    None
+                },
                 rename_to: rename_to.map(PathBuf::from),
                 copy: copied,
-                sidecar_renames: self.load_sidecar_renames(file_change_id)?,
-                block_changes: self.load_block_changes(file_change_id, images)?,
+                sidecar_renames: if sidecars {
+                    self.load_sidecar_renames(file_change_id)?
+                } else {
+                    Vec::new()
+                },
+                block_changes: if blocks {
+                    self.load_block_changes(file_change_id, images)?
+                } else {
+                    Vec::new()
+                },
             });
         }
         Ok((changes, marker.unwrap_or(false)))
@@ -2716,11 +2757,10 @@ impl SqliteJournal {
         }))
     }
 
-    fn load_field_changes(&self, file_change_id: i64) -> Result<Vec<FieldChange>, JournalError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT field, old_value, new_value FROM field_changes \
-             WHERE file_change_id = ?1 ORDER BY id",
-        )?;
+    fn load_field_changes(
+        stmt: &mut rusqlite::Statement<'_>,
+        file_change_id: i64,
+    ) -> Result<Vec<FieldChange>, JournalError> {
         let rows = stmt.query_map(rusqlite::params![file_change_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,

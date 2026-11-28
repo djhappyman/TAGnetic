@@ -2,7 +2,7 @@
 //! the interface supplies only selection order and displayed group identities.
 use super::*;
 use crate::field_operations::invalid;
-use crate::native_batch::{check_cancel, restore_locked_sources, unique_paths};
+use crate::native_batch::{check_cancel, unique_paths, unlocked_working_tags};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -223,7 +223,7 @@ impl App {
             let Some(change) = base.get(path.as_path()) else {
                 continue;
             };
-            let track = self.read_cached(path)?;
+            let read = self.read_snapshot(path)?;
             for edit in &change.tag_changes {
                 bytes = bytes
                     .checked_add(edit.old.as_ref().map_or(0, String::len))
@@ -233,7 +233,7 @@ impl App {
                     return Err(invalid("Numbering source values exceed the 64 MiB limit."));
                 }
                 let field = TagField::from_storage_key(&edit.field);
-                if track.tags.get(&field).map(String::as_str).unwrap_or("")
+                if read.file.tags.get(&field).map(String::as_str).unwrap_or("")
                     != edit.old.as_deref().unwrap_or("")
                 {
                     return Err(tagrex_core::plan::PlanError::Stale(path.clone()).into());
@@ -266,10 +266,9 @@ impl App {
         let mut discs = HashMap::<usize, u32>::new();
         for path in paths {
             check_cancel(&cancelled)?;
-            let track = self.read_cached(path)?;
-            let mut tags = track.tags.clone();
-            overlay_working_tags(&mut tags, base.get(path.as_path()).copied());
-            restore_locked_sources(&mut tags, &track.tags, &locked);
+            let read = self.read_snapshot(path)?;
+            let tags =
+                unlocked_working_tags(&read.file.tags, base.get(path.as_path()).copied(), &locked);
             let album = tags.get(&TagField::Album).cloned().unwrap_or_default();
             if previous_album
                 .as_ref()

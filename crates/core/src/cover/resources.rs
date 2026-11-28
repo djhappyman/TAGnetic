@@ -1,4 +1,4 @@
-//! Conservative working-set admission and bounded encoded-only result caching.
+//! Conservative working-set admission and bounded artwork caching.
 use crate::resources::{Budget, Charge, Lease};
 use sha2::{Digest, Sha256};
 use std::{
@@ -30,21 +30,74 @@ impl Key {
 }
 pub(super) struct Cache {
     entries: VecDeque<(Key, Arc<[u8]>, Lease)>,
+    recent_source: Option<RecentSource>,
     bytes: usize,
     max_entries: usize,
     max_bytes: usize,
     budget: Budget,
 }
+
+struct RecentSource {
+    key: Key,
+    data: Arc<[u8]>,
+    _lease: Lease,
+}
+
 impl Cache {
     fn new(max_entries: usize, max_bytes: usize) -> Self {
         Self {
             entries: VecDeque::new(),
+            recent_source: None,
             bytes: 0,
             max_entries,
             max_bytes,
             budget: Budget::process(),
         }
     }
+    /// Repeated interactive previews often submit the same image in a new
+    /// allocation. Exact equality can reuse the inspected and encoded result
+    /// without parsing its header or hashing its complete bytes again.
+    pub fn get_for_source(
+        &mut self,
+        source: &Arc<[u8]>,
+        max: u32,
+        quality: u8,
+    ) -> Option<Arc<[u8]>> {
+        let recent = self.recent_source.as_ref()?;
+        if recent.key.max != max
+            || recent.key.quality != quality
+            || (!Arc::ptr_eq(&recent.data, source) && recent.data.as_ref() != source.as_ref())
+        {
+            return None;
+        }
+        let key = recent.key.clone();
+        self.get(&key)
+    }
+
+    pub fn remember_source(&mut self, key: Key, source: &Arc<[u8]>) {
+        // This optional shortcut shares the existing byte ceiling and may
+        // never displace an encoded result.
+        let cost = source
+            .len()
+            .saturating_add(std::mem::size_of::<RecentSource>());
+        if cost > self.max_bytes.saturating_sub(self.bytes)
+            || !self.entries.iter().any(|(held, _, _)| held == &key)
+        {
+            return;
+        }
+        self.recent_source = None;
+        if let Ok(lease) = self.budget.try_acquire(Charge {
+            retained: cost,
+            ..Charge::default()
+        }) {
+            self.recent_source = Some(RecentSource {
+                key,
+                data: source.clone(),
+                _lease: lease,
+            });
+        }
+    }
+
     pub fn get(&mut self, key: &Key) -> Option<Arc<[u8]>> {
         let index = self.entries.iter().position(|(k, _, _)| k == key)?;
         let entry = self.entries.remove(index)?;
@@ -53,6 +106,7 @@ impl Cache {
         Some(bytes)
     }
     pub fn insert(&mut self, key: Key, data: Arc<[u8]>) {
+        self.recent_source = None;
         if let Some(index) = self.entries.iter().position(|(k, _, _)| k == &key) {
             if let Some((_, old, _)) = self.entries.remove(index) {
                 self.bytes -= old.len() + 128;
@@ -194,6 +248,45 @@ mod tests {
                 .sum::<usize>()
         );
     }
+
+    #[test]
+    fn recent_source_matches_exact_bytes_and_shares_the_encoded_cache_budget() {
+        use crate::resources::Limits;
+        let budget = Budget::new(Limits {
+            retained: 1000,
+            transient: 1000,
+            total: 1000,
+            jobs: 1,
+        });
+        let mut cache = Cache::new(2, 300);
+        cache.budget = budget.clone();
+        let source = Arc::<[u8]>::from(&b"test artwork"[..]);
+        let key = Key::new(&source, 100, 85);
+        let result = Arc::<[u8]>::from([23]);
+        cache.insert(key.clone(), result.clone());
+        cache.remember_source(key, &source);
+
+        let copied = Arc::<[u8]>::from(source.as_ref());
+        assert!(!Arc::ptr_eq(&copied, &source));
+        assert!(Arc::ptr_eq(
+            &cache.get_for_source(&copied, 100, 85).unwrap(),
+            &result,
+        ));
+        assert!(cache.get_for_source(&copied, 100, 90).is_none());
+        assert!(cache
+            .get_for_source(&Arc::from(&b"test artworK"[..]), 100, 85)
+            .is_none());
+        assert_eq!(
+            budget.usage().0.retained,
+            cache.bytes + source.len() + std::mem::size_of::<RecentSource>()
+        );
+        assert!(budget.usage().0.retained <= cache.max_bytes);
+
+        cache.insert(Key::new(b"other", 100, 85), result);
+        assert!(cache.get_for_source(&source, 100, 85).is_none());
+        assert_eq!(budget.usage().0.retained, cache.bytes);
+    }
+
     #[test]
     fn encoder_sink_refuses_before_crossing_the_limit() {
         let mut out = Encoded(Vec::new());

@@ -410,10 +410,15 @@ impl RepairSpectra {
                     frame
                 };
                 for region in &edit.mask.regions {
-                    self.region.fill(0.0);
-                    raster_region(region, frame, self.step_hz, &edit.mask, &mut self.region);
-                    for (weight, &next) in self.weights.iter_mut().zip(&self.region) {
-                        combine(weight, next, region.operation());
+                    let bins =
+                        raster_region(region, frame, self.step_hz, &edit.mask, &mut self.region);
+                    let operation = region.operation();
+                    for (weight, next) in self.weights[bins.clone()]
+                        .iter_mut()
+                        .zip(&mut self.region[bins])
+                    {
+                        combine(weight, *next, operation);
+                        *next = 0.0;
                     }
                 }
                 if self.weights.iter().all(|&weight| weight == 0.0) {
@@ -549,15 +554,24 @@ fn bins_between(lo: f64, hi: f64, bin_hz: f64, len: usize) -> Range<usize> {
         ..(((hi / bin_hz).floor() as usize).saturating_add(1)).min(len)
 }
 
+fn include_bins(support: &mut Range<usize>, bins: &Range<usize>) {
+    if !bins.is_empty() {
+        support.start = support.start.min(bins.start);
+        support.end = support.end.max(bins.end);
+    }
+}
+
+/// Rasterize one region into zeroed scratch and return the bins to combine and clear.
 fn raster_region(
     shape: &RepairMaskRegion,
     frame: f64,
     bin_hz: f64,
     mask: &RepairMask,
     weights: &mut [f64],
-) {
+) -> Range<usize> {
     let time_feather = f64::from(mask.feather_frames);
     let freq_feather = f64::from(mask.feather_hz);
+    let mut support = weights.len()..0;
     match shape {
         RepairMaskRegion::Rectangle {
             start_frame,
@@ -577,6 +591,7 @@ fn raster_region(
                     bin_hz,
                     weights.len(),
                 );
+                support = bins.clone();
                 for (index, weight) in bins.clone().zip(&mut weights[bins]) {
                     // Include narrow rectangles that fall between FFT centers.
                     let hz = index as f64 * bin_hz;
@@ -609,6 +624,7 @@ fn raster_region(
                     bin_hz,
                     weights.len(),
                 );
+                include_bins(&mut support, &bins);
                 for (index, weight) in bins.clone().zip(&mut weights[bins]) {
                     let point = [frame, index as f64 * bin_hz];
                     let inner = segment_distance(point, a, b, radii);
@@ -646,6 +662,7 @@ fn raster_region(
             crossings.sort_unstable_by(f64::total_cmp);
             for &[low, high] in crossings.as_chunks::<2>().0 {
                 let bins = bins_between(low, high, bin_hz, weights.len());
+                include_bins(&mut support, &bins);
                 weights[bins].fill(1.0);
             }
             let radii = [time_feather.max(1e-6), freq_feather.max(1e-6)];
@@ -656,6 +673,7 @@ fn raster_region(
                     bin_hz,
                     weights.len(),
                 );
+                include_bins(&mut support, &bins);
                 for (index, weight) in bins.clone().zip(&mut weights[bins]) {
                     let distance = segment_distance([frame, index as f64 * bin_hz], a, b, radii);
                     *weight = weight.max(smooth(1.0 - distance));
@@ -663,6 +681,7 @@ fn raster_region(
             }
         }
     }
+    support.start.min(support.end)..support.end
 }
 
 // Coordinates normalized to the two axes of the ellipse. This preserves

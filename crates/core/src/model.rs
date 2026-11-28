@@ -7,7 +7,8 @@ pub(crate) use policy::{operation_policy_valid, recovery_active, OperationPolicy
 pub use policy::{ModelPolicy, PolicyScope};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::Cursor;
+use std::fs::File;
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use encoding_rs::Encoding;
@@ -4329,11 +4330,9 @@ fn write_id3v2(path: &Path, container: FileType, tags: &TagMap) -> Result<(), Ta
     } else {
         tags
     };
-    // A WAV or AIFF write that does not land has still rewritten the file, and
-    // the repair below rewrites it again, so the error at the end used to
-    // report a failure over a file that was no longer what it had been (#722).
-    // The bytes are put back on any error. The tag library reads such a file
-    // whole to write it, so holding a copy costs no more than the write does.
+    // Keep the original for rollback (#722). Updating legacy text or repairing
+    // a malformed chunk chain can change more than the appended ID3 tag. On
+    // error, restore the exact bytes even if an earlier write appeared to land.
     let original = if matches!(container, FileType::Wav | FileType::Aiff) {
         Some(exact::source_bytes(path)?)
     } else {
@@ -4987,8 +4986,125 @@ fn splice_v23_frames(block: &[u8], frames: &[([u8; 4], Vec<u8>)]) -> Option<Vec<
 ///
 /// Returns `false`, touching nothing, for a file that is not a FORM/AIFF or a
 /// RIFF/WAVE — or one whose audio this walk cannot reach, so that a rebuild
-/// could never lose it. Written in place, by [`rewrite_in_place`].
+/// could never lose it. The original file object remains in place.
 fn write_iff_id3(path: &Path, id3_bytes: Option<&[u8]>) -> Result<bool, TagIoError> {
+    let mut source = exact::source_file(path)?;
+    let len = source.metadata()?.len();
+    if len < 12 {
+        return Ok(false);
+    }
+    let mut header = [0; 12];
+    source.read_exact(&mut header)?;
+    let (big_endian, audio_id): (bool, &[u8; 4]) = match (&header[0..4], &header[8..12]) {
+        (b"FORM", _) => (true, b"SSND"),
+        (b"RIFF", b"WAVE") => (false, b"data"),
+        _ => return Ok(false),
+    };
+
+    // When the ID3 chunks are all at the end, the retained audio and other
+    // metadata form one unchanged prefix. Read only the chunk headers and
+    // leave the prefix in place, even for a multi-gigabyte recording.
+    let mut pos = 12;
+    let mut kept_end = pos;
+    let mut saw_audio = false;
+    while let Some((id, end)) = read_iff_chunk(&mut source, pos, len, big_endian)? {
+        if !id.eq_ignore_ascii_case(b"ID3 ") {
+            if kept_end != pos {
+                // A retained chunk after ID3 needs to move. Use the existing
+                // buffered rewrite for that uncommon layout.
+                return rewrite_interleaved_iff_id3(path, id3_bytes);
+            }
+            saw_audio |= &id == audio_id;
+            kept_end = end;
+        }
+        pos = end;
+    }
+    if !saw_audio {
+        return Ok(false);
+    }
+    rewrite_iff_tail(path, source, len, header, kept_end, big_endian, id3_bytes)?;
+    Ok(true)
+}
+
+fn read_iff_chunk(
+    source: &mut (impl Read + Seek),
+    pos: u64,
+    len: u64,
+    big_endian: bool,
+) -> Result<Option<([u8; 4], u64)>, TagIoError> {
+    if len - pos < 8 {
+        return Ok(None);
+    }
+    source.seek(SeekFrom::Start(pos))?;
+    let mut header = [0; 8];
+    source.read_exact(&mut header)?;
+    let [a, b, c, d, e, f, g, h] = header;
+    let id = [a, b, c, d];
+    let size = [e, f, g, h];
+    let size = u64::from(if big_endian {
+        u32::from_be_bytes(size)
+    } else {
+        u32::from_le_bytes(size)
+    });
+    if !id.iter().all(|b| b.is_ascii_graphic() || *b == b' ') || size > len - pos - 8 {
+        return Ok(None);
+    }
+    let payload_end = pos + 8 + size;
+    // Keep an existing word-alignment byte, including its value. Some files
+    // have an odd-length final payload and no pad byte.
+    let end = payload_end.saturating_add(size & 1).min(len);
+    Ok(Some((id, end)))
+}
+
+fn rewrite_iff_tail(
+    path: &Path,
+    source: File,
+    source_len: u64,
+    mut header: [u8; 12],
+    kept_end: u64,
+    big_endian: bool,
+    id3_bytes: Option<&[u8]>,
+) -> Result<(), TagIoError> {
+    let invalid_size = || TagIoError::Malformed("WAV/AIFF chunk size exceeds its container".into());
+    let pack_size = |size: u32| {
+        if big_endian {
+            size.to_be_bytes()
+        } else {
+            size.to_le_bytes()
+        }
+    };
+    let tag_size = id3_bytes
+        .map(|bytes| u32::try_from(bytes.len()).map_err(|_| invalid_size()))
+        .transpose()?;
+    let tail_len = tag_size.map_or(0, |size| 8 + u64::from(size) + u64::from(size & 1));
+    let end = kept_end.checked_add(tail_len).ok_or_else(invalid_size)?;
+    let form_size = u32::try_from(end - 8).map_err(|_| invalid_size())?;
+    header[4..8].copy_from_slice(&pack_size(form_size));
+
+    let original = same_file::Handle::from_file(source)?;
+    let mut file = crate::plan::open_metadata_file(path, true)?;
+    if same_file::Handle::from_file(file.try_clone()?)? != original
+        || file.metadata()?.len() != source_len
+    {
+        return Err(std::io::Error::other("WAV/AIFF source changed during metadata write").into());
+    }
+    if let (Some(bytes), Some(size)) = (id3_bytes, tag_size) {
+        file.seek(SeekFrom::Start(kept_end))?;
+        file.write_all(b"ID3 ")?;
+        file.write_all(&pack_size(size))?;
+        file.write_all(bytes)?;
+        if size & 1 != 0 {
+            file.write_all(&[0])?;
+        }
+    }
+    file.set_len(end)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(&header)?;
+    file.flush()?;
+    Ok(())
+}
+
+fn rewrite_interleaved_iff_id3(path: &Path, id3_bytes: Option<&[u8]>) -> Result<bool, TagIoError> {
     let raw = exact::source_bytes(path)?;
     if raw.len() < 12 {
         return Ok(false);
@@ -5103,61 +5219,37 @@ fn rewrite_in_place(path: &Path, old: &[u8], new: &[u8]) -> Result<(), TagIoErro
 /// Returns `true` when it rebuilt the file, `false` when there was nothing to
 /// repair (a well-formed AIFF, or one this can't safely rewrite). Never touches
 /// a file whose chunks all parse to its end, so a healthy AIFF is left alone.
-/// Written in place, by [`rewrite_in_place`].
+/// Written in place, by [`rewrite_iff_tail`].
 fn repair_aiff_container(path: &Path) -> Result<bool, TagIoError> {
-    let bytes = exact::source_bytes(path)?;
+    let mut source = exact::source_file(path)?;
+    let len = source.metadata()?.len();
     // A FORM/AIFF (or AIFF-C) header, or there is nothing here to repair.
-    if bytes.len() < 12 || &bytes[0..4] != b"FORM" {
+    if len < 12 {
         return Ok(false);
     }
-    let form_type = &bytes[8..12];
-    if form_type != b"AIFF" && form_type != b"AIFC" {
+    let mut header = [0; 12];
+    source.read_exact(&mut header)?;
+    if &header[..4] != b"FORM" || !matches!(&header[8..12], b"AIFF" | b"AIFC") {
         return Ok(false);
     }
 
     // Walk the chunks, keeping the valid leading run. A chunk is valid when its
     // four-byte id is printable and its payload fits inside the file; the first
     // one that isn't is the break.
-    let mut pos = 12usize;
-    let mut kept_end = 12usize;
+    let mut pos = 12;
     let mut saw_ssnd = false;
-    while pos + 8 <= bytes.len() {
-        let id = &bytes[pos..pos + 4];
-        let size = u32::from_be_bytes([
-            bytes[pos + 4],
-            bytes[pos + 5],
-            bytes[pos + 6],
-            bytes[pos + 7],
-        ]) as usize;
-        let payload_end = pos + 8 + size;
-        let id_ok = id.iter().all(|b| b.is_ascii_graphic() || *b == b' ');
-        if !id_ok || payload_end > bytes.len() {
-            break;
-        }
-        if id == b"SSND" {
-            saw_ssnd = true;
-        }
-        // Chunks are word-aligned: an odd length carries a pad byte.
-        kept_end = (payload_end + (size & 1)).min(bytes.len());
-        pos = kept_end;
+    while let Some((id, end)) = read_iff_chunk(&mut source, pos, len, true)? {
+        saw_ssnd |= &id == b"SSND";
+        pos = end;
     }
 
     // Repair only a file that actually broke *after* its audio: no audio means
     // this isn't a file we can safely shorten, and a chain that reached the end
     // is well-formed and must be left untouched.
-    if !saw_ssnd || kept_end >= bytes.len() {
+    if !saw_ssnd || pos == len {
         return Ok(false);
     }
-
-    let body = &bytes[12..kept_end];
-    let form_size = (4 + body.len()) as u32; // the form-type plus the kept chunks
-    let mut rebuilt = Vec::with_capacity(12 + body.len());
-    rebuilt.extend_from_slice(b"FORM");
-    rebuilt.extend_from_slice(&form_size.to_be_bytes());
-    rebuilt.extend_from_slice(form_type);
-    rebuilt.extend_from_slice(body);
-
-    rewrite_in_place(path, &bytes, &rebuilt)?;
+    rewrite_iff_tail(path, source, len, header, pos, true, None)?;
     Ok(true)
 }
 
@@ -7645,6 +7737,36 @@ mod tests {
         );
         assert_eq!(out, expected);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn write_iff_id3_preserves_chunks_between_old_tags() {
+        let mut bytes = wav_bytes(
+            &[
+                (b"fmt ", &PCM_FMT),
+                (b"id3 ", b"first"),
+                (b"data", &[1; 8]),
+                (b"ID3 ", b"second"),
+                (b"JUNK", b"keep me"),
+            ],
+            None,
+        );
+        bytes.extend_from_slice(b"dangling");
+        let path =
+            std::env::temp_dir().join(format!("tagrex-wav-mixed-{}.wav", std::process::id()));
+        std::fs::write(&path, bytes).unwrap();
+        assert!(write_iff_id3(&path, Some(b"new")).unwrap());
+        let expected = wav_bytes(
+            &[
+                (b"fmt ", &PCM_FMT),
+                (b"data", &[1; 8]),
+                (b"JUNK", b"keep me"),
+                (b"ID3 ", b"new"),
+            ],
+            None,
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+        std::fs::remove_file(&path).unwrap();
     }
 
     /// #505: a WAV whose audio chunk this walk cannot reach — a streamed file

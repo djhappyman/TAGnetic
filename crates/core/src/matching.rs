@@ -382,11 +382,16 @@ fn title_score(a: &str, b: &str) -> (f32, MatchReason) {
             return (1.0, MatchReason::Exact);
         }
     }
-    let best = a_variants
-        .iter()
-        .zip(b_variants.iter())
-        .map(|(left, right)| similarity(left, right))
-        .fold(0.0_f32, f32::max);
+    let mut best = 0.0_f32;
+    let mut previous = None;
+    for pair @ (left, right) in a_variants.iter().zip(&b_variants) {
+        // Several normalization steps often leave both titles unchanged.
+        // An identical pair cannot improve the score.
+        if previous != Some(pair) {
+            best = best.max(similarity(left, right));
+            previous = Some(pair);
+        }
+    }
     if let Some(credit_only) = credit_only_score(a, b) {
         if credit_only > best {
             return (credit_only, MatchReason::Fuzzy);
@@ -619,6 +624,21 @@ fn similarity(a: &str, b: &str) -> f32 {
 }
 
 fn levenshtein(a: &[char], b: &[char]) -> usize {
+    // Common edges contribute no edits. Keep the original lengths in the
+    // caller for score normalization.
+    let prefix = a
+        .iter()
+        .zip(b)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let (a, b) = (&a[prefix..], &b[prefix..]);
+    let suffix = a
+        .iter()
+        .rev()
+        .zip(b.iter().rev())
+        .take_while(|(left, right)| left == right)
+        .count();
+    let (a, b) = (&a[..a.len() - suffix], &b[..b.len() - suffix]);
     if a.is_empty() {
         return b.len();
     }
@@ -643,6 +663,43 @@ fn levenshtein(a: &[char], b: &[char]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trimmed_distances_match_a_full_matrix_for_short_unicode_strings() {
+        fn distance(a: &[char], b: &[char]) -> usize {
+            let mut matrix = vec![vec![0; b.len() + 1]; a.len() + 1];
+            for (i, row) in matrix.iter_mut().enumerate() {
+                row[0] = i;
+            }
+            for (j, cell) in matrix[0].iter_mut().enumerate() {
+                *cell = j;
+            }
+            for (i, left) in a.iter().enumerate() {
+                for (j, right) in b.iter().enumerate() {
+                    matrix[i + 1][j + 1] = (matrix[i][j] + usize::from(left != right))
+                        .min(matrix[i + 1][j] + 1)
+                        .min(matrix[i][j + 1] + 1);
+                }
+            }
+            matrix[a.len()][b.len()]
+        }
+
+        let mut strings = vec![Vec::new()];
+        for length in 1..=5 {
+            for bits in 0..(1 << length) {
+                strings.push(
+                    (0..length)
+                        .map(|bit| if bits & (1 << bit) == 0 { 'é' } else { '尾' })
+                        .collect(),
+                );
+            }
+        }
+        for a in &strings {
+            for b in &strings {
+                assert_eq!(levenshtein(a, b), distance(a, b), "{a:?}, {b:?}");
+            }
+        }
+    }
 
     fn track<'a>(title: &'a str, artist: Option<&'a str>) -> TrackRef<'a> {
         TrackRef {

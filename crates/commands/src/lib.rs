@@ -45,6 +45,7 @@ mod sidecars;
 
 use std::path::{Component, Path, PathBuf};
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
@@ -650,6 +651,15 @@ fn overlay_working_tags(tags: &mut TagMap, working: Option<&FileChangeDto>) {
             }
         }
     }
+}
+
+fn working_tag_snapshot<'a>(saved: &'a TagMap, working: Option<&FileChangeDto>) -> Cow<'a, TagMap> {
+    let Some(working) = working.filter(|change| !change.tag_changes.is_empty()) else {
+        return Cow::Borrowed(saved);
+    };
+    let mut tags = saved.clone();
+    overlay_working_tags(&mut tags, Some(working));
+    Cow::Owned(tags)
 }
 
 /// Whether the folder `target` would land in is not on disk yet (#385).
@@ -2211,7 +2221,8 @@ impl ProviderHub {
                 _ => self.discogs_provider(token)?.search(&search)?,
             })
         })?;
-        let mut results: Vec<CandidateDto> = candidates.iter().map(CandidateDto::from).collect();
+        let mut results: Vec<CandidateDto> =
+            candidates.into_iter().map(CandidateDto::from).collect();
 
         let wanted = [
             query.artist.as_deref(),
@@ -2249,7 +2260,7 @@ impl ProviderHub {
                 _ => self.discogs_provider(token)?.fetch_release(&rid)?,
             })
         })?;
-        Ok(ReleaseDto::from(&release))
+        Ok(ReleaseDto::from(release))
     }
 
     pub fn audio_discogs_release(
@@ -2456,6 +2467,39 @@ struct PendingQuery {
     paths: HashSet<PathBuf>,
 }
 
+/// Keep the supplied iteration order and exact lexical membership. Both
+/// collections share the path allocation, and membership survives every read.
+struct FileSelection {
+    paths: Vec<std::sync::Arc<Path>>,
+    members: HashSet<std::sync::Arc<Path>>,
+}
+
+impl FileSelection {
+    fn new(paths: Vec<PathBuf>) -> Self {
+        let paths: Vec<_> = paths
+            .into_iter()
+            .map(std::sync::Arc::<Path>::from)
+            .collect();
+        let members = paths.iter().cloned().collect();
+        Self { paths, members }
+    }
+
+    fn remove(&mut self, paths: &HashSet<&Path>) {
+        self.paths.retain(|path| !paths.contains(path.as_ref()));
+        for &path in paths {
+            self.members.remove(path);
+        }
+    }
+
+    fn add(&mut self, path: PathBuf) {
+        if !self.members.contains(path.as_path()) {
+            let path = std::sync::Arc::<Path>::from(path);
+            self.members.insert(path.clone());
+            self.paths.push(path);
+        }
+    }
+}
+
 /// A read-only suggestion, requiring explicit frontend confirmation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportOrderProposalDto {
@@ -2479,7 +2523,7 @@ pub struct App {
     /// `library_root`. `library_root` still bounds every write as the executor's
     /// `allowed_root`; the filter only narrows *which* files are listed and
     /// operated on. `None` = an ordinary library rooted at `library_root`.
-    file_filter: Option<Vec<PathBuf>>,
+    file_filter: Option<FileSelection>,
     journal: SqliteJournal,
     /// Where a damaged journal was set aside when this session opened it, until
     /// the interface has said so ([`App::take_journal_notice`]).
@@ -2645,13 +2689,10 @@ impl App {
         self.read_snapshot(path).map(|read| read.file.clone())
     }
 
-    /// Gather only the file properties a mask needs, reusing cached audio
-    /// properties while reading filesystem size/date freshly when requested.
-    fn file_context<'a>(
-        &self,
-        mask: &Mask,
-        track: &'a tagrex_core::model::TrackFile,
-    ) -> FileContext<'a> {
+    /// Reuse audio properties from the same probe as the tags, and read
+    /// filesystem size/date freshly when requested.
+    fn file_context<'a>(mask: &Mask, read: &'a tagrex_core::model::TrackRead) -> FileContext<'a> {
+        let track = &read.file;
         let metadata = mask
             .needs_metadata()
             .then(|| std::fs::metadata(&track.path).ok())
@@ -2659,11 +2700,7 @@ impl App {
         FileContext {
             path: Some(&track.path),
             format: Some(track.format),
-            props: if mask.needs_audio_props() {
-                self.read_snapshot(&track.path).ok().map(|read| read.props)
-            } else {
-                None
-            },
+            props: Some(read.props),
             size_bytes: metadata.as_ref().map(|m| m.len()),
             modified: metadata.and_then(|m| m.modified().ok()),
         }
@@ -2679,7 +2716,7 @@ impl App {
         journal_path: &Path,
     ) -> Result<Self, AppError> {
         let mut app = Self::open(root, journal_path)?;
-        app.file_filter = Some(files);
+        app.file_filter = Some(FileSelection::new(files));
         Ok(app)
     }
 
@@ -2724,7 +2761,7 @@ impl App {
     /// file-set drop), otherwise a fresh recursive scan of `library_root`.
     fn source_paths(&self) -> Box<dyn Iterator<Item = PathBuf> + '_> {
         match &self.file_filter {
-            Some(files) => Box::new(files.iter().cloned()),
+            Some(files) => Box::new(files.paths.iter().map(|path| path.to_path_buf())),
             None => Box::new(
                 scanner::scan(&self.library_root, &ScanOptions::default()).filter_map(Result::ok),
             ),
@@ -3142,11 +3179,8 @@ impl App {
         let Some(files) = &mut self.file_filter else {
             return;
         };
-        if removed.is_empty()
-            || !removed
-                .iter()
-                .all(|path| files.iter().any(|file| file == Path::new(path)))
-        {
+        let removed: HashSet<_> = removed.iter().map(Path::new).collect();
+        if removed.is_empty() || !removed.iter().all(|path| files.members.contains(*path)) {
             return;
         }
         let Ok(root) = self.library_root.canonicalize() else {
@@ -3165,11 +3199,9 @@ impl App {
         {
             return;
         }
-        files.retain(|file| !removed.iter().any(|path| file == Path::new(path)));
+        files.remove(&removed);
         for path in added {
-            if !files.contains(&path) {
-                files.push(path);
-            }
+            files.add(path);
         }
         self.invalidate_query();
     }
@@ -3196,22 +3228,19 @@ impl App {
     }
 
     /// Check a known set of paths without parsing any of them. One root lookup
-    /// and one membership index serve the batch, including explicit file-set
+    /// serves the batch, with membership already indexed by explicit file-set
     /// sessions. Callers that only need the boundary — an artwork import that
     /// reads its own rows, or a write that validates before mutating — should
     /// not pay for snapshots they discard.
     fn validate_track_paths(&self, paths: &[PathBuf]) -> Result<(), AppError> {
         preview_context::check()?;
         let root = std::fs::canonicalize(&self.library_root)?;
-        let files = self
-            .file_filter
-            .as_ref()
-            .map(|files| files.iter().collect::<HashSet<_>>());
+        let files = self.file_filter.as_ref();
         for path in paths {
             preview_context::check()?;
             let outside = || AppError::OutsideRoot(path.to_string_lossy().into_owned());
             if !scanner::is_supported_audio(path)
-                || files.as_ref().is_some_and(|files| !files.contains(path))
+                || files.is_some_and(|files| !files.members.contains(path.as_path()))
             {
                 return Err(outside());
             }
@@ -3623,12 +3652,10 @@ impl App {
         root: &Path,
         working: Option<&FileChangeDto>,
     ) -> Result<PathBuf, Option<String>> {
-        let mut track = self.read_cached(path).map_err(|_| None)?;
-        // `read_cached` returns an owned view: desired values never leak into
-        // the saved snapshot, file context, executor baseline or disk.
-        overlay_working_tags(&mut track.tags, working);
+        let read = self.read_snapshot(path).map_err(|_| None)?;
+        let tags = working_tag_snapshot(&read.file.tags, working);
         let rendered = mask
-            .render_with(&track.tags, &self.file_context(mask, &track))
+            .render_with(&tags, &Self::file_context(mask, &read))
             .map_err(|err| match err {
                 MaskError::MissingTag(field) => Some(field),
                 _ => None,
@@ -6055,7 +6082,7 @@ impl App {
                     if !seen_targets.insert(canonical_target) {
                         continue;
                     }
-                    self.write_output(&target, &cover.data)?;
+                    self.write_output(&target, cover.data.to_vec())?;
                     written.push(target.to_string_lossy().into_owned());
                 }
                 None => skipped_no_cover.push(path.to_string_lossy().into_owned()),
@@ -6101,12 +6128,8 @@ impl App {
 
     /// Stage and replace one export beneath the library root through the
     /// confined output publisher. Separate calls are separate transactions.
-    fn write_output(&self, target: &Path, bytes: &[u8]) -> Result<(), AppError> {
-        output::write_batch(
-            &self.library_root,
-            &[(target.to_path_buf(), bytes.to_vec())],
-            true,
-        )?;
+    fn write_output(&self, target: &Path, bytes: Vec<u8>) -> Result<(), AppError> {
+        output::write_batch(&self.library_root, &[(target.to_path_buf(), bytes)], true)?;
         Ok(())
     }
 
@@ -6152,7 +6175,7 @@ impl App {
             &target,
             export::Format::M3u(&entries)
                 .render_bounded(64 * 1024 * 1024)?
-                .as_bytes(),
+                .into_bytes(),
         )?;
         Ok(target.to_string_lossy().into_owned())
     }
@@ -6162,8 +6185,8 @@ impl App {
         paths
             .iter()
             .filter_map(|path| {
-                let track = self.read_cached(path).ok()?;
-                let duration = TagEngine::read_duration(path).unwrap_or_default();
+                let read = self.read_snapshot(path).ok()?;
+                let tags = &read.file.tags;
                 let display = Self::path_from_export(root, path);
                 let file_stem = path
                     .file_name()
@@ -6171,19 +6194,11 @@ impl App {
                     .unwrap_or_default();
                 Some(PlaylistTrack {
                     path: display,
-                    artist: track
-                        .tags
-                        .get(&TagField::Artist)
-                        .cloned()
-                        .unwrap_or_default(),
+                    artist: tags.get(&TagField::Artist).cloned().unwrap_or_default(),
                     // Fall back to the file name so an untagged entry still
                     // shows something useful in a player.
-                    title: track
-                        .tags
-                        .get(&TagField::Title)
-                        .cloned()
-                        .unwrap_or(file_stem),
-                    duration_secs: match duration.as_secs() {
+                    title: tags.get(&TagField::Title).cloned().unwrap_or(file_stem),
+                    duration_secs: match read.props.duration_secs {
                         0 => -1, // unknown
                         secs => secs as i64,
                     },
@@ -6231,11 +6246,11 @@ impl App {
         let mut order: Vec<String> = Vec::new();
         let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
         for path in paths {
-            let Ok(track) = self.read_cached(path) else {
+            let Ok(read) = self.read_snapshot(path) else {
                 continue;
             };
             let key = if by_album {
-                track
+                read.file
                     .tags
                     .get(&TagField::Album)
                     .cloned()
@@ -6295,10 +6310,10 @@ impl App {
         first: &Path,
         taken: &mut HashSet<String>,
     ) -> Result<String, AppError> {
-        let rendered = match TagEngine::read(first) {
-            Ok(track) => {
-                let file = self.file_context(mask, &track);
-                mask.render_with(&export::lenient_tags(&track.tags), &file)
+        let rendered = match TagEngine::read_with_props(first) {
+            Ok(read) => {
+                let file = Self::file_context(mask, &read);
+                mask.render_with(&export::lenient_tags(&read.file.tags), &file)
                     .unwrap_or_default()
             }
             Err(_) => String::new(),
@@ -6371,7 +6386,7 @@ impl App {
             &target,
             export::Format::Cue(&entries)
                 .render_bounded(64 * 1024 * 1024)?
-                .as_bytes(),
+                .into_bytes(),
         )?;
         Ok(target.to_string_lossy().into_owned())
     }
@@ -6385,7 +6400,7 @@ impl App {
             &target,
             export::Format::Csv(&tracks)
                 .render_bounded(64 * 1024 * 1024)?
-                .as_bytes(),
+                .into_bytes(),
         )?;
         Ok(target.to_string_lossy().into_owned())
     }
@@ -6399,7 +6414,7 @@ impl App {
             &target,
             export::Format::Html(&tracks)
                 .render_bounded(64 * 1024 * 1024)?
-                .as_bytes(),
+                .into_bytes(),
         )?;
         Ok(target.to_string_lossy().into_owned())
     }
@@ -6413,7 +6428,7 @@ impl App {
             &target,
             export::Format::Xml(&tracks)
                 .render_bounded(64 * 1024 * 1024)?
-                .as_bytes(),
+                .into_bytes(),
         )?;
         Ok(target.to_string_lossy().into_owned())
     }
@@ -6434,7 +6449,7 @@ impl App {
             &target,
             export::Format::Report(&tracks, &mask)
                 .render_bounded(64 * 1024 * 1024)?
-                .as_bytes(),
+                .into_bytes(),
         )?;
         Ok(target.to_string_lossy().into_owned())
     }
@@ -6530,9 +6545,17 @@ impl App {
             .iter()
             .filter_map(|root| std::fs::canonicalize(root).ok())
             .collect();
-        let listed: HashSet<PathBuf> = self.source_paths().collect();
+        let listed = self
+            .file_filter
+            .is_none()
+            .then(|| self.source_paths().collect::<HashSet<_>>());
         for path in paths {
-            if !listed.contains(path) {
+            let is_member = if let Some(files) = &self.file_filter {
+                files.members.contains(path.as_path())
+            } else {
+                listed.as_ref().is_some_and(|listed| listed.contains(path))
+            };
+            if !is_member {
                 return Err(AppError::OutsideRoot(path.to_string_lossy().into_owned()));
             }
             // Canonicalized, so a symlink cannot point out of the library and
@@ -6548,8 +6571,7 @@ impl App {
         // (#127), and a trashed file has to leave it — otherwise the next
         // re-read still asks for it and shows it as unreadable rather than gone.
         if let Some(files) = self.file_filter.as_mut() {
-            let gone: HashSet<&PathBuf> = paths.iter().collect();
-            files.retain(|path| !gone.contains(path));
+            files.remove(&paths.iter().map(PathBuf::as_path).collect());
         }
         Ok(paths
             .iter()
@@ -7004,27 +7026,23 @@ impl App {
         let locals: Vec<(String, String, Option<u64>, Option<String>)> = paths
             .iter()
             .map(|path| {
-                let track = self.read_cached(path).ok();
-                let title = track
-                    .as_ref()
-                    .and_then(|track| track.tags.get(&TagField::Title).cloned())
+                let read = self.read_snapshot(path).ok();
+                let tags = read.as_ref().map(|read| &read.file.tags);
+                let title = tags
+                    .and_then(|tags| tags.get(&TagField::Title).cloned())
                     .filter(|title| !title.is_empty())
                     .unwrap_or_else(|| {
                         path.file_stem()
                             .map(|stem| stem.to_string_lossy().into_owned())
                             .unwrap_or_default()
                     });
-                let artist = track
-                    .as_ref()
-                    .and_then(|track| track.tags.get(&TagField::Artist).cloned())
+                let artist = tags
+                    .and_then(|tags| tags.get(&TagField::Artist).cloned())
                     .unwrap_or_default();
-                let isrc = track
-                    .as_ref()
-                    .and_then(|track| track.tags.get(&TagField::Isrc).cloned())
+                let isrc = tags
+                    .and_then(|tags| tags.get(&TagField::Isrc).cloned())
                     .filter(|isrc| !isrc.is_empty());
-                let duration = self
-                    .read_snapshot(path)
-                    .ok()
+                let duration = read
                     .map(|read| read.props.duration_secs)
                     .filter(|secs| *secs > 0);
                 (title, artist, duration, isrc)
@@ -7180,12 +7198,13 @@ impl App {
         Ok(paths
             .iter()
             .map(|path| {
-                let Ok(mut track) = self.read_cached(path) else {
+                let Ok(read) = self.read_snapshot(path) else {
                     return String::new();
                 };
-                overlay_working_tags(&mut track.tags, working.get(path.as_path()).copied());
-                let file = self.file_context(&mask, &track);
-                mask.render_with(&export::lenient_tags(&track.tags), &file)
+                let tags =
+                    working_tag_snapshot(&read.file.tags, working.get(path.as_path()).copied());
+                let file = Self::file_context(&mask, &read);
+                mask.render_with(&export::lenient_tags(&tags), &file)
                     .unwrap_or_default()
             })
             .collect())
@@ -7207,6 +7226,9 @@ impl App {
             .iter()
             .map(|mask| mask.as_ref().map(|_| Vec::with_capacity(paths.len())))
             .collect();
+        if columns.iter().all(Option::is_none) {
+            return Ok(columns);
+        }
         let needs_metadata = masks.iter().flatten().any(Mask::needs_metadata);
         for path in paths {
             let read = self.read_snapshot(path).ok();
@@ -8184,35 +8206,47 @@ const FILL_BY_LENGTH_SECS: u64 = 2;
 /// only free one within [`FILL_BY_LENGTH_SECS`] of the file, and the file the
 /// only unmatched one that near to the track. Nothing the names placed moves.
 fn fill_by_length(aligned: &mut [Option<usize>], locals: &[TrackRef], candidates: &[TrackRef]) {
+    let mut open_files: Vec<_> = aligned
+        .iter()
+        .enumerate()
+        .filter(|(_, track)| track.is_none())
+        .filter_map(|(i, _)| locals[i].duration_secs.map(|duration| (duration, i)))
+        .collect();
+    if open_files.is_empty() {
+        return;
+    }
     let mut taken = vec![false; candidates.len()];
     for track in aligned.iter().flatten() {
         taken[*track] = true;
     }
-    let near = |file: usize, track: usize| match (
-        locals[file].duration_secs,
-        candidates[track].duration_secs,
-    ) {
-        (Some(a), Some(b)) => a.abs_diff(b) <= FILL_BY_LENGTH_SECS,
-        _ => false,
-    };
-    let open: Vec<usize> = (0..aligned.len())
-        .filter(|&i| aligned[i].is_none())
+    let mut free_tracks: Vec<_> = candidates
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !taken[*i])
+        .filter_map(|(i, track)| track.duration_secs.map(|duration| (duration, i)))
         .collect();
-    let mut pairs = Vec::new();
-    for &file in &open {
-        let tracks: Vec<usize> = (0..candidates.len())
-            .filter(|&track| !taken[track] && near(file, track))
-            .collect();
-        let [track] = tracks[..] else {
-            continue;
-        };
-        if open.iter().filter(|&&other| near(other, track)).count() == 1 {
-            pairs.push((file, track));
+    open_files.sort_unstable();
+    free_tracks.sort_unstable();
+    // Both indexes describe the initial set of unmatched rows, so an
+    // assignment never makes another ambiguous match become eligible.
+    for &(file_duration, file_index) in &open_files {
+        if let Some((track_duration, track_index)) = unique_near(&free_tracks, file_duration) {
+            if unique_near(&open_files, track_duration).is_some() {
+                aligned[file_index] = Some(track_index);
+            }
         }
     }
-    for (file, track) in pairs {
-        aligned[file] = Some(track);
-    }
+}
+
+fn unique_near(sorted: &[(u64, usize)], duration: u64) -> Option<(u64, usize)> {
+    let min = duration.saturating_sub(FILL_BY_LENGTH_SECS);
+    let max = duration.saturating_add(FILL_BY_LENGTH_SECS);
+    let index = sorted.partition_point(|entry| entry.0 < min);
+    let &entry = sorted.get(index).filter(|entry| entry.0 <= max)?;
+    sorted
+        .get(index + 1)
+        .is_none_or(|other| other.0 > max)
+        .then_some(entry)
 }
 
 /// Order two paths the way a file manager lists them (#526): runs of digits as
@@ -8223,39 +8257,54 @@ fn fill_by_length(aligned: &mut [Option<usize>], locals: &[TrackRef], candidates
 /// the order is total and stable.
 pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering;
-    let (mut left, mut right) = (a.chars(), b.chars());
+    let (mut left, mut right) = (a, b);
     loop {
-        match (left.clone().next(), right.clone().next()) {
+        // File manager sorts repeatedly compare long ASCII directory prefixes.
+        // Consume those bytes without decoding or Unicode-folding each letter.
+        let mut compared = 0;
+        for (&l, &r) in left.as_bytes().iter().zip(right.as_bytes()) {
+            if !l.is_ascii() || !r.is_ascii() || (l.is_ascii_digit() && r.is_ascii_digit()) {
+                break;
+            }
+            let order = l.to_ascii_lowercase().cmp(&r.to_ascii_lowercase());
+            if order != Ordering::Equal {
+                return order;
+            }
+            compared += 1;
+        }
+        left = &left[compared..];
+        right = &right[compared..];
+        match (left.as_bytes().first(), right.as_bytes().first()) {
             (None, None) => return a.cmp(b),
             (None, Some(_)) => return Ordering::Less,
             (Some(_), None) => return Ordering::Greater,
             (Some(l), Some(r)) if l.is_ascii_digit() && r.is_ascii_digit() => {
-                // Borrow the digit run from the original UTF-8 string. ASCII
-                // digits are one byte, so the boundary is also a char boundary.
-                fn take<'a>(chars: &mut std::str::Chars<'a>) -> &'a str {
-                    let suffix = chars.as_str();
-                    let len = suffix.bytes().take_while(u8::is_ascii_digit).count();
-                    let (digits, rest) = suffix.split_at(len);
-                    *chars = rest.chars();
-                    digits
+                fn take<'a>(value: &mut &'a str) -> &'a str {
+                    let length = value.bytes().take_while(u8::is_ascii_digit).count();
+                    let (digits, rest) = value.split_at(length);
+                    *value = rest;
+                    digits.trim_start_matches('0')
                 }
-                let (l, r) = (take(&mut left), take(&mut right));
-                let (l_value, r_value) = (l.trim_start_matches('0'), r.trim_start_matches('0'));
-                let by_value = l_value
+                let (l_value, r_value) = (take(&mut left), take(&mut right));
+                let order = l_value
                     .len()
                     .cmp(&r_value.len())
                     .then_with(|| l_value.cmp(r_value));
-                if by_value != Ordering::Equal {
-                    return by_value;
+                if order != Ordering::Equal {
+                    return order;
                 }
             }
-            (Some(l), Some(r)) => {
-                let by_letter = l.to_lowercase().cmp(r.to_lowercase());
-                if by_letter != Ordering::Equal {
-                    return by_letter;
+            (Some(_), Some(_)) => {
+                let (mut l, mut r) = (left.chars(), right.chars());
+                let order = l
+                    .next()
+                    .unwrap()
+                    .to_lowercase()
+                    .cmp(r.next().unwrap().to_lowercase());
+                if order != Ordering::Equal {
+                    return order;
                 }
-                left.next();
-                right.next();
+                (left, right) = (l.as_str(), r.as_str());
             }
         }
     }
@@ -9248,79 +9297,79 @@ impl SearchQueryDto {
     }
 }
 
-impl From<&tagrex_core::provider::ReleaseCandidate> for CandidateDto {
-    fn from(candidate: &tagrex_core::provider::ReleaseCandidate) -> Self {
+impl From<tagrex_core::provider::ReleaseCandidate> for CandidateDto {
+    fn from(candidate: tagrex_core::provider::ReleaseCandidate) -> Self {
         Self {
-            id: candidate.id.0.clone(),
-            artist: candidate.artist.clone(),
-            title: candidate.title.clone(),
+            id: candidate.id.0,
+            artist: candidate.artist,
+            title: candidate.title,
             year: candidate.year,
             score: candidate.score,
-            thumb_url: candidate.thumb_url.clone(),
-            cover_url: candidate.cover_url.clone(),
-            country: candidate.country.clone(),
-            label: candidate.label.clone(),
-            format: candidate.format.clone(),
-            catalog_number: candidate.catalog_number.clone(),
+            thumb_url: candidate.thumb_url,
+            cover_url: candidate.cover_url,
+            country: candidate.country,
+            label: candidate.label,
+            format: candidate.format,
+            catalog_number: candidate.catalog_number,
         }
     }
 }
 
-impl From<&tagrex_core::provider::Release> for ReleaseDto {
-    fn from(release: &tagrex_core::provider::Release) -> Self {
+impl From<tagrex_core::provider::Release> for ReleaseDto {
+    fn from(release: tagrex_core::provider::Release) -> Self {
         Self {
             links: release
                 .links
-                .iter()
+                .into_iter()
                 .map(|link| ReleaseLinkDto {
-                    name: link.name.clone(),
+                    name: link.name,
                     kind: match link.kind {
                         tagrex_core::provider::ReleaseLinkKind::Artist => "artist",
                         tagrex_core::provider::ReleaseLinkKind::Label => "label",
                     }
                     .to_string(),
-                    id: link.id.clone(),
+                    id: link.id,
                 })
                 .collect(),
-            id: release.id.0.clone(),
-            artist: release.artist.clone(),
-            title: release.title.clone(),
+            id: release.id.0,
+            artist: release.artist,
+            title: release.title,
             year: release.year,
-            genres: release.genres.clone(),
-            styles: release.styles.clone(),
+            genres: release.genres,
+            styles: release.styles,
             tracks: release
                 .tracks
-                .iter()
+                .into_iter()
                 .map(|track| ReleaseTrackDto {
-                    position: track.position.clone(),
+                    position: track.position,
                     disc: track.disc,
-                    artist: track.artist.clone(),
-                    title: track.title.clone(),
+                    artist: track.artist,
+                    title: track.title,
                     duration_secs: track.duration_secs,
-                    isrc: track.isrc.clone(),
+                    isrc: track.isrc,
                     bpm: track.bpm,
-                    key: track.key.clone(),
-                    section: track.section.clone(),
+                    key: track.key,
+                    section: track.section,
                 })
                 .collect(),
             labels: release
                 .labels
-                .iter()
+                .into_iter()
                 .map(|label| ReleaseLabelDto {
-                    name: label.name.clone(),
-                    catalog_number: label.catalog_number.clone(),
+                    name: label.name,
+                    catalog_number: label.catalog_number,
                 })
                 .collect(),
-            country: release.country.clone(),
-            format: release.format.clone(),
+            country: release.country,
+            format: release.format,
             disc_total: release.disc_total,
-            url: release.url.clone(),
-            cover_image_url: release.cover_image_url.clone(),
+            url: release.url,
+            cover_image_url: release.cover_image_url,
             images: release
                 .images
-                .iter()
+                .into_iter()
                 .map(|image| ReleaseImageDto {
-                    url: image.url.clone(),
+                    url: image.url,
                     width: image.width,
                     height: image.height,
                 })
@@ -11676,7 +11725,7 @@ mod tests {
             .read_image(&outside.0.join("directory.png"))
             .is_err());
         let prepared = options.read_image(&source).unwrap();
-        app.file_filter = Some(Vec::new());
+        app.file_filter = Some(FileSelection::new(Vec::new()));
         assert!(matches!(
             app.preview_prepared_cover_embed(paths, prepared),
             Err(AppError::OutsideRoot(_))
@@ -13317,6 +13366,11 @@ mod tests {
         assert_eq!(natural_cmp("a٢", "a10"), Greater);
         assert_eq!(natural_cmp("İ02", "i2"), Greater);
         assert_eq!(natural_cmp("🎵", "🎵0"), Less);
+        assert_eq!(natural_cmp("/Library/K01/2", "/library/k1/10"), Less);
+        assert_eq!(
+            natural_cmp("/Library/α2", "/library/Α2"),
+            "/Library/α2".cmp("/library/Α2")
+        );
         let long = "9".repeat(500);
         assert_eq!(
             natural_cmp(&format!("音{long}"), &format!("音1{long}")),
@@ -17416,6 +17470,31 @@ mod tests {
     }
 
     #[test]
+    fn playlist_exports_identical_duration_text_and_skip_unreadable_files() {
+        let dir = TempDir::new("export-playlist-duration");
+        let unknown = dir.0.join("unknown.flac");
+        std::fs::write(&unknown, MINIMAL_FLAC).unwrap();
+        let known = dir.0.join("known.flac");
+        let mut fixture = MINIMAL_FLAC;
+        fixture[22..26].copy_from_slice(&(7 * 44_100u32).to_be_bytes());
+        std::fs::write(&known, fixture).unwrap();
+        assert_eq!(TagEngine::read_duration(&known).unwrap().as_secs(), 7);
+        assert_eq!(TagEngine::read_duration(&unknown).unwrap().as_secs(), 0);
+        let broken = dir.0.join("broken.flac");
+        std::fs::write(&broken, b"unreadable format").unwrap();
+        let app = open_app(&dir);
+        let paths = [known.clone(), broken, unknown.clone()];
+        let single = app.export_playlist(&paths, "single.m3u").unwrap();
+        let grouped = app.export_playlists(&paths, "folder", "grouped").unwrap();
+        let expected =
+            "#EXTM3U\n#EXTINF:7,known.flac\nknown.flac\n#EXTINF:-1,unknown.flac\nunknown.flac\n";
+        assert_eq!(std::fs::read_to_string(single).unwrap(), expected);
+        assert_eq!(std::fs::read_to_string(&grouped[0]).unwrap(), expected);
+        assert_eq!(std::fs::read(known).unwrap(), fixture);
+        assert_eq!(std::fs::read(unknown).unwrap(), MINIMAL_FLAC);
+    }
+
+    #[test]
     fn an_exported_relative_path_is_written_with_forward_slashes() {
         let dir = TempDir::new("export-separators");
         let track = dir.tagged_flac_at("Ambient/deep/a.flac", "A", "a");
@@ -18152,6 +18231,62 @@ mod tests {
         assert!(paths.contains(&c.to_string_lossy().into_owned()));
         // The un-listed file is on disk — filtered out of the session, not gone.
         assert!(dir.0.join("02.flac").exists());
+    }
+
+    #[test]
+    fn split_replacements_update_file_set_membership_and_keep_input_order() {
+        let dir = TempDir::new("fileset-split");
+        let first = dir
+            .tagged_flac_at("a.flac", "A", "First")
+            .canonicalize()
+            .unwrap();
+        let keep = dir
+            .tagged_flac_at("b.flac", "B", "Keep")
+            .canonicalize()
+            .unwrap();
+        let replacement = dir
+            .tagged_flac_at("c.flac", "C", "Replacement")
+            .canonicalize()
+            .unwrap();
+        let unrelated = dir.tagged_flac_at("x.flac", "X", "Outside selection");
+        let mut app = App::open_file_set(
+            &dir.0,
+            vec![first.clone(), keep.clone(), first.clone()],
+            &dir.0.join("j.sqlite"),
+        )
+        .unwrap();
+        let removal = [first.to_string_lossy().into_owned()];
+
+        app.sync_audio_file_set(
+            &removal,
+            &[dir.0.join("missing.flac").to_string_lossy().into_owned()],
+        );
+        assert_eq!(
+            app.source_paths().collect::<Vec<_>>(),
+            [first.clone(), keep.clone(), first.clone()]
+        );
+
+        app.sync_audio_file_set(
+            &removal,
+            &[
+                keep.to_string_lossy().into_owned(),
+                replacement.to_string_lossy().into_owned(),
+                replacement.to_string_lossy().into_owned(),
+            ],
+        );
+        assert_eq!(
+            app.source_paths().collect::<Vec<_>>(),
+            [keep, replacement.clone()]
+        );
+        assert!(matches!(
+            app.read_track(&first),
+            Err(AppError::OutsideRoot(_))
+        ));
+        assert!(matches!(
+            app.read_track(&unrelated),
+            Err(AppError::OutsideRoot(_))
+        ));
+        assert!(app.read_track(&replacement).is_ok());
     }
 
     #[test]

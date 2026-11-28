@@ -158,20 +158,22 @@ fn reports() -> std::sync::MutexGuard<'static, Reports> {
 /// only for the track the player is actually playing — the frontend names a
 /// path, but it cannot make this read any other file.
 pub async fn update(app: AppHandle, now: NowPlaying) {
-    let start_worker = {
+    let (start_worker, retired) = {
         let mut reports = reports();
         let playing = app.state::<Player>().status().path;
         let (changed_track, start_worker) =
             reports.record(&now, playing.as_deref(), Instant::now());
         // Keep platform publication in report order. Start the track without
         // waiting on its cover, and clear artwork from the previous track.
-        publish(&app, now, changed_track.then_some(None));
-        start_worker
+        let retired = publish(&app, now, changed_track.then_some(None));
+        (start_worker, retired)
     };
-    if start_worker {
-        // Keep the worker alive if the IPC caller disconnects. There can be
-        // one running read and one pending path, regardless of skip rate.
-        let _ = tauri::async_runtime::spawn(read_pending_covers(app)).await;
+    // Keep the worker alive if the IPC caller disconnects. There can be
+    // one running read and one pending path, regardless of skip rate.
+    let worker = start_worker.then(|| tauri::async_runtime::spawn(read_pending_covers(app)));
+    release_cover(retired).await;
+    if let Some(worker) = worker {
+        let _ = worker.await;
     }
 }
 
@@ -182,18 +184,34 @@ async fn read_pending_covers(app: AppHandle) {
             return;
         };
         let cover = tauri::async_runtime::spawn_blocking(move || {
-            tagrex_core::model::TagEngine::read_cover(&path)
+            let art = tagrex_core::model::TagEngine::read_cover(&path)
                 .ok()
-                .flatten()
-                .map(|art| art.data.to_vec())
+                .flatten()?;
+            let is_current = reports().generation == generation;
+            if !is_current {
+                return None;
+            }
+            prepare_cover(&art.data)
         })
         .await
         .ok()
         .flatten();
-        let mut reports = reports();
-        if let (Some(now), Some(cover)) = (reports.complete(generation, Instant::now()), cover) {
-            publish(&app, now, Some(Some(cover)));
-        }
+        let retired = {
+            let mut reports = reports();
+            match (reports.complete(generation, Instant::now()), cover) {
+                (Some(now), Some(cover)) => publish(&app, now, Some(Some(cover))),
+                (_, cover) => cover,
+            }
+        };
+        release_cover(retired).await;
+    }
+}
+
+async fn release_cover(cover: Option<PreparedCover>) {
+    if let Some(cover) = cover {
+        // Linux owns a cache file. Retire it without holding the playback
+        // report or D-Bus session lock, even when it was superseded.
+        let _ = tauri::async_runtime::spawn_blocking(move || drop(cover)).await;
     }
 }
 
@@ -302,20 +320,39 @@ mod publication_tests {
 }
 
 #[cfg(target_os = "macos")]
-pub use mac::{install, publish};
+pub use mac::install;
 
 #[cfg(target_os = "linux")]
-pub use mpris::{install, publish};
+pub use mpris::install;
+#[cfg(target_os = "linux")]
+use mpris::{prepare_cover, publish, PreparedCover};
 
 #[cfg(windows)]
-pub use smtc::{install, publish};
+pub use smtc::install;
 
-/// No system media session on Windows yet.
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 pub fn install(_app: &AppHandle) {}
 
-#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-pub fn publish(_app: &AppHandle, _now: NowPlaying, _cover: Option<Option<Vec<u8>>>) {}
+#[cfg(not(target_os = "linux"))]
+type PreparedCover = Vec<u8>;
+
+#[cfg(not(target_os = "linux"))]
+fn prepare_cover(bytes: &[u8]) -> Option<PreparedCover> {
+    Some(bytes.to_vec())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn publish(
+    _app: &AppHandle,
+    _now: NowPlaying,
+    _cover: Option<Option<PreparedCover>>,
+) -> Option<PreparedCover> {
+    #[cfg(target_os = "macos")]
+    mac::publish(_app, _now, _cover);
+    #[cfg(windows)]
+    smtc::publish(_app, _now, _cover);
+    None
+}
 
 #[cfg(target_os = "macos")]
 mod mac {
@@ -481,7 +518,9 @@ mod mac {
 #[cfg(target_os = "linux")]
 mod mpris {
     use std::collections::HashMap;
-    use std::path::{Path, PathBuf};
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex, OnceLock};
     use std::time::Instant;
 
@@ -528,9 +567,31 @@ mod mpris {
 
     /// Hand `now` to MPRIS. `cover` is `None` to keep the current artwork,
     /// `Some` for a new track's (or its lack of one).
-    pub fn publish(_app: &AppHandle, now: NowPlaying, cover: Option<Option<Vec<u8>>>) {
-        if let Some(service) = SERVICE.get() {
-            service.publish(now, cover);
+    pub(super) fn publish(
+        _app: &AppHandle,
+        now: NowPlaying,
+        cover: Option<Option<PreparedCover>>,
+    ) -> Option<PreparedCover> {
+        match SERVICE.get() {
+            Some(service) => service.publish(now, cover),
+            None => cover.flatten(),
+        }
+    }
+
+    pub(super) fn prepare_cover(bytes: &[u8]) -> Option<PreparedCover> {
+        SERVICE.get()?.prepare_cover(bytes)
+    }
+
+    /// A cache file stays owned by the cover worker until its generation is
+    /// accepted. Dropping an obsolete candidate cannot remove the active file.
+    pub(super) struct PreparedCover {
+        file: PathBuf,
+        url: String,
+    }
+
+    impl Drop for PreparedCover {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.file);
         }
     }
 
@@ -540,6 +601,7 @@ mod mpris {
         connection: zbus::blocking::Connection,
         session: Arc<Mutex<Session>>,
         covers: Option<PathBuf>,
+        next_art: AtomicU64,
     }
 
     impl Service {
@@ -564,14 +626,45 @@ mod mpris {
                 connection,
                 session,
                 covers,
+                next_art: AtomicU64::new(1),
             })
         }
 
+        /// Write the cover on its blocking worker before taking either
+        /// playback lock. The bus only ever sees a completed file.
+        fn prepare_cover(&self, bytes: &[u8]) -> Option<PreparedCover> {
+            self.write_cover(extension(bytes), |output| output.write_all(bytes))
+        }
+
+        fn write_cover(
+            &self,
+            extension: &str,
+            write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+        ) -> Option<PreparedCover> {
+            let dir = self.covers.as_ref()?;
+            let number = self.next_art.fetch_add(1, Ordering::Relaxed);
+            let file = dir.join(format!("cover-{number}{extension}"));
+            let url = tauri::Url::from_file_path(&file).ok()?.into();
+            std::fs::create_dir_all(dir).ok()?;
+            let mut output = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&file)
+                .ok()?;
+            let prepared = PreparedCover { file, url };
+            write(&mut output).ok()?;
+            Some(prepared)
+        }
+
         /// Take the frontend's report and tell listeners what changed.
-        fn publish(&self, now: NowPlaying, cover: Option<Option<Vec<u8>>>) {
-            let (changed, seeked) = {
+        fn publish(
+            &self,
+            now: NowPlaying,
+            cover: Option<Option<PreparedCover>>,
+        ) -> Option<PreparedCover> {
+            let (changed, seeked, retired_cover) = {
                 let mut session = self.session.lock().unwrap();
-                let change = session.apply(now, cover, self.covers.as_deref());
+                let change = session.apply(now, cover);
                 let mut changed: HashMap<&str, Value> = HashMap::new();
                 if change.status {
                     changed.insert("PlaybackStatus", Value::from(session.status()));
@@ -579,7 +672,7 @@ mod mpris {
                 if change.metadata {
                     changed.insert("Metadata", Value::from(session.metadata()));
                 }
-                (changed, change.seeked)
+                (changed, change.seeked, change.retired_cover)
             };
             if !changed.is_empty() {
                 let _ = self.connection.emit_signal(
@@ -601,6 +694,7 @@ mod mpris {
                     &position,
                 );
             }
+            retired_cover
         }
     }
 
@@ -620,6 +714,7 @@ mod mpris {
         metadata: bool,
         /// The new position in microseconds, when it jumped rather than ran on.
         seeked: Option<i64>,
+        retired_cover: Option<PreparedCover>,
     }
 
     #[derive(Default)]
@@ -632,25 +727,17 @@ mod mpris {
         /// The last track id handed out.
         last_id: u64,
         /// The current artwork file and its `file://` URL.
-        art: Option<(PathBuf, String)>,
-        /// Numbers the artwork files, so a listener that caches by URL never
-        /// shows the previous track's cover.
-        art_no: u64,
+        art: Option<PreparedCover>,
     }
 
     impl Session {
-        fn apply(
-            &mut self,
-            now: NowPlaying,
-            cover: Option<Option<Vec<u8>>>,
-            covers: Option<&Path>,
-        ) -> Change {
+        fn apply(&mut self, now: NowPlaying, cover: Option<Option<PreparedCover>>) -> Change {
             let status = self.status();
             let metadata = self.metadata();
             let expected = self.position_secs();
             let id = self.track.as_ref().map(|track| track.id);
 
-            match now.path {
+            let retired_cover = match now.path {
                 Some(path) if now.state != PlaybackState::Stopped => {
                     let id = match &self.track {
                         Some(track) if track.path == path => track.id,
@@ -670,18 +757,16 @@ mod mpris {
                     self.playing = now.state == PlaybackState::Playing;
                     self.position_secs = now.position_secs.max(0.0);
                     self.at = Some(Instant::now());
-                    if let Some(cover) = cover {
-                        self.set_art(cover, covers);
-                    }
+                    cover.and_then(|cover| std::mem::replace(&mut self.art, cover))
                 }
                 _ => {
                     self.track = None;
                     self.playing = false;
                     self.position_secs = 0.0;
                     self.at = None;
-                    self.set_art(None, covers);
+                    self.art.take()
                 }
-            }
+            };
 
             let same_track = id.is_some() && id == self.track.as_ref().map(|track| track.id);
             Change {
@@ -689,25 +774,7 @@ mod mpris {
                 metadata: self.metadata() != metadata,
                 seeked: (same_track && (self.position_secs - expected).abs() > 1.0)
                     .then(|| micros(self.position_secs)),
-            }
-        }
-
-        /// Replace the artwork file. Listeners load the cover from a URL, so
-        /// the bytes go to a file of their own in the app's cache folder.
-        fn set_art(&mut self, bytes: Option<Vec<u8>>, covers: Option<&Path>) {
-            if let Some((file, _)) = self.art.take() {
-                let _ = std::fs::remove_file(file);
-            }
-            let (Some(bytes), Some(dir)) = (bytes, covers) else {
-                return;
-            };
-            self.art_no += 1;
-            let file = dir.join(format!("cover-{}{}", self.art_no, extension(&bytes)));
-            let written = std::fs::create_dir_all(dir).and_then(|()| std::fs::write(&file, bytes));
-            if written.is_ok() {
-                if let Ok(url) = tauri::Url::from_file_path(&file) {
-                    self.art = Some((file, url.into()));
-                }
+                retired_cover,
             }
         }
 
@@ -761,8 +828,8 @@ mod mpris {
             if !track.album.is_empty() {
                 map.insert("xesam:album".to_owned(), Value::from(track.album.clone()));
             }
-            if let Some((_, url)) = &self.art {
-                map.insert("mpris:artUrl".to_owned(), Value::from(url.clone()));
+            if let Some(art) = &self.art {
+                map.insert("mpris:artUrl".to_owned(), Value::from(art.url.clone()));
             }
             map
         }
@@ -1016,25 +1083,24 @@ mod mpris {
         #[test]
         fn a_track_keeps_its_id_and_a_jump_is_a_seek() {
             let mut session = Session::default();
-            let change =
-                session.apply(report(PlaybackState::Playing, Some("/a"), 10.0), None, None);
+            let change = session.apply(report(PlaybackState::Playing, Some("/a"), 10.0), None);
             assert!(change.status && change.metadata && change.seeked.is_none());
             assert_eq!(session.track_id(), "/com/tagrex/track/1");
 
             // Pausing the same track: a new status, the same metadata.
-            let change = session.apply(report(PlaybackState::Paused, Some("/a"), 10.0), None, None);
+            let change = session.apply(report(PlaybackState::Paused, Some("/a"), 10.0), None);
             assert!(change.status && !change.metadata && change.seeked.is_none());
 
             // A jump on the same track is announced as Seeked.
-            let change = session.apply(report(PlaybackState::Paused, Some("/a"), 90.0), None, None);
+            let change = session.apply(report(PlaybackState::Paused, Some("/a"), 90.0), None);
             assert_eq!(change.seeked, Some(90_000_000));
 
             // Another track is another id and no seek.
-            let change = session.apply(report(PlaybackState::Playing, Some("/b"), 0.0), None, None);
+            let change = session.apply(report(PlaybackState::Playing, Some("/b"), 0.0), None);
             assert!(change.status && change.metadata && change.seeked.is_none());
             assert_eq!(session.track_id(), "/com/tagrex/track/2");
 
-            let change = session.apply(report(PlaybackState::Stopped, None, 0.0), None, None);
+            let change = session.apply(report(PlaybackState::Stopped, None, 0.0), None);
             assert!(change.status && change.metadata);
             assert_eq!(session.track_id(), NO_TRACK);
             assert_eq!(session.status(), "Stopped");
@@ -1128,6 +1194,49 @@ mod mpris {
 
         #[test]
         #[ignore = "needs a D-Bus session bus: run under dbus-run-session"]
+        fn an_incomplete_artwork_write_does_not_park_playback_reports() {
+            let fx = fixture("slow_cover");
+            let (writing, started) = mpsc::channel();
+            let (resume, finish) = mpsc::channel();
+            std::thread::scope(|scope| {
+                let service = &fx.service;
+                let writer = scope.spawn(move || {
+                    service
+                        .write_cover(".jpg", |file| {
+                            file.write_all(&JPEG[..3])?;
+                            writing.send(()).unwrap();
+                            finish.recv_timeout(TIMEOUT).unwrap();
+                            file.write_all(&JPEG[3..])
+                        })
+                        .unwrap()
+                });
+                started.recv_timeout(TIMEOUT).unwrap();
+
+                // The writer is waiting between writes. The session stays
+                // available for a new report and the bus sees that report.
+                assert!(service.session.try_lock().is_ok());
+                let paused = report(PlaybackState::Paused, Some("/music/b.flac"), 45.0);
+                service.publish(paused, None);
+                let player = fx.proxy(PLAYER_IFACE);
+                assert_eq!(
+                    player.get_property::<String>("PlaybackStatus").unwrap(),
+                    "Paused"
+                );
+                assert_eq!(player.get_property::<i64>("Position").unwrap(), 45_000_000);
+                assert!(!fx.metadata().contains_key("mpris:artUrl"));
+
+                resume.send(()).unwrap();
+                let discarded = writer.join().unwrap();
+                assert_eq!(std::fs::read(&discarded.file).unwrap(), JPEG);
+                let discarded_path = discarded.file.clone();
+                drop(discarded);
+                assert!(!discarded_path.exists());
+            });
+            std::fs::remove_dir(&fx.covers).unwrap();
+        }
+
+        #[test]
+        #[ignore = "needs a D-Bus session bus: run under dbus-run-session"]
         fn the_player_is_on_the_bus_with_what_the_frontend_reports() {
             let fx = fixture("report");
             let root = fx.proxy("org.mpris.MediaPlayer2");
@@ -1157,9 +1266,10 @@ mod mpris {
             assert_eq!(id.unwrap().as_str(), NO_TRACK);
 
             let changes = fx.listen("PropertiesChanged");
+            let cover = fx.service.prepare_cover(JPEG).unwrap();
             fx.service.publish(
                 report(PlaybackState::Playing, Some("/music/a.flac"), 10.0),
-                Some(Some(JPEG.to_vec())),
+                Some(Some(cover)),
             );
             let message = changes.recv_timeout(TIMEOUT).expect("PropertiesChanged");
             let (interface, changed, _): (String, HashMap<String, OwnedValue>, Vec<String>) =
