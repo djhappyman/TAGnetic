@@ -4,6 +4,7 @@
   import { Input } from '@ui-sdk/svelte/input';
   import { NumberInput, NumberInputControl } from '@ui-sdk/svelte/number-input';
   import Button from './AudioSplitButton.svelte';
+  import { withDiscogsAccess } from '../js/discogs-access';
   import { audioCommand, leaf, openDiscogsRelease, timeLabel, type Cue, type Proposal, type Source, type Tags, type Track } from '../js/audio-split';
 
   let { source, playhead, mode, cue, cueEncoding, cueLoading, onencoding, onapply, oncancel, onerror }: {
@@ -66,8 +67,11 @@
     onerror('');
     const ordered = [...ranges].sort((first, second) => first.startIndex - second.startIndex);
     try {
-      const result = await audioCommand<Proposal>('discogs', { id: source.id, releaseId: id, anchors: ordered });
-      if (!live) return;
+      const args = { id: source.id, releaseId: id, anchors: ordered };
+      const result = !ordered.length && id !== releaseId
+        ? await withDiscogsAccess(token => audioCommand<Proposal>('discogs', { ...args, token }), () => live)
+        : await audioCommand<Proposal>('discogs', args);
+      if (!live || !result) return;
       proposal = result;
       anchors = ordered;
       releaseId = id;

@@ -769,6 +769,9 @@ fn release_url(source: &str, id: &str) -> Result<String, ErrorDto> {
 }
 
 fn provider_page_url(source: &str, entity: &str, id: &str) -> Result<String, ErrorDto> {
+    if source == "discogs" && entity == "applications" && id.is_empty() {
+        return Ok("https://www.discogs.com/settings/developers".into());
+    }
     if entity == "release" {
         return release_url(source, id);
     }
@@ -786,7 +789,9 @@ fn provider_page_url(source: &str, entity: &str, id: &str) -> Result<String, Err
 #[tauri::command]
 async fn open_provider_page(source: String, entity: String, id: String) -> Result<(), ErrorDto> {
     BROWSER_QUEUE
-        .run(move || open::that(provider_page_url(&source, &entity, &id)?).map_err(ErrorDto::from))
+        .run(move || {
+            open::that_detached(provider_page_url(&source, &entity, &id)?).map_err(ErrorDto::from)
+        })
         .await
 }
 
@@ -3583,12 +3588,18 @@ mod tests {
             provider_page_url("discogs", "label", "456").unwrap(),
             "https://www.discogs.com/label/456"
         );
+        assert_eq!(
+            provider_page_url("discogs", "applications", "").unwrap(),
+            "https://www.discogs.com/settings/developers"
+        );
         for (source, entity, id) in [
             ("discogs", "label", "../evil"),
             ("discogs", "artist", ""),
             ("discogs", "artist", "0"),
             ("discogs", "unknown", "1"),
             ("musicbrainz", "label", "1"),
+            ("discogs", "applications", "../evil"),
+            ("musicbrainz", "applications", ""),
         ] {
             assert!(provider_page_url(source, entity, id).is_err());
         }

@@ -5,6 +5,7 @@
   import { Input } from '$lib/components/ui/input/index.js';
   import { NativeSelect, NativeSelectOption } from '$lib/components/ui/native-select/index.js';
   import ControllerTooltip from './ControllerTooltip.svelte';
+  import DiscogsAccessDialog from './DiscogsAccessDialog.svelte';
   import { Toaster } from '$lib/components/ui/sonner/index.js';
   import ControllerDialog from './ControllerDialog.svelte';
   import ControllerPopover from './ControllerPopover.svelte';
@@ -20,6 +21,7 @@
     <div id="query-preset-menu" class="col-menu" hidden></div>
 
     <ControllerTooltip />
+    <DiscogsAccessDialog />
     <Toaster position="bottom-center" visibleToasts={1} offset="var(--controller-toast-bottom, 20px)" mobileOffset="16px" class="controller-toaster" />
 
     <div id="drop-overlay" aria-hidden="true">

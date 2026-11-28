@@ -1,4 +1,5 @@
 import { onlineSearchDrafts, searchRequestFor } from './search-filter.js';
+import { withDiscogsAccess } from './discogs-access';
 import { prepareImportPreferences } from './import-preferences.js';
 import { getOnlineOptions } from './online-options.js';
 import { beginLiveImport, finishLiveImport, isLiveImportCurrent, replaceLiveImport, adoptLiveCoverPlan } from "./live-preview.js";
@@ -164,17 +165,22 @@ async function runSearch(reset) {
   updateLoadMoreUi();
   try {
     const source = releaseSource;
-    const token = await providerToken(source);
-    if (gen !== searchGen) return;
-    if (source === "discogs" && !token) { pagingPaused = true; toast(t("toast.online.needToken"), true); return; }
-    if (source === "beatport" && !token) { pagingPaused = true; toast(t("toast.online.needBeatport"), true); return; }
-    if (source === "discogs" && token) invoke("save_discogs_token", { token }).catch(() => {});
-    const hits = await invoke("provider_search", {
-      source: releaseSource,
-      token,
-      query: { ...searchRequest, page, per_page: searchPerPage },
-    });
+    const query = { ...searchRequest, page, per_page: searchPerPage };
+    let token = '';
+    const search = credential => {
+      token = credential;
+      return invoke('provider_search', { source, token, query });
+    };
+    let hits;
+    if (source === 'discogs') hits = await withDiscogsAccess(search, () => gen === searchGen);
+    else {
+      const credential = await providerToken(source);
+      if (gen !== searchGen) return;
+      if (source === 'beatport' && !credential) { pagingPaused = true; toast(t('toast.online.needBeatport'), true); return; }
+      hits = await search(credential);
+    }
     if (gen !== searchGen) return; // a newer search / Stop superseded this
+    if (!hits) { pagingPaused = true; return; }
     searchPage = page;
     // A full page back suggests there's more to fetch.
     searchHasMore = hits.length >= searchPerPage;

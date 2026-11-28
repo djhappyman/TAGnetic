@@ -597,6 +597,7 @@ async function cancelSettings() {
 }
 
 // ---- wire up ----
+document.addEventListener('tagnetic:discogs-token-saved', updateSettingsDot);
 el("set-import-all").addEventListener("click", () => setAllImportFields(true));
 el("set-import-none").addEventListener("click", () => setAllImportFields(false));
 el("settings-open").addEventListener("click", openSettings);

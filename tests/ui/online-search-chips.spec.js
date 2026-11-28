@@ -6,7 +6,16 @@ const root = resolve('.test-dist');
 test.beforeEach(async ({page}) => {
   page.issues=[];
   page.on('pageerror',error=>page.issues.push(String(error)));
-  await page.addInitScript(()=>{window.searchCalls=[];window.captureSearch=args=>{window.searchCalls.push(args);return Promise.resolve([]);};});
+  await page.addInitScript(() => {
+    window.searchCalls = [];
+    window.captureSearch = async args => {
+      window.searchCalls.push(args);
+      if (args.source === 'discogs' && args.token === 'rejected-fixture') {
+        throw { message: { code: 'error.provider.auth', args: { detail: 'HTTP 401' } }, text: 'authentication failed: HTTP 401' };
+      }
+      return [];
+    };
+  });
   await page.route('http://tagrex.test/**', async route => {
     const path=resolve(root,'.'+new URL(route.request().url()).pathname);
     if(!path.startsWith(root+sep))return route.abort();
@@ -22,6 +31,42 @@ test.beforeEach(async ({page}) => {
   await page.locator('#discogs-token').evaluate(node=>{node.value='fixture';});
 });
 test.afterEach(async({page})=>expect(page.issues).toEqual([]));
+
+test('prompts on first Discogs use, validates the token and continues the original search', async ({ page }) => {
+  await page.locator('#discogs-token').evaluate(node => { node.value = ''; });
+  await page.locator('#discogs-query').fill('A test release');
+  await page.locator('#discogs-query').press('Enter');
+  const dialog = page.getByRole('dialog', { name: 'Connect Discogs' });
+  const input = dialog.getByLabel('Personal token');
+  await expect(input).toBeFocused();
+  await expect(input).toHaveAttribute('type', 'password');
+  await expect(dialog.getByRole('link', { name: 'Create a token on Discogs' })).toHaveAttribute('href', 'https://www.discogs.com/settings/developers');
+  await expect(dialog.getByRole('button', { name: 'Connect', exact: true })).toBeDisabled();
+  await input.fill('rejected-fixture');
+  await input.press('Enter');
+  await expect(dialog.getByRole('status')).toContainText('Discogs rejected this token');
+  await expect(page.locator('#discogs-token')).toHaveValue('');
+  await input.fill('accepted-fixture');
+  await input.press('Enter');
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator('#discogs-token')).toHaveValue('accepted-fixture');
+  await expect(page.locator('#discogs-query')).toBeFocused();
+  const searches = await page.evaluate(() => window.searchCalls);
+  expect(searches.map(({ token }) => token)).toEqual(['rejected-fixture', 'accepted-fixture']);
+  expect(searches[1].query).toEqual(searches[0].query);
+});
+
+test('offers to replace a rejected saved credential and returns focus on cancel', async ({ page }) => {
+  await page.locator('#discogs-token').evaluate(node => { node.value = 'rejected-fixture'; });
+  await page.locator('#discogs-query').fill('Another release');
+  await page.locator('#discogs-query').press('Enter');
+  const dialog = page.getByRole('dialog', { name: 'Connect Discogs' });
+  await expect(dialog.getByRole('status')).toContainText('Discogs rejected the saved token');
+  await dialog.getByLabel('Personal token').press('Escape');
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator('#discogs-query')).toBeFocused();
+  expect(await page.evaluate(() => window.searchCalls.length)).toBe(1);
+});
 async function addFilter(page, field='Label', value='React', keyboard=false) {
   await page.locator('#discogs-query').fill(field);
   const option=page.getByRole('option',{name:field,exact:true});

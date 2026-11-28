@@ -23,6 +23,7 @@ test.beforeEach(async ({ page }) => {
   await page.evaluate(async () => {
     document.getElementById('root').value = '/music';
     await window.tagrex.openLibrary();
+    document.getElementById('discogs-token').value = 'fixture';
     const calls = [];
     const peaks = Array.from({ length: 512 }, (_, index) => (index % 2 ? 1 : -1) * (0.3 + 0.5 * Math.sin(index / 11) ** 2));
     function stereoWaveform(first = 0, last = 480000, bins = 256) {
@@ -558,12 +559,24 @@ test('file menu imports a CUE with confirmation, encoding and inherited tags', a
 });
 
 test('Discogs proposes anchored cuts and makes the remaining audio visible', async ({ page }) => {
+  await page.locator('#discogs-token').evaluate(node => { node.value = ''; });
   await page.getByRole('button', { name: 'Split recording', exact: true }).click();
   const studio = page.getByRole('dialog', { name: 'Split recording' });
   await importCuts(page, studio, 'Use Discogs…');
   const importPanel = studio.getByRole('region', { name: 'Discogs timing proposals' });
   await importPanel.getByRole('textbox', { name: 'Release ID or link' }).fill('https://www.discogs.com/release/12345-Example');
   await importPanel.getByRole('button', { name: 'Load tracklist' }).click();
+  const access = page.getByRole('dialog', { name: 'Connect Discogs' });
+  const token = access.getByLabel('Personal token');
+  await expect(token).toBeFocused();
+  await expect(access.getByRole('link', { name: 'Create a token on Discogs' }))
+    .toHaveAttribute('href', 'https://www.discogs.com/settings/developers');
+  await token.fill('studio-token-fixture');
+  await access.getByRole('button', { name: 'Connect', exact: true }).click();
+  await expect(access).toHaveCount(0);
+  expect((await calls(page, 'discogs')).at(-1).args).toMatchObject({
+    releaseId: '12345', token: 'studio-token-fixture',
+  });
   await expect(importPanel.getByRole('link', { name: 'Data provided by Discogs.' })).toHaveAttribute('href', 'https://www.discogs.com/release/12345');
   await importPanel.getByRole('link', { name: 'Data provided by Discogs.' }).click();
   await expect.poll(() => page.evaluate(() => window.studioFixture.calls.find(call => call.command === 'open_provider_page')?.args)).toMatchObject({ source: 'discogs', entity: 'release', id: '12345' });
